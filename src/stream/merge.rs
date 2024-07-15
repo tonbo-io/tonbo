@@ -27,10 +27,9 @@ impl<'merge, R> MergeStream<'merge, R>
 where
     R: Record,
 {
-    async fn from_iter<T: IntoIterator<Item = ScanStream<'merge, R>>>(
-        iter: T,
+    pub(crate) async fn from_vec(
+        mut streams: Vec<ScanStream<'merge, R>>,
     ) -> Result<Self, parquet::errors::ParquetError> {
-        let mut streams = iter.into_iter().collect::<Vec<_>>();
         let mut peeked = BinaryHeap::with_capacity(streams.len());
 
         for stream in &mut streams {
@@ -136,27 +135,27 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::MergeStream;
-    use crate::{inmem::mutable::Mutable, oracle::timestamp::Timestamped};
+    use crate::inmem::mutable::Mutable;
 
     #[tokio::test]
     async fn merge_mutable() {
         let m1 = Mutable::<String>::new();
-        m1.remove(Timestamped::new("b".into(), 3.into()));
-        m1.insert(Timestamped::new("c".into(), 4.into()));
-        m1.insert(Timestamped::new("d".into(), 5.into()));
+        m1.remove("b".into(), 3.into());
+        m1.insert("c".into(), 4.into());
+        m1.insert("d".into(), 5.into());
 
         let m2 = Mutable::<String>::new();
-        m2.insert(Timestamped::new("a".into(), 1.into()));
-        m2.insert(Timestamped::new("b".into(), 2.into()));
-        m2.insert(Timestamped::new("c".into(), 3.into()));
+        m2.insert("a".into(), 1.into());
+        m2.insert("b".into(), 2.into());
+        m2.insert("c".into(), 3.into());
 
         let m3 = Mutable::<String>::new();
-        m3.insert(Timestamped::new("e".into(), 4.into()));
+        m3.insert("e".into(), 4.into());
 
         let lower = "a".to_string();
         let upper = "e".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::from_iter(vec![
+        let mut merge = MergeStream::from_vec(vec![
             m1.scan(bound, 6.into()).into(),
             m2.scan(bound, 6.into()).into(),
             m3.scan(bound, 6.into()).into(),
