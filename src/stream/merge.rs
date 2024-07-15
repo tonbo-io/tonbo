@@ -132,7 +132,6 @@ where
 #[cfg(test)]
 mod tests {
     use std::ops::Bound;
-
     use futures_util::StreamExt;
 
     use super::MergeStream;

@@ -1,10 +1,3 @@
-use std::ops::Bound;
-
-use crossbeam_skiplist::{
-    map::{Entry, Range},
-    SkipMap,
-};
-
 use crate::{
     oracle::{
         timestamp::{Timestamped, TimestampedRef},
@@ -12,8 +5,13 @@ use crate::{
     },
     record::{KeyRef, Record},
 };
+use crossbeam_skiplist::{
+    map::{Entry, Range},
+    SkipMap,
+};
+use std::ops::Bound;
 
-pub(crate) type MutableScan<'scan, R> = Range<
+pub(crate) type MutableScanInner<'scan, R> = Range<
     'scan,
     TimestampedRef<<R as Record>::Key>,
     (
@@ -30,6 +28,15 @@ where
     R: Record,
 {
     data: SkipMap<Timestamped<R::Key>, Option<R>>,
+}
+
+pub(crate) struct MutableScan<'scan, R>
+where
+    R: Record,
+{
+    inner: MutableScanInner<'scan, R>,
+    item_buf: Option<Entry<'scan, Timestamped<R::Key>, Option<R>>>,
+    ts: Timestamp,
 }
 
 impl<R> Default for Mutable<R>
@@ -96,7 +103,13 @@ where
         let lower = range.0.map(|key| TimestampedRef::new(key, ts));
         let upper = range.1.map(|key| TimestampedRef::new(key, EPOCH));
 
-        self.data.range((lower, upper))
+        let mut scan = MutableScan {
+            inner: self.data.range((lower, upper)),
+            item_buf: None,
+            ts,
+        };
+        let _ = scan.next();
+        scan
     }
 }
 
@@ -109,8 +122,33 @@ where
     }
 }
 
+impl<'scan, R> Iterator for MutableScan<'scan, R>
+where
+    R: Record,
+{
+    type Item = Entry<'scan, Timestamped<R::Key>, Option<R>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for entry in self.inner.by_ref() {
+            let key = entry.key();
+            if key.ts <= self.ts
+                && matches!(
+                    self.item_buf
+                        .as_ref()
+                        .map(|entry| entry.key().value() != key.value()),
+                    Some(true) | None
+                )
+            {
+                return self.item_buf.replace(entry);
+            }
+        }
+        self.item_buf.take()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ops::Bound;
     use super::Mutable;
     use crate::{
         oracle::timestamp::{Timestamped, TimestampedRef},
@@ -153,5 +191,52 @@ mod tests {
                 vbool: Some(true)
             }
         )
+    }
+
+    #[test]
+    fn range() {
+        let mutable = Mutable::<String>::new();
+
+        mutable.insert(Timestamped::new("1".into(), 0_u32.into()));
+        mutable.insert(Timestamped::new("2".into(), 0_u32.into()));
+        mutable.insert(Timestamped::new("2".into(), 1_u32.into()));
+        mutable.insert(Timestamped::new("3".into(), 1_u32.into()));
+        mutable.insert(Timestamped::new("4".into(), 0_u32.into()));
+
+        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("1".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("4".into(), 0_u32.into())
+        );
+
+        let lower = "1".to_string();
+        let upper = "4".to_string();
+        let mut scan = mutable.scan((Bound::Included(&lower), Bound::Included(&upper)), 1_u32.into());
+
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("1".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("3".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("4".into(), 0_u32.into())
+        );
     }
 }
