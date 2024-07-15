@@ -5,7 +5,6 @@ use std::{
 };
 
 use arrow::array::RecordBatch;
-use futures_util::stream::{self, Iter};
 
 use super::mutable::Mutable;
 use crate::{
