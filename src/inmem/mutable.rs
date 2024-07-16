@@ -114,7 +114,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Bound;
+    use std::collections::Bound;
 
     use super::Mutable;
     use crate::{
@@ -156,5 +156,67 @@ mod tests {
                 vbool: Some(true)
             }
         )
+    }
+
+    #[test]
+    fn range() {
+        let mutable = Mutable::<String>::new();
+
+        mutable.insert("1".into(), 0_u32.into());
+        mutable.insert("2".into(), 0_u32.into());
+        mutable.insert("2".into(), 1_u32.into());
+        mutable.insert("3".into(), 1_u32.into());
+        mutable.insert("4".into(), 0_u32.into());
+
+        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("1".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("3".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("4".into(), 0_u32.into())
+        );
+
+        let lower = "1".to_string();
+        let upper = "4".to_string();
+        let mut scan = mutable.scan(
+            (Bound::Included(&lower), Bound::Included(&upper)),
+            1_u32.into(),
+        );
+
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("1".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("3".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("4".into(), 0_u32.into())
+        );
     }
 }

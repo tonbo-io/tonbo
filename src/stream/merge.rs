@@ -170,4 +170,36 @@ mod tests {
         dbg!(merge.next().await);
         dbg!(merge.next().await);
     }
+
+    #[tokio::test]
+    async fn merge_mutable_remove_duplicates() {
+        let m1 = Mutable::<String>::new();
+        m1.insert("1".into(), 0_u32.into());
+        m1.insert("2".into(), 0_u32.into());
+        m1.insert("2".into(), 1_u32.into());
+        m1.insert("3".into(), 1_u32.into());
+        m1.insert("4".into(), 0_u32.into());
+
+        let lower = "1".to_string();
+        let upper = "4".to_string();
+        let bound = (Bound::Included(&lower), Bound::Included(&upper));
+        let mut merge = MergeStream::from_vec(vec![m1.scan(bound, 0.into()).into()])
+            .await
+            .unwrap();
+
+        dbg!(merge.next().await);
+        dbg!(merge.next().await);
+        dbg!(merge.next().await);
+
+        let lower = "1".to_string();
+        let upper = "4".to_string();
+        let bound = (Bound::Included(&lower), Bound::Included(&upper));
+        let mut merge = MergeStream::from_vec(vec![m1.scan(bound, 1.into()).into()])
+            .await
+            .unwrap();
+
+        dbg!(merge.next().await);
+        dbg!(merge.next().await);
+        dbg!(merge.next().await);
+    }
 }
