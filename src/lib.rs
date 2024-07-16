@@ -13,19 +13,19 @@ mod transaction;
 mod version;
 
 use std::{
-    any::TypeId,
-    collections::{hash_map::Entry, HashMap, VecDeque},
-    io,
-    marker::PhantomData,
-    mem,
+    collections::VecDeque,
+    io, mem,
     ops::Bound,
-    path::PathBuf,
     sync::Arc,
 };
-
-use async_lock::RwLock;
+use std::marker::PhantomData;
+use std::path::PathBuf;
+use async_lock::{RwLock, RwLockReadGuard};
+use futures_core::Stream;
+use futures_util::StreamExt;
+use parquet::errors::ParquetError;
 use inmem::{immutable::Immutable, mutable::Mutable};
-use oracle::{timestamp::Timestamped, Timestamp};
+use oracle::Timestamp;
 use record::Record;
 
 use crate::{
@@ -33,6 +33,8 @@ use crate::{
     fs::{FileId, FileType},
     version::Version,
 };
+use crate::stream::merge::MergeStream;
+use crate::stream::{Entry, ScanStream};
 
 #[derive(Debug)]
 pub struct DbOption {
@@ -45,9 +47,12 @@ pub struct DbOption {
     pub clean_channel_buffer: usize,
 }
 
-#[derive(Debug)]
-pub struct DB<E> {
-    schemas: std::sync::RwLock<HashMap<TypeId, *const ()>>,
+pub struct DB<R, E>
+where
+    R: Record,
+    E: Executor,
+{
+    schema: Arc<RwLock<Schema<R>>>,
     _p: PhantomData<E>,
 }
 
@@ -90,99 +95,51 @@ impl DbOption {
     }
 }
 
-impl<E> DB<E>
+impl<R, E> Default for DB<R, E>
 where
+    R: Record,
+    E: Executor,
+{
+    fn default() -> Self {
+        Self {
+            schema: Arc::new(RwLock::new(Schema::default())),
+            _p: Default::default(),
+        }
+    }
+}
+
+impl<R, E> DB<R, E>
+where
+    R: Record + Send + Sync,
+    R::Key: Send + Sync,
     E: Executor,
 {
     pub fn empty() -> Self {
         Self {
-            schemas: std::sync::RwLock::new(HashMap::new()),
+            schema: Arc::new(RwLock::new(Schema::default())),
             _p: Default::default(),
         }
     }
 
-    pub(crate) async fn write<R>(&self, record: R, ts: Timestamp) -> io::Result<()>
-    where
-        R: Record + Send + Sync,
-        R::Key: Send,
-    {
-        let columns = self.get_schema::<R>();
-        let columns = columns.read().await;
+    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
+        let columns = self.schema.read().await;
         columns.write(record, ts).await
     }
 
-    pub(crate) async fn write_batch<R>(
+    pub(crate) async fn write_batch(
         &self,
         records: impl Iterator<Item = R>,
         ts: Timestamp,
-    ) -> io::Result<()>
-    where
-        R: Record + Send + Sync,
-        R::Key: Send,
-    {
-        let columns = self.get_schema::<R>();
-        let columns = columns.read().await;
+    ) -> io::Result<()> {
+        let columns = self.schema.read().await;
         for record in records {
             columns.write(record, ts).await?;
         }
         Ok(())
     }
 
-    pub(crate) async fn get<R: Record>(&self, key: Timestamped<R::Key>) -> io::Result<Option<&R>> {
-        let columns = self.get_schema::<R>();
-        let columns = columns.read().await;
-        // columns.get(key, ts).await
-        todo!()
-    }
-
-    pub async fn range_scan<T: Record>(&self, start: Bound<&T::Key>, end: Bound<&T::Key>) {}
-
-    fn get_schema<R>(&self) -> Arc<RwLock<Schema<R>>>
-    where
-        R: Record,
-    {
-        let schemas = self.schemas.read().unwrap();
-        match schemas.get(&TypeId::of::<R>()) {
-            Some(schema) => {
-                let inner = unsafe { Arc::from_raw(*schema as *const RwLock<Schema<R>>) };
-                let schema = inner.clone();
-                std::mem::forget(inner);
-                schema
-            }
-            None => {
-                drop(schemas);
-                let mut schemas = self.schemas.write().unwrap();
-                match schemas.entry(TypeId::of::<R>()) {
-                    Entry::Occupied(o) => unsafe {
-                        let inner = Arc::from_raw(*o.get() as *const RwLock<Schema<R>>);
-                        let schema = inner.clone();
-                        std::mem::forget(inner);
-                        schema
-                    },
-                    Entry::Vacant(v) => {
-                        let schema = Schema {
-                            mutable: Mutable::new(),
-                            immutables: VecDeque::new(),
-                        };
-                        let columns = Arc::new(RwLock::new(schema));
-                        v.insert(Arc::into_raw(columns.clone()) as *const ());
-                        columns
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<E> Drop for DB<E> {
-    fn drop(&mut self) {
-        self.schemas
-            .write()
-            .unwrap()
-            .values()
-            .for_each(|schema| unsafe {
-                Arc::from_raw(*schema as *const RwLock<()>);
-            });
+    pub(crate) async fn read(&self) -> RwLockReadGuard<'_, Schema<R>> {
+        self.schema.read().await
     }
 }
 
@@ -194,14 +151,60 @@ where
     immutables: VecDeque<Immutable<R::Columns>>,
 }
 
+impl<R> Default for Schema<R>
+where
+    R: Record,
+{
+    fn default() -> Self {
+        Self {
+            mutable: Mutable::default(),
+            immutables: VecDeque::default(),
+        }
+    }
+}
+
 impl<R> Schema<R>
 where
     R: Record + Send + Sync,
     R::Key: Send + Sync,
 {
     async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
-        self.mutable.insert(Timestamped::new(record, ts));
+        self.mutable.insert(record, ts);
         Ok(())
+    }
+
+    async fn get<'get, E>(
+        &'get self,
+        key: &'get R::Key,
+        ts: Timestamp,
+    ) -> Result<Option<Entry<'get, R>>, ParquetError>
+    where
+        E: Executor,
+    {
+        self.scan::<E>(Bound::Included(key), Bound::Unbounded, ts)
+            .await?
+            .next()
+            .await
+            .transpose()
+    }
+
+    async fn scan<'scan, E>(
+        &'scan self,
+        lower: Bound<&'scan R::Key>,
+        uppwer: Bound<&'scan R::Key>,
+        ts: Timestamp,
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
+    where
+        E: Executor
+    {
+        let mut streams = Vec::<ScanStream<R, E>>::with_capacity(self.immutables.len() + 1);
+        streams.push(self.mutable.scan((lower, uppwer), ts).into());
+        for immutable in &self.immutables {
+            streams.push(immutable.scan((lower, uppwer), ts).into());
+        }
+        // TODO: sstable scan
+
+        MergeStream::from_vec(streams).await
     }
 
     fn freeze(&mut self) {
@@ -222,11 +225,11 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
 
     use crate::{
-        executor::{tokio::TokioExecutor, Executor},
         inmem::immutable::tests::TestImmutableArrays,
         record::{internal::InternalRecordRef, RecordRef},
         Record, DB,
     };
+    use crate::executor::Executor;
 
     #[derive(Debug, PartialEq, Eq)]
     pub struct Test {
@@ -310,7 +313,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn get_test_record_batch<E: Executor>() -> RecordBatch {
-        let db = DB::<E>::empty();
+        let db: DB<Test, E> = DB::default();
 
         db.write(
             Test {
@@ -333,9 +336,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let schema = db.get_schema::<Test>();
-
-        let mut schema = schema.write().await;
+        let mut schema = db.schema.write().await;
 
         schema.freeze();
 

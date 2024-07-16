@@ -66,26 +66,29 @@ where
     R: Record + Send + Sync,
     R::Key: Send,
 {
-    pub(crate) fn insert(&self, record: Timestamped<R>) {
-        let (record, ts) = record.into_parts();
+    pub(crate) fn insert(&self, record: R, ts: Timestamp) {
         self.data
             // TODO: remove key cloning
             .insert(Timestamped::new(record.key().to_key(), ts), Some(record));
     }
 
-    pub(crate) fn remove(&self, key: Timestamped<R::Key>) {
-        self.data.insert(key, None);
+    pub(crate) fn remove(&self, key: R::Key, ts: Timestamp) {
+        self.data.insert(Timestamped::new(key, ts), None);
     }
 
     fn get(
         &self,
-        key: &TimestampedRef<R::Key>,
+        key: &R::Key,
+        ts: Timestamp,
     ) -> Option<Entry<'_, Timestamped<R::Key>, Option<R>>> {
         self.data
-            .range::<TimestampedRef<R::Key>, _>((Bound::Included(key), Bound::Unbounded))
+            .range::<TimestampedRef<R::Key>, _>((
+                Bound::Included(TimestampedRef::new(key, ts)),
+                Bound::Unbounded,
+            ))
             .next()
             .and_then(|entry| {
-                if &entry.key().value == key.value() {
+                if &entry.key().value == key {
                     Some(entry)
                 } else {
                     None
@@ -154,7 +157,7 @@ mod tests {
 
     use super::Mutable;
     use crate::{
-        oracle::timestamp::{Timestamped, TimestampedRef},
+        oracle::timestamp::Timestamped,
         record::Record,
         tests::{Test, TestRef},
     };
@@ -166,26 +169,24 @@ mod tests {
 
         let mem_table = Mutable::default();
 
-        mem_table.insert(Timestamped::new(
+        mem_table.insert(
             Test {
                 vstring: key_1.clone(),
                 vu32: 1,
                 vobool: Some(true),
             },
             0_u32.into(),
-        ));
-        mem_table.insert(Timestamped::new(
+        );
+        mem_table.insert(
             Test {
                 vstring: key_2.clone(),
                 vu32: 2,
                 vobool: None,
             },
             1_u32.into(),
-        ));
+        );
 
-        let entry = mem_table
-            .get(TimestampedRef::new(&key_1, 0_u32.into()))
-            .unwrap();
+        let entry = mem_table.get(&key_1, 0_u32.into()).unwrap();
         assert_eq!(
             entry.value().as_ref().unwrap().as_record_ref(),
             TestRef {
@@ -200,11 +201,11 @@ mod tests {
     fn range() {
         let mutable = Mutable::<String>::new();
 
-        mutable.insert(Timestamped::new("1".into(), 0_u32.into()));
-        mutable.insert(Timestamped::new("2".into(), 0_u32.into()));
-        mutable.insert(Timestamped::new("2".into(), 1_u32.into()));
-        mutable.insert(Timestamped::new("3".into(), 1_u32.into()));
-        mutable.insert(Timestamped::new("4".into(), 0_u32.into()));
+        mutable.insert("1".into(), 0_u32.into());
+        mutable.insert("2".into(), 0_u32.into());
+        mutable.insert("2".into(), 1_u32.into());
+        mutable.insert("3".into(), 1_u32.into());
+        mutable.insert("4".into(), 0_u32.into());
 
         let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
 
