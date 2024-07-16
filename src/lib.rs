@@ -312,8 +312,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn get_test_record_batch<E: Executor>() -> RecordBatch {
-        let db: DB<Test, E> = DB::default();
+    pub(crate) async fn get_test_record_batch() -> RecordBatch {
+        let db = DB::empty();
 
         db.write(
             Test {
