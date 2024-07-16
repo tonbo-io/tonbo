@@ -186,10 +186,9 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge =
-            MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 0.into()).into()])
-                .await
-                .unwrap();
+        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 0.into()).into()])
+            .await
+            .unwrap();
 
         dbg!(merge.next().await);
         dbg!(merge.next().await);
@@ -198,10 +197,9 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge =
-            MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 1.into()).into()])
-                .await
-                .unwrap();
+        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 1.into()).into()])
+            .await
+            .unwrap();
 
         dbg!(merge.next().await);
         dbg!(merge.next().await);
