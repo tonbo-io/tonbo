@@ -13,7 +13,7 @@ use crate::{
     record::{KeyRef, Record},
 };
 
-pub(crate) type MutableScanInner<'scan, R> = Range<
+pub(crate) type MutableScan<'scan, R> = Range<
     'scan,
     TimestampedRef<<R as Record>::Key>,
     (
@@ -30,15 +30,6 @@ where
     R: Record,
 {
     data: SkipMap<Timestamped<R::Key>, Option<R>>,
-}
-
-pub(crate) struct MutableScan<'scan, R>
-where
-    R: Record,
-{
-    inner: MutableScanInner<'scan, R>,
-    item_buf: Option<Entry<'scan, Timestamped<R::Key>, Option<R>>>,
-    ts: Timestamp,
 }
 
 impl<R> Default for Mutable<R>
@@ -108,13 +99,7 @@ where
         let lower = range.0.map(|key| TimestampedRef::new(key, ts));
         let upper = range.1.map(|key| TimestampedRef::new(key, EPOCH));
 
-        let mut scan = MutableScan {
-            inner: self.data.range((lower, upper)),
-            item_buf: None,
-            ts,
-        };
-        let _ = scan.next();
-        scan
+        self.data.range((lower, upper))
     }
 }
 
@@ -127,33 +112,9 @@ where
     }
 }
 
-impl<'scan, R> Iterator for MutableScan<'scan, R>
-where
-    R: Record,
-{
-    type Item = Entry<'scan, Timestamped<R::Key>, Option<R>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        for entry in self.inner.by_ref() {
-            let key = entry.key();
-            if key.ts <= self.ts
-                && matches!(
-                    self.item_buf
-                        .as_ref()
-                        .map(|entry| entry.key().value() != key.value()),
-                    Some(true) | None
-                )
-            {
-                return self.item_buf.replace(entry);
-            }
-        }
-        self.item_buf.take()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::ops::Bound;
+    use std::collections::Bound;
 
     use super::Mutable;
     use crate::{
@@ -215,7 +176,15 @@ mod tests {
         );
         assert_eq!(
             scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
             &Timestamped::new("2".into(), 0_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("3".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
@@ -236,6 +205,10 @@ mod tests {
         assert_eq!(
             scan.next().unwrap().key(),
             &Timestamped::new("2".into(), 1_u32.into())
+        );
+        assert_eq!(
+            scan.next().unwrap().key(),
+            &Timestamped::new("2".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
