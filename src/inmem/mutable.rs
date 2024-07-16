@@ -114,7 +114,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::Bound;
+    use std::ops::Bound;
 
     use super::Mutable;
     use crate::{

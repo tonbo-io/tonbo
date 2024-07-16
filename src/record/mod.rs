@@ -9,9 +9,12 @@ use arrow::{
 };
 use internal::InternalRecordRef;
 
-use crate::inmem::immutable::ArrowArrays;
+use crate::{
+    inmem::immutable::ArrowArrays,
+    serdes::{Decode, Encode},
+};
 
-pub trait Key: 'static + Ord + Send + Sync {
+pub trait Key: 'static + Encode + Decode + Ord + Clone + Send + Sync {
     type Ref<'r>: KeyRef<'r, Key = Self> + Copy
     where
         Self: 'r;

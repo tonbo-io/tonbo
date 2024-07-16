@@ -1,6 +1,8 @@
 use std::future::Future;
 
-pub trait Executor {
+use crate::fs::Fs;
+
+pub trait Executor: Fs {
     fn spawn<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static;
@@ -10,15 +12,19 @@ pub trait Executor {
 pub mod tokio {
     use std::future::Future;
 
+    use tokio::runtime::Handle;
+
     use super::Executor;
 
     pub struct TokioExecutor {
-        tokio: tokio::runtime::Runtime,
+        handle: Handle,
     }
 
     impl TokioExecutor {
-        pub fn new(tokio: tokio::runtime::Runtime) -> Self {
-            Self { tokio }
+        pub fn new() -> Self {
+            Self {
+                handle: Handle::current(),
+            }
         }
     }
 
@@ -27,7 +33,7 @@ pub mod tokio {
         where
             F: Future<Output = ()> + Send + 'static,
         {
-            self.tokio.spawn(future);
+            self.handle.spawn(future);
         }
     }
 }

@@ -97,9 +97,9 @@ pub struct StringColumns {
 impl ArrowArrays for StringColumns {
     type Record = String;
 
-    type Buider = StringColumnsBuilder;
+    type Builder = StringColumnsBuilder;
 
-    fn builder(capacity: usize) -> Self::Buider {
+    fn builder(capacity: usize) -> Self::Builder {
         StringColumnsBuilder {
             _null: BooleanBufferBuilder::new(capacity),
             _ts: UInt32Builder::with_capacity(capacity),

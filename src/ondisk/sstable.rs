@@ -17,32 +17,34 @@ use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
 use super::scan::SsTableScan;
 use crate::{
     arrows::get_range_filter,
-    fs::AsyncFile,
+    executor::Executor,
     oracle::{timestamp::TimestampedRef, Timestamp},
     record::Record,
     stream::record_batch::RecordBatchEntry,
 };
 
-struct SsTable<R>
+pub(crate) struct SsTable<R, E>
 where
     R: Record,
+    E: Executor,
 {
-    file: Box<dyn AsyncFile>,
-    _marker: PhantomData<R>,
+    file: E::File,
+    _marker: PhantomData<(R, E)>,
 }
 
-impl<R> SsTable<R>
+impl<R, E> SsTable<R, E>
 where
     R: Record,
+    E: Executor,
 {
-    fn open(file: Box<dyn AsyncFile>) -> Self {
+    pub(crate) fn open(file: E::File) -> Self {
         SsTable {
             file,
             _marker: PhantomData,
         }
     }
 
-    fn create_writer(&mut self) -> AsyncArrowWriter<Compat<&mut Box<dyn AsyncFile>>> {
+    fn create_writer(&mut self) -> AsyncArrowWriter<Compat<&mut E::File>> {
         // TODO: expose writer options
         let options = ArrowWriterOptions::new().with_properties(
             WriterProperties::builder()
@@ -73,7 +75,7 @@ where
     async fn into_parquet_builder(
         self,
         limit: usize,
-    ) -> parquet::errors::Result<ArrowReaderBuilder<AsyncReader<Compat<Box<dyn AsyncFile>>>>> {
+    ) -> parquet::errors::Result<ArrowReaderBuilder<AsyncReader<Compat<E::File>>>> {
         Ok(ParquetRecordBatchStreamBuilder::new_with_options(
             self.file.compat(),
             ArrowReaderOptions::default().with_page_index(true),
@@ -82,7 +84,7 @@ where
         .with_limit(limit))
     }
 
-    async fn get(
+    pub(crate) async fn get(
         self,
         key: &TimestampedRef<R::Key>,
     ) -> parquet::errors::Result<Option<RecordBatchEntry<R>>> {
@@ -97,7 +99,7 @@ where
         self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
-    ) -> Result<SsTableScan<R>, parquet::errors::ParquetError> {
+    ) -> Result<SsTableScan<R, E>, parquet::errors::ParquetError> {
         let builder = self.into_parquet_builder(1).await?;
 
         let schema_descriptor = builder.metadata().file_metadata().schema_descr();
@@ -113,7 +115,8 @@ mod tests {
 
     use super::SsTable;
     use crate::{
-        fs::{tokio::TokioFs, AsyncFile, Fs},
+        executor::tokio::TokioExecutor,
+        fs::Fs,
         oracle::timestamp::Timestamped,
         tests::{get_test_record_batch, Test},
     };
@@ -121,12 +124,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn write_sstable() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let file = temp_dir.path().join("test.parquet");
-
-        let file = TokioFs {}.open(&file).await.unwrap();
-        let mut sstable = SsTable::<Test>::open(Box::new(file) as Box<dyn AsyncFile>);
-
-        let record_batch = get_test_record_batch().await;
+        let record_batch = get_test_record_batch::<TokioExecutor>().await;
+        let file = TokioExecutor::open(&temp_dir.path().join("test.parquet"))
+            .await
+            .unwrap();
+        let mut sstable = SsTable::<Test, TokioExecutor>::open(file);
 
         sstable.write(record_batch).await.unwrap();
 
