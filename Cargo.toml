@@ -5,14 +5,14 @@ resolver = "2"
 version = "0.1.0"
 
 [features]
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "dep:tokio-util"]
 
 [dependencies]
 arrow = "52"
 async-lock = "3"
 crossbeam-skiplist = "0.1"
-futures-core = "0.3"
 futures-channel = "0.3"
+futures-core = "0.3"
 futures-executor = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"
@@ -21,7 +21,7 @@ parquet = { version = "52", features = ["async"] }
 pin-project-lite = "0.2"
 thiserror = "1"
 tokio = { version = "1", optional = true }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
 tracing = "0.1"
 ulid = "1"
 
