@@ -13,28 +13,23 @@ mod transaction;
 mod version;
 
 use std::{
-    collections::VecDeque,
-    io, mem,
-    ops::Bound,
-    sync::Arc,
+    collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, path::PathBuf, sync::Arc,
 };
-use std::marker::PhantomData;
-use std::path::PathBuf;
+
 use async_lock::{RwLock, RwLockReadGuard};
 use futures_core::Stream;
 use futures_util::StreamExt;
-use parquet::errors::ParquetError;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use oracle::Timestamp;
+use parquet::errors::ParquetError;
 use record::Record;
 
 use crate::{
     executor::Executor,
     fs::{FileId, FileType},
+    stream::{merge::MergeStream, Entry, ScanStream},
     version::Version,
 };
-use crate::stream::merge::MergeStream;
-use crate::stream::{Entry, ScanStream};
 
 #[derive(Debug)]
 pub struct DbOption {
@@ -195,7 +190,7 @@ where
         ts: Timestamp,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
     where
-        E: Executor
+        E: Executor,
     {
         let mut streams = Vec::<ScanStream<R, E>>::with_capacity(self.immutables.len() + 1);
         streams.push(self.mutable.scan((lower, uppwer), ts).into());
@@ -225,11 +220,11 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
 
     use crate::{
+        executor::Executor,
         inmem::immutable::tests::TestImmutableArrays,
         record::{internal::InternalRecordRef, RecordRef},
         Record, DB,
     };
-    use crate::executor::Executor;
 
     #[derive(Debug, PartialEq, Eq)]
     pub struct Test {
@@ -312,8 +307,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn get_test_record_batch() -> RecordBatch {
-        let db = DB::empty();
+    pub(crate) async fn get_test_record_batch<E: Executor>() -> RecordBatch {
+        let db: DB<Test, E> = DB::empty();
 
         db.write(
             Test {

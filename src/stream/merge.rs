@@ -136,9 +136,9 @@ mod tests {
     use std::ops::Bound;
 
     use futures_util::StreamExt;
-    use crate::executor::tokio::TokioExecutor;
+
     use super::MergeStream;
-    use crate::inmem::mutable::Mutable;
+    use crate::{executor::tokio::TokioExecutor, inmem::mutable::Mutable};
 
     #[tokio::test]
     async fn merge_mutable() {
