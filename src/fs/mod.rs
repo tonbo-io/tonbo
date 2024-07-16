@@ -19,7 +19,14 @@ pub enum FileType {
     LOG,
 }
 
-pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
+pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {
+    fn to_file(self) -> Box<dyn AsyncFile>
+    where
+        Self: Sized,
+    {
+        Box::new(self) as Box<dyn AsyncFile>
+    }
+}
 
 impl<T> AsyncFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
 

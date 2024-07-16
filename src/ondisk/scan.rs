@@ -9,36 +9,30 @@ use pin_project_lite::pin_project;
 use tokio_util::compat::Compat;
 
 use crate::{
-    executor::Executor,
+    fs::AsyncFile,
     record::Record,
     stream::record_batch::{RecordBatchEntry, RecordBatchIterator},
 };
 
 pin_project! {
     #[derive(Debug)]
-    pub struct SsTableScan<R, E>
-    where
-        E: Executor
+    pub struct SsTableScan<R>
     {
         #[pin]
-        stream: ParquetRecordBatchStream<Compat<E::File>>,
+        stream: ParquetRecordBatchStream<Compat<Box<dyn AsyncFile>>>,
         iter: Option<RecordBatchIterator<R>>,
     }
 }
 
-impl<R, E> SsTableScan<R, E>
-where
-    E: Executor,
-{
-    pub fn new(stream: ParquetRecordBatchStream<Compat<E::File>>) -> Self {
+impl<R> SsTableScan<R> {
+    pub fn new(stream: ParquetRecordBatchStream<Compat<Box<dyn AsyncFile>>>) -> Self {
         SsTableScan { stream, iter: None }
     }
 }
 
-impl<R, E> Stream for SsTableScan<R, E>
+impl<R> Stream for SsTableScan<R>
 where
     R: Record,
-    E: Executor,
 {
     type Item = Result<RecordBatchEntry<R>, parquet::errors::ParquetError>;
 

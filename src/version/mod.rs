@@ -12,7 +12,7 @@ use tracing::error;
 
 use crate::{
     executor::Executor,
-    fs::FileId,
+    fs::{AsyncFile, FileId},
     ondisk::sstable::SsTable,
     oracle::{timestamp::TimestampedRef, Timestamp},
     record::Record,
@@ -103,8 +103,9 @@ where
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = E::open(self.option.table_path(gen))
             .await
-            .map_err(VersionError::Io)?;
-        let table = SsTable::<R, E>::open(file);
+            .map_err(VersionError::Io)?
+            .to_file();
+        let table = SsTable::open(file);
         table.get(key).await.map_err(VersionError::Parquet)
     }
 
@@ -132,15 +133,16 @@ where
 
     pub(crate) async fn iters<'a>(
         &self,
-        iters: &mut Vec<ScanStream<'a, R, E>>,
+        iters: &mut Vec<ScanStream<'a, R>>,
         range: (Bound<&'a R::Key>, Bound<&'a R::Key>),
         ts: Timestamp,
     ) -> Result<(), VersionError<R>> {
         for scope in self.level_slice[0].iter() {
             let file = E::open(self.option.table_path(&scope.gen))
                 .await
-                .map_err(VersionError::Io)?;
-            let table = SsTable::<R, E>::open(file);
+                .map_err(VersionError::Io)?
+                .to_file();
+            let table = SsTable::open(file);
 
             iters.push(ScanStream::SsTable {
                 inner: table.scan(range, ts).await.map_err(VersionError::Parquet)?,

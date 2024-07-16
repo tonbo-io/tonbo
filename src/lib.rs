@@ -27,7 +27,7 @@ use record::Record;
 use crate::{
     executor::Executor,
     fs::{FileId, FileType},
-    stream::{merge::MergeStream, Entry, ScanStream},
+    stream::{merge::MergeStream, Entry},
     version::Version,
 };
 
@@ -106,7 +106,7 @@ where
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
-    R::Key: Send + Sync,
+    R::Key: Send,
     E: Executor,
 {
     pub fn empty() -> Self {
@@ -161,38 +161,32 @@ where
 impl<R> Schema<R>
 where
     R: Record + Send + Sync,
-    R::Key: Send + Sync,
+    R::Key: Send,
 {
     async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
         self.mutable.insert(record, ts);
         Ok(())
     }
 
-    async fn get<'get, E>(
+    async fn get<'get>(
         &'get self,
         key: &'get R::Key,
         ts: Timestamp,
-    ) -> Result<Option<Entry<'get, R>>, ParquetError>
-    where
-        E: Executor,
-    {
-        self.scan::<E>(Bound::Included(key), Bound::Unbounded, ts)
+    ) -> Result<Option<Entry<'get, R>>, ParquetError> {
+        self.scan(Bound::Included(key), Bound::Unbounded, ts)
             .await?
             .next()
             .await
             .transpose()
     }
 
-    async fn scan<'scan, E>(
+    async fn scan<'scan>(
         &'scan self,
         lower: Bound<&'scan R::Key>,
         uppwer: Bound<&'scan R::Key>,
         ts: Timestamp,
-    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
-    where
-        E: Executor,
-    {
-        let mut streams = Vec::<ScanStream<R, E>>::with_capacity(self.immutables.len() + 1);
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError> {
+        let mut streams = Vec::with_capacity(self.immutables.len() + 1);
         streams.push(self.mutable.scan((lower, uppwer), ts).into());
         for immutable in &self.immutables {
             streams.push(immutable.scan((lower, uppwer), ts).into());

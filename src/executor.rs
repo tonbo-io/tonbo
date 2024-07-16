@@ -20,6 +20,12 @@ pub mod tokio {
         handle: Handle,
     }
 
+    impl Default for TokioExecutor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl TokioExecutor {
         pub fn new() -> Self {
             Self {

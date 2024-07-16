@@ -5,7 +5,7 @@ resolver = "2"
 version = "0.1.0"
 
 [features]
-tokio = ["dep:tokio", "dep:tokio-util"]
+tokio = ["dep:tokio"]
 
 [dependencies]
 arrow = "52"
@@ -21,7 +21,7 @@ parquet = { version = "52", features = ["async"] }
 pin-project-lite = "0.2"
 thiserror = "1"
 tokio = { version = "1", optional = true }
-tokio-util = { version = "0.7", features = ["compat"], optional = true }
+tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 ulid = "1"
 
