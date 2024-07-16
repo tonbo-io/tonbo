@@ -10,24 +10,26 @@ use futures_util::stream::StreamExt;
 use pin_project_lite::pin_project;
 
 use super::{Entry, ScanStream};
-use crate::record::Record;
+use crate::{executor::Executor, record::Record};
 
 pin_project! {
-    pub(crate) struct MergeStream<'merge, R>
+    pub(crate) struct MergeStream<'merge, R, E>
     where
         R: Record,
+        E: Executor,
     {
-        streams: Vec<ScanStream<'merge, R>>,
+        streams: Vec<ScanStream<'merge, R, E>>,
         peeked: BinaryHeap<CmpEntry<'merge, R>>,
         buf: Option<Entry<'merge, R>>,
     }
 }
 
-impl<'merge, R> MergeStream<'merge, R>
+impl<'merge, R, E> MergeStream<'merge, R, E>
 where
     R: Record,
+    E: Executor,
 {
-    async fn from_iter<T: IntoIterator<Item = ScanStream<'merge, R>>>(
+    async fn from_iter<T: IntoIterator<Item = ScanStream<'merge, R, E>>>(
         iter: T,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut streams = iter.into_iter().collect::<Vec<_>>();
@@ -50,9 +52,10 @@ where
     }
 }
 
-impl<'merge, R> Stream for MergeStream<'merge, R>
+impl<'merge, R, E> Stream for MergeStream<'merge, R, E>
 where
     R: Record,
+    E: Executor,
 {
     type Item = Result<Entry<'merge, R>, parquet::errors::ParquetError>;
 
@@ -132,10 +135,13 @@ where
 #[cfg(test)]
 mod tests {
     use std::ops::Bound;
+
     use futures_util::StreamExt;
 
     use super::MergeStream;
-    use crate::{inmem::mutable::Mutable, oracle::timestamp::Timestamped};
+    use crate::{
+        executor::tokio::TokioExecutor, inmem::mutable::Mutable, oracle::timestamp::Timestamped,
+    };
 
     #[tokio::test]
     async fn merge_mutable() {
@@ -155,7 +161,7 @@ mod tests {
         let lower = "a".to_string();
         let upper = "e".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::from_iter(vec![
+        let mut merge = MergeStream::<String, TokioExecutor>::from_iter(vec![
             m1.scan(bound, 6.into()).into(),
             m2.scan(bound, 6.into()).into(),
             m3.scan(bound, 6.into()).into(),

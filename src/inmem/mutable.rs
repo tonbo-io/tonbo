@@ -1,3 +1,10 @@
+use std::ops::Bound;
+
+use crossbeam_skiplist::{
+    map::{Entry, Range},
+    SkipMap,
+};
+
 use crate::{
     oracle::{
         timestamp::{Timestamped, TimestampedRef},
@@ -5,11 +12,6 @@ use crate::{
     },
     record::{KeyRef, Record},
 };
-use crossbeam_skiplist::{
-    map::{Entry, Range},
-    SkipMap,
-};
-use std::ops::Bound;
 
 pub(crate) type MutableScanInner<'scan, R> = Range<
     'scan,
@@ -149,6 +151,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::ops::Bound;
+
     use super::Mutable;
     use crate::{
         oracle::timestamp::{Timestamped, TimestampedRef},
@@ -220,7 +223,10 @@ mod tests {
 
         let lower = "1".to_string();
         let upper = "4".to_string();
-        let mut scan = mutable.scan((Bound::Included(&lower), Bound::Included(&upper)), 1_u32.into());
+        let mut scan = mutable.scan(
+            (Bound::Included(&lower), Bound::Included(&upper)),
+            1_u32.into(),
+        );
 
         assert_eq!(
             scan.next().unwrap().key(),

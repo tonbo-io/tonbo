@@ -1,22 +1,24 @@
 use std::{collections::BTreeMap, io, sync::Arc};
 
-use crate::{oracle::Timestamp, Record, DB};
+use crate::{executor::Executor, oracle::Timestamp, Record, DB};
 
 #[derive(Debug)]
-pub struct Transaction<R>
+pub struct Transaction<R, E>
 where
     R: Record,
+    E: Executor,
 {
-    db: Arc<DB>,
+    db: Arc<DB<E>>,
     read_at: Timestamp,
     local: BTreeMap<R::Key, Option<R>>,
 }
 
-impl<R> Transaction<R>
+impl<R, E> Transaction<R, E>
 where
     R: Record,
+    E: Executor,
 {
-    pub(crate) fn new(db: Arc<DB>, read_at: Timestamp) -> Self {
+    pub(crate) fn new(db: Arc<DB<E>>, read_at: Timestamp) -> Self {
         Self {
             db,
             read_at,

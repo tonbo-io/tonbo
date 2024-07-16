@@ -1,19 +1,25 @@
 #![allow(dead_code)]
 pub(crate) mod arrows;
-mod executor;
+pub mod executor;
 pub mod fs;
 mod inmem;
 mod ondisk;
 mod oracle;
 mod record;
+mod scope;
+pub mod serdes;
 mod stream;
 mod transaction;
+mod version;
 
 use std::{
     any::TypeId,
     collections::{hash_map::Entry, HashMap, VecDeque},
-    io, mem,
+    io,
+    marker::PhantomData,
+    mem,
     ops::Bound,
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -22,15 +28,76 @@ use inmem::{immutable::Immutable, mutable::Mutable};
 use oracle::{timestamp::Timestamped, Timestamp};
 use record::Record;
 
+use crate::{
+    executor::Executor,
+    fs::{FileId, FileType},
+    version::Version,
+};
+
 #[derive(Debug)]
-pub struct DB {
-    schemas: std::sync::RwLock<HashMap<TypeId, *const ()>>,
+pub struct DbOption {
+    pub path: PathBuf,
+    pub max_mem_table_size: usize,
+    pub immutable_chunk_num: usize,
+    pub major_threshold_with_sst_size: usize,
+    pub level_sst_magnification: usize,
+    pub max_sst_file_size: usize,
+    pub clean_channel_buffer: usize,
 }
 
-impl DB {
+#[derive(Debug)]
+pub struct DB<E> {
+    schemas: std::sync::RwLock<HashMap<TypeId, *const ()>>,
+    _p: PhantomData<E>,
+}
+
+impl DbOption {
+    pub fn new(path: impl Into<PathBuf> + Send) -> Self {
+        DbOption {
+            path: path.into(),
+            max_mem_table_size: 8 * 1024 * 1024,
+            immutable_chunk_num: 3,
+            major_threshold_with_sst_size: 10,
+            level_sst_magnification: 10,
+            max_sst_file_size: 24 * 1024 * 1024,
+            clean_channel_buffer: 10,
+        }
+    }
+
+    pub(crate) fn table_path(&self, gen: &FileId) -> PathBuf {
+        self.path.join(format!("{}.{}", gen, FileType::PARQUET))
+    }
+
+    pub(crate) fn wal_path(&self, gen: &FileId) -> PathBuf {
+        self.path.join(format!("{}.{}", gen, FileType::WAL))
+    }
+
+    pub(crate) fn version_path(&self) -> PathBuf {
+        self.path.join(format!("version.{}", FileType::LOG))
+    }
+
+    pub(crate) fn is_threshold_exceeded_major<R, E>(
+        &self,
+        version: &Version<R, E>,
+        level: usize,
+    ) -> bool
+    where
+        R: Record,
+        E: Executor,
+    {
+        Version::<R, E>::tables_len(version, level)
+            >= (self.major_threshold_with_sst_size * self.level_sst_magnification.pow(level as u32))
+    }
+}
+
+impl<E> DB<E>
+where
+    E: Executor,
+{
     pub fn empty() -> Self {
         Self {
             schemas: std::sync::RwLock::new(HashMap::new()),
+            _p: Default::default(),
         }
     }
 
@@ -107,7 +174,7 @@ impl DB {
     }
 }
 
-impl Drop for DB {
+impl<E> Drop for DB<E> {
     fn drop(&mut self) {
         self.schemas
             .write()
@@ -155,6 +222,7 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
 
     use crate::{
+        executor::{tokio::TokioExecutor, Executor},
         inmem::immutable::tests::TestImmutableArrays,
         record::{internal::InternalRecordRef, RecordRef},
         Record, DB,
@@ -241,8 +309,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn get_test_record_batch() -> RecordBatch {
-        let db = DB::empty();
+    pub(crate) async fn get_test_record_batch<E: Executor>() -> RecordBatch {
+        let db = DB::<E>::empty();
 
         db.write(
             Test {
