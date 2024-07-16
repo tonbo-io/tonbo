@@ -115,12 +115,13 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::Bound;
+
     use super::Mutable;
     use crate::{
+        oracle::timestamp::Timestamped,
         record::Record,
         tests::{Test, TestRef},
     };
-    use crate::oracle::timestamp::Timestamped;
 
     #[test]
     fn insert_and_get() {
