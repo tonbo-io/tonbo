@@ -3,10 +3,10 @@ use std::{io, path::Path};
 use tokio::fs::{remove_file, File};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
-use super::Fs;
+use super::FileProvider;
 use crate::executor::tokio::TokioExecutor;
 
-impl Fs for TokioExecutor {
+impl FileProvider for TokioExecutor {
     type File = Compat<File>;
 
     async fn open(path: impl AsRef<Path>) -> io::Result<Self::File> {
