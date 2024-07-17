@@ -114,10 +114,10 @@ where
         self.level_slice[level].len()
     }
 
-    pub(crate) async fn iters<'a>(
+    pub(crate) async fn iters<'iters>(
         &self,
-        iters: &mut Vec<ScanStream<'a, R>>,
-        range: (Bound<&'a R::Key>, Bound<&'a R::Key>),
+        iters: &mut Vec<ScanStream<'iters, R>>,
+        range: (Bound<&'iters R::Key>, Bound<&'iters R::Key>),
         ts: Timestamp,
     ) -> Result<(), VersionError<R>> {
         for scope in self.level_slice[0].iter() {
