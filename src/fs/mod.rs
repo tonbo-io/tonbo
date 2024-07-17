@@ -30,7 +30,7 @@ pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 
 
 impl<T> AsyncFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
 
-pub trait Fs {
+pub trait FileProvider {
     type File: AsyncFile;
 
     fn open(path: impl AsRef<Path>) -> impl Future<Output = io::Result<Self::File>>;
