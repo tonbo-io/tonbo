@@ -13,7 +13,7 @@ use ulid::Ulid;
 
 pub(crate) type FileId = Ulid;
 
-pub enum FileType {
+pub(crate) enum FileType {
     WAL,
     PARQUET,
     LOG,

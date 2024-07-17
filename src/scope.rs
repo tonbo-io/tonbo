@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct Scope<K> {
+pub(crate) struct Scope<K> {
     pub(crate) min: K,
     pub(crate) max: K,
     pub(crate) gen: FileId,

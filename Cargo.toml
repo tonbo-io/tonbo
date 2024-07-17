@@ -11,7 +11,7 @@ tokio = ["dep:tokio"]
 arrow = "52"
 async-lock = "3"
 crossbeam-skiplist = "0.1"
-flume = { version = "0.11.0", features = ["async"] }
+flume = { version = "0.11", features = ["async"] }
 futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"
