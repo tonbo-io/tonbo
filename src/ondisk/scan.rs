@@ -16,17 +16,15 @@ use crate::{
 
 pin_project! {
     #[derive(Debug)]
-    pub struct SsTableScan<R> {
+    pub struct SsTableScan<R>
+    {
         #[pin]
         stream: ParquetRecordBatchStream<Compat<Box<dyn AsyncFile>>>,
         iter: Option<RecordBatchIterator<R>>,
     }
 }
 
-impl<R> SsTableScan<R>
-where
-    R: Record,
-{
+impl<R> SsTableScan<R> {
     pub fn new(stream: ParquetRecordBatchStream<Compat<Box<dyn AsyncFile>>>) -> Self {
         SsTableScan { stream, iter: None }
     }

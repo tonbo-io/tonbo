@@ -1,16 +1,49 @@
 #[cfg(any(feature = "tokio", test))]
 pub mod tokio;
 
-use std::{future::Future, io, path::Path};
+use std::{
+    fmt::{Display, Formatter},
+    future::Future,
+    io,
+    path::Path,
+};
 
 use futures_io::{AsyncRead, AsyncSeek, AsyncWrite};
+use ulid::Ulid;
 
-pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Unpin + 'static {}
+pub(crate) type FileId = Ulid;
 
-impl<T> AsyncFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Unpin + 'static {}
+pub(crate) enum FileType {
+    WAL,
+    PARQUET,
+    LOG,
+}
+
+pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {
+    fn boxed(self) -> Box<dyn AsyncFile>
+    where
+        Self: Sized,
+    {
+        Box::new(self) as Box<dyn AsyncFile>
+    }
+}
+
+impl<T> AsyncFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
 
 pub trait Fs {
     type File: AsyncFile;
 
-    fn open(&self, path: impl AsRef<Path>) -> impl Future<Output = io::Result<Self::File>>;
+    fn open(path: impl AsRef<Path>) -> impl Future<Output = io::Result<Self::File>>;
+
+    fn remove(path: impl AsRef<Path>) -> impl Future<Output = io::Result<()>>;
+}
+
+impl Display for FileType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileType::WAL => write!(f, "wal"),
+            FileType::PARQUET => write!(f, "parquet"),
+            FileType::LOG => write!(f, "log"),
+        }
+    }
 }

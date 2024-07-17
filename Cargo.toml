@@ -11,6 +11,7 @@ tokio = ["dep:tokio"]
 arrow = "52"
 async-lock = "3"
 crossbeam-skiplist = "0.1"
+flume = { version = "0.11", features = ["async"] }
 futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"
@@ -20,6 +21,8 @@ pin-project-lite = "0.2"
 thiserror = "1"
 tokio = { version = "1", optional = true }
 tokio-util = { version = "0.7", features = ["compat"] }
+tracing = "0.1"
+ulid = "1"
 
 [dev-dependencies]
 tempfile = "3"

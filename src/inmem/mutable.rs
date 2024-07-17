@@ -54,8 +54,7 @@ where
 
 impl<R> Mutable<R>
 where
-    R: Record + Send + Sync,
-    R::Key: Send,
+    R: Record + Send,
 {
     pub(crate) fn insert(&self, record: R, ts: Timestamp) {
         self.data
@@ -114,7 +113,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::Bound;
+    use std::ops::Bound;
 
     use super::Mutable;
     use crate::{
