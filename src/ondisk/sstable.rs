@@ -126,7 +126,7 @@ mod tests {
         let file = TokioExecutor::open(&temp_dir.path().join("test.parquet"))
             .await
             .unwrap()
-            .to_file();
+            .boxed();
         let mut sstable = SsTable::<Test>::open(file);
 
         sstable.write(record_batch).await.unwrap();

@@ -20,7 +20,7 @@ pub enum FileType {
 }
 
 pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {
-    fn to_file(self) -> Box<dyn AsyncFile>
+    fn boxed(self) -> Box<dyn AsyncFile>
     where
         Self: Sized,
     {

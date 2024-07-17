@@ -99,7 +99,7 @@ where
         let file = E::open(self.option.table_path(gen))
             .await
             .map_err(VersionError::Io)?
-            .to_file();
+            .boxed();
         let table = SsTable::open(file);
         table.get(key).await.map_err(VersionError::Parquet)
     }
@@ -124,7 +124,7 @@ where
             let file = E::open(self.option.table_path(&scope.gen))
                 .await
                 .map_err(VersionError::Io)?
-                .to_file();
+                .boxed();
             let table = SsTable::open(file);
 
             iters.push(ScanStream::SsTable {
