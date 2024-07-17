@@ -40,7 +40,7 @@ where
     ts: Timestamp,
     option: Arc<DbOption>,
     gens: VecDeque<FileId>,
-    statue: FutureStatus<'level, R, E>,
+    status: FutureStatus<'level, R, E>,
 }
 
 impl<'level, R, E> Stream for LevelStream<'level, R, E>
@@ -52,12 +52,12 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            return match &mut self.statue {
+            return match &mut self.status {
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.statue = FutureStatus::OpenFile(Box::pin(E::open(
+                            self.status = FutureStatus::OpenFile(Box::pin(E::open(
                                 self.option.table_path(&gen),
                             )));
                             continue;
@@ -67,7 +67,7 @@ where
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.statue = FutureStatus::LoadStream(Box::pin(
+                        self.status = FutureStatus::LoadStream(Box::pin(
                             SsTable::open(file).scan((self.lower, self.upper), self.ts),
                         ));
                         continue;
@@ -77,7 +77,7 @@ where
                 },
                 FutureStatus::LoadStream(stream_future) => match Pin::new(stream_future).poll(cx) {
                     Poll::Ready(Ok(scan)) => {
-                        self.statue = FutureStatus::Ready(scan);
+                        self.status = FutureStatus::Ready(scan);
                         continue;
                     }
                     Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),
