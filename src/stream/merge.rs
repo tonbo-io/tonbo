@@ -10,25 +10,27 @@ use futures_util::stream::StreamExt;
 use pin_project_lite::pin_project;
 
 use super::{Entry, ScanStream};
-use crate::record::Record;
+use crate::{executor::Executor, record::Record};
 
 pin_project! {
-    pub(crate) struct MergeStream<'merge, R>
+    pub(crate) struct MergeStream<'merge, R, E>
     where
         R: Record,
+        E: Executor,
     {
-        streams: Vec<ScanStream<'merge, R>>,
+        streams: Vec<ScanStream<'merge, R, E>>,
         peeked: BinaryHeap<CmpEntry<'merge, R>>,
         buf: Option<Entry<'merge, R>>,
     }
 }
 
-impl<'merge, R> MergeStream<'merge, R>
+impl<'merge, R, E> MergeStream<'merge, R, E>
 where
     R: Record,
+    E: Executor,
 {
     pub(crate) async fn from_vec(
-        mut streams: Vec<ScanStream<'merge, R>>,
+        mut streams: Vec<ScanStream<'merge, R, E>>,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
 
@@ -49,9 +51,10 @@ where
     }
 }
 
-impl<'merge, R> Stream for MergeStream<'merge, R>
+impl<'merge, R, E> Stream for MergeStream<'merge, R, E>
 where
     R: Record,
+    E: Executor,
 {
     type Item = Result<Entry<'merge, R>, parquet::errors::ParquetError>;
 
@@ -135,7 +138,7 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::MergeStream;
-    use crate::inmem::mutable::Mutable;
+    use crate::{executor::tokio::TokioExecutor, inmem::mutable::Mutable};
 
     #[tokio::test]
     async fn merge_mutable() {
@@ -155,7 +158,7 @@ mod tests {
         let lower = "a".to_string();
         let upper = "e".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::from_vec(vec![
+        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(vec![
             m1.scan(bound, 6.into()).into(),
             m2.scan(bound, 6.into()).into(),
             m3.scan(bound, 6.into()).into(),
@@ -183,9 +186,10 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::from_vec(vec![m1.scan(bound, 0.into()).into()])
-            .await
-            .unwrap();
+        let mut merge =
+            MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 0.into()).into()])
+                .await
+                .unwrap();
 
         dbg!(merge.next().await);
         dbg!(merge.next().await);
@@ -194,9 +198,10 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::from_vec(vec![m1.scan(bound, 1.into()).into()])
-            .await
-            .unwrap();
+        let mut merge =
+            MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 1.into()).into()])
+                .await
+                .unwrap();
 
         dbg!(merge.next().await);
         dbg!(merge.next().await);
