@@ -107,46 +107,43 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures_executor::block_on;
     use futures_util::io::Cursor;
 
     use crate::{fs::FileId, scope::Scope, serdes::Encode, version::edit::VersionEdit};
 
-    #[test]
-    fn encode_and_decode() {
-        block_on(async {
-            let edits = vec![
-                VersionEdit::Add {
-                    level: 0,
-                    scope: Scope {
-                        min: "Min".to_string(),
-                        max: "Max".to_string(),
-                        gen: Default::default(),
-                        wal_ids: Some(vec![FileId::new(), FileId::new()]),
-                    },
-                },
-                VersionEdit::Remove {
-                    level: 1,
+    #[tokio::test]
+    async fn encode_and_decode() {
+        let edits = vec![
+            VersionEdit::Add {
+                level: 0,
+                scope: Scope {
+                    min: "Min".to_string(),
+                    max: "Max".to_string(),
                     gen: Default::default(),
+                    wal_ids: Some(vec![FileId::new(), FileId::new()]),
                 },
-            ];
+            },
+            VersionEdit::Remove {
+                level: 1,
+                gen: Default::default(),
+            },
+        ];
 
-            let bytes = {
-                let mut cursor = Cursor::new(vec![]);
+        let bytes = {
+            let mut cursor = Cursor::new(vec![]);
 
-                for edit in edits.clone() {
-                    edit.encode(&mut cursor).await.unwrap();
-                }
-                cursor.into_inner()
-            };
+            for edit in edits.clone() {
+                edit.encode(&mut cursor).await.unwrap();
+            }
+            cursor.into_inner()
+        };
 
-            let decode_edits = {
-                let mut cursor = Cursor::new(bytes);
+        let decode_edits = {
+            let mut cursor = Cursor::new(bytes);
 
-                VersionEdit::<String>::recover(&mut cursor).await
-            };
+            VersionEdit::<String>::recover(&mut cursor).await
+        };
 
-            assert_eq!(edits, decode_edits);
-        })
+        assert_eq!(edits, decode_edits);
     }
 }

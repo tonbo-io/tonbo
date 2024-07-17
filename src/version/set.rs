@@ -1,8 +1,8 @@
 use std::{io::SeekFrom, sync::Arc};
 
 use async_lock::RwLock;
-use futures_channel::mpsc::Sender;
-use futures_util::{AsyncSeekExt, AsyncWriteExt, SinkExt};
+use flume::Sender;
+use futures_util::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
     executor::Executor,
@@ -125,7 +125,7 @@ where
         if let Some(delete_gens) = delete_gens {
             new_version
                 .clean_sender
-                .send(CleanTag::Add {
+                .send_async(CleanTag::Add {
                     version_num: new_version.num,
                     gens: delete_gens,
                 })

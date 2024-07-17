@@ -4,9 +4,7 @@ mod set;
 
 use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
-use futures_channel::mpsc::{SendError, Sender};
-use futures_executor::block_on;
-use futures_util::SinkExt;
+use flume::{SendError, Sender};
 use thiserror::Error;
 use tracing::error;
 
@@ -168,17 +166,11 @@ where
     E: Executor,
 {
     fn drop(&mut self) {
-        block_on(async {
-            if let Err(err) = self
-                .clean_sender
-                .send(CleanTag::Clean {
-                    version_num: self.num,
-                })
-                .await
-            {
-                error!("[Version Drop Error]: {}", err)
-            }
-        });
+        if let Err(err) = self.clean_sender.send(CleanTag::Clean {
+            version_num: self.num,
+        }) {
+            error!("[Version Drop Error]: {}", err)
+        }
     }
 }
 
@@ -194,5 +186,5 @@ where
     #[error("version parquet error: {0}")]
     Parquet(#[source] parquet::errors::ParquetError),
     #[error("version send error: {0}")]
-    Send(#[source] SendError),
+    Send(#[source] SendError<CleanTag>),
 }

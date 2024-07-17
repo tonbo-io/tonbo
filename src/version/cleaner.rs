@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, fs, io, sync::Arc};
 
-use futures_channel::mpsc::{channel, Receiver, Sender};
-use futures_util::StreamExt;
+use flume::{Receiver, Sender};
 
 use crate::{fs::FileId, DbOption};
 
@@ -23,7 +22,7 @@ pub(crate) struct Cleaner {
 
 impl Cleaner {
     pub(crate) fn new(option: Arc<DbOption>) -> (Self, Sender<CleanTag>) {
-        let (tag_send, tag_recv) = channel(option.clean_channel_buffer);
+        let (tag_send, tag_recv) = flume::bounded(option.clean_channel_buffer);
 
         (
             Cleaner {
@@ -36,13 +35,12 @@ impl Cleaner {
     }
 
     pub(crate) async fn listen(&mut self) -> Result<(), io::Error> {
-        loop {
-            match self.tag_recv.next().await {
-                None => break,
-                Some(CleanTag::Add { version_num, gens }) => {
+        while let Ok(tag) = self.tag_recv.recv_async().await {
+            match tag {
+                CleanTag::Add { version_num, gens } => {
                     let _ = self.gens_map.insert(version_num, (gens, false));
                 }
-                Some(CleanTag::Clean { version_num }) => {
+                CleanTag::Clean { version_num } => {
                     if let Some((_, dropped)) = self.gens_map.get_mut(&version_num) {
                         *dropped = true;
                     }
