@@ -23,7 +23,7 @@ use crate::{
     stream::record_batch::RecordBatchEntry,
 };
 
-struct SsTable<R>
+pub(crate) struct SsTable<R>
 where
     R: Record,
 {
@@ -35,14 +35,14 @@ impl<R> SsTable<R>
 where
     R: Record,
 {
-    fn open(file: Box<dyn AsyncFile>) -> Self {
+    pub(crate) fn open(file: Box<dyn AsyncFile>) -> Self {
         SsTable {
             file,
             _marker: PhantomData,
         }
     }
 
-    fn create_writer(&mut self) -> AsyncArrowWriter<Compat<&mut Box<dyn AsyncFile>>> {
+    fn create_writer(&mut self) -> AsyncArrowWriter<Compat<&mut dyn AsyncFile>> {
         // TODO: expose writer options
         let options = ArrowWriterOptions::new().with_properties(
             WriterProperties::builder()
@@ -51,7 +51,7 @@ where
                 .build(),
         );
         AsyncArrowWriter::try_new_with_options(
-            (&mut self.file).compat(),
+            (&mut self.file as &mut dyn AsyncFile).compat(),
             R::arrow_schema().clone(),
             options,
         )
@@ -82,7 +82,7 @@ where
         .with_limit(limit))
     }
 
-    async fn get(
+    pub(crate) async fn get(
         self,
         key: &TimestampedRef<R::Key>,
     ) -> parquet::errors::Result<Option<RecordBatchEntry<R>>> {
@@ -113,7 +113,8 @@ mod tests {
 
     use super::SsTable;
     use crate::{
-        fs::{tokio::TokioFs, AsyncFile, Fs},
+        executor::tokio::TokioExecutor,
+        fs::{AsyncFile, Fs},
         oracle::timestamp::Timestamped,
         tests::{get_test_record_batch, Test},
     };
@@ -121,12 +122,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn write_sstable() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let file = temp_dir.path().join("test.parquet");
-
-        let file = TokioFs {}.open(&file).await.unwrap();
-        let mut sstable = SsTable::<Test>::open(Box::new(file) as Box<dyn AsyncFile>);
-
-        let record_batch = get_test_record_batch().await;
+        let record_batch = get_test_record_batch::<TokioExecutor>().await;
+        let file = TokioExecutor::open(&temp_dir.path().join("test.parquet"))
+            .await
+            .unwrap()
+            .boxed();
+        let mut sstable = SsTable::<Test>::open(file);
 
         sstable.write(record_batch).await.unwrap();
 

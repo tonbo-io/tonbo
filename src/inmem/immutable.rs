@@ -19,9 +19,9 @@ use crate::{
 pub trait ArrowArrays: Sized {
     type Record: Record;
 
-    type Buider: Builder<Self>;
+    type Builder: Builder<Self>;
 
-    fn builder(capacity: usize) -> Self::Buider;
+    fn builder(capacity: usize) -> Self::Builder;
 
     fn get(&self, offset: u32) -> Option<Option<<Self::Record as Record>::Ref<'_>>>;
 
@@ -48,7 +48,7 @@ where
 impl<A> From<Mutable<A::Record>> for Immutable<A>
 where
     A: ArrowArrays,
-    A::Record: Send + Sync,
+    A::Record: Send,
 {
     fn from(mutable: Mutable<A::Record>) -> Self {
         let mut index = BTreeMap::new();
@@ -167,9 +167,9 @@ pub(crate) mod tests {
     impl ArrowArrays for TestImmutableArrays {
         type Record = Test;
 
-        type Buider = TestBuilder;
+        type Builder = TestBuilder;
 
-        fn builder(capacity: usize) -> Self::Buider {
+        fn builder(capacity: usize) -> Self::Builder {
             TestBuilder {
                 vstring: StringBuilder::with_capacity(capacity, 0),
                 vu32: PrimitiveBuilder::<UInt32Type>::with_capacity(capacity),

@@ -1,15 +1,20 @@
 #![allow(dead_code)]
 pub(crate) mod arrows;
-mod executor;
+pub mod executor;
 pub mod fs;
 mod inmem;
 mod ondisk;
 mod oracle;
 mod record;
+mod scope;
+pub mod serdes;
 mod stream;
 mod transaction;
+mod version;
 
-use std::{collections::VecDeque, io, mem, ops::Bound, sync::Arc};
+use std::{
+    collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, path::PathBuf, sync::Arc,
+};
 
 use async_lock::{RwLock, RwLockReadGuard};
 use futures_core::Stream;
@@ -18,31 +23,98 @@ use inmem::{immutable::Immutable, mutable::Mutable};
 use oracle::Timestamp;
 use parquet::errors::ParquetError;
 use record::Record;
-use stream::{merge::MergeStream, Entry, ScanStream};
 
-pub struct DB<R>
-where
-    R: Record,
-{
-    schema: Arc<RwLock<Schema<R>>>,
+use crate::{
+    executor::Executor,
+    fs::{FileId, FileType},
+    stream::{merge::MergeStream, Entry},
+    version::Version,
+};
+
+#[derive(Debug)]
+pub struct DbOption {
+    pub path: PathBuf,
+    pub max_mem_table_size: usize,
+    pub immutable_chunk_num: usize,
+    pub major_threshold_with_sst_size: usize,
+    pub level_sst_magnification: usize,
+    pub max_sst_file_size: usize,
+    pub clean_channel_buffer: usize,
 }
 
-impl<R> Default for DB<R>
+pub struct DB<R, E>
 where
     R: Record,
+    E: Executor,
+{
+    schema: Arc<RwLock<Schema<R>>>,
+    _p: PhantomData<E>,
+}
+
+impl DbOption {
+    pub fn new(path: impl Into<PathBuf> + Send) -> Self {
+        DbOption {
+            path: path.into(),
+            max_mem_table_size: 8 * 1024 * 1024,
+            immutable_chunk_num: 3,
+            major_threshold_with_sst_size: 10,
+            level_sst_magnification: 10,
+            max_sst_file_size: 24 * 1024 * 1024,
+            clean_channel_buffer: 10,
+        }
+    }
+
+    pub(crate) fn table_path(&self, gen: &FileId) -> PathBuf {
+        self.path.join(format!("{}.{}", gen, FileType::PARQUET))
+    }
+
+    pub(crate) fn wal_path(&self, gen: &FileId) -> PathBuf {
+        self.path.join(format!("{}.{}", gen, FileType::WAL))
+    }
+
+    pub(crate) fn version_path(&self) -> PathBuf {
+        self.path.join(format!("version.{}", FileType::LOG))
+    }
+
+    pub(crate) fn is_threshold_exceeded_major<R, E>(
+        &self,
+        version: &Version<R, E>,
+        level: usize,
+    ) -> bool
+    where
+        R: Record,
+        E: Executor,
+    {
+        Version::<R, E>::tables_len(version, level)
+            >= (self.major_threshold_with_sst_size * self.level_sst_magnification.pow(level as u32))
+    }
+}
+
+impl<R, E> Default for DB<R, E>
+where
+    R: Record,
+    E: Executor,
 {
     fn default() -> Self {
         Self {
             schema: Arc::new(RwLock::new(Schema::default())),
+            _p: Default::default(),
         }
     }
 }
 
-impl<R> DB<R>
+impl<R, E> DB<R, E>
 where
-    R: Record + Send + Sync,
-    R::Key: Send,
+    R: Record + Send,
+    E: Executor,
 {
+    pub fn empty() -> Self {
+        Self {
+            schema: Arc::new(RwLock::new(Schema::default())),
+            _p: Default::default(),
+        }
+    }
+
     pub(crate) async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
         let columns = self.schema.read().await;
         columns.write(record, ts).await
@@ -87,8 +159,7 @@ where
 
 impl<R> Schema<R>
 where
-    R: Record + Send + Sync,
-    R::Key: Send + Sync,
+    R: Record + Send,
 {
     async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
         self.mutable.insert(record, ts);
@@ -113,7 +184,7 @@ where
         uppwer: Bound<&'scan R::Key>,
         ts: Timestamp,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError> {
-        let mut streams = Vec::<ScanStream<R>>::with_capacity(self.immutables.len() + 1);
+        let mut streams = Vec::with_capacity(self.immutables.len() + 1);
         streams.push(self.mutable.scan((lower, uppwer), ts).into());
         for immutable in &self.immutables {
             streams.push(immutable.scan((lower, uppwer), ts).into());
@@ -141,6 +212,7 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
 
     use crate::{
+        executor::Executor,
         inmem::immutable::tests::TestImmutableArrays,
         record::{internal::InternalRecordRef, RecordRef},
         Record, DB,
@@ -227,8 +299,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn get_test_record_batch() -> RecordBatch {
-        let db = DB::default();
+    pub(crate) async fn get_test_record_batch<E: Executor>() -> RecordBatch {
+        let db: DB<Test, E> = DB::empty();
 
         db.write(
             Test {
