@@ -71,7 +71,7 @@ where
             if !scope.contains(key.value()) {
                 continue;
             }
-            if let Some(entry) = Self::table_query(self, key, &scope.gen).await? {
+            if let Some(entry) = self.table_query(key, &scope.gen).await? {
                 return Ok(Some(entry));
             }
         }
@@ -83,7 +83,7 @@ where
             if !level[index].contains(key.value()) {
                 continue;
             }
-            if let Some(entry) = Self::table_query(self, key, &level[index].gen).await? {
+            if let Some(entry) = self.table_query(key, &level[index].gen).await? {
                 return Ok(Some(entry));
             }
         }
