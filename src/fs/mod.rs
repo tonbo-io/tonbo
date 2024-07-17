@@ -14,19 +14,12 @@ use ulid::Ulid;
 pub(crate) type FileId = Ulid;
 
 pub(crate) enum FileType {
-    WAL,
-    PARQUET,
-    LOG,
+    Wal,
+    Parquet,
+    Log,
 }
 
-pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {
-    fn boxed(self) -> Box<dyn AsyncFile>
-    where
-        Self: Sized,
-    {
-        Box::new(self) as Box<dyn AsyncFile>
-    }
-}
+pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
 
 impl<T> AsyncFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
 
@@ -41,9 +34,9 @@ pub trait FileProvider {
 impl Display for FileType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            FileType::WAL => write!(f, "wal"),
-            FileType::PARQUET => write!(f, "parquet"),
-            FileType::LOG => write!(f, "log"),
+            FileType::Wal => write!(f, "wal"),
+            FileType::Parquet => write!(f, "parquet"),
+            FileType::Log => write!(f, "log"),
         }
     }
 }

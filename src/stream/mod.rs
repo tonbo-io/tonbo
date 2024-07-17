@@ -1,3 +1,4 @@
+pub(crate) mod level;
 pub(crate) mod merge;
 pub(crate) mod record_batch;
 
@@ -14,6 +15,7 @@ use pin_project_lite::pin_project;
 use record_batch::RecordBatchEntry;
 
 use crate::{
+    executor::Executor,
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
     oracle::timestamp::Timestamped,
@@ -65,9 +67,10 @@ where
 
 pin_project! {
     #[project = ScanStreamProject]
-    pub enum ScanStream<'scan, R>
+    pub enum ScanStream<'scan, R, E>
     where
         R: Record,
+        E: Executor,
     {
         Mutable {
             #[pin]
@@ -79,14 +82,15 @@ pin_project! {
         },
         SsTable {
             #[pin]
-            inner: SsTableScan<R>,
+            inner: SsTableScan<R, E>,
         },
     }
 }
 
-impl<'scan, R> From<MutableScan<'scan, R>> for ScanStream<'scan, R>
+impl<'scan, R, E> From<MutableScan<'scan, R>> for ScanStream<'scan, R, E>
 where
     R: Record,
+    E: Executor,
 {
     fn from(inner: MutableScan<'scan, R>) -> Self {
         ScanStream::Mutable {
@@ -95,9 +99,10 @@ where
     }
 }
 
-impl<'scan, R> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R>
+impl<'scan, R, E> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R, E>
 where
     R: Record,
+    E: Executor,
 {
     fn from(inner: ImmutableScan<'scan, R>) -> Self {
         ScanStream::Immutable {
@@ -106,18 +111,20 @@ where
     }
 }
 
-impl<'scan, R> From<SsTableScan<R>> for ScanStream<'scan, R>
+impl<'scan, R, E> From<SsTableScan<R, E>> for ScanStream<'scan, R, E>
 where
     R: Record,
+    E: Executor,
 {
-    fn from(inner: SsTableScan<R>) -> Self {
+    fn from(inner: SsTableScan<R, E>) -> Self {
         ScanStream::SsTable { inner }
     }
 }
 
-impl<R> fmt::Debug for ScanStream<'_, R>
+impl<R, E> fmt::Debug for ScanStream<'_, R, E>
 where
     R: Record,
+    E: Executor,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -128,9 +135,10 @@ where
     }
 }
 
-impl<'scan, R> Stream for ScanStream<'scan, R>
+impl<'scan, R, E> Stream for ScanStream<'scan, R, E>
 where
     R: Record,
+    E: Executor,
 {
     type Item = Result<Entry<'scan, R>, parquet::errors::ParquetError>;
 

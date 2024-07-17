@@ -27,7 +27,7 @@ use record::Record;
 use crate::{
     executor::Executor,
     fs::{FileId, FileType},
-    stream::{merge::MergeStream, Entry},
+    stream::{merge::MergeStream, Entry, ScanStream},
     version::Version,
 };
 
@@ -65,15 +65,15 @@ impl DbOption {
     }
 
     pub(crate) fn table_path(&self, gen: &FileId) -> PathBuf {
-        self.path.join(format!("{}.{}", gen, FileType::PARQUET))
+        self.path.join(format!("{}.{}", gen, FileType::Parquet))
     }
 
     pub(crate) fn wal_path(&self, gen: &FileId) -> PathBuf {
-        self.path.join(format!("{}.{}", gen, FileType::WAL))
+        self.path.join(format!("{}.{}", gen, FileType::Wal))
     }
 
     pub(crate) fn version_path(&self) -> PathBuf {
-        self.path.join(format!("version.{}", FileType::LOG))
+        self.path.join(format!("version.{}", FileType::Log))
     }
 
     pub(crate) fn is_threshold_exceeded_major<R, E>(
@@ -166,25 +166,31 @@ where
         Ok(())
     }
 
-    async fn get<'get>(
+    async fn get<'get, E>(
         &'get self,
         key: &'get R::Key,
         ts: Timestamp,
-    ) -> Result<Option<Entry<'get, R>>, ParquetError> {
-        self.scan(Bound::Included(key), Bound::Unbounded, ts)
+    ) -> Result<Option<Entry<'get, R>>, ParquetError>
+    where
+        E: Executor,
+    {
+        self.scan::<E>(Bound::Included(key), Bound::Unbounded, ts)
             .await?
             .next()
             .await
             .transpose()
     }
 
-    async fn scan<'scan>(
+    async fn scan<'scan, E>(
         &'scan self,
         lower: Bound<&'scan R::Key>,
         uppwer: Bound<&'scan R::Key>,
         ts: Timestamp,
-    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError> {
-        let mut streams = Vec::with_capacity(self.immutables.len() + 1);
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
+    where
+        E: Executor,
+    {
+        let mut streams = Vec::<ScanStream<R, E>>::with_capacity(self.immutables.len() + 1);
         streams.push(self.mutable.scan((lower, uppwer), ts).into());
         for immutable in &self.immutables {
             streams.push(immutable.scan((lower, uppwer), ts).into());
