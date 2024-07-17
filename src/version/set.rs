@@ -4,6 +4,7 @@ use async_lock::RwLock;
 use flume::Sender;
 use futures_util::{AsyncSeekExt, AsyncWriteExt};
 
+use super::MAX_LEVEL;
 use crate::{
     executor::Executor,
     fs::FileId,
@@ -65,7 +66,7 @@ where
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(Version::<R, E> {
                     num: 0,
-                    level_slice: Version::<R, E>::level_slice_new(),
+                    level_slice: [const { Vec::new() }; MAX_LEVEL],
                     clean_sender: clean_sender.clone(),
                     option: option.clone(),
                     _p: Default::default(),
@@ -92,7 +93,7 @@ where
     ) -> Result<(), VersionError<R>> {
         let mut guard = self.inner.write().await;
 
-        let mut new_version = Version::<R, E>::clone(&guard.current);
+        let mut new_version = Version::clone(&guard.current);
 
         for version_edit in version_edits {
             if !is_recover {

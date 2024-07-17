@@ -54,8 +54,7 @@ where
 
 impl<R> Mutable<R>
 where
-    R: Record + Send + Sync,
-    R::Key: Send,
+    R: Record + Send,
 {
     pub(crate) fn insert(&self, record: R, ts: Timestamp) {
         self.data

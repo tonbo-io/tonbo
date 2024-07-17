@@ -7,10 +7,7 @@ use crate::{
 };
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct Scope<K>
-where
-    K: Encode + Decode + Ord + Clone,
-{
+pub struct Scope<K> {
     pub(crate) min: K,
     pub(crate) max: K,
     pub(crate) gen: FileId,
@@ -19,7 +16,7 @@ where
 
 impl<K> Clone for Scope<K>
 where
-    K: Encode + Decode + Ord + Clone,
+    K: Clone,
 {
     fn clone(&self) -> Self {
         Scope {
@@ -33,7 +30,7 @@ where
 
 impl<K> Scope<K>
 where
-    K: Encode + Decode + Ord + Clone,
+    K: Ord,
 {
     pub(crate) fn is_between(&self, key: &K) -> bool {
         self.min.le(key) && self.max.ge(key)
@@ -49,7 +46,7 @@ where
 
 impl<K> Encode for Scope<K>
 where
-    K: Encode + Decode + Ord + Clone,
+    K: Encode,
 {
     type Error = <K as Encode>::Error;
 
@@ -85,7 +82,7 @@ where
 
 impl<K> Decode for Scope<K>
 where
-    K: Encode + Decode + Ord + Clone,
+    K: Decode,
 {
     type Error = <K as Decode>::Error;
 

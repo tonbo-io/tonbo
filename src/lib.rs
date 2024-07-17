@@ -105,8 +105,7 @@ where
 
 impl<R, E> DB<R, E>
 where
-    R: Record + Send + Sync,
-    R::Key: Send,
+    R: Record + Send,
     E: Executor,
 {
     pub fn empty() -> Self {
@@ -160,8 +159,7 @@ where
 
 impl<R> Schema<R>
 where
-    R: Record + Send + Sync,
-    R::Key: Send,
+    R: Record + Send,
 {
     async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
         self.mutable.insert(record, ts);

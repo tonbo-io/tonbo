@@ -21,14 +21,13 @@ use crate::{
     DbOption,
 };
 
-pub const MAX_LEVEL: usize = 7;
+const MAX_LEVEL: usize = 7;
 
 pub(crate) type VersionRef<R, E> = Arc<Version<R, E>>;
 
 pub(crate) struct Version<R, E>
 where
     R: Record,
-    E: Executor,
 {
     pub(crate) num: usize,
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
@@ -43,12 +42,10 @@ where
     E: Executor,
 {
     fn clone(&self) -> Self {
-        let mut level_slice = Version::<R, E>::level_slice_new();
+        let mut level_slice = [const { Vec::new() }; MAX_LEVEL];
 
         for (level, scopes) in self.level_slice.iter().enumerate() {
-            for scope in scopes {
-                level_slice[level].push(scope.clone());
-            }
+            level_slice[level].clone_from(scopes);
         }
 
         Self {
@@ -117,18 +114,6 @@ where
         self.level_slice[level].len()
     }
 
-    pub(crate) fn level_slice_new() -> [Vec<Scope<R::Key>>; 7] {
-        [
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ]
-    }
-
     pub(crate) async fn iters<'a>(
         &self,
         iters: &mut Vec<ScanStream<'a, R>>,
@@ -163,7 +148,6 @@ where
 impl<R, E> Drop for Version<R, E>
 where
     R: Record,
-    E: Executor,
 {
     fn drop(&mut self) {
         if let Err(err) = self.clean_sender.send(CleanTag::Clean {

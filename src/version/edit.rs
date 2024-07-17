@@ -10,17 +10,14 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum VersionEdit<K>
-where
-    K: Encode + Decode + Ord + Clone,
-{
+pub(crate) enum VersionEdit<K> {
     Add { level: u8, scope: Scope<K> },
     Remove { level: u8, gen: FileId },
 }
 
 impl<K> VersionEdit<K>
 where
-    K: Encode + Decode + Ord + Clone,
+    K: Decode,
 {
     pub(crate) async fn recover<R: AsyncRead + Unpin>(reader: &mut R) -> Vec<VersionEdit<K>> {
         let mut edits = Vec::new();
@@ -34,7 +31,7 @@ where
 
 impl<K> Encode for VersionEdit<K>
 where
-    K: Encode + Decode + Ord + Clone,
+    K: Encode,
 {
     type Error = <K as Encode>::Error;
 
@@ -70,7 +67,7 @@ where
 
 impl<K> Decode for VersionEdit<K>
 where
-    K: Encode + Decode + Ord + Clone,
+    K: Decode,
 {
     type Error = <K as Decode>::Error;
 

@@ -48,7 +48,7 @@ where
 impl<A> From<Mutable<A::Record>> for Immutable<A>
 where
     A: ArrowArrays,
-    A::Record: Send + Sync,
+    A::Record: Send,
 {
     fn from(mutable: Mutable<A::Record>) -> Self {
         let mut index = BTreeMap::new();
