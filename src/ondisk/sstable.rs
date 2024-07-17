@@ -114,7 +114,7 @@ mod tests {
     use super::SsTable;
     use crate::{
         executor::tokio::TokioExecutor,
-        fs::{AsyncFile, Fs},
+        fs::{AsyncFile, FileProvider},
         oracle::timestamp::Timestamped,
         tests::{get_test_record_batch, Test},
     };

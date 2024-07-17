@@ -1,8 +1,8 @@
 use std::future::Future;
 
-use crate::fs::Fs;
+use crate::fs::FileProvider;
 
-pub trait Executor: Fs {
+pub trait Executor: FileProvider {
     fn spawn<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static;
