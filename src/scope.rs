@@ -32,15 +32,12 @@ impl<K> Scope<K>
 where
     K: Ord,
 {
-    pub(crate) fn is_between(&self, key: &K) -> bool {
-        self.min.le(key) && self.max.ge(key)
+    pub(crate) fn contains(&self, key: &K) -> bool {
+        &self.min <= key && key <= &self.max
     }
 
-    pub(crate) fn is_meet(&self, target: &Scope<K>) -> bool {
-        (self.min.le(&target.min) && self.max.ge(&target.min))
-            || (self.min.le(&target.max) && self.max.ge(&target.max))
-            || (self.min.le(&target.min)) && self.max.ge(&target.max)
-            || (self.min.ge(&target.min)) && self.max.le(&target.max)
+    pub(crate) fn meets(&self, target: &Self) -> bool {
+        self.contains(&target.min) || self.contains(&target.max)
     }
 }
 

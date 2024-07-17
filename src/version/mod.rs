@@ -68,7 +68,7 @@ where
         key: &TimestampedRef<R::Key>,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         for scope in self.level_slice[0].iter().rev() {
-            if !scope.is_between(key.value()) {
+            if !scope.contains(key.value()) {
                 continue;
             }
             if let Some(entry) = Self::table_query(self, key, &scope.gen).await? {
@@ -80,7 +80,7 @@ where
                 continue;
             }
             let index = Self::scope_search(key.value(), level);
-            if !level[index].is_between(key.value()) {
+            if !level[index].contains(key.value()) {
                 continue;
             }
             if let Some(entry) = Self::table_query(self, key, &level[index].gen).await? {
