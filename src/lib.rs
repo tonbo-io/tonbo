@@ -17,14 +17,15 @@ use std::{
     collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, path::PathBuf, sync::Arc,
 };
 
-use async_lock::{RwLock, RwLockReadGuard};
+use async_lock::RwLock;
 use fs::FileProvider;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
-use oracle::Timestamp;
+use oracle::{Oracle, Timestamp};
 use parquet::{errors::ParquetError, file::properties::WriterProperties};
 use record::Record;
+use transaction::Transaction;
 
 use crate::{
     executor::Executor,
@@ -43,15 +44,6 @@ pub struct DbOption {
     pub max_sst_file_size: usize,
     pub clean_channel_buffer: usize,
     pub write_parquet_option: Option<WriterProperties>,
-}
-
-pub struct DB<R, E>
-where
-    R: Record,
-    E: Executor,
-{
-    schema: Arc<RwLock<Schema<R>>>,
-    _p: PhantomData<E>,
 }
 
 impl DbOption {
@@ -94,6 +86,16 @@ impl DbOption {
     }
 }
 
+pub struct DB<R, E>
+where
+    R: Record,
+    E: Executor,
+{
+    schema: Arc<RwLock<Schema<R, E>>>,
+    oracle: Oracle<R::Key>,
+    _p: PhantomData<E>,
+}
+
 impl<R, E> Default for DB<R, E>
 where
     R: Record,
@@ -103,6 +105,7 @@ where
         Self {
             schema: Arc::new(RwLock::new(Schema::default())),
             _p: Default::default(),
+            oracle: Oracle::default(),
         }
     }
 }
@@ -113,15 +116,16 @@ where
     E: Executor,
 {
     pub fn empty() -> Self {
-        Self {
-            schema: Arc::new(RwLock::new(Schema::default())),
-            _p: Default::default(),
-        }
+        Self::default()
+    }
+
+    pub async fn transaction(&self) -> Transaction<'_, R, E> {
+        Transaction::new(&self.oracle, self.schema.read().await)
     }
 
     pub(crate) async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
-        let columns = self.schema.read().await;
-        columns.write(record, ts).await
+        let schema = self.schema.read().await;
+        schema.write(record, ts).await
     }
 
     pub(crate) async fn write_batch(
@@ -135,21 +139,18 @@ where
         }
         Ok(())
     }
-
-    pub(crate) async fn read(&self) -> RwLockReadGuard<'_, Schema<R>> {
-        self.schema.read().await
-    }
 }
 
-pub(crate) struct Schema<R>
+pub(crate) struct Schema<R, FP>
 where
     R: Record,
 {
     mutable: Mutable<R>,
     immutables: VecDeque<Immutable<R::Columns>>,
+    _marker: PhantomData<FP>,
 }
 
-impl<R> Default for Schema<R>
+impl<R, FP> Default for Schema<R, FP>
 where
     R: Record,
 {
@@ -157,44 +158,51 @@ where
         Self {
             mutable: Mutable::default(),
             immutables: VecDeque::default(),
+            _marker: Default::default(),
         }
     }
 }
 
-impl<R> Schema<R>
+impl<R, FP> Schema<R, FP>
 where
     R: Record + Send,
+    FP: FileProvider,
 {
     async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
         self.mutable.insert(record, ts);
         Ok(())
     }
 
-    async fn get<'get, E>(
+    async fn remove(&self, key: R::Key, ts: Timestamp) -> io::Result<()> {
+        self.mutable.remove(key, ts);
+        Ok(())
+    }
+
+    async fn get<'get>(
         &'get self,
         key: &'get R::Key,
         ts: Timestamp,
     ) -> Result<Option<Entry<'get, R>>, ParquetError>
     where
-        E: Executor + 'get,
+        FP: FileProvider,
     {
-        self.scan::<E>(Bound::Included(key), Bound::Unbounded, ts)
+        self.scan(Bound::Included(key), Bound::Unbounded, ts)
             .await?
             .next()
             .await
             .transpose()
     }
 
-    async fn scan<'scan, E>(
+    async fn scan<'scan>(
         &'scan self,
         lower: Bound<&'scan R::Key>,
         uppwer: Bound<&'scan R::Key>,
         ts: Timestamp,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
     where
-        E: Executor + 'scan,
+        FP: FileProvider,
     {
-        let mut streams = Vec::<ScanStream<R, E>>::with_capacity(self.immutables.len() + 1);
+        let mut streams = Vec::<ScanStream<R, FP>>::with_capacity(self.immutables.len() + 1);
         streams.push(self.mutable.scan((lower, uppwer), ts).into());
         for immutable in &self.immutables {
             streams.push(immutable.scan((lower, uppwer), ts).into());
