@@ -61,31 +61,34 @@ where
     R: Record,
 {
     let (lower_key, lower_cmp) = get_range_bound_fn::<R>(range.0);
-    let (upper_key, upper_cmp) = get_range_bound_fn::<R>(range.0);
+    let (upper_key, upper_cmp) = get_range_bound_fn::<R>(range.1);
 
-    let predictions: Vec<Box<dyn ArrowPredicate>> = vec![
-        Box::new(ArrowPredicateFn::new(
+    let mut predictions: Vec<Box<dyn ArrowPredicate>> = vec![Box::new(ArrowPredicateFn::new(
+        ProjectionMask::roots(schema_descriptor, [1]),
+        move |record_batch| lt_eq(record_batch.column(0), &ts.to_arrow_scalar() as &dyn Datum),
+    ))];
+    if let Some(lower_key) = lower_key {
+        predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
                 lower_cmp(
                     record_batch.column(0),
-                    &lower_key.unwrap().to_arrow_datum() as &dyn Datum,
+                    &lower_key.to_arrow_datum() as &dyn Datum,
                 )
             },
-        )),
-        Box::new(ArrowPredicateFn::new(
+        )));
+    }
+    if let Some(upper_key) = upper_key {
+        predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
                 upper_cmp(
                     record_batch.column(0),
-                    &upper_key.unwrap().to_arrow_datum() as &dyn Datum,
+                    &upper_key.to_arrow_datum() as &dyn Datum,
                 )
             },
-        )),
-        Box::new(ArrowPredicateFn::new(
-            ProjectionMask::roots(schema_descriptor, [1]),
-            move |record_batch| lt_eq(record_batch.column(0), &ts.to_arrow_scalar() as &dyn Datum),
-        )),
-    ];
+        )));
+    }
+
     RowFilter::new(predictions)
 }

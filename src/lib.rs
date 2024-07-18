@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 pub(crate) mod arrows;
+mod compaction;
 pub mod executor;
 pub mod fs;
 mod inmem;
@@ -10,7 +11,7 @@ mod scope;
 pub mod serdes;
 mod stream;
 mod transaction;
-mod version;
+pub(crate) mod version;
 
 use std::{
     collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, path::PathBuf, sync::Arc,
@@ -21,7 +22,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use oracle::Timestamp;
-use parquet::errors::ParquetError;
+use parquet::{errors::ParquetError, file::properties::WriterProperties};
 use record::Record;
 
 use crate::{
@@ -40,6 +41,7 @@ pub struct DbOption {
     pub level_sst_magnification: usize,
     pub max_sst_file_size: usize,
     pub clean_channel_buffer: usize,
+    pub write_parquet_option: Option<WriterProperties>,
 }
 
 pub struct DB<R, E>
@@ -61,6 +63,7 @@ impl DbOption {
             level_sst_magnification: 10,
             max_sst_file_size: 24 * 1024 * 1024,
             clean_channel_buffer: 10,
+            write_parquet_option: None,
         }
     }
 
@@ -172,7 +175,7 @@ where
         ts: Timestamp,
     ) -> Result<Option<Entry<'get, R>>, ParquetError>
     where
-        E: Executor,
+        E: Executor + 'get,
     {
         self.scan::<E>(Bound::Included(key), Bound::Unbounded, ts)
             .await?
@@ -188,7 +191,7 @@ where
         ts: Timestamp,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
     where
-        E: Executor,
+        E: Executor + 'scan,
     {
         let mut streams = Vec::<ScanStream<R, E>>::with_capacity(self.immutables.len() + 1);
         streams.push(self.mutable.scan((lower, uppwer), ts).into());

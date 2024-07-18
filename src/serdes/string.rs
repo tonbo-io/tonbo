@@ -5,7 +5,7 @@ use futures_util::{AsyncReadExt, AsyncWriteExt};
 
 use super::{Decode, Encode};
 
-impl Encode for String {
+impl<'r> Encode for &'r str {
     type Error = io::Error;
 
     async fn encode<W: AsyncWrite + Unpin + Send>(
@@ -18,6 +18,21 @@ impl Encode for String {
 
     fn size(&self) -> usize {
         size_of::<u16>() + self.len()
+    }
+}
+
+impl Encode for String {
+    type Error = io::Error;
+
+    async fn encode<W: AsyncWrite + Unpin + Send + Sync>(
+        &self,
+        writer: &mut W,
+    ) -> Result<(), Self::Error> {
+        self.as_str().encode(writer).await
+    }
+
+    fn size(&self) -> usize {
+        self.as_str().size()
     }
 }
 

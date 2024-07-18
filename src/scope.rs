@@ -39,6 +39,10 @@ where
     pub(crate) fn meets(&self, target: &Self) -> bool {
         self.contains(&target.min) || self.contains(&target.max)
     }
+
+    pub(crate) fn gen(&self) -> FileId {
+        self.gen
+    }
 }
 
 impl<K> Encode for Scope<K>

@@ -1,6 +1,6 @@
 use std::{io, path::Path};
 
-use tokio::fs::{remove_file, File};
+use tokio::fs::{remove_file, File, OpenOptions};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use super::FileProvider;
@@ -10,7 +10,11 @@ impl FileProvider for TokioExecutor {
     type File = Compat<File>;
 
     async fn open(path: impl AsRef<Path>) -> io::Result<Self::File> {
-        File::create_new(path)
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(path)
             .await
             .map(TokioAsyncReadCompatExt::compat)
     }
