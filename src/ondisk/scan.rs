@@ -18,6 +18,7 @@ pin_project! {
     #[derive(Debug)]
     pub struct SsTableScan<R, E>
     where
+        R: Record,
         E: Executor,
     {
         #[pin]
@@ -28,6 +29,7 @@ pin_project! {
 
 impl<R, E> SsTableScan<R, E>
 where
+    R: Record,
     E: Executor,
 {
     pub fn new(stream: ParquetRecordBatchStream<Compat<E::File>>) -> Self {

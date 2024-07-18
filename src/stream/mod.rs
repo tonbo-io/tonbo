@@ -20,6 +20,7 @@ use crate::{
     ondisk::scan::SsTableScan,
     oracle::timestamp::Timestamped,
     record::{Key, Record},
+    stream::level::LevelStream,
 };
 
 pub enum Entry<'entry, R>
@@ -29,6 +30,7 @@ where
     Mutable(crossbeam_skiplist::map::Entry<'entry, Timestamped<R::Key>, Option<R>>),
     Immutable(RecordBatchEntry<R>),
     SsTable(RecordBatchEntry<R>),
+    Level(RecordBatchEntry<R>),
 }
 
 impl<R> Entry<'_, R>
@@ -42,6 +44,7 @@ where
                 .map(|key| unsafe { transmute(key.as_key_ref()) }),
             Entry::SsTable(entry) => entry.internal_key(),
             Entry::Immutable(entry) => entry.internal_key(),
+            Entry::Level(entry) => entry.internal_key(),
         }
     }
 
@@ -50,6 +53,7 @@ where
             Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref).unwrap(),
             Entry::SsTable(entry) => entry.get(),
             Entry::Immutable(entry) => entry.get(),
+            Entry::Level(entry) => entry.get(),
         }
     }
 }
@@ -69,6 +73,7 @@ where
             ),
             Entry::SsTable(sstable) => write!(f, "Entry::SsTable({:?})", sstable),
             Entry::Immutable(immutable) => write!(f, "Entry::Immutable({:?})", immutable),
+            Entry::Level(level) => write!(f, "Entry::Level({:?})", level),
         }
     }
 }
@@ -92,6 +97,10 @@ pin_project! {
             #[pin]
             inner: SsTableScan<R, E>,
         },
+        Level {
+            #[pin]
+            inner: LevelStream<'scan, R, E>,
+        }
     }
 }
 
@@ -129,6 +138,16 @@ where
     }
 }
 
+impl<'scan, R, E> From<LevelStream<'scan, R, E>> for ScanStream<'scan, R, E>
+where
+    R: Record,
+    E: Executor,
+{
+    fn from(inner: LevelStream<'scan, R, E>) -> Self {
+        ScanStream::Level { inner }
+    }
+}
+
 impl<R, E> fmt::Debug for ScanStream<'_, R, E>
 where
     R: Record,
@@ -139,6 +158,7 @@ where
             ScanStream::Mutable { .. } => write!(f, "ScanStream::Mutable"),
             ScanStream::SsTable { .. } => write!(f, "ScanStream::SsTable"),
             ScanStream::Immutable { .. } => write!(f, "ScanStream::Immutable"),
+            ScanStream::Level { .. } => write!(f, "ScanStream::Level"),
         }
     }
 }
@@ -146,7 +166,7 @@ where
 impl<'scan, R, E> Stream for ScanStream<'scan, R, E>
 where
     R: Record,
-    E: Executor,
+    E: Executor + 'scan,
 {
     type Item = Result<Entry<'scan, R>, parquet::errors::ParquetError>;
 
@@ -160,6 +180,9 @@ where
             }
             ScanStreamProject::Immutable { inner } => {
                 Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| Ok(Entry::Immutable(entry))))
+            }
+            ScanStreamProject::Level { inner } => {
+                Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| entry.map(Entry::Level)))
             }
         }
     }

@@ -12,7 +12,7 @@ use crate::{
         timestamp::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
-    record::{internal::InternalRecordRef, Record, RecordRef},
+    record::{internal::InternalRecordRef, Key, Record, RecordRef},
     stream::record_batch::RecordBatchEntry,
 };
 
@@ -32,7 +32,11 @@ pub trait Builder<S>
 where
     S: ArrowArrays,
 {
-    fn push(&mut self, key: &Timestamped<<S::Record as Record>::Key>, row: &Option<S::Record>);
+    fn push(
+        &mut self,
+        key: Timestamped<<<S::Record as Record>::Key as Key>::Ref<'_>>,
+        row: Option<<S::Record as Record>::Ref<'_>>,
+    );
 
     fn finish(&mut self) -> S;
 }
@@ -55,7 +59,10 @@ where
         let mut builder = A::builder(mutable.len());
 
         for (offset, (key, value)) in mutable.into_iter().enumerate() {
-            builder.push(&key, &value);
+            builder.push(
+                Timestamped::new(key.value.as_key_ref(), key.ts),
+                value.as_ref().map(Record::as_record_ref),
+            );
             index.insert(key, offset as u32);
         }
 
@@ -69,6 +76,18 @@ impl<A> Immutable<A>
 where
     A: ArrowArrays,
 {
+    pub(crate) fn scope(
+        &self,
+    ) -> (
+        Option<&<A::Record as Record>::Key>,
+        Option<&<A::Record as Record>::Key>,
+    ) {
+        (
+            self.index.first_key_value().map(|(key, _)| key.value()),
+            self.index.last_key_value().map(|(key, _)| key.value()),
+        )
+    }
+
     pub(crate) fn as_record_batch(&self) -> &RecordBatch {
         self.data.as_record_batch()
     }
@@ -220,12 +239,12 @@ pub(crate) mod tests {
     }
 
     impl Builder<TestImmutableArrays> for TestBuilder {
-        fn push(&mut self, key: &Timestamped<String>, row: &Option<Test>) {
+        fn push(&mut self, key: Timestamped<&str>, row: Option<TestRef>) {
             self.vstring.append_value(&key.value);
             match row {
                 Some(row) => {
                     self.vu32.append_value(row.vu32);
-                    match row.vobool {
+                    match row.vbool {
                         Some(vobool) => self.vobool.append_value(vobool),
                         None => self.vobool.append_null(),
                     }

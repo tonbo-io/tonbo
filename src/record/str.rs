@@ -128,7 +128,7 @@ pub struct StringColumnsBuilder {
 }
 
 impl Builder<StringColumns> for StringColumnsBuilder {
-    fn push(&mut self, key: &Timestamped<String>, row: &Option<String>) {
+    fn push(&mut self, key: Timestamped<&str>, row: Option<&str>) {
         self._null.append(row.is_none());
         self._ts.append_value(key.ts.into());
         if let Some(row) = row {

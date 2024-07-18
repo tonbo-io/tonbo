@@ -1,6 +1,11 @@
-use std::{borrow::Borrow, cmp::Ordering, marker::PhantomData, mem::transmute};
+use std::{
+    borrow::Borrow,
+    cmp::Ordering,
+    marker::PhantomData,
+    mem::{size_of, transmute},
+};
 
-use crate::oracle::Timestamp;
+use crate::{oracle::Timestamp, serdes::Encode};
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub(crate) struct Timestamped<V> {
@@ -32,6 +37,15 @@ impl<V> Timestamped<V> {
 
     pub(crate) fn into_parts(self) -> (V, Timestamp) {
         (self.value, self.ts)
+    }
+}
+
+impl<V> Timestamped<V>
+where
+    V: Encode,
+{
+    pub(crate) fn size(&self) -> usize {
+        self.value.size() + size_of::<u32>()
     }
 }
 
