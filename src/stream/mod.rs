@@ -35,13 +35,21 @@ impl<R> Entry<'_, R>
 where
     R: Record,
 {
-    pub fn key(&self) -> Timestamped<<R::Key as Key>::Ref<'_>> {
+    pub(crate) fn key(&self) -> Timestamped<<R::Key as Key>::Ref<'_>> {
         match self {
             Entry::Mutable(entry) => entry
                 .key()
                 .map(|key| unsafe { transmute(key.as_key_ref()) }),
             Entry::SsTable(entry) => entry.internal_key(),
             Entry::Immutable(entry) => entry.internal_key(),
+        }
+    }
+
+    pub(crate) fn value(&self) -> R::Ref<'_> {
+        match self {
+            Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref).unwrap(),
+            Entry::SsTable(entry) => entry.get(),
+            Entry::Immutable(entry) => entry.get(),
         }
     }
 }
