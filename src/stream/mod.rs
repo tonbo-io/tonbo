@@ -138,16 +138,6 @@ where
     }
 }
 
-impl<'scan, R, FP> From<LevelStream<'scan, R, FP>> for ScanStream<'scan, R, FP>
-where
-    R: Record,
-    FP: FileProvider,
-{
-    fn from(inner: LevelStream<'scan, R, FP>) -> Self {
-        ScanStream::Level { inner }
-    }
-}
-
 impl<R, FP> fmt::Debug for ScanStream<'_, R, FP>
 where
     R: Record,
