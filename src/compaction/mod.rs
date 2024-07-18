@@ -218,13 +218,13 @@ where
 
                     streams.push(ScanStream::SsTable {
                         inner: SsTable::open(file)
-                            .scan((Bound::Unbounded, Bound::Unbounded), u32::MAX.into())
+                            .scan((Bound::Unbounded, Bound::Unbounded), u32::MAX.into(), None)
                             .await
                             .map_err(CompactionError::Parquet)?,
                     });
                 }
             } else {
-                let (lower, upper) = Self::full_scope(&mut meet_scopes_l)?;
+                let (lower, upper) = Self::full_scope(&meet_scopes_l)?;
                 let level_scan_l = LevelStream::new(
                     version,
                     level,
@@ -232,6 +232,7 @@ where
                     end_l,
                     (Bound::Included(lower), Bound::Included(upper)),
                     u32::MAX.into(),
+                    None,
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -240,7 +241,7 @@ where
                 });
             }
             // Next Level
-            let (lower, upper) = Self::full_scope(&mut meet_scopes_ll)?;
+            let (lower, upper) = Self::full_scope(&meet_scopes_ll)?;
             let level_scan_ll = LevelStream::new(
                 version,
                 level + 1,
@@ -248,6 +249,7 @@ where
                 end_ll,
                 (Bound::Included(lower), Bound::Included(upper)),
                 u32::MAX.into(),
+                None,
             )
             .ok_or(CompactionError::EmptyLevel)?;
 
