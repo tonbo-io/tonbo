@@ -8,7 +8,7 @@ use std::{
 use crate::{oracle::Timestamp, serdes::Encode};
 
 #[derive(PartialEq, Eq, Debug, Clone)]
-pub(crate) struct Timestamped<V> {
+pub struct Timestamped<V> {
     pub(crate) ts: Timestamp,
     pub(crate) value: V,
 }

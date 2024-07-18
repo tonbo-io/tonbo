@@ -61,7 +61,7 @@ impl<K> Oracle<K>
 where
     K: Eq + Hash + Clone,
 {
-    fn start_read(&self) -> Timestamp {
+    pub(crate) fn start_read(&self) -> Timestamp {
         let mut in_read = self.in_read.lock().unwrap();
         let now = self.now.load(Ordering::Relaxed).into();
         match in_read.entry(now) {
@@ -75,7 +75,7 @@ where
         now
     }
 
-    fn read_commit(&self, ts: Timestamp) {
+    pub(crate) fn read_commit(&self, ts: Timestamp) {
         match self.in_read.lock().unwrap().entry(ts) {
             Entry::Vacant(_) => panic!("commit non-existing read"),
             Entry::Occupied(mut o) => match o.get_mut() {
@@ -89,27 +89,28 @@ where
         }
     }
 
-    fn start_write(&self) -> Timestamp {
+    pub(crate) fn start_write(&self) -> Timestamp {
         (self.now.fetch_add(1, Ordering::Relaxed) + 1).into()
     }
 
-    fn write_commit(
+    pub(crate) fn write_commit(
         &self,
         read_at: Timestamp,
         write_at: Timestamp,
         in_write: HashSet<K>,
     ) -> Result<(), WriteConflict<K>> {
         let mut committed_txns = self.committed_txns.lock().unwrap();
-        let conflicts: Vec<_> = committed_txns
+        let conflicts = committed_txns
             .range((Bound::Excluded(read_at), Bound::Excluded(write_at)))
             .flat_map(|(_, txn)| txn.intersection(&in_write))
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
 
         if !conflicts.is_empty() {
             return Err(WriteConflict { keys: conflicts });
         }
 
+        // TODO: clean committed transactions
         committed_txns.insert(write_at, in_write);
         Ok(())
     }

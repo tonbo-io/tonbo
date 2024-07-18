@@ -30,7 +30,7 @@ where
     FP: FileProvider,
 {
     pub(crate) option: Arc<DbOption>,
-    pub(crate) schema: Arc<RwLock<Schema<R>>>,
+    pub(crate) schema: Arc<RwLock<Schema<R, FP>>>,
     pub(crate) version_set: VersionSet<R, FP>,
 }
 
@@ -40,7 +40,7 @@ where
     FP: FileProvider,
 {
     pub(crate) fn new(
-        schema: Arc<RwLock<Schema<R>>>,
+        schema: Arc<RwLock<Schema<R, FP>>>,
         option: Arc<DbOption>,
         version_set: VersionSet<R, FP>,
     ) -> Self {
