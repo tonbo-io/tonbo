@@ -27,7 +27,7 @@ pin_project! {
 impl<'merge, R, E> MergeStream<'merge, R, E>
 where
     R: Record,
-    E: Executor,
+    E: Executor + 'merge,
 {
     pub(crate) async fn from_vec(
         mut streams: Vec<ScanStream<'merge, R, E>>,
@@ -54,7 +54,7 @@ where
 impl<'merge, R, E> Stream for MergeStream<'merge, R, E>
 where
     R: Record,
-    E: Executor,
+    E: Executor + 'merge,
 {
     type Item = Result<Entry<'merge, R>, parquet::errors::ParquetError>;
 

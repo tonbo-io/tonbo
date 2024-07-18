@@ -1,6 +1,6 @@
 mod cleaner;
-mod edit;
-mod set;
+pub(crate) mod edit;
+pub(crate) mod set;
 
 use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
@@ -21,7 +21,7 @@ use crate::{
     DbOption,
 };
 
-const MAX_LEVEL: usize = 7;
+pub(crate) const MAX_LEVEL: usize = 7;
 
 pub(crate) type VersionRef<R, E> = Arc<Version<R, E>>;
 
@@ -29,11 +29,31 @@ pub(crate) struct Version<R, E>
 where
     R: Record,
 {
-    pub(crate) num: usize,
+    num: usize,
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
-    pub(crate) clean_sender: Sender<CleanTag>,
-    pub(crate) option: Arc<DbOption>,
+    clean_sender: Sender<CleanTag>,
+    option: Arc<DbOption>,
     _p: PhantomData<E>,
+}
+
+impl<R, E> Version<R, E>
+where
+    R: Record,
+    E: Executor,
+{
+    pub(crate) fn new(option: Arc<DbOption>, clean_sender: Sender<CleanTag>) -> Self {
+        Version {
+            num: 0,
+            level_slice: [const { Vec::new() }; MAX_LEVEL],
+            clean_sender,
+            option: option.clone(),
+            _p: Default::default(),
+        }
+    }
+
+    pub(crate) fn option(&self) -> &Arc<DbOption> {
+        &self.option
+    }
 }
 
 impl<R, E> Clone for Version<R, E>

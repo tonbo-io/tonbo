@@ -1,7 +1,7 @@
 pub(crate) mod internal;
 mod str;
 
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use arrow::{
     array::{Datum, RecordBatch},
@@ -14,7 +14,7 @@ use crate::{
     serdes::{Decode, Encode},
 };
 
-pub trait Key: 'static + Encode + Decode + Ord + Clone + Send {
+pub trait Key: 'static + Debug + Encode + Decode + Ord + Clone + Send {
     type Ref<'r>: KeyRef<'r, Key = Self> + Copy
     where
         Self: 'r;
@@ -24,7 +24,7 @@ pub trait Key: 'static + Encode + Decode + Ord + Clone + Send {
     fn to_arrow_datum(&self) -> impl Datum;
 }
 
-pub trait KeyRef<'r>: Clone + PartialEq<Self::Key> + Ord {
+pub trait KeyRef<'r>: Clone + Encode + PartialEq<Self::Key> + Ord {
     type Key: Key<Ref<'r> = Self>;
 
     fn to_key(&self) -> Self::Key;
