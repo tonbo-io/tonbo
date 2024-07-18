@@ -43,6 +43,7 @@ where
     ts: Timestamp,
     option: Arc<DbOption>,
     gens: VecDeque<FileId>,
+    limit: Option<usize>,
     status: FutureStatus<'level, R, E>,
 }
 
@@ -59,6 +60,7 @@ where
         end: usize,
         range: (Bound<&'level R::Key>, Bound<&'level R::Key>),
         ts: Timestamp,
+        limit: Option<usize>,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -74,6 +76,7 @@ where
             ts,
             option: version.option().clone(),
             gens,
+            limit,
             status,
         })
     }
@@ -105,13 +108,21 @@ where
                             continue;
                         }
                     },
-                    poll => poll,
+                    Poll::Ready(Some(result)) => {
+                        if let Some(limit) = &mut self.limit {
+                            *limit -= 1;
+                        }
+                        Poll::Ready(Some(result))
+                    }
+                    Poll::Pending => Poll::Pending,
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::LoadStream(Box::pin(
-                            SsTable::open(file).scan((self.lower, self.upper), self.ts),
-                        ));
+                        self.status = FutureStatus::LoadStream(Box::pin(SsTable::open(file).scan(
+                            (self.lower, self.upper),
+                            self.ts,
+                            self.limit,
+                        )));
                         continue;
                     }
                     Poll::Ready(Err(err)) => Poll::Ready(Some(Err(ParquetError::from(err)))),
