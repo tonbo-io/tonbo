@@ -140,6 +140,7 @@ where
         iters: &mut Vec<ScanStream<'iters, R, E>>,
         range: (Bound<&'iters R::Key>, Bound<&'iters R::Key>),
         ts: Timestamp,
+        limit: Option<usize>,
     ) -> Result<(), VersionError<R>> {
         for scope in self.level_slice[0].iter() {
             let file = E::open(self.option.table_path(&scope.gen))
@@ -148,7 +149,10 @@ where
             let table = SsTable::open(file);
 
             iters.push(ScanStream::SsTable {
-                inner: table.scan(range, ts).await.map_err(VersionError::Parquet)?,
+                inner: table
+                    .scan(range, ts, limit)
+                    .await
+                    .map_err(VersionError::Parquet)?,
             })
         }
         for scopes in self.level_slice[1..].iter() {

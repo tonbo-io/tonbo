@@ -75,33 +75,41 @@ where
 
     async fn into_parquet_builder(
         self,
-        limit: usize,
+        limit: Option<usize>,
     ) -> parquet::errors::Result<ArrowReaderBuilder<AsyncReader<Compat<E::File>>>> {
-        Ok(ParquetRecordBatchStreamBuilder::new_with_options(
+        let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(
             self.file.compat(),
             ArrowReaderOptions::default().with_page_index(true),
         )
-        .await?
-        .with_limit(limit))
+        .await?;
+        if let Some(limit) = limit {
+            builder = builder.with_limit(limit);
+        }
+        Ok(builder)
     }
 
     pub(crate) async fn get(
         self,
         key: &TimestampedRef<R::Key>,
     ) -> parquet::errors::Result<Option<RecordBatchEntry<R>>> {
-        self.scan((Bound::Included(key.value()), Bound::Unbounded), key.ts())
-            .await?
-            .next()
-            .await
-            .transpose()
+        self.scan(
+            (Bound::Included(key.value()), Bound::Unbounded),
+            key.ts(),
+            Some(1),
+        )
+        .await?
+        .next()
+        .await
+        .transpose()
     }
 
     pub(crate) async fn scan<'scan>(
         self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
+        limit: Option<usize>,
     ) -> Result<SsTableScan<R, E>, parquet::errors::ParquetError> {
-        let builder = self.into_parquet_builder(1).await?;
+        let builder = self.into_parquet_builder(limit).await?;
 
         let schema_descriptor = builder.metadata().file_metadata().schema_descr();
         let filter = unsafe { get_range_filter::<R>(schema_descriptor, range, ts) };
