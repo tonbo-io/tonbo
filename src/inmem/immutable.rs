@@ -240,7 +240,7 @@ pub(crate) mod tests {
 
     impl Builder<TestImmutableArrays> for TestBuilder {
         fn push(&mut self, key: Timestamped<&str>, row: Option<TestRef>) {
-            self.vstring.append_value(&key.value);
+            self.vstring.append_value(key.value);
             match row {
                 Some(row) => {
                     self.vu32.append_value(row.vu32);
