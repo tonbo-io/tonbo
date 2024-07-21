@@ -6,37 +6,36 @@ use futures_util::{AsyncSeekExt, AsyncWriteExt};
 
 use super::MAX_LEVEL;
 use crate::{
-    executor::Executor,
-    fs::FileId,
+    fs::{FileId, FileProvider},
     record::Record,
     serdes::Encode,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
 };
 
-pub(crate) struct VersionSetInner<R, E>
+pub(crate) struct VersionSetInner<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
-    current: VersionRef<R, E>,
-    log: E::File,
+    current: VersionRef<R, FP>,
+    log: FP::File,
 }
 
-pub(crate) struct VersionSet<R, E>
+pub(crate) struct VersionSet<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
-    inner: Arc<RwLock<VersionSetInner<R, E>>>,
+    inner: Arc<RwLock<VersionSetInner<R, FP>>>,
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
 }
 
-impl<R, E> Clone for VersionSet<R, E>
+impl<R, FP> Clone for VersionSet<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     fn clone(&self) -> Self {
         VersionSet {
@@ -47,24 +46,24 @@ where
     }
 }
 
-impl<R, E> VersionSet<R, E>
+impl<R, FP> VersionSet<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     pub(crate) async fn new(
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
     ) -> Result<Self, VersionError<R>> {
-        let mut log = E::open(option.version_path())
+        let mut log = FP::open(option.version_path())
             .await
             .map_err(VersionError::Io)?;
         let edits = VersionEdit::recover(&mut log).await;
         log.seek(SeekFrom::End(0)).await.map_err(VersionError::Io)?;
 
-        let set = VersionSet::<R, E> {
+        let set = VersionSet::<R, FP> {
             inner: Arc::new(RwLock::new(VersionSetInner {
-                current: Arc::new(Version::<R, E> {
+                current: Arc::new(Version::<R, FP> {
                     num: 0,
                     level_slice: [const { Vec::new() }; MAX_LEVEL],
                     clean_sender: clean_sender.clone(),
@@ -81,7 +80,7 @@ where
         Ok(set)
     }
 
-    pub(crate) async fn current(&self) -> VersionRef<R, E> {
+    pub(crate) async fn current(&self) -> VersionRef<R, FP> {
         self.inner.read().await.current.clone()
     }
 
@@ -106,7 +105,7 @@ where
                 VersionEdit::Add { mut scope, level } => {
                     if let Some(wal_ids) = scope.wal_ids.take() {
                         for wal_id in wal_ids {
-                            E::remove(self.option.wal_path(&wal_id))
+                            FP::remove(self.option.wal_path(&wal_id))
                                 .await
                                 .map_err(VersionError::Io)?;
                         }

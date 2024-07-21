@@ -14,8 +14,7 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use ulid::Ulid;
 
 use crate::{
-    executor::Executor,
-    fs::FileId,
+    fs::{FileId, FileProvider},
     inmem::immutable::{ArrowArrays, Builder, Immutable},
     ondisk::sstable::SsTable,
     record::{KeyRef, Record},
@@ -25,27 +24,27 @@ use crate::{
     DbOption, Schema,
 };
 
-pub(crate) struct Compactor<R, E>
+pub(crate) struct Compactor<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     pub(crate) option: Arc<DbOption>,
     pub(crate) schema: Arc<RwLock<Schema<R>>>,
-    pub(crate) version_set: VersionSet<R, E>,
+    pub(crate) version_set: VersionSet<R, FP>,
 }
 
-impl<R, E> Compactor<R, E>
+impl<R, FP> Compactor<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     pub(crate) fn new(
         schema: Arc<RwLock<Schema<R>>>,
         option: Arc<DbOption>,
-        version_set: VersionSet<R, E>,
+        version_set: VersionSet<R, FP>,
     ) -> Self {
-        Compactor::<R, E> {
+        Compactor::<R, FP> {
             option,
             schema,
             version_set,
@@ -109,7 +108,7 @@ where
             // let mut wal_ids = Vec::with_capacity(batches.len());
 
             let mut writer = AsyncArrowWriter::try_new(
-                E::open(option.table_path(&gen))
+                FP::open(option.table_path(&gen))
                     .await
                     .map_err(CompactionError::Io)?
                     .compat(),
@@ -148,7 +147,7 @@ where
     }
 
     pub(crate) async fn major_compaction(
-        version: &Version<R, E>,
+        version: &Version<R, FP>,
         option: &DbOption,
         mut min: &R::Key,
         mut max: &R::Key,
@@ -163,7 +162,7 @@ where
             }
 
             let mut meet_scopes_l = Vec::new();
-            let start_l = Version::<R, E>::scope_search(min, &version.level_slice[level]);
+            let start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
             let mut end_l = start_l;
             {
                 for scope in version.level_slice[level][start_l..].iter() {
@@ -192,9 +191,9 @@ where
                     max = max_key;
 
                     start_ll =
-                        Version::<R, E>::scope_search(min_key, &version.level_slice[level + 1]);
+                        Version::<R, FP>::scope_search(min_key, &version.level_slice[level + 1]);
                     end_ll =
-                        Version::<R, E>::scope_search(max_key, &version.level_slice[level + 1]);
+                        Version::<R, FP>::scope_search(max_key, &version.level_slice[level + 1]);
 
                     let next_level_len = version.level_slice[level + 1].len();
                     for scope in version.level_slice[level + 1]
@@ -212,7 +211,7 @@ where
             // This Level
             if level == 0 {
                 for scope in meet_scopes_l.iter() {
-                    let file = E::open(option.table_path(&scope.gen))
+                    let file = FP::open(option.table_path(&scope.gen))
                         .await
                         .map_err(CompactionError::Io)?;
 
@@ -256,7 +255,7 @@ where
             streams.push(ScanStream::Level {
                 inner: level_scan_ll,
             });
-            let mut stream = MergeStream::<R, E>::from_vec(streams)
+            let mut stream = MergeStream::<R, FP>::from_vec(streams)
                 .await
                 .map_err(CompactionError::Parquet)?;
 
@@ -344,7 +343,7 @@ where
         let gen = Ulid::new();
         let columns = builder.finish();
         let mut writer = AsyncArrowWriter::try_new(
-            E::open(option.table_path(&gen))
+            FP::open(option.table_path(&gen))
                 .await
                 .map_err(CompactionError::Io)?
                 .compat(),
@@ -415,14 +414,14 @@ mod tests {
         Immutable::from(mutable)
     }
 
-    async fn build_parquet_table<R: Record + Send, E: Executor>(
+    async fn build_parquet_table<R: Record + Send, FP: Executor>(
         option: &DbOption,
         gen: FileId,
         fn_mutable: impl FnOnce(&mut Mutable<R>),
     ) -> Result<(), ParquetError> {
         let immutable = build_immutable(fn_mutable);
         let mut writer = AsyncArrowWriter::try_new(
-            E::open(option.table_path(&gen))
+            FP::open(option.table_path(&gen))
                 .await
                 .map_err(ParquetError::from)?
                 .compat(),

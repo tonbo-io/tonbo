@@ -15,7 +15,7 @@ use pin_project_lite::pin_project;
 use record_batch::RecordBatchEntry;
 
 use crate::{
-    executor::Executor,
+    fs::FileProvider,
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
     oracle::timestamp::Timestamped,
@@ -80,10 +80,10 @@ where
 
 pin_project! {
     #[project = ScanStreamProject]
-    pub enum ScanStream<'scan, R, E>
+    pub enum ScanStream<'scan, R, FP>
     where
         R: Record,
-        E: Executor,
+        FP: FileProvider,
     {
         Mutable {
             #[pin]
@@ -95,19 +95,19 @@ pin_project! {
         },
         SsTable {
             #[pin]
-            inner: SsTableScan<R, E>,
+            inner: SsTableScan<R, FP>,
         },
         Level {
             #[pin]
-            inner: LevelStream<'scan, R, E>,
+            inner: LevelStream<'scan, R, FP>,
         }
     }
 }
 
-impl<'scan, R, E> From<MutableScan<'scan, R>> for ScanStream<'scan, R, E>
+impl<'scan, R, FP> From<MutableScan<'scan, R>> for ScanStream<'scan, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     fn from(inner: MutableScan<'scan, R>) -> Self {
         ScanStream::Mutable {
@@ -116,10 +116,10 @@ where
     }
 }
 
-impl<'scan, R, E> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R, E>
+impl<'scan, R, FP> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     fn from(inner: ImmutableScan<'scan, R>) -> Self {
         ScanStream::Immutable {
@@ -128,30 +128,30 @@ where
     }
 }
 
-impl<'scan, R, E> From<SsTableScan<R, E>> for ScanStream<'scan, R, E>
+impl<'scan, R, FP> From<SsTableScan<R, FP>> for ScanStream<'scan, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
-    fn from(inner: SsTableScan<R, E>) -> Self {
+    fn from(inner: SsTableScan<R, FP>) -> Self {
         ScanStream::SsTable { inner }
     }
 }
 
-impl<'scan, R, E> From<LevelStream<'scan, R, E>> for ScanStream<'scan, R, E>
+impl<'scan, R, FP> From<LevelStream<'scan, R, FP>> for ScanStream<'scan, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
-    fn from(inner: LevelStream<'scan, R, E>) -> Self {
+    fn from(inner: LevelStream<'scan, R, FP>) -> Self {
         ScanStream::Level { inner }
     }
 }
 
-impl<R, E> fmt::Debug for ScanStream<'_, R, E>
+impl<R, FP> fmt::Debug for ScanStream<'_, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -163,10 +163,10 @@ where
     }
 }
 
-impl<'scan, R, E> Stream for ScanStream<'scan, R, E>
+impl<'scan, R, FP> Stream for ScanStream<'scan, R, FP>
 where
     R: Record,
-    E: Executor + 'scan,
+    FP: FileProvider + 'scan,
 {
     type Item = Result<Entry<'scan, R>, parquet::errors::ParquetError>;
 
