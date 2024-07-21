@@ -17,28 +17,27 @@ use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
 use super::scan::SsTableScan;
 use crate::{
     arrows::get_range_filter,
-    executor::Executor,
-    fs::AsyncFile,
+    fs::{AsyncFile, FileProvider},
     oracle::{timestamp::TimestampedRef, Timestamp},
     record::Record,
     stream::record_batch::RecordBatchEntry,
 };
 
-pub(crate) struct SsTable<R, E>
+pub(crate) struct SsTable<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
-    file: E::File,
+    file: FP::File,
     _marker: PhantomData<R>,
 }
 
-impl<R, E> SsTable<R, E>
+impl<R, FP> SsTable<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
-    pub(crate) fn open(file: E::File) -> Self {
+    pub(crate) fn open(file: FP::File) -> Self {
         SsTable {
             file,
             _marker: PhantomData,
@@ -76,7 +75,7 @@ where
     async fn into_parquet_builder(
         self,
         limit: Option<usize>,
-    ) -> parquet::errors::Result<ArrowReaderBuilder<AsyncReader<Compat<E::File>>>> {
+    ) -> parquet::errors::Result<ArrowReaderBuilder<AsyncReader<Compat<FP::File>>>> {
         let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(
             self.file.compat(),
             ArrowReaderOptions::default().with_page_index(true),
@@ -108,7 +107,7 @@ where
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
-    ) -> Result<SsTableScan<R, E>, parquet::errors::ParquetError> {
+    ) -> Result<SsTableScan<R, FP>, parquet::errors::ParquetError> {
         let builder = self.into_parquet_builder(limit).await?;
 
         let schema_descriptor = builder.metadata().file_metadata().schema_descr();

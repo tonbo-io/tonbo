@@ -18,6 +18,7 @@ use std::{
 };
 
 use async_lock::{RwLock, RwLockReadGuard};
+use fs::FileProvider;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
@@ -86,7 +87,7 @@ impl DbOption {
     ) -> bool
     where
         R: Record,
-        E: Executor,
+        E: FileProvider,
     {
         Version::<R, E>::tables_len(version, level)
             >= (self.major_threshold_with_sst_size * self.level_sst_magnification.pow(level as u32))

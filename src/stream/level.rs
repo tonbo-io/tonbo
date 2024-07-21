@@ -11,8 +11,7 @@ use futures_core::Stream;
 use parquet::errors::ParquetError;
 
 use crate::{
-    executor::Executor,
-    fs::FileId,
+    fs::{FileId, FileProvider},
     ondisk::{scan::SsTableScan, sstable::SsTable},
     oracle::Timestamp,
     record::Record,
@@ -22,21 +21,21 @@ use crate::{
     DbOption,
 };
 
-enum FutureStatus<'level, R, E>
+enum FutureStatus<'level, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     Init(FileId),
-    Ready(SsTableScan<R, E>),
-    OpenFile(Pin<Box<dyn Future<Output = io::Result<E::File>> + 'level>>),
-    LoadStream(Pin<Box<dyn Future<Output = Result<SsTableScan<R, E>, ParquetError>> + 'level>>),
+    Ready(SsTableScan<R, FP>),
+    OpenFile(Pin<Box<dyn Future<Output = io::Result<FP::File>> + 'level>>),
+    LoadStream(Pin<Box<dyn Future<Output = Result<SsTableScan<R, FP>, ParquetError>> + 'level>>),
 }
 
-pub(crate) struct LevelStream<'level, R, E>
+pub(crate) struct LevelStream<'level, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     lower: Bound<&'level R::Key>,
     upper: Bound<&'level R::Key>,
@@ -44,17 +43,17 @@ where
     option: Arc<DbOption>,
     gens: VecDeque<FileId>,
     limit: Option<usize>,
-    status: FutureStatus<'level, R, E>,
+    status: FutureStatus<'level, R, FP>,
 }
 
-impl<'level, R, E> LevelStream<'level, R, E>
+impl<'level, R, FP> LevelStream<'level, R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     // Kould: only used by Compaction now, and the start and end of the sstables range are known
     pub(crate) fn new(
-        version: &Version<R, E>,
+        version: &Version<R, FP>,
         level: usize,
         start: usize,
         end: usize,
@@ -82,10 +81,10 @@ where
     }
 }
 
-impl<'level, R, E> Stream for LevelStream<'level, R, E>
+impl<'level, R, FP> Stream for LevelStream<'level, R, FP>
 where
     R: Record,
-    E: Executor + 'level,
+    FP: FileProvider + 'level,
 {
     type Item = Result<RecordBatchEntry<R>, ParquetError>;
 
@@ -95,14 +94,14 @@ where
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
                     self.status =
-                        FutureStatus::OpenFile(Box::pin(E::open(self.option.table_path(&gen))));
+                        FutureStatus::OpenFile(Box::pin(FP::open(self.option.table_path(&gen))));
                     continue;
                 }
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.status = FutureStatus::OpenFile(Box::pin(E::open(
+                            self.status = FutureStatus::OpenFile(Box::pin(FP::open(
                                 self.option.table_path(&gen),
                             )));
                             continue;
