@@ -10,27 +10,27 @@ use futures_util::stream::StreamExt;
 use pin_project_lite::pin_project;
 
 use super::{Entry, ScanStream};
-use crate::{executor::Executor, record::Record};
+use crate::{fs::FileProvider, record::Record};
 
 pin_project! {
-    pub(crate) struct MergeStream<'merge, R, E>
+    pub(crate) struct MergeStream<'merge, R, FP>
     where
         R: Record,
-        E: Executor,
+        FP: FileProvider,
     {
-        streams: Vec<ScanStream<'merge, R, E>>,
+        streams: Vec<ScanStream<'merge, R, FP>>,
         peeked: BinaryHeap<CmpEntry<'merge, R>>,
         buf: Option<Entry<'merge, R>>,
     }
 }
 
-impl<'merge, R, E> MergeStream<'merge, R, E>
+impl<'merge, R, FP> MergeStream<'merge, R, FP>
 where
     R: Record,
-    E: Executor + 'merge,
+    FP: FileProvider + 'merge,
 {
     pub(crate) async fn from_vec(
-        mut streams: Vec<ScanStream<'merge, R, E>>,
+        mut streams: Vec<ScanStream<'merge, R, FP>>,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
 
@@ -51,10 +51,10 @@ where
     }
 }
 
-impl<'merge, R, E> Stream for MergeStream<'merge, R, E>
+impl<'merge, R, FP> Stream for MergeStream<'merge, R, FP>
 where
     R: Record,
-    E: Executor + 'merge,
+    FP: FileProvider + 'merge,
 {
     type Item = Result<Entry<'merge, R>, parquet::errors::ParquetError>;
 

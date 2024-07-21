@@ -9,8 +9,7 @@ use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    executor::Executor,
-    fs::FileId,
+    fs::{FileId, FileProvider},
     ondisk::sstable::SsTable,
     oracle::{timestamp::TimestampedRef, Timestamp},
     record::Record,
@@ -23,9 +22,9 @@ use crate::{
 
 pub(crate) const MAX_LEVEL: usize = 7;
 
-pub(crate) type VersionRef<R, E> = Arc<Version<R, E>>;
+pub(crate) type VersionRef<R, FP> = Arc<Version<R, FP>>;
 
-pub(crate) struct Version<R, E>
+pub(crate) struct Version<R, FP>
 where
     R: Record,
 {
@@ -33,13 +32,13 @@ where
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
-    _p: PhantomData<E>,
+    _p: PhantomData<FP>,
 }
 
-impl<R, E> Version<R, E>
+impl<R, FP> Version<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     pub(crate) fn new(option: Arc<DbOption>, clean_sender: Sender<CleanTag>) -> Self {
         Version {
@@ -56,10 +55,9 @@ where
     }
 }
 
-impl<R, E> Clone for Version<R, E>
+impl<R, FP> Clone for Version<R, FP>
 where
     R: Record,
-    E: Executor,
 {
     fn clone(&self) -> Self {
         let mut level_slice = [const { Vec::new() }; MAX_LEVEL];
@@ -78,10 +76,10 @@ where
     }
 }
 
-impl<R, E> Version<R, E>
+impl<R, FP> Version<R, FP>
 where
     R: Record,
-    E: Executor,
+    FP: FileProvider,
 {
     pub(crate) async fn query(
         &self,
@@ -116,10 +114,10 @@ where
         key: &TimestampedRef<<R as Record>::Key>,
         gen: &FileId,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
-        let file = E::open(self.option.table_path(gen))
+        let file = FP::open(self.option.table_path(gen))
             .await
             .map_err(VersionError::Io)?;
-        SsTable::<R, E>::open(file)
+        SsTable::<R, FP>::open(file)
             .get(key)
             .await
             .map_err(VersionError::Parquet)
@@ -137,13 +135,13 @@ where
 
     pub(crate) async fn iters<'iters>(
         &self,
-        iters: &mut Vec<ScanStream<'iters, R, E>>,
+        iters: &mut Vec<ScanStream<'iters, R, FP>>,
         range: (Bound<&'iters R::Key>, Bound<&'iters R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
     ) -> Result<(), VersionError<R>> {
         for scope in self.level_slice[0].iter() {
-            let file = E::open(self.option.table_path(&scope.gen))
+            let file = FP::open(self.option.table_path(&scope.gen))
                 .await
                 .map_err(VersionError::Io)?;
             let table = SsTable::open(file);
@@ -169,7 +167,7 @@ where
     }
 }
 
-impl<R, E> Drop for Version<R, E>
+impl<R, FP> Drop for Version<R, FP>
 where
     R: Record,
 {
