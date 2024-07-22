@@ -22,17 +22,22 @@ use fs::FileProvider;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
-use oracle::{Oracle, Timestamp};
+use lockable::LockableHashMap;
+use oracle::Timestamp;
 use parquet::{errors::ParquetError, file::properties::WriterProperties};
 use record::Record;
+use thiserror::Error;
+use tracing::error;
 use transaction::Transaction;
 
 use crate::{
     executor::Executor,
     fs::{FileId, FileType},
     stream::{merge::MergeStream, Entry, ScanStream},
-    version::Version,
+    version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
 };
+
+type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
 #[derive(Debug)]
 pub struct DbOption {
@@ -44,6 +49,17 @@ pub struct DbOption {
     pub max_sst_file_size: usize,
     pub clean_channel_buffer: usize,
     pub write_parquet_option: Option<WriterProperties>,
+}
+
+pub struct DB<R, E>
+where
+    R: Record,
+    E: Executor,
+{
+    schema: Arc<RwLock<Schema<R, E>>>,
+    version_set: VersionSet<R, E>,
+    lock_map: LockMap<R::Key>,
+    _p: PhantomData<E>,
 }
 
 impl DbOption {
@@ -86,41 +102,40 @@ impl DbOption {
     }
 }
 
-pub struct DB<R, E>
-where
-    R: Record,
-    E: Executor,
-{
-    schema: Arc<RwLock<Schema<R, E>>>,
-    oracle: Oracle<R::Key>,
-    _p: PhantomData<E>,
-}
-
-impl<R, E> Default for DB<R, E>
-where
-    R: Record,
-    E: Executor,
-{
-    fn default() -> Self {
-        Self {
-            schema: Arc::new(RwLock::new(Schema::default())),
-            _p: Default::default(),
-            oracle: Oracle::default(),
-        }
-    }
-}
-
 impl<R, E> DB<R, E>
 where
     R: Record + Send,
     E: Executor,
 {
-    pub fn empty() -> Self {
-        Self::default()
+    pub async fn new(option: Arc<DbOption>, executor: E) -> Result<Self, WriteError<R>> {
+        E::create_dir_all(&option.path).await?;
+
+        let schema = Arc::new(RwLock::new(Schema::default()));
+
+        let (mut cleaner, clean_sender) = Cleaner::new(option.clone());
+
+        let version_set = VersionSet::new(clean_sender, option.clone()).await?;
+
+        executor.spawn(async move {
+            if let Err(err) = cleaner.listen().await {
+                error!("[Cleaner Error]: {}", err)
+            }
+        });
+
+        Ok(Self {
+            schema,
+            version_set,
+            lock_map: Arc::new(Default::default()),
+            _p: Default::default(),
+        })
     }
 
     pub async fn transaction(&self) -> Transaction<'_, R, E> {
-        Transaction::new(&self.oracle, self.schema.read().await)
+        Transaction::new(
+            self.version_set.current().await,
+            self.schema.read().await,
+            self.lock_map.clone(),
+        )
     }
 
     pub(crate) async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
@@ -138,6 +153,10 @@ where
             columns.write(record, ts).await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn read(&self) -> RwLockReadGuard<'_, Schema<R, E>> {
+        self.schema.read().await
     }
 }
 
@@ -212,11 +231,30 @@ where
         MergeStream::from_vec(streams).await
     }
 
+    fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
+        self.mutable.check_conflict(key, ts)
+            || self
+                .immutables
+                .iter()
+                .any(|immutable| immutable.check_conflict(key, ts))
+    }
+
     fn freeze(&mut self) {
         let mutable = mem::replace(&mut self.mutable, Mutable::new());
         let immutable = Immutable::from(mutable);
         self.immutables.push_front(immutable);
     }
+}
+
+#[derive(Debug, Error)]
+pub enum WriteError<R>
+where
+    R: Record,
+{
+    #[error("write io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("write version error: {0}")]
+    Version(#[from] VersionError<R>),
 }
 
 #[cfg(test)]
@@ -233,7 +271,7 @@ pub(crate) mod tests {
         executor::Executor,
         inmem::immutable::tests::TestImmutableArrays,
         record::{internal::InternalRecordRef, RecordRef},
-        Record, DB,
+        DbOption, Record, DB,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -317,8 +355,11 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn get_test_record_batch<E: Executor>() -> RecordBatch {
-        let db: DB<Test, E> = DB::empty();
+    pub(crate) async fn get_test_record_batch<E: Executor>(
+        option: Arc<DbOption>,
+        executor: E,
+    ) -> RecordBatch {
+        let db: DB<Test, E> = DB::new(option, executor).await.unwrap();
 
         db.write(
             Test {

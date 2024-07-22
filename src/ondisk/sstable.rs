@@ -119,7 +119,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Borrow;
+    use std::{borrow::Borrow, sync::Arc};
 
     use super::SsTable;
     use crate::{
@@ -127,12 +127,17 @@ mod tests {
         fs::FileProvider,
         oracle::timestamp::Timestamped,
         tests::{get_test_record_batch, Test},
+        DbOption,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn write_sstable() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let record_batch = get_test_record_batch::<TokioExecutor>().await;
+        let record_batch = get_test_record_batch::<TokioExecutor>(
+            Arc::new(DbOption::new(temp_dir.path())),
+            TokioExecutor::new(),
+        )
+        .await;
         let file = TokioExecutor::open(&temp_dir.path().join("test.parquet"))
             .await
             .unwrap();

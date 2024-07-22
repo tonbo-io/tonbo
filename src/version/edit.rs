@@ -5,6 +5,7 @@ use futures_util::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     fs::FileId,
+    oracle::Timestamp,
     scope::Scope,
     serdes::{Decode, Encode},
 };
@@ -13,6 +14,8 @@ use crate::{
 pub(crate) enum VersionEdit<K> {
     Add { level: u8, scope: Scope<K> },
     Remove { level: u8, gen: FileId },
+    // TODO: on compaction
+    LatestTimeStamp { ts: Timestamp },
 }
 
 impl<K> VersionEdit<K>
@@ -50,6 +53,10 @@ where
                 writer.write_all(&level.to_le_bytes()).await?;
                 writer.write_all(&gen.to_bytes()).await?;
             }
+            VersionEdit::LatestTimeStamp { ts } => {
+                writer.write_all(&2u8.to_le_bytes()).await?;
+                ts.encode(writer).await?;
+            }
         }
 
         Ok(())
@@ -61,6 +68,7 @@ where
             + match self {
                 VersionEdit::Add { scope, .. } => scope.size(),
                 VersionEdit::Remove { .. } => 16,
+                VersionEdit::LatestTimeStamp { ts } => ts.size(),
             }
     }
 }
@@ -96,6 +104,10 @@ where
                     FileId::from_bytes(slice)
                 };
                 VersionEdit::Remove { level, gen }
+            }
+            2 => {
+                let ts = Timestamp::decode(reader).await?;
+                VersionEdit::LatestTimeStamp { ts }
             }
             _ => todo!(),
         })
