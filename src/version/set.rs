@@ -1,4 +1,10 @@
-use std::{io::SeekFrom, sync::Arc};
+use std::{
+    io::SeekFrom,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+};
 
 use async_lock::RwLock;
 use flume::Sender;
@@ -7,11 +13,14 @@ use futures_util::{AsyncSeekExt, AsyncWriteExt};
 use super::MAX_LEVEL;
 use crate::{
     fs::{FileId, FileProvider},
+    oracle::Timestamp,
     record::Record,
     serdes::Encode,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
 };
+
+static GLOBAL_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) struct VersionSetInner<R, FP>
 where
@@ -55,16 +64,14 @@ where
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
     ) -> Result<Self, VersionError<R>> {
-        let mut log = FP::open(option.version_path())
-            .await
-            .map_err(VersionError::Io)?;
+        let mut log = FP::open(option.version_path()).await?;
         let edits = VersionEdit::recover(&mut log).await;
-        log.seek(SeekFrom::End(0)).await.map_err(VersionError::Io)?;
+        log.seek(SeekFrom::End(0)).await?;
 
         let set = VersionSet::<R, FP> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(Version::<R, FP> {
-                    num: 0,
+                    ts: Timestamp::from(0),
                     level_slice: [const { Vec::new() }; MAX_LEVEL],
                     clean_sender: clean_sender.clone(),
                     option: option.clone(),
@@ -78,6 +85,10 @@ where
         set.apply_edits(edits, None, true).await?;
 
         Ok(set)
+    }
+
+    pub(crate) fn transaction_ts() -> Timestamp {
+        GLOBAL_TIMESTAMP.fetch_add(1, Ordering::Release).into()
     }
 
     pub(crate) async fn current(&self) -> VersionRef<R, FP> {
@@ -120,13 +131,19 @@ where
                         new_version.level_slice[level as usize].remove(i);
                     }
                 }
+                VersionEdit::LatestTimeStamp { ts } => {
+                    if is_recover {
+                        GLOBAL_TIMESTAMP.store(u32::from(ts) + 1, Ordering::Release);
+                    }
+                    new_version.ts = ts;
+                }
             }
         }
         if let Some(delete_gens) = delete_gens {
             new_version
                 .clean_sender
                 .send_async(CleanTag::Add {
-                    version_num: new_version.num,
+                    ts: new_version.ts,
                     gens: delete_gens,
                 })
                 .await

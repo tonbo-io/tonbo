@@ -26,6 +26,8 @@ impl<T> AsyncFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Syn
 pub trait FileProvider {
     type File: AsyncFile;
 
+    fn create_dir_all(path: impl AsRef<Path>) -> impl Future<Output = io::Result<()>>;
+
     fn open(path: impl AsRef<Path>) -> impl Future<Output = io::Result<Self::File>>;
 
     fn remove(path: impl AsRef<Path>) -> impl Future<Output = io::Result<()>>;

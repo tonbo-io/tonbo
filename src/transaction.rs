@@ -5,24 +5,29 @@ use std::{
 };
 
 use async_lock::RwLockReadGuard;
+use lockable::SyncLimit;
 use parquet::errors::ParquetError;
 use thiserror::Error;
 
 use crate::{
     fs::FileProvider,
-    oracle::{Oracle, Timestamp, WriteConflict},
+    oracle::Timestamp,
     record::KeyRef,
-    stream, Record, Schema,
+    stream,
+    version::{set::VersionSet, VersionRef},
+    LockMap, Record, Schema,
 };
 
 pub struct Transaction<'txn, R, FP>
 where
     R: Record,
+    FP: FileProvider,
 {
-    read_at: Timestamp,
+    ts: Timestamp,
     local: BTreeMap<R::Key, Option<R>>,
     share: RwLockReadGuard<'txn, Schema<R, FP>>,
-    oracle: &'txn Oracle<R::Key>,
+    version: VersionRef<R, FP>,
+    lock_map: LockMap<R::Key>,
 }
 
 impl<'txn, R, FP> Transaction<'txn, R, FP>
@@ -31,14 +36,16 @@ where
     FP: FileProvider,
 {
     pub(crate) fn new(
-        oracle: &'txn Oracle<R::Key>,
+        version: VersionRef<R, FP>,
         share: RwLockReadGuard<'txn, Schema<R, FP>>,
+        lock_map: LockMap<R::Key>,
     ) -> Self {
         Self {
-            read_at: oracle.start_read(),
+            ts: VersionSet::<R, FP>::transaction_ts(),
             local: BTreeMap::new(),
             share,
-            oracle,
+            version,
+            lock_map,
         }
     }
 
@@ -50,7 +57,7 @@ where
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
                 .share
-                .get(key, self.read_at)
+                .get(key, self.ts)
                 .await?
                 .map(TransactionEntry::Stream),
         })
@@ -74,18 +81,26 @@ where
     }
 
     pub async fn commit(self) -> Result<(), CommitError<R>> {
-        self.oracle.read_commit(self.read_at);
-        if self.local.is_empty() {
-            return Ok(());
-        }
-        let write_at = self.oracle.start_write();
-        self.oracle
-            .write_commit(self.read_at, write_at, self.local.keys().cloned().collect())?;
+        let mut _key_guards = Vec::new();
 
+        for (key, _) in self.local.iter() {
+            // SAFETY: Error is Never
+            _key_guards.push(
+                self.lock_map
+                    .blocking_lock(key.clone(), SyncLimit::no_limit())
+                    .unwrap(),
+            );
+        }
+        for (key, _) in self.local.iter() {
+            if self.share.check_conflict(key, self.ts) {
+                return Err(CommitError::WriteConflict(key.clone()));
+            }
+        }
         for (key, record) in self.local {
+            let new_ts = VersionSet::<R, FP>::transaction_ts();
             match record {
-                Some(record) => self.share.write(record, write_at).await?,
-                None => self.share.remove(key, write_at).await?,
+                Some(record) => self.share.write(record, new_ts).await?,
+                None => self.share.remove(key, new_ts).await?,
             }
         }
         Ok(())
@@ -120,19 +135,32 @@ pub enum CommitError<R>
 where
     R: Record,
 {
-    #[error("commit transaction error {:?}", .0)]
+    #[error("transaction io error {:?}", .0)]
     Io(#[from] io::Error),
-    #[error(transparent)]
-    WriteConflict(#[from] WriteConflict<R::Key>),
+    #[error("transaction parquet error {:?}", .0)]
+    Parquet(#[from] ParquetError),
+    #[error("transaction write conflict: {:?}", .0)]
+    WriteConflict(R::Key),
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{executor::tokio::TokioExecutor, DB};
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+
+    use crate::{executor::tokio::TokioExecutor, transaction::CommitError, DbOption, DB};
 
     #[tokio::test]
     async fn transaction_read_write() {
-        let db = DB::<String, TokioExecutor>::default();
+        let temp_dir = TempDir::new().unwrap();
+
+        let db = DB::<String, TokioExecutor>::new(
+            Arc::new(DbOption::new(temp_dir.path())),
+            TokioExecutor::new(),
+        )
+        .await
+        .unwrap();
         {
             let mut txn1 = db.transaction().await;
             txn1.set("foo".to_string());
@@ -149,5 +177,40 @@ mod tests {
             dbg!(txn3.get(&"foo".to_string()).await.unwrap().is_none());
             txn3.commit().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn write_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let db = DB::<String, TokioExecutor>::new(
+            Arc::new(DbOption::new(temp_dir.path())),
+            TokioExecutor::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut txn = db.transaction().await;
+        txn.set(0.to_string());
+        txn.set(1.to_string());
+        txn.commit().await.unwrap();
+
+        let mut txn_0 = db.transaction().await;
+        let mut txn_1 = db.transaction().await;
+        let mut txn_2 = db.transaction().await;
+
+        txn_0.set(1.to_string());
+        txn_1.set(1.to_string());
+        txn_1.set(2.to_string());
+        txn_2.set(2.to_string());
+
+        txn_0.commit().await.unwrap();
+
+        if let Err(CommitError::WriteConflict(conflict_key)) = txn_1.commit().await {
+            assert_eq!(conflict_key, 1.to_string());
+            txn_2.commit().await.unwrap();
+            return;
+        }
+        unreachable!();
     }
 }
