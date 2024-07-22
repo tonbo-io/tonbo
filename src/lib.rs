@@ -17,7 +17,7 @@ use std::{
     collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, path::PathBuf, sync::Arc,
 };
 
-use async_lock::RwLock;
+use async_lock::{RwLock, RwLockReadGuard};
 use fs::FileProvider;
 use futures_core::Stream;
 use futures_util::StreamExt;
