@@ -1,4 +1,4 @@
-mod cleaner;
+pub(crate) mod cleaner;
 pub(crate) mod edit;
 pub(crate) mod set;
 
@@ -27,8 +27,9 @@ pub(crate) type VersionRef<R, FP> = Arc<Version<R, FP>>;
 pub(crate) struct Version<R, FP>
 where
     R: Record,
+    FP: FileProvider,
 {
-    num: usize,
+    ts: Timestamp,
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
@@ -42,7 +43,7 @@ where
 {
     pub(crate) fn new(option: Arc<DbOption>, clean_sender: Sender<CleanTag>) -> Self {
         Version {
-            num: 0,
+            ts: Timestamp::from(0),
             level_slice: [const { Vec::new() }; MAX_LEVEL],
             clean_sender,
             option: option.clone(),
@@ -58,6 +59,7 @@ where
 impl<R, FP> Clone for Version<R, FP>
 where
     R: Record,
+    FP: FileProvider,
 {
     fn clone(&self) -> Self {
         let mut level_slice = [const { Vec::new() }; MAX_LEVEL];
@@ -67,7 +69,7 @@ where
         }
 
         Self {
-            num: self.num,
+            ts: self.ts,
             level_slice,
             clean_sender: self.clean_sender.clone(),
             option: self.option.clone(),
@@ -170,11 +172,10 @@ where
 impl<R, FP> Drop for Version<R, FP>
 where
     R: Record,
+    FP: FileProvider,
 {
     fn drop(&mut self) {
-        if let Err(err) = self.clean_sender.send(CleanTag::Clean {
-            version_num: self.num,
-        }) {
+        if let Err(err) = self.clean_sender.send(CleanTag::Clean { ts: self.ts }) {
             error!("[Version Drop Error]: {}", err)
         }
     }
@@ -188,9 +189,9 @@ where
     #[error("version encode error: {0}")]
     Encode(#[source] <R::Key as Encode>::Error),
     #[error("version io error: {0}")]
-    Io(#[source] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("version parquet error: {0}")]
-    Parquet(#[source] parquet::errors::ParquetError),
+    Parquet(#[from] parquet::errors::ParquetError),
     #[error("version send error: {0}")]
-    Send(#[source] SendError<CleanTag>),
+    Send(#[from] SendError<CleanTag>),
 }

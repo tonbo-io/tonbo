@@ -109,6 +109,16 @@ where
 
         ImmutableScan::<A::Record>::new(range, self.data.as_record_batch())
     }
+
+    pub(crate) fn check_conflict(&self, key: &<A::Record as Record>::Key, ts: Timestamp) -> bool {
+        self.index
+            .range::<TimestampedRef<<A::Record as Record>::Key>, _>((
+                Bound::Excluded(TimestampedRef::new(key, u32::MAX.into())),
+                Bound::Excluded(TimestampedRef::new(key, ts)),
+            ))
+            .next()
+            .is_some()
+    }
 }
 
 pub struct ImmutableScan<'iter, R>

@@ -2,21 +2,16 @@ use std::{collections::BTreeMap, fs, io, sync::Arc};
 
 use flume::{Receiver, Sender};
 
-use crate::{fs::FileId, DbOption};
+use crate::{fs::FileId, oracle::Timestamp, DbOption};
 
 pub(crate) enum CleanTag {
-    Add {
-        version_num: usize,
-        gens: Vec<FileId>,
-    },
-    Clean {
-        version_num: usize,
-    },
+    Add { ts: Timestamp, gens: Vec<FileId> },
+    Clean { ts: Timestamp },
 }
 
 pub(crate) struct Cleaner {
     tag_recv: Receiver<CleanTag>,
-    gens_map: BTreeMap<usize, (Vec<FileId>, bool)>,
+    gens_map: BTreeMap<Timestamp, (Vec<FileId>, bool)>,
     option: Arc<DbOption>,
 }
 
@@ -37,10 +32,10 @@ impl Cleaner {
     pub(crate) async fn listen(&mut self) -> Result<(), io::Error> {
         while let Ok(tag) = self.tag_recv.recv_async().await {
             match tag {
-                CleanTag::Add { version_num, gens } => {
-                    let _ = self.gens_map.insert(version_num, (gens, false));
+                CleanTag::Add { ts, gens } => {
+                    let _ = self.gens_map.insert(ts, (gens, false));
                 }
-                CleanTag::Clean { version_num } => {
+                CleanTag::Clean { ts: version_num } => {
                     if let Some((_, dropped)) = self.gens_map.get_mut(&version_num) {
                         *dropped = true;
                     }

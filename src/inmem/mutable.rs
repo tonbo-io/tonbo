@@ -100,6 +100,16 @@ where
 
         self.data.range((lower, upper))
     }
+
+    pub(crate) fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
+        self.data
+            .range::<TimestampedRef<<R as Record>::Key>, _>((
+                Bound::Excluded(TimestampedRef::new(key, u32::MAX.into())),
+                Bound::Excluded(TimestampedRef::new(key, ts)),
+            ))
+            .next()
+            .is_some()
+    }
 }
 
 impl<R> Mutable<R>
