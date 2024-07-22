@@ -11,6 +11,7 @@ impl FileProvider for TokioExecutor {
 
     async fn open(path: impl AsRef<Path>) -> io::Result<Self::File> {
         OpenOptions::new()
+            .truncate(false)
             .create(true)
             .write(true)
             .read(true)
