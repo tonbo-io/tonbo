@@ -237,29 +237,28 @@ where
         let mut meet_scopes_ll = Vec::new();
         let mut start_ll = 0;
         let mut end_ll = 0;
-        {
-            if !version.level_slice[level + 1].is_empty() {
-                *min = &meet_scopes_l
-                    .first()
-                    .ok_or(CompactionError::EmptyLevel)?
-                    .min;
-                *max = &meet_scopes_l
-                    .iter()
-                    .last()
-                    .ok_or(CompactionError::EmptyLevel)?
-                    .max;
 
-                start_ll = Version::<R, FP>::scope_search(min, &version.level_slice[level + 1]);
-                end_ll = Version::<R, FP>::scope_search(max, &version.level_slice[level + 1]);
+        if !version.level_slice[level + 1].is_empty() {
+            *min = &meet_scopes_l
+                .first()
+                .ok_or(CompactionError::EmptyLevel)?
+                .min;
+            *max = &meet_scopes_l
+                .iter()
+                .last()
+                .ok_or(CompactionError::EmptyLevel)?
+                .max;
 
-                let next_level_len = version.level_slice[level + 1].len();
-                for scope in version.level_slice[level + 1]
-                    [start_ll..cmp::min(end_ll + 1, next_level_len - 1)]
-                    .iter()
-                {
-                    if scope.contains(min) || scope.contains(max) {
-                        meet_scopes_ll.push(scope);
-                    }
+            start_ll = Version::<R, FP>::scope_search(min, &version.level_slice[level + 1]);
+            end_ll = Version::<R, FP>::scope_search(max, &version.level_slice[level + 1]);
+
+            let next_level_len = version.level_slice[level + 1].len();
+            for scope in version.level_slice[level + 1]
+                [start_ll..cmp::min(end_ll + 1, next_level_len - 1)]
+                .iter()
+            {
+                if scope.contains(min) || scope.contains(max) {
+                    meet_scopes_ll.push(scope);
                 }
             }
         }
@@ -275,18 +274,17 @@ where
         let mut meet_scopes_l = Vec::new();
         let start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
         let mut end_l = start_l;
-        {
-            for scope in version.level_slice[level][start_l..].iter() {
-                if scope.contains(min) || scope.contains(max) {
-                    meet_scopes_l.push(scope);
-                    end_l += 1;
-                } else {
-                    break;
-                }
+
+        for scope in version.level_slice[level][start_l..].iter() {
+            if scope.contains(min) || scope.contains(max) {
+                meet_scopes_l.push(scope);
+                end_l += 1;
+            } else {
+                break;
             }
-            if meet_scopes_l.is_empty() {
-                return None;
-            }
+        }
+        if meet_scopes_l.is_empty() {
+            return None;
         }
         Some((meet_scopes_l, start_l, end_l))
     }
