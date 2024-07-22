@@ -14,7 +14,7 @@ use crate::{
     oracle::Timestamp,
     record::KeyRef,
     stream,
-    version::{set::VersionSet, VersionRef},
+    version::{set::transaction_ts, VersionRef},
     LockMap, Record, Schema,
 };
 
@@ -41,7 +41,7 @@ where
         lock_map: LockMap<R::Key>,
     ) -> Self {
         Self {
-            ts: VersionSet::<R, FP>::transaction_ts(),
+            ts: transaction_ts(),
             local: BTreeMap::new(),
             share,
             version,
@@ -97,7 +97,7 @@ where
             }
         }
         for (key, record) in self.local {
-            let new_ts = VersionSet::<R, FP>::transaction_ts();
+            let new_ts = transaction_ts();
             match record {
                 Some(record) => self.share.write(record, new_ts).await?,
                 None => self.share.remove(key, new_ts).await?,

@@ -85,19 +85,24 @@ where
             reader.read_exact(&mut len).await?;
             u8::from_le_bytes(len) as usize
         };
-        let level = {
-            let mut level = [0; size_of::<u8>()];
-            reader.read_exact(&mut level).await?;
-            u8::from_le_bytes(level)
-        };
 
         Ok(match edit_type {
             0 => {
+                let level = {
+                    let mut level = [0; size_of::<u8>()];
+                    reader.read_exact(&mut level).await?;
+                    u8::from_le_bytes(level)
+                };
                 let scope = Scope::<K>::decode(reader).await?;
 
                 VersionEdit::Add { level, scope }
             }
             1 => {
+                let level = {
+                    let mut level = [0; size_of::<u8>()];
+                    reader.read_exact(&mut level).await?;
+                    u8::from_le_bytes(level)
+                };
                 let gen = {
                     let mut slice = [0; 16];
                     reader.read_exact(&mut slice).await?;

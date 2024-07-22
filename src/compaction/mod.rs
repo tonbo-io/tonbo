@@ -20,7 +20,11 @@ use crate::{
     record::{KeyRef, Record},
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
-    version::{edit::VersionEdit, set::VersionSet, Version, VersionError, MAX_LEVEL},
+    version::{
+        edit::VersionEdit,
+        set::{transaction_ts, VersionSet},
+        Version, VersionError, MAX_LEVEL,
+    },
     DbOption, Schema,
 };
 
@@ -81,6 +85,9 @@ where
                     .await?;
                 }
                 version_edits.insert(0, VersionEdit::Add { level: 0, scope });
+                version_edits.push(VersionEdit::LatestTimeStamp {
+                    ts: transaction_ts(),
+                });
 
                 self.version_set
                     .apply_edits(version_edits, Some(delete_gens), false)
