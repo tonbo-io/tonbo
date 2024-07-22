@@ -87,10 +87,6 @@ where
         Ok(set)
     }
 
-    pub(crate) fn transaction_ts() -> Timestamp {
-        GLOBAL_TIMESTAMP.fetch_add(1, Ordering::Release).into()
-    }
-
     pub(crate) async fn current(&self) -> VersionRef<R, FP> {
         self.inner.read().await.current.clone()
     }
@@ -133,7 +129,7 @@ where
                 }
                 VersionEdit::LatestTimeStamp { ts } => {
                     if is_recover {
-                        GLOBAL_TIMESTAMP.store(u32::from(ts) + 1, Ordering::Release);
+                        GLOBAL_TIMESTAMP.store(u32::from(ts), Ordering::Release);
                     }
                     new_version.ts = ts;
                 }
@@ -149,8 +145,62 @@ where
                 .await
                 .map_err(VersionError::Send)?;
         }
-        guard.log.flush().await.map_err(VersionError::Io)?;
+        guard.log.flush().await?;
         guard.current = Arc::new(new_version);
         Ok(())
+    }
+}
+
+pub(crate) fn transaction_ts() -> Timestamp {
+    GLOBAL_TIMESTAMP.fetch_add(1, Ordering::Release).into()
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::sync::{atomic::Ordering, Arc};
+
+    use flume::bounded;
+    use tempfile::TempDir;
+
+    use crate::{
+        executor::tokio::TokioExecutor,
+        version::{
+            edit::VersionEdit,
+            set::{transaction_ts, VersionSet, GLOBAL_TIMESTAMP},
+        },
+        DbOption,
+    };
+
+    #[tokio::test]
+    async fn timestamp_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+        let (sender, _) = bounded(1);
+        let option = Arc::new(DbOption::new(temp_dir.path()));
+
+        let version_set: VersionSet<String, TokioExecutor> =
+            VersionSet::new(sender.clone(), option.clone())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            transaction_ts(),
+            (GLOBAL_TIMESTAMP.load(Ordering::SeqCst) - 1).into()
+        );
+        version_set
+            .apply_edits(
+                vec![VersionEdit::LatestTimeStamp { ts: 20_u32.into() }],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        drop(version_set);
+
+        let _version_set: VersionSet<String, TokioExecutor> =
+            VersionSet::new(sender.clone(), option.clone())
+                .await
+                .unwrap();
+        assert_eq!(transaction_ts(), 20_u32.into());
     }
 }
