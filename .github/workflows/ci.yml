@@ -12,7 +12,13 @@ jobs:
   # 1
   check:
     name: Rust project check
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
     steps:
       - uses: actions/checkout@v2
       - name: Install latest
@@ -21,9 +27,6 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v2
 
       # `cargo check` command here will use installed `nightly`
       # as it is set as an "override" for current directory
