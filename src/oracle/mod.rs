@@ -12,7 +12,7 @@ use crate::serdes::{Decode, Encode};
 
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub(crate) struct Timestamp(u32);
+pub struct Timestamp(u32);
 
 pub(crate) const EPOCH: Timestamp = Timestamp(0);
 
