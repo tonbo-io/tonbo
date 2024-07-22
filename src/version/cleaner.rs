@@ -4,7 +4,7 @@ use flume::{Receiver, Sender};
 
 use crate::{fs::FileId, oracle::Timestamp, DbOption};
 
-pub(crate) enum CleanTag {
+pub enum CleanTag {
     Add { ts: Timestamp, gens: Vec<FileId> },
     Clean { ts: Timestamp },
 }
