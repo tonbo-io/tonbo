@@ -15,8 +15,8 @@ use parquet::{
 };
 
 use crate::{
-    oracle::Timestamp,
     record::{Key, Record},
+    timestamp::Timestamp,
 };
 
 unsafe fn get_range_bound_fn<R>(

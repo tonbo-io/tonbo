@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fs, io, sync::Arc};
 
 use flume::{Receiver, Sender};
 
-use crate::{fs::FileId, oracle::Timestamp, DbOption};
+use crate::{fs::FileId, timestamp::Timestamp, DbOption};
 
 pub enum CleanTag {
     Add { ts: Timestamp, gens: Vec<FileId> },

@@ -13,9 +13,9 @@ use futures_util::{AsyncSeekExt, AsyncWriteExt};
 use super::MAX_LEVEL;
 use crate::{
     fs::{FileId, FileProvider},
-    oracle::Timestamp,
     record::Record,
     serdes::Encode,
+    timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
 };

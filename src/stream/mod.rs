@@ -18,9 +18,9 @@ use crate::{
     fs::FileProvider,
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
-    oracle::timestamp::Timestamped,
     record::{Key, Record},
     stream::level::LevelStream,
+    timestamp::Timestamped,
 };
 
 pub enum Entry<'entry, R>

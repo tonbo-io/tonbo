@@ -8,12 +8,12 @@ use arrow::array::RecordBatch;
 
 use super::mutable::Mutable;
 use crate::{
-    oracle::{
-        timestamp::{Timestamped, TimestampedRef},
-        Timestamp, EPOCH,
-    },
     record::{internal::InternalRecordRef, Key, Record, RecordRef},
     stream::record_batch::RecordBatchEntry,
+    timestamp::{
+        timestamped::{Timestamped, TimestampedRef},
+        Timestamp, EPOCH,
+    },
 };
 
 pub trait ArrowArrays: Sized {
@@ -177,9 +177,9 @@ pub(crate) mod tests {
 
     use super::{ArrowArrays, Builder};
     use crate::{
-        oracle::timestamp::Timestamped,
         record::Record,
         tests::{Test, TestRef},
+        timestamp::Timestamped,
     };
 
     #[derive(Debug)]
