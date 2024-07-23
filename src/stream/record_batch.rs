@@ -5,6 +5,7 @@ use std::{
 };
 
 use arrow::array::RecordBatch;
+use parquet::arrow::ProjectionMask;
 
 use crate::{
     record::{internal::InternalRecordRef, Key, Record, RecordRef},
@@ -60,6 +61,7 @@ where
 pub struct RecordBatchIterator<R> {
     record_batch: RecordBatch,
     offset: usize,
+    projection_mask: ProjectionMask,
     _marker: PhantomData<R>,
 }
 
@@ -67,10 +69,11 @@ impl<R> RecordBatchIterator<R>
 where
     R: Record,
 {
-    pub(crate) fn new(record_batch: RecordBatch) -> Self {
+    pub(crate) fn new(record_batch: RecordBatch, projection_mask: ProjectionMask) -> Self {
         Self {
             record_batch,
             offset: 0,
+            projection_mask,
             _marker: PhantomData,
         }
     }
@@ -88,7 +91,8 @@ where
         }
 
         let record_batch = self.record_batch.clone();
-        let record = R::Ref::from_record_batch(&self.record_batch, self.offset);
+        let record =
+            R::Ref::from_record_batch(&self.record_batch, self.offset, &self.projection_mask);
         let entry = RecordBatchEntry::new(record_batch, unsafe {
             // Safety: self-referring lifetime is safe
             transmute::<
@@ -100,3 +104,6 @@ where
         Some(entry)
     }
 }
+
+#[cfg(test)]
+mod tests {}

@@ -8,7 +8,7 @@ use std::{
 
 use async_lock::RwLock;
 use futures_util::StreamExt;
-use parquet::arrow::AsyncArrowWriter;
+use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use thiserror::Error;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use ulid::Ulid;
@@ -175,7 +175,12 @@ where
 
                     streams.push(ScanStream::SsTable {
                         inner: SsTable::open(file)
-                            .scan((Bound::Unbounded, Bound::Unbounded), u32::MAX.into(), None)
+                            .scan(
+                                (Bound::Unbounded, Bound::Unbounded),
+                                u32::MAX.into(),
+                                None,
+                                ProjectionMask::all(),
+                            )
                             .await?,
                     });
                 }
@@ -189,6 +194,7 @@ where
                     (Bound::Included(lower), Bound::Included(upper)),
                     u32::MAX.into(),
                     None,
+                    ProjectionMask::all(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -206,6 +212,7 @@ where
                 (Bound::Included(lower), Bound::Included(upper)),
                 u32::MAX.into(),
                 None,
+                ProjectionMask::all(),
             )
             .ok_or(CompactionError::EmptyLevel)?;
 
@@ -409,7 +416,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{collections::VecDeque, sync::Arc};
 
     use flume::bounded;
@@ -438,7 +445,7 @@ mod tests {
         Immutable::from(mutable)
     }
 
-    async fn build_parquet_table<R: Record + Send, FP: Executor>(
+    pub(crate) async fn build_parquet_table<R: Record + Send, FP: Executor>(
         option: &DbOption,
         gen: FileId,
         fn_mutable: impl FnOnce(&mut Mutable<R>),
@@ -534,187 +541,8 @@ mod tests {
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
 
-        // level 0
-        let table_gen_1 = FileId::new();
-        let table_gen_2 = FileId::new();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_1, |mutable| {
-            mutable.insert(
-                Test {
-                    vstring: 1.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                1.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 2.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                1.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 3.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-        })
-        .await
-        .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_2, |mutable| {
-            mutable.insert(
-                Test {
-                    vstring: 4.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                1.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 5.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                1.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 6.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-        })
-        .await
-        .unwrap();
-
-        // level 1
-        let table_gen_3 = FileId::new();
-        let table_gen_4 = FileId::new();
-        let table_gen_5 = FileId::new();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_3, |mutable| {
-            mutable.insert(
-                Test {
-                    vstring: 1.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 2.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 3.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-        })
-        .await
-        .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_4, |mutable| {
-            mutable.insert(
-                Test {
-                    vstring: 4.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 5.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 6.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-        })
-        .await
-        .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_5, |mutable| {
-            mutable.insert(
-                Test {
-                    vstring: 7.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 8.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-            mutable.insert(
-                Test {
-                    vstring: 9.to_string(),
-                    vu32: 0,
-                    vobool: None,
-                },
-                0.into(),
-            );
-        })
-        .await
-        .unwrap();
-
-        let (sender, _) = bounded(1);
-        let mut version = Version::<Test, TokioExecutor>::new(option.clone(), sender);
-        version.level_slice[0].push(Scope {
-            min: 1.to_string(),
-            max: 3.to_string(),
-            gen: table_gen_1,
-            wal_ids: None,
-        });
-        version.level_slice[0].push(Scope {
-            min: 4.to_string(),
-            max: 6.to_string(),
-            gen: table_gen_2,
-            wal_ids: None,
-        });
-        version.level_slice[1].push(Scope {
-            min: 1.to_string(),
-            max: 3.to_string(),
-            gen: table_gen_3,
-            wal_ids: None,
-        });
-        version.level_slice[1].push(Scope {
-            min: 4.to_string(),
-            max: 6.to_string(),
-            gen: table_gen_4,
-            wal_ids: None,
-        });
-        version.level_slice[1].push(Scope {
-            min: 7.to_string(),
-            max: 9.to_string(),
-            gen: table_gen_5,
-            wal_ids: None,
-        });
+        let ((table_gen_1, table_gen_2, table_gen_3, table_gen_4, _), version) =
+            build_version(&option).await;
 
         let min = 2.to_string();
         let max = 5.to_string();
@@ -756,5 +584,204 @@ mod tests {
                 },
             ]
         );
+    }
+
+    pub(crate) async fn build_version(
+        option: &Arc<DbOption>,
+    ) -> (
+        (FileId, FileId, FileId, FileId, FileId),
+        Version<Test, TokioExecutor>,
+    ) {
+        // level 0
+        let table_gen_1 = FileId::new();
+        let table_gen_2 = FileId::new();
+        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_1, |mutable| {
+            mutable.insert(
+                Test {
+                    vstring: 1.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                1.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 2.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                1.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 3.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+        })
+        .await
+        .unwrap();
+        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_2, |mutable| {
+            mutable.insert(
+                Test {
+                    vstring: 4.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                1.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 5.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                1.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 6.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+        })
+        .await
+        .unwrap();
+
+        // level 1
+        let table_gen_3 = FileId::new();
+        let table_gen_4 = FileId::new();
+        let table_gen_5 = FileId::new();
+        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_3, |mutable| {
+            mutable.insert(
+                Test {
+                    vstring: 1.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 2.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 3.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+        })
+        .await
+        .unwrap();
+        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_4, |mutable| {
+            mutable.insert(
+                Test {
+                    vstring: 4.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 5.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 6.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+        })
+        .await
+        .unwrap();
+        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_5, |mutable| {
+            mutable.insert(
+                Test {
+                    vstring: 7.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 8.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: 9.to_string(),
+                    vu32: 0,
+                    vobool: Some(true),
+                },
+                0.into(),
+            );
+        })
+        .await
+        .unwrap();
+
+        let (sender, _) = bounded(1);
+        let mut version = Version::<Test, TokioExecutor>::new(option.clone(), sender);
+        version.level_slice[0].push(Scope {
+            min: 1.to_string(),
+            max: 3.to_string(),
+            gen: table_gen_1,
+            wal_ids: None,
+        });
+        version.level_slice[0].push(Scope {
+            min: 4.to_string(),
+            max: 6.to_string(),
+            gen: table_gen_2,
+            wal_ids: None,
+        });
+        version.level_slice[1].push(Scope {
+            min: 1.to_string(),
+            max: 3.to_string(),
+            gen: table_gen_3,
+            wal_ids: None,
+        });
+        version.level_slice[1].push(Scope {
+            min: 4.to_string(),
+            max: 6.to_string(),
+            gen: table_gen_4,
+            wal_ids: None,
+        });
+        version.level_slice[1].push(Scope {
+            min: 7.to_string(),
+            max: 9.to_string(),
+            gen: table_gen_5,
+            wal_ids: None,
+        });
+        (
+            (
+                table_gen_1,
+                table_gen_2,
+                table_gen_3,
+                table_gen_4,
+                table_gen_5,
+            ),
+            version,
+        )
     }
 }

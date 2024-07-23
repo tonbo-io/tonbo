@@ -23,7 +23,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use lockable::LockableHashMap;
-use parquet::{errors::ParquetError, file::properties::WriterProperties};
+use parquet::{arrow::ProjectionMask, errors::ParquetError, file::properties::WriterProperties};
 use record::Record;
 use thiserror::Error;
 use timestamp::Timestamp;
@@ -201,11 +201,12 @@ where
         &'get self,
         key: &'get R::Key,
         ts: Timestamp,
+        projection_mask: ProjectionMask,
     ) -> Result<Option<Entry<'get, R>>, ParquetError>
     where
         FP: FileProvider,
     {
-        self.scan(Bound::Included(key), Bound::Unbounded, ts)
+        self.scan(Bound::Included(key), Bound::Unbounded, ts, projection_mask)
             .await?
             .next()
             .await
@@ -217,6 +218,7 @@ where
         lower: Bound<&'scan R::Key>,
         uppwer: Bound<&'scan R::Key>,
         ts: Timestamp,
+        projection_mask: ProjectionMask,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
     where
         FP: FileProvider,
@@ -224,7 +226,11 @@ where
         let mut streams = Vec::<ScanStream<R, FP>>::with_capacity(self.immutables.len() + 1);
         streams.push(self.mutable.scan((lower, uppwer), ts).into());
         for immutable in &self.immutables {
-            streams.push(immutable.scan((lower, uppwer), ts).into());
+            streams.push(
+                immutable
+                    .scan((lower, uppwer), ts, projection_mask.clone())
+                    .into(),
+            );
         }
         // TODO: sstable scan
 
@@ -262,10 +268,11 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use arrow::{
-        array::{AsArray, RecordBatch},
+        array::{Array, AsArray, RecordBatch},
         datatypes::{DataType, Field, Schema, UInt32Type},
     };
     use once_cell::sync::Lazy;
+    use parquet::arrow::ProjectionMask;
 
     use crate::{
         executor::Executor,
@@ -297,7 +304,7 @@ pub(crate) mod tests {
         fn as_record_ref(&self) -> Self::Ref<'_> {
             TestRef {
                 vstring: &self.vstring,
-                vu32: self.vu32,
+                vu32: Some(self.vu32),
                 vbool: self.vobool,
             }
         }
@@ -319,8 +326,10 @@ pub(crate) mod tests {
 
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct TestRef<'r> {
+        // primary key cannot be projected
         pub vstring: &'r str,
-        pub vu32: u32,
+        pub vu32: Option<u32>,
+        // Kould: two layer option can be a single layer option
         pub vbool: Option<bool>,
     }
 
@@ -334,7 +343,8 @@ pub(crate) mod tests {
         fn from_record_batch(
             record_batch: &'r RecordBatch,
             offset: usize,
-        ) -> InternalRecordRef<Self> {
+            projection_mask: &'r ProjectionMask,
+        ) -> InternalRecordRef<'r, Self> {
             let null = record_batch.column(0).as_boolean().value(offset);
 
             let ts = record_batch
@@ -343,13 +353,33 @@ pub(crate) mod tests {
                 .value(offset)
                 .into();
             let vstring = record_batch.column(2).as_string::<i32>();
-            let vu32 = record_batch.column(3).as_primitive::<UInt32Type>();
-            let vobool = record_batch.column(4).as_boolean();
+
+            let mut vu32 = None;
+            let mut vbool = None;
+            let mut column_i = 3;
+
+            if projection_mask.leaf_included(3) {
+                vu32 = Some(
+                    record_batch
+                        .column(column_i)
+                        .as_primitive::<UInt32Type>()
+                        .value(offset),
+                );
+                column_i += 1;
+            }
+            if projection_mask.leaf_included(4) {
+                let vbool_array = record_batch.column(column_i).as_boolean();
+
+                if !vbool_array.is_null(offset) {
+                    vbool = Some(vbool_array.value(offset));
+                }
+                column_i += 1;
+            }
 
             let record = TestRef {
                 vstring: vstring.value(offset),
-                vu32: vu32.value(offset),
-                vbool: vobool.value(offset).into(),
+                vu32,
+                vbool,
             };
             InternalRecordRef::new(ts, record, null)
         }

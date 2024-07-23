@@ -161,7 +161,7 @@ mod tests {
             entry.value().as_ref().unwrap().as_record_ref(),
             TestRef {
                 vstring: &key_1,
-                vu32: 1,
+                vu32: Some(1),
                 vbool: Some(true)
             }
         )
