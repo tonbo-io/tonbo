@@ -12,7 +12,7 @@ use once_cell::sync::Lazy;
 use super::{internal::InternalRecordRef, Key, KeyRef, Record, RecordRef};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
-    oracle::timestamp::Timestamped,
+    timestamp::Timestamped,
 };
 
 impl Key for String {

@@ -7,8 +7,8 @@ use std::{
 use arrow::array::RecordBatch;
 
 use crate::{
-    oracle::timestamp::Timestamped,
     record::{internal::InternalRecordRef, Key, Record, RecordRef},
+    timestamp::Timestamped,
 };
 
 pub struct RecordBatchEntry<R>

@@ -5,9 +5,9 @@ use futures_util::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     fs::FileId,
-    oracle::Timestamp,
     scope::Scope,
     serdes::{Decode, Encode},
+    timestamp::Timestamp,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]

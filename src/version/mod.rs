@@ -11,11 +11,11 @@ use tracing::error;
 use crate::{
     fs::{FileId, FileProvider},
     ondisk::sstable::SsTable,
-    oracle::{timestamp::TimestampedRef, Timestamp},
     record::Record,
     scope::Scope,
     serdes::Encode,
     stream::{record_batch::RecordBatchEntry, ScanStream},
+    timestamp::{Timestamp, TimestampedRef},
     version::cleaner::CleanTag,
     DbOption,
 };

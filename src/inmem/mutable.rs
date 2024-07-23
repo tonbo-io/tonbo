@@ -6,11 +6,11 @@ use crossbeam_skiplist::{
 };
 
 use crate::{
-    oracle::{
-        timestamp::{Timestamped, TimestampedRef},
+    record::{KeyRef, Record},
+    timestamp::{
+        timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
-    record::{KeyRef, Record},
 };
 
 pub(crate) type MutableScan<'scan, R> = Range<
@@ -127,9 +127,9 @@ mod tests {
 
     use super::Mutable;
     use crate::{
-        oracle::timestamp::Timestamped,
         record::Record,
         tests::{Test, TestRef},
+        timestamp::Timestamped,
     };
 
     #[test]
