@@ -5,6 +5,7 @@ use std::{
 };
 
 use arrow::array::RecordBatch;
+use parquet::arrow::ProjectionMask;
 
 use super::mutable::Mutable;
 use crate::{
@@ -20,7 +21,11 @@ pub trait ArrowArrays: Sized {
 
     fn builder(capacity: usize) -> Self::Builder;
 
-    fn get(&self, offset: u32) -> Option<Option<<Self::Record as Record>::Ref<'_>>>;
+    fn get(
+        &self,
+        offset: u32,
+        projection_mask: &ProjectionMask,
+    ) -> Option<Option<<Self::Record as Record>::Ref<'_>>>;
 
     fn as_record_batch(&self) -> &RecordBatch;
 }
@@ -96,6 +101,7 @@ where
             Bound<&'scan <A::Record as Record>::Key>,
         ),
         ts: Timestamp,
+        projection_mask: ProjectionMask,
     ) -> ImmutableScan<'scan, A::Record> {
         let lower = range.0.map(|key| TimestampedRef::new(key, ts));
         let upper = range.1.map(|key| TimestampedRef::new(key, EPOCH));
@@ -104,7 +110,7 @@ where
             .index
             .range::<TimestampedRef<<A::Record as Record>::Key>, _>((lower, upper));
 
-        ImmutableScan::<A::Record>::new(range, self.data.as_record_batch())
+        ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
     }
 
     pub(crate) fn check_conflict(&self, key: &<A::Record as Record>::Key, ts: Timestamp) -> bool {
@@ -124,6 +130,7 @@ where
 {
     range: Range<'iter, Timestamped<R::Key>, u32>,
     record_batch: &'iter RecordBatch,
+    projection_mask: ProjectionMask,
 }
 
 impl<'iter, R> ImmutableScan<'iter, R>
@@ -133,10 +140,12 @@ where
     fn new(
         range: Range<'iter, Timestamped<R::Key>, u32>,
         record_batch: &'iter RecordBatch,
+        projection_mask: ProjectionMask,
     ) -> Self {
         Self {
             range,
             record_batch,
+            projection_mask,
         }
     }
 }
@@ -149,7 +158,11 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|(_, &offset)| {
-            let record_ref = R::Ref::from_record_batch(self.record_batch, offset as usize);
+            let record_ref = R::Ref::from_record_batch(
+                self.record_batch,
+                offset as usize,
+                &self.projection_mask,
+            );
             // TODO: remove cloning record batch
             RecordBatchEntry::new(self.record_batch.clone(), {
                 // Safety: record_ref self-references the record batch
@@ -174,6 +187,7 @@ pub(crate) mod tests {
         },
         datatypes::{ArrowPrimitiveType, UInt32Type},
     };
+    use parquet::arrow::ProjectionMask;
 
     use super::{ArrowArrays, Builder};
     use crate::{
@@ -208,31 +222,32 @@ pub(crate) mod tests {
             }
         }
 
-        fn get(&self, offset: u32) -> Option<Option<<Self::Record as Record>::Ref<'_>>> {
+        fn get(
+            &self,
+            offset: u32,
+            projection_mask: &ProjectionMask,
+        ) -> Option<Option<<Self::Record as Record>::Ref<'_>>> {
             let offset = offset as usize;
 
             if offset >= self.vstring.len() {
                 return None;
             }
+            if self._null.value(offset) {
+                return Some(None);
+            }
 
             let vstring = self.vstring.value(offset);
-            let vu32 = self.vu32.value(offset);
-            let vbool = if self.vbool.is_null(offset) {
-                None
-            } else {
-                Some(self.vbool.value(offset))
-            };
+            let vu32 = projection_mask
+                .leaf_included(3)
+                .then(|| self.vu32.value(offset));
+            let vbool = (!self.vbool.is_null(offset) && projection_mask.leaf_included(4))
+                .then(|| self.vbool.value(offset));
 
-            let is_null = self._null.value(offset);
-            Some(if !is_null {
-                Some(TestRef {
-                    vstring,
-                    vu32,
-                    vbool,
-                })
-            } else {
-                None
-            })
+            Some(Some(TestRef {
+                vstring,
+                vu32,
+                vbool,
+            }))
         }
 
         fn as_record_batch(&self) -> &RecordBatch {
@@ -253,7 +268,7 @@ pub(crate) mod tests {
             self.vstring.append_value(key.value);
             match row {
                 Some(row) => {
-                    self.vu32.append_value(row.vu32);
+                    self.vu32.append_value(row.vu32.unwrap());
                     match row.vbool {
                         Some(vobool) => self.vobool.append_value(vobool),
                         None => self.vobool.append_null(),

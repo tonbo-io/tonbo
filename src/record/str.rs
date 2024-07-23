@@ -8,6 +8,7 @@ use arrow::{
     datatypes::{DataType, Field, Schema, UInt32Type},
 };
 use once_cell::sync::Lazy;
+use parquet::arrow::ProjectionMask;
 
 use super::{internal::InternalRecordRef, Key, KeyRef, Record, RecordRef};
 use crate::{
@@ -72,7 +73,11 @@ impl<'r> RecordRef<'r> for &'r str {
         self
     }
 
-    fn from_record_batch(record_batch: &'r RecordBatch, offset: usize) -> InternalRecordRef<Self> {
+    fn from_record_batch(
+        record_batch: &'r RecordBatch,
+        offset: usize,
+        _: &'r ProjectionMask,
+    ) -> InternalRecordRef<'r, Self> {
         let ts = record_batch
             .column(1)
             .as_primitive::<UInt32Type>()
@@ -107,7 +112,11 @@ impl ArrowArrays for StringColumns {
         }
     }
 
-    fn get(&self, offset: u32) -> Option<Option<<Self::Record as Record>::Ref<'_>>> {
+    fn get(
+        &self,
+        offset: u32,
+        _: &ProjectionMask,
+    ) -> Option<Option<<Self::Record as Record>::Ref<'_>>> {
         if self._null.value(offset as usize) {
             return Some(None);
         }

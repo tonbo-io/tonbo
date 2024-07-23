@@ -8,6 +8,7 @@ use arrow::{
     datatypes::Schema,
 };
 use internal::InternalRecordRef;
+use parquet::arrow::ProjectionMask;
 
 use crate::{
     inmem::immutable::ArrowArrays,
@@ -53,5 +54,9 @@ pub trait RecordRef<'r>: Clone + Sized + Copy {
 
     fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;
 
-    fn from_record_batch(record_batch: &'r RecordBatch, offset: usize) -> InternalRecordRef<Self>;
+    fn from_record_batch(
+        record_batch: &'r RecordBatch,
+        offset: usize,
+        projection_mask: &'r ProjectionMask,
+    ) -> InternalRecordRef<'r, Self>;
 }

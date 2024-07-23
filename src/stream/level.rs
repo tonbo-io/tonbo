@@ -8,7 +8,7 @@ use std::{
 };
 
 use futures_core::Stream;
-use parquet::errors::ParquetError;
+use parquet::{arrow::ProjectionMask, errors::ParquetError};
 
 use crate::{
     fs::{FileId, FileProvider},
@@ -45,6 +45,7 @@ where
     option: Arc<DbOption>,
     gens: VecDeque<FileId>,
     limit: Option<usize>,
+    projection_mask: ProjectionMask,
     status: FutureStatus<'level, R, FP>,
 }
 
@@ -54,6 +55,7 @@ where
     FP: FileProvider,
 {
     // Kould: only used by Compaction now, and the start and end of the sstables range are known
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         version: &Version<R, FP>,
         level: usize,
@@ -62,6 +64,7 @@ where
         range: (Bound<&'level R::Key>, Bound<&'level R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
+        projection_mask: ProjectionMask,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -78,6 +81,7 @@ where
             option: version.option().clone(),
             gens,
             limit,
+            projection_mask,
             status,
         })
     }
@@ -123,6 +127,7 @@ where
                             (self.lower, self.upper),
                             self.ts,
                             self.limit,
+                            self.projection_mask.clone(),
                         )));
                         continue;
                     }
@@ -142,4 +147,130 @@ where
     }
 }
 
-// TODO: Test Case after `Compaction`
+#[cfg(test)]
+mod tests {
+    use std::{collections::Bound, sync::Arc};
+
+    use futures_util::StreamExt;
+    use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
+    use tempfile::TempDir;
+
+    use crate::{
+        compaction::tests::build_version, record::Record, stream::level::LevelStream, tests::Test,
+        DbOption,
+    };
+
+    #[tokio::test]
+    async fn projection_scan() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::new(temp_dir.path()));
+
+        let (_, version) = build_version(&option).await;
+
+        {
+            let mut level_stream_1 = LevelStream::new(
+                &version,
+                0,
+                0,
+                1,
+                (Bound::Unbounded, Bound::Unbounded),
+                1_u32.into(),
+                None,
+                ProjectionMask::roots(
+                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    [0, 1, 2, 3],
+                ),
+            )
+            .unwrap();
+
+            let entry_0 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_0.get().vu32.is_some());
+            assert!(entry_0.get().vbool.is_none());
+            let entry_1 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_1.get().vu32.is_some());
+            assert!(entry_1.get().vbool.is_none());
+            let entry_2 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_2.get().vu32.is_some());
+            assert!(entry_2.get().vbool.is_none());
+            let entry_3 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_3.get().vu32.is_some());
+            assert!(entry_3.get().vbool.is_none());
+            let entry_4 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_4.get().vu32.is_some());
+            assert!(entry_4.get().vbool.is_none());
+            let entry_5 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_5.get().vu32.is_some());
+            assert!(entry_5.get().vbool.is_none());
+        }
+        {
+            let mut level_stream_1 = LevelStream::new(
+                &version,
+                0,
+                0,
+                1,
+                (Bound::Unbounded, Bound::Unbounded),
+                1_u32.into(),
+                None,
+                ProjectionMask::roots(
+                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    [0, 1, 2, 4],
+                ),
+            )
+            .unwrap();
+
+            let entry_0 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_0.get().vu32.is_none());
+            assert!(entry_0.get().vbool.is_some());
+            let entry_1 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_1.get().vu32.is_none());
+            assert!(entry_1.get().vbool.is_some());
+            let entry_2 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_2.get().vu32.is_none());
+            assert!(entry_2.get().vbool.is_some());
+            let entry_3 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_3.get().vu32.is_none());
+            assert!(entry_3.get().vbool.is_some());
+            let entry_4 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_4.get().vu32.is_none());
+            assert!(entry_4.get().vbool.is_some());
+            let entry_5 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_5.get().vu32.is_none());
+            assert!(entry_5.get().vbool.is_some());
+        }
+        {
+            let mut level_stream_1 = LevelStream::new(
+                &version,
+                0,
+                0,
+                1,
+                (Bound::Unbounded, Bound::Unbounded),
+                1_u32.into(),
+                None,
+                ProjectionMask::roots(
+                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    [0, 1, 2],
+                ),
+            )
+            .unwrap();
+
+            let entry_0 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_0.get().vu32.is_none());
+            assert!(entry_0.get().vbool.is_none());
+            let entry_1 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_1.get().vu32.is_none());
+            assert!(entry_1.get().vbool.is_none());
+            let entry_2 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_2.get().vu32.is_none());
+            assert!(entry_2.get().vbool.is_none());
+            let entry_3 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_3.get().vu32.is_none());
+            assert!(entry_3.get().vbool.is_none());
+            let entry_4 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_4.get().vu32.is_none());
+            assert!(entry_4.get().vbool.is_none());
+            let entry_5 = level_stream_1.next().await.unwrap().unwrap();
+            assert!(entry_5.get().vu32.is_none());
+            assert!(entry_5.get().vbool.is_none());
+        }
+    }
+}

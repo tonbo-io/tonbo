@@ -6,7 +6,7 @@ use std::{
 
 use async_lock::RwLockReadGuard;
 use lockable::SyncLimit;
-use parquet::errors::ParquetError;
+use parquet::{arrow::ProjectionMask, errors::ParquetError};
 use thiserror::Error;
 
 use crate::{
@@ -52,12 +52,13 @@ where
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
+        projection_mask: ProjectionMask,
     ) -> Result<Option<TransactionEntry<'get, R>>, ParquetError> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
                 .share
-                .get(key, self.ts)
+                .get(key, self.ts, projection_mask)
                 .await?
                 .map(TransactionEntry::Stream),
         })
@@ -147,9 +148,13 @@ where
 mod tests {
     use std::sync::Arc;
 
+    use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
 
-    use crate::{executor::tokio::TokioExecutor, transaction::CommitError, DbOption, DB};
+    use crate::{
+        executor::tokio::TokioExecutor, record::Record, tests::Test, transaction::CommitError,
+        DbOption, DB,
+    };
 
     #[tokio::test]
     async fn transaction_read_write() {
@@ -166,7 +171,11 @@ mod tests {
             txn1.set("foo".to_string());
 
             let txn2 = db.transaction().await;
-            dbg!(txn2.get(&"foo".to_string()).await.unwrap().is_none());
+            dbg!(txn2
+                .get(&"foo".to_string(), ProjectionMask::all())
+                .await
+                .unwrap()
+                .is_none());
 
             txn1.commit().await.unwrap();
             txn2.commit().await.unwrap();
@@ -174,7 +183,11 @@ mod tests {
 
         {
             let txn3 = db.transaction().await;
-            dbg!(txn3.get(&"foo".to_string()).await.unwrap().is_none());
+            dbg!(txn3
+                .get(&"foo".to_string(), ProjectionMask::all())
+                .await
+                .unwrap()
+                .is_none());
             txn3.commit().await.unwrap();
         }
     }
@@ -212,5 +225,44 @@ mod tests {
             return;
         }
         unreachable!();
+    }
+
+    #[tokio::test]
+    async fn transaction_projection() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let db = DB::<Test, TokioExecutor>::new(
+            Arc::new(DbOption::new(temp_dir.path())),
+            TokioExecutor::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut txn1 = db.transaction().await;
+        txn1.set(Test {
+            vstring: 0.to_string(),
+            vu32: 0,
+            vobool: Some(true),
+        });
+
+        let key = 0.to_string();
+        let entry = txn1
+            .get(
+                &key,
+                ProjectionMask::roots(
+                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    [0, 1, 2],
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(entry.get().vstring, 0.to_string());
+        assert_eq!(entry.get().vu32, Some(0));
+        assert_eq!(entry.get().vbool, Some(true));
+        drop(entry);
+
+        txn1.commit().await.unwrap();
     }
 }
