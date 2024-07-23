@@ -6,7 +6,7 @@ use std::{
 
 use async_lock::RwLockReadGuard;
 use lockable::SyncLimit;
-use parquet::{arrow::ProjectionMask, errors::ParquetError};
+use parquet::errors::ParquetError;
 use thiserror::Error;
 
 use crate::{
@@ -52,13 +52,12 @@ where
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
-        projection_mask: ProjectionMask,
     ) -> Result<Option<TransactionEntry<'get, R>>, ParquetError> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
                 .share
-                .get(key, self.ts, projection_mask)
+                .get(key, self.ts)
                 .await?
                 .map(TransactionEntry::Stream),
         })
@@ -148,12 +147,10 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
 
     use crate::{
-        executor::tokio::TokioExecutor, record::Record, tests::Test, transaction::CommitError,
-        DbOption, DB,
+        executor::tokio::TokioExecutor, tests::Test, transaction::CommitError, DbOption, DB,
     };
 
     #[tokio::test]
@@ -171,11 +168,7 @@ mod tests {
             txn1.set("foo".to_string());
 
             let txn2 = db.transaction().await;
-            dbg!(txn2
-                .get(&"foo".to_string(), ProjectionMask::all())
-                .await
-                .unwrap()
-                .is_none());
+            dbg!(txn2.get(&"foo".to_string()).await.unwrap().is_none());
 
             txn1.commit().await.unwrap();
             txn2.commit().await.unwrap();
@@ -183,11 +176,7 @@ mod tests {
 
         {
             let txn3 = db.transaction().await;
-            dbg!(txn3
-                .get(&"foo".to_string(), ProjectionMask::all())
-                .await
-                .unwrap()
-                .is_none());
+            dbg!(txn3.get(&"foo".to_string()).await.unwrap().is_none());
             txn3.commit().await.unwrap();
         }
     }
@@ -246,17 +235,7 @@ mod tests {
         });
 
         let key = 0.to_string();
-        let entry = txn1
-            .get(
-                &key,
-                ProjectionMask::roots(
-                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
-                    [0, 1, 2],
-                ),
-            )
-            .await
-            .unwrap()
-            .unwrap();
+        let entry = txn1.get(&key).await.unwrap().unwrap();
 
         assert_eq!(entry.get().vstring, 0.to_string());
         assert_eq!(entry.get().vu32, Some(0));
