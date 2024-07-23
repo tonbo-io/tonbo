@@ -104,13 +104,7 @@ where
     V: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        unsafe {
-            let this = transmute::<&TimestampedRef<V>, [usize; 2]>(self);
-            let other = transmute::<&TimestampedRef<V>, [usize; 2]>(other);
-            let this_value = transmute::<usize, &V>(this[0]);
-            let other_value = transmute::<usize, &V>(other[0]);
-            this_value == other_value && this[1] == other[1]
-        }
+        self.value() == other.value() && self.ts() == other.ts()
     }
 }
 
@@ -121,15 +115,9 @@ where
     V: PartialOrd,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        unsafe {
-            let this = transmute::<&TimestampedRef<V>, [usize; 2]>(self);
-            let other = transmute::<&TimestampedRef<V>, [usize; 2]>(other);
-            let this_value = transmute::<usize, &V>(this[0]);
-            let other_value = transmute::<usize, &V>(other[0]);
-            this_value
-                .partial_cmp(other_value)
-                .map(|ordering| ordering.then_with(|| other[1].cmp(&this[1])))
-        }
+        self.value()
+            .partial_cmp(other.value())
+            .map(|ordering| ordering.then_with(|| other.ts().cmp(&self.ts())))
     }
 }
 
@@ -138,15 +126,9 @@ where
     K: Ord,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        unsafe {
-            let this = transmute::<&TimestampedRef<K>, [usize; 2]>(self);
-            let other = transmute::<&TimestampedRef<K>, [usize; 2]>(other);
-            let this_value = transmute::<usize, &K>(this[0]);
-            let other_value = transmute::<usize, &K>(other[0]);
-            this_value
-                .cmp(other_value)
-                .then_with(|| other[1].cmp(&this[1]))
-        }
+        self.value()
+            .cmp(other.value())
+            .then_with(|| other.ts().cmp(&self.ts()))
     }
 }
 

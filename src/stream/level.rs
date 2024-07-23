@@ -27,9 +27,11 @@ where
     FP: FileProvider,
 {
     Init(FileId),
-    Ready(SsTableScan<R, FP>),
+    Ready(SsTableScan<'level, R, FP>),
     OpenFile(Pin<Box<dyn Future<Output = io::Result<FP::File>> + 'level>>),
-    LoadStream(Pin<Box<dyn Future<Output = Result<SsTableScan<R, FP>, ParquetError>> + 'level>>),
+    LoadStream(
+        Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R, FP>, ParquetError>> + 'level>>,
+    ),
 }
 
 pub(crate) struct LevelStream<'level, R, FP>
