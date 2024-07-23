@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures_core::{ready, Stream};
-use parquet::arrow::async_reader::ParquetRecordBatchStream;
+use parquet::arrow::{async_reader::ParquetRecordBatchStream, ProjectionMask};
 use pin_project_lite::pin_project;
 use tokio_util::compat::Compat;
 
@@ -24,6 +24,7 @@ pin_project! {
         #[pin]
         stream: ParquetRecordBatchStream<Compat<FP::File>>,
         iter: Option<RecordBatchIterator<R>>,
+        projection_mask: ProjectionMask,
         _marker: PhantomData<&'scan ()>
     }
 }
@@ -32,10 +33,14 @@ impl<R, FP> SsTableScan<'_, R, FP>
 where
     FP: FileProvider,
 {
-    pub fn new(stream: ParquetRecordBatchStream<Compat<FP::File>>) -> Self {
+    pub fn new(
+        stream: ParquetRecordBatchStream<Compat<FP::File>>,
+        projection_mask: ProjectionMask,
+    ) -> Self {
         SsTableScan {
             stream,
             iter: None,
+            projection_mask,
             _marker: PhantomData,
         }
     }
@@ -64,7 +69,10 @@ where
                         Some(record_batch) => record_batch,
                         None => return Poll::Ready(None),
                     };
-                    *this.iter = Some(RecordBatchIterator::new(record_batch));
+                    *this.iter = Some(RecordBatchIterator::new(
+                        record_batch,
+                        this.projection_mask.clone(),
+                    ));
                 }
             }
         }

@@ -5,6 +5,7 @@ pub(crate) mod set;
 use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
 use flume::{SendError, Sender};
+use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
 
@@ -86,12 +87,16 @@ where
     pub(crate) async fn query(
         &self,
         key: &TimestampedRef<R::Key>,
+        projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         for scope in self.level_slice[0].iter().rev() {
             if !scope.contains(key.value()) {
                 continue;
             }
-            if let Some(entry) = self.table_query(key, &scope.gen).await? {
+            if let Some(entry) = self
+                .table_query(key, &scope.gen, projection_mask.clone())
+                .await?
+            {
                 return Ok(Some(entry));
             }
         }
@@ -103,7 +108,10 @@ where
             if !level[index].contains(key.value()) {
                 continue;
             }
-            if let Some(entry) = self.table_query(key, &level[index].gen).await? {
+            if let Some(entry) = self
+                .table_query(key, &level[index].gen, projection_mask.clone())
+                .await?
+            {
                 return Ok(Some(entry));
             }
         }
@@ -115,12 +123,13 @@ where
         &self,
         key: &TimestampedRef<<R as Record>::Key>,
         gen: &FileId,
+        projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = FP::open(self.option.table_path(gen))
             .await
             .map_err(VersionError::Io)?;
         SsTable::<R, FP>::open(file)
-            .get(key)
+            .get(key, projection_mask)
             .await
             .map_err(VersionError::Parquet)
     }
@@ -141,6 +150,7 @@ where
         range: (Bound<&'iters R::Key>, Bound<&'iters R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
+        projection_mask: ProjectionMask,
     ) -> Result<(), VersionError<R>> {
         for scope in self.level_slice[0].iter() {
             let file = FP::open(self.option.table_path(&scope.gen))
@@ -150,7 +160,7 @@ where
 
             iters.push(ScanStream::SsTable {
                 inner: table
-                    .scan(range, ts, limit)
+                    .scan(range, ts, limit, projection_mask.clone())
                     .await
                     .map_err(VersionError::Parquet)?,
             })
