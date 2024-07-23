@@ -11,9 +11,9 @@ use thiserror::Error;
 
 use crate::{
     fs::FileProvider,
-    oracle::Timestamp,
     record::KeyRef,
     stream,
+    timestamp::Timestamp,
     version::{set::transaction_ts, VersionRef},
     LockMap, Record, Schema,
 };

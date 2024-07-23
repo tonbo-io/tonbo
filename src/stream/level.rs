@@ -13,10 +13,10 @@ use parquet::errors::ParquetError;
 use crate::{
     fs::{FileId, FileProvider},
     ondisk::{scan::SsTableScan, sstable::SsTable},
-    oracle::Timestamp,
     record::Record,
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
+    timestamp::Timestamp,
     version::Version,
     DbOption,
 };

@@ -5,7 +5,7 @@ use std::{
     mem::{size_of, transmute},
 };
 
-use crate::{oracle::Timestamp, serdes::Encode};
+use crate::{serdes::Encode, timestamp::Timestamp};
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Timestamped<V> {

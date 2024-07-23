@@ -5,11 +5,11 @@ pub mod executor;
 pub mod fs;
 mod inmem;
 mod ondisk;
-mod oracle;
 mod record;
 mod scope;
 pub mod serdes;
 mod stream;
+mod timestamp;
 mod transaction;
 pub(crate) mod version;
 
@@ -23,10 +23,10 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use lockable::LockableHashMap;
-use oracle::Timestamp;
 use parquet::{errors::ParquetError, file::properties::WriterProperties};
 use record::Record;
 use thiserror::Error;
+use timestamp::Timestamp;
 use tracing::error;
 use transaction::Transaction;
 

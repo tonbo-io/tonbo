@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, mem::transmute};
 
 use super::{Key, Record, RecordRef};
-use crate::oracle::{timestamp::Timestamped, Timestamp};
+use crate::timestamp::{Timestamp, Timestamped};
 
 #[derive(Debug)]
 pub(crate) struct InternalRecordRef<'r, R>

@@ -1,4 +1,4 @@
-pub(crate) mod timestamp;
+pub(crate) mod timestamped;
 
 use std::{future::Future, io};
 
@@ -8,6 +8,7 @@ use arrow::{
 };
 use futures_io::{AsyncRead, AsyncWrite};
 
+pub(crate) use self::timestamped::*;
 use crate::serdes::{Decode, Encode};
 
 #[repr(transparent)]

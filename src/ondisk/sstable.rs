@@ -18,9 +18,9 @@ use super::scan::SsTableScan;
 use crate::{
     arrows::get_range_filter,
     fs::{AsyncFile, FileProvider},
-    oracle::{timestamp::TimestampedRef, Timestamp},
     record::Record,
     stream::record_batch::RecordBatchEntry,
+    timestamp::{Timestamp, TimestampedRef},
 };
 
 pub(crate) struct SsTable<R, FP>
@@ -125,8 +125,8 @@ mod tests {
     use crate::{
         executor::tokio::TokioExecutor,
         fs::FileProvider,
-        oracle::timestamp::Timestamped,
         tests::{get_test_record_batch, Test},
+        timestamp::Timestamped,
         DbOption,
     };
 
