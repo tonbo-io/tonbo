@@ -23,7 +23,11 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use lockable::LockableHashMap;
-use parquet::{arrow::ProjectionMask, errors::ParquetError, file::properties::WriterProperties};
+use parquet::{
+    arrow::{arrow_to_parquet_schema, ProjectionMask},
+    errors::ParquetError,
+    file::properties::WriterProperties,
+};
 use record::Record;
 use thiserror::Error;
 use timestamp::Timestamp;
@@ -201,40 +205,22 @@ where
         &'get self,
         key: &'get R::Key,
         ts: Timestamp,
-        projection_mask: ProjectionMask,
-    ) -> Result<Option<Entry<'get, R>>, ParquetError>
-    where
-        FP: FileProvider,
-    {
-        self.scan(Bound::Included(key), Bound::Unbounded, ts, projection_mask)
+    ) -> Result<Option<Entry<'get, R>>, ParquetError> {
+        self.scan(Bound::Included(key), Bound::Unbounded, ts)
+            .take()
             .await?
             .next()
             .await
             .transpose()
     }
 
-    async fn scan<'scan>(
+    fn scan<'scan>(
         &'scan self,
         lower: Bound<&'scan R::Key>,
         uppwer: Bound<&'scan R::Key>,
         ts: Timestamp,
-        projection_mask: ProjectionMask,
-    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError>
-    where
-        FP: FileProvider,
-    {
-        let mut streams = Vec::<ScanStream<R, FP>>::with_capacity(self.immutables.len() + 1);
-        streams.push(self.mutable.scan((lower, uppwer), ts).into());
-        for immutable in &self.immutables {
-            streams.push(
-                immutable
-                    .scan((lower, uppwer), ts, projection_mask.clone())
-                    .into(),
-            );
-        }
-        // TODO: sstable scan
-
-        MergeStream::from_vec(streams).await
+    ) -> Scan<'scan, R, FP> {
+        Scan::new(self, lower, uppwer, ts)
     }
 
     fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
@@ -249,6 +235,79 @@ where
         let mutable = mem::replace(&mut self.mutable, Mutable::new());
         let immutable = Immutable::from(mutable);
         self.immutables.push_front(immutable);
+    }
+}
+
+pub struct Scan<'scan, R, FP>
+where
+    R: Record,
+    FP: FileProvider,
+{
+    schema: &'scan Schema<R, FP>,
+    lower: Bound<&'scan R::Key>,
+    uppwer: Bound<&'scan R::Key>,
+    ts: Timestamp,
+
+    projection: ProjectionMask,
+}
+
+impl<'scan, R, FP> Scan<'scan, R, FP>
+where
+    R: Record + Send,
+    FP: FileProvider,
+{
+    fn new(
+        schema: &'scan Schema<R, FP>,
+        lower: Bound<&'scan R::Key>,
+        uppwer: Bound<&'scan R::Key>,
+        ts: Timestamp,
+    ) -> Self {
+        Self {
+            schema,
+            lower,
+            uppwer,
+            ts,
+            projection: ProjectionMask::all(),
+        }
+    }
+
+    pub fn project(self, mut projection: Vec<usize>) -> Self {
+        // skip two columns: _null and _ts
+        for p in &mut projection {
+            *p += 2;
+        }
+
+        let mask = ProjectionMask::roots(
+            &arrow_to_parquet_schema(R::arrow_schema()).unwrap(),
+            projection,
+        );
+
+        Self {
+            projection: mask,
+            ..self
+        }
+    }
+
+    pub async fn take(
+        self,
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError> {
+        let mut streams = Vec::<ScanStream<R, FP>>::with_capacity(self.schema.immutables.len() + 1);
+        streams.push(
+            self.schema
+                .mutable
+                .scan((self.lower, self.uppwer), self.ts)
+                .into(),
+        );
+        for immutable in &self.schema.immutables {
+            streams.push(
+                immutable
+                    .scan((self.lower, self.uppwer), self.ts, self.projection.clone())
+                    .into(),
+            );
+        }
+        // TODO: sstable scan
+
+        MergeStream::from_vec(streams).await
     }
 }
 
@@ -373,7 +432,6 @@ pub(crate) mod tests {
                 if !vbool_array.is_null(offset) {
                     vbool = Some(vbool_array.value(offset));
                 }
-                column_i += 1;
             }
 
             let record = TestRef {
