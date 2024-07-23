@@ -301,7 +301,10 @@ where
         version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'scan, R, FP>>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError<R>>
+    where
+        FP: 'scan,
+    {
         let mut stream = MergeStream::<R, FP>::from_vec(streams).await?;
 
         // Kould: is the capacity parameter necessary?

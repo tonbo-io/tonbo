@@ -39,9 +39,10 @@ where
 {
     pub(crate) fn key(&self) -> Timestamped<<R::Key as Key>::Ref<'_>> {
         match self {
-            Entry::Mutable(entry) => entry
-                .key()
-                .map(|key| unsafe { transmute(key.as_key_ref()) }),
+            Entry::Mutable(entry) => entry.key().map(|key| {
+                // Safety: shorter lifetime must be safe
+                unsafe { transmute(key.as_key_ref()) }
+            }),
             Entry::SsTable(entry) => entry.internal_key(),
             Entry::Immutable(entry) => entry.internal_key(),
             Entry::Level(entry) => entry.internal_key(),
@@ -95,7 +96,7 @@ pin_project! {
         },
         SsTable {
             #[pin]
-            inner: SsTableScan<R, FP>,
+            inner: SsTableScan<'scan, R, FP>,
         },
         Level {
             #[pin]
@@ -128,12 +129,12 @@ where
     }
 }
 
-impl<'scan, R, FP> From<SsTableScan<R, FP>> for ScanStream<'scan, R, FP>
+impl<'scan, R, FP> From<SsTableScan<'scan, R, FP>> for ScanStream<'scan, R, FP>
 where
     R: Record,
     FP: FileProvider,
 {
-    fn from(inner: SsTableScan<R, FP>) -> Self {
+    fn from(inner: SsTableScan<'scan, R, FP>) -> Self {
         ScanStream::SsTable { inner }
     }
 }

@@ -1,4 +1,5 @@
 use std::{
+    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -16,26 +17,31 @@ use crate::{
 
 pin_project! {
     #[derive(Debug)]
-    pub struct SsTableScan<R, FP>
+    pub struct SsTableScan<'scan, R, FP>
     where
         FP: FileProvider,
     {
         #[pin]
         stream: ParquetRecordBatchStream<Compat<FP::File>>,
         iter: Option<RecordBatchIterator<R>>,
+        _marker: PhantomData<&'scan ()>
     }
 }
 
-impl<R, FP> SsTableScan<R, FP>
+impl<R, FP> SsTableScan<'_, R, FP>
 where
     FP: FileProvider,
 {
     pub fn new(stream: ParquetRecordBatchStream<Compat<FP::File>>) -> Self {
-        SsTableScan { stream, iter: None }
+        SsTableScan {
+            stream,
+            iter: None,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<R, FP> Stream for SsTableScan<R, FP>
+impl<'scan, R, FP> Stream for SsTableScan<'scan, R, FP>
 where
     R: Record,
     FP: FileProvider,

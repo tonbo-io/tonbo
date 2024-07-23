@@ -10,10 +10,7 @@ use super::mutable::Mutable;
 use crate::{
     record::{internal::InternalRecordRef, Key, Record, RecordRef},
     stream::record_batch::RecordBatchEntry,
-    timestamp::{
-        timestamped::{Timestamped, TimestampedRef},
-        Timestamp, EPOCH,
-    },
+    timestamp::{Timestamp, Timestamped, TimestampedRef, EPOCH},
 };
 
 pub trait ArrowArrays: Sized {
@@ -154,10 +151,13 @@ where
         self.range.next().map(|(_, &offset)| {
             let record_ref = R::Ref::from_record_batch(self.record_batch, offset as usize);
             // TODO: remove cloning record batch
-            RecordBatchEntry::new(self.record_batch.clone(), unsafe {
-                transmute::<InternalRecordRef<R::Ref<'_>>, InternalRecordRef<R::Ref<'static>>>(
-                    record_ref,
-                )
+            RecordBatchEntry::new(self.record_batch.clone(), {
+                // Safety: record_ref self-references the record batch
+                unsafe {
+                    transmute::<InternalRecordRef<R::Ref<'_>>, InternalRecordRef<R::Ref<'static>>>(
+                        record_ref,
+                    )
+                }
             })
         })
     }
@@ -179,7 +179,7 @@ pub(crate) mod tests {
     use crate::{
         record::Record,
         tests::{Test, TestRef},
-        timestamp::Timestamped,
+        timestamp::timestamped::Timestamped,
     };
 
     #[derive(Debug)]
