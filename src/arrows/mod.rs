@@ -32,11 +32,11 @@ where
     let key = match range {
         Bound::Included(key) => {
             cmp = &gt_eq;
-            Some(unsafe { &*(key as *const _) })
+            Some(&*(key as *const _))
         }
         Bound::Excluded(key) => {
             cmp = &gt;
-            Some(unsafe { &*(key as *const _) })
+            Some(&*(key as *const _))
         }
         Bound::Unbounded => {
             cmp = &|this, _| {
