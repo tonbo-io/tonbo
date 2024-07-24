@@ -595,7 +595,7 @@ pub(crate) mod tests {
         // level 0
         let table_gen_1 = FileId::new();
         let table_gen_2 = FileId::new();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_1, |mutable| {
+        build_parquet_table::<Test, TokioExecutor>(option, table_gen_1, |mutable| {
             mutable.insert(
                 Test {
                     vstring: 1.to_string(),
@@ -623,7 +623,7 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_2, |mutable| {
+        build_parquet_table::<Test, TokioExecutor>(option, table_gen_2, |mutable| {
             mutable.insert(
                 Test {
                     vstring: 4.to_string(),
@@ -656,7 +656,7 @@ pub(crate) mod tests {
         let table_gen_3 = FileId::new();
         let table_gen_4 = FileId::new();
         let table_gen_5 = FileId::new();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_3, |mutable| {
+        build_parquet_table::<Test, TokioExecutor>(option, table_gen_3, |mutable| {
             mutable.insert(
                 Test {
                     vstring: 1.to_string(),
@@ -684,7 +684,7 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_4, |mutable| {
+        build_parquet_table::<Test, TokioExecutor>(option, table_gen_4, |mutable| {
             mutable.insert(
                 Test {
                     vstring: 4.to_string(),
@@ -712,7 +712,7 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen_5, |mutable| {
+        build_parquet_table::<Test, TokioExecutor>(option, table_gen_5, |mutable| {
             mutable.insert(
                 Test {
                     vstring: 7.to_string(),
