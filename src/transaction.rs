@@ -92,7 +92,8 @@ where
         let streams = vec![TransactionScan {
             inner: self.local.range(range),
             ts: self.ts,
-        }.into()];
+        }
+        .into()];
         Scan::new(&self.share, range, self.ts, &self.version, streams)
     }
 
@@ -312,28 +313,38 @@ mod tests {
         let mut stream = txn
             .scan((Bound::Unbounded, Bound::Unbounded))
             .await
+            .projection(vec![1])
             .take()
             .await
             .unwrap();
 
         let entry_0 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_0.key().value, "1");
+        assert!(entry_0.value().vbool.is_none());
         let entry_1 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_1.key().value, "2");
+        assert!(entry_1.value().vbool.is_none());
         let entry_2 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_2.key().value, "3");
+        assert!(entry_2.value().vbool.is_none());
         let entry_3 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_3.key().value, "4");
+        assert!(entry_3.value().vbool.is_none());
         let entry_4 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_4.key().value, "5");
+        assert!(entry_4.value().vbool.is_none());
         let entry_5 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_5.key().value, "6");
+        assert!(entry_5.value().vbool.is_none());
         let entry_6 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_6.key().value, "7");
+        assert!(entry_6.value().vbool.is_none());
         let entry_7 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_7.key().value, "8");
+        assert!(entry_7.value().vbool.is_none());
         let entry_8 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_8.key().value, "9");
+        assert!(entry_8.value().vbool.is_none());
         let entry_9 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_9.key().value, "alice");
         let entry_10 = stream.next().await.unwrap().unwrap();
