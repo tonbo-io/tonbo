@@ -295,7 +295,7 @@ where
         for p in &mut projection {
             *p += 2;
         }
-
+        projection.extend([0, 1, 2]);
         let mask = ProjectionMask::roots(
             &arrow_to_parquet_schema(R::arrow_schema()).unwrap(),
             projection,
