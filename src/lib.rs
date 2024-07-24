@@ -45,7 +45,7 @@ type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
 pub enum Projection {
     All,
-    Some(Vec<usize>),
+    Parts(Vec<usize>),
 }
 
 #[derive(Debug)]
@@ -214,7 +214,7 @@ where
     ) -> Result<Option<Entry<'get, R>>, ParquetError> {
         let mut scan = self.scan(Bound::Included(key), Bound::Unbounded, ts);
 
-        if let Projection::Some(projection) = projection {
+        if let Projection::Parts(projection) = projection {
             scan = scan.projection(projection)
         }
         scan.take().await?.next().await.transpose()
