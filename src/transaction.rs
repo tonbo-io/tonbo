@@ -15,7 +15,7 @@ use crate::{
     stream,
     timestamp::Timestamp,
     version::{set::transaction_ts, VersionRef},
-    LockMap, Record, Schema,
+    LockMap, Projection, Record, Schema,
 };
 
 pub struct Transaction<'txn, R, FP>
@@ -52,12 +52,13 @@ where
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
+        projection: Projection,
     ) -> Result<Option<TransactionEntry<'get, R>>, ParquetError> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
                 .share
-                .get(key, self.ts)
+                .get(key, self.ts, projection)
                 .await?
                 .map(TransactionEntry::Stream),
         })
@@ -150,7 +151,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        executor::tokio::TokioExecutor, tests::Test, transaction::CommitError, DbOption, DB,
+        executor::tokio::TokioExecutor, tests::Test, transaction::CommitError, DbOption,
+        Projection, DB,
     };
 
     #[tokio::test]
@@ -168,7 +170,11 @@ mod tests {
             txn1.set("foo".to_string());
 
             let txn2 = db.transaction().await;
-            dbg!(txn2.get(&"foo".to_string()).await.unwrap().is_none());
+            dbg!(txn2
+                .get(&"foo".to_string(), Projection::All)
+                .await
+                .unwrap()
+                .is_none());
 
             txn1.commit().await.unwrap();
             txn2.commit().await.unwrap();
@@ -176,7 +182,11 @@ mod tests {
 
         {
             let txn3 = db.transaction().await;
-            dbg!(txn3.get(&"foo".to_string()).await.unwrap().is_none());
+            dbg!(txn3
+                .get(&"foo".to_string(), Projection::All)
+                .await
+                .unwrap()
+                .is_none());
             txn3.commit().await.unwrap();
         }
     }
@@ -235,7 +245,7 @@ mod tests {
         });
 
         let key = 0.to_string();
-        let entry = txn1.get(&key).await.unwrap().unwrap();
+        let entry = txn1.get(&key, Projection::All).await.unwrap().unwrap();
 
         assert_eq!(entry.get().vstring, 0.to_string());
         assert_eq!(entry.get().vu32, Some(0));
