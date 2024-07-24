@@ -43,6 +43,11 @@ use crate::{
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
+pub enum Projection {
+    All,
+    Some(Vec<usize>),
+}
+
 #[derive(Debug)]
 pub struct DbOption {
     pub path: PathBuf,
@@ -205,13 +210,14 @@ where
         &'get self,
         key: &'get R::Key,
         ts: Timestamp,
+        projection: Projection,
     ) -> Result<Option<Entry<'get, R>>, ParquetError> {
-        self.scan(Bound::Included(key), Bound::Unbounded, ts)
-            .take()
-            .await?
-            .next()
-            .await
-            .transpose()
+        let mut scan = self.scan(Bound::Included(key), Bound::Unbounded, ts);
+
+        if let Projection::Some(projection) = projection {
+            scan = scan.projection(projection)
+        }
+        scan.take().await?.next().await.transpose()
     }
 
     fn scan<'scan>(
@@ -271,7 +277,7 @@ where
         }
     }
 
-    pub fn project(self, mut projection: Vec<usize>) -> Self {
+    pub fn projection(self, mut projection: Vec<usize>) -> Self {
         // skip two columns: _null and _ts
         for p in &mut projection {
             *p += 2;
