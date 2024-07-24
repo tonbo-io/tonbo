@@ -157,19 +157,50 @@ pub(crate) fn transaction_ts() -> Timestamp {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::{atomic::Ordering, Arc};
+    use std::{
+        io::SeekFrom,
+        sync::{atomic::Ordering, Arc},
+    };
 
-    use flume::bounded;
+    use async_lock::RwLock;
+    use flume::{bounded, Sender};
+    use futures_util::AsyncSeekExt;
     use tempfile::TempDir;
 
     use crate::{
         executor::tokio::TokioExecutor,
+        fs::FileProvider,
+        record::Record,
         version::{
+            cleaner::CleanTag,
             edit::VersionEdit,
-            set::{transaction_ts, VersionSet, GLOBAL_TIMESTAMP},
+            set::{transaction_ts, VersionSet, VersionSetInner, GLOBAL_TIMESTAMP},
+            Version, VersionError,
         },
         DbOption,
     };
+
+    pub(crate) async fn build_version_set<R, FP>(
+        version: Version<R, FP>,
+        clean_sender: Sender<CleanTag>,
+        option: Arc<DbOption>,
+    ) -> Result<VersionSet<R, FP>, VersionError<R>>
+    where
+        R: Record,
+        FP: FileProvider,
+    {
+        let mut log = FP::open(option.version_path()).await?;
+        log.seek(SeekFrom::End(0)).await?;
+
+        Ok(VersionSet::<R, FP> {
+            inner: Arc::new(RwLock::new(VersionSetInner {
+                current: Arc::new(version),
+                log,
+            })),
+            clean_sender,
+            option,
+        })
+    }
 
     #[tokio::test]
     async fn timestamp_persistence() {
