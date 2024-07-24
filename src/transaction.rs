@@ -81,7 +81,13 @@ where
                 .share
                 .get(&self.version, key, self.ts, projection)
                 .await?
-                .map(TransactionEntry::Stream),
+                .and_then(|entry| {
+                    if entry.value().is_none() {
+                        None
+                    } else {
+                        TransactionEntry::Stream(entry).into()
+                    }
+                }),
         })
     }
 
@@ -153,12 +159,12 @@ impl<'entry, R> TransactionEntry<'entry, R>
 where
     R: Record,
 {
-    pub fn get(&self) -> R::Ref<'_> {
+    pub fn get(&self) -> Option<R::Ref<'_>> {
         match self {
             TransactionEntry::Stream(entry) => entry.value(),
             TransactionEntry::Local(value) => {
                 // Safety: shorter lifetime must be safe
-                unsafe { transmute::<R::Ref<'entry>, R::Ref<'_>>(*value) }
+                Some(unsafe { transmute::<R::Ref<'entry>, R::Ref<'_>>(*value) })
             }
         }
     }
@@ -197,7 +203,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let db = DB::<String, TokioExecutor>::new(
-            Arc::new(DbOption::new(temp_dir.path())),
+            Arc::new(DbOption::from(temp_dir.path())),
             TokioExecutor::new(),
         )
         .await
@@ -233,7 +239,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let db = DB::<String, TokioExecutor>::new(
-            Arc::new(DbOption::new(temp_dir.path())),
+            Arc::new(DbOption::from(temp_dir.path())),
             TokioExecutor::new(),
         )
         .await
@@ -268,7 +274,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let db = DB::<Test, TokioExecutor>::new(
-            Arc::new(DbOption::new(temp_dir.path())),
+            Arc::new(DbOption::from(temp_dir.path())),
             TokioExecutor::new(),
         )
         .await
@@ -284,9 +290,9 @@ mod tests {
         let key = 0.to_string();
         let entry = txn1.get(&key, Projection::All).await.unwrap().unwrap();
 
-        assert_eq!(entry.get().vstring, 0.to_string());
-        assert_eq!(entry.get().vu32, Some(0));
-        assert_eq!(entry.get().vbool, Some(true));
+        assert_eq!(entry.get().unwrap().vstring, 0.to_string());
+        assert_eq!(entry.get().unwrap().vu32, Some(0));
+        assert_eq!(entry.get().unwrap().vbool, Some(true));
         drop(entry);
 
         txn1.commit().await.unwrap();
@@ -295,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn transaction_scan() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::new(temp_dir.path()));
+        let option = Arc::new(DbOption::from(temp_dir.path()));
 
         let (_, version) = build_version(&option).await;
         let schema = build_schema().await;
@@ -320,31 +326,31 @@ mod tests {
 
         let entry_0 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_0.key().value, "1");
-        assert!(entry_0.value().vbool.is_none());
+        assert!(entry_0.value().unwrap().vbool.is_none());
         let entry_1 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_1.key().value, "2");
-        assert!(entry_1.value().vbool.is_none());
+        assert!(entry_1.value().unwrap().vbool.is_none());
         let entry_2 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_2.key().value, "3");
-        assert!(entry_2.value().vbool.is_none());
+        assert!(entry_2.value().unwrap().vbool.is_none());
         let entry_3 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_3.key().value, "4");
-        assert!(entry_3.value().vbool.is_none());
+        assert!(entry_3.value().unwrap().vbool.is_none());
         let entry_4 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_4.key().value, "5");
-        assert!(entry_4.value().vbool.is_none());
+        assert!(entry_4.value().unwrap().vbool.is_none());
         let entry_5 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_5.key().value, "6");
-        assert!(entry_5.value().vbool.is_none());
+        assert!(entry_5.value().unwrap().vbool.is_none());
         let entry_6 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_6.key().value, "7");
-        assert!(entry_6.value().vbool.is_none());
+        assert!(entry_6.value().unwrap().vbool.is_none());
         let entry_7 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_7.key().value, "8");
-        assert!(entry_7.value().vbool.is_none());
+        assert!(entry_7.value().unwrap().vbool.is_none());
         let entry_8 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_8.key().value, "9");
-        assert!(entry_8.value().vbool.is_none());
+        assert!(entry_8.value().unwrap().vbool.is_none());
         let entry_9 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_9.key().value, "alice");
         let entry_10 = stream.next().await.unwrap().unwrap();

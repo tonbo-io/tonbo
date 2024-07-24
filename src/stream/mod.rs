@@ -55,10 +55,10 @@ where
         }
     }
 
-    pub(crate) fn value(&self) -> R::Ref<'_> {
+    pub(crate) fn value(&self) -> Option<R::Ref<'_>> {
         match self {
-            Entry::Transaction((_, value)) => value.as_ref().map(R::as_record_ref).unwrap(),
-            Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref).unwrap(),
+            Entry::Transaction((_, value)) => value.as_ref().map(R::as_record_ref),
+            Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref),
             Entry::SsTable(entry) => entry.get(),
             Entry::Immutable(entry) => entry.get(),
             Entry::Level(entry) => entry.get(),

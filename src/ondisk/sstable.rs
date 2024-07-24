@@ -158,7 +158,7 @@ pub(crate) mod tests {
     async fn write_sstable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            Arc::new(DbOption::new(temp_dir.path())),
+            Arc::new(DbOption::from(temp_dir.path())),
             TokioExecutor::new(),
         )
         .await;
@@ -185,7 +185,7 @@ pub(crate) mod tests {
     async fn projection_query() {
         let temp_dir = tempfile::tempdir().unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            Arc::new(DbOption::new(temp_dir.path())),
+            Arc::new(DbOption::from(temp_dir.path())),
             TokioExecutor::new(),
         )
         .await;
@@ -212,9 +212,9 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(test_ref_1.get().vstring, "hello");
-            assert_eq!(test_ref_1.get().vu32, Some(12));
-            assert_eq!(test_ref_1.get().vbool, None);
+            assert_eq!(test_ref_1.get().unwrap().vstring, "hello");
+            assert_eq!(test_ref_1.get().unwrap().vu32, Some(12));
+            assert_eq!(test_ref_1.get().unwrap().vbool, None);
         }
         {
             let test_ref_2 = open_sstable::<Test, TokioExecutor>(&table_path)
@@ -229,9 +229,9 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(test_ref_2.get().vstring, "hello");
-            assert_eq!(test_ref_2.get().vu32, None);
-            assert_eq!(test_ref_2.get().vbool, Some(true));
+            assert_eq!(test_ref_2.get().unwrap().vstring, "hello");
+            assert_eq!(test_ref_2.get().unwrap().vu32, None);
+            assert_eq!(test_ref_2.get().unwrap().vbool, Some(true));
         }
         {
             let test_ref_3 = open_sstable::<Test, TokioExecutor>(&table_path)
@@ -246,9 +246,9 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(test_ref_3.get().vstring, "hello");
-            assert_eq!(test_ref_3.get().vu32, None);
-            assert_eq!(test_ref_3.get().vbool, None);
+            assert_eq!(test_ref_3.get().unwrap().vstring, "hello");
+            assert_eq!(test_ref_3.get().unwrap().vu32, None);
+            assert_eq!(test_ref_3.get().unwrap().vbool, None);
         }
     }
 
@@ -256,7 +256,7 @@ pub(crate) mod tests {
     async fn projection_scan() {
         let temp_dir = tempfile::tempdir().unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            Arc::new(DbOption::new(temp_dir.path())),
+            Arc::new(DbOption::from(temp_dir.path())),
             TokioExecutor::new(),
         )
         .await;
@@ -284,14 +284,14 @@ pub(crate) mod tests {
                 .unwrap();
 
             let entry_0 = test_ref_1.next().await.unwrap().unwrap();
-            assert_eq!(entry_0.get().vstring, "hello");
-            assert_eq!(entry_0.get().vu32, Some(12));
-            assert_eq!(entry_0.get().vbool, None);
+            assert_eq!(entry_0.get().unwrap().vstring, "hello");
+            assert_eq!(entry_0.get().unwrap().vu32, Some(12));
+            assert_eq!(entry_0.get().unwrap().vbool, None);
 
             let entry_1 = test_ref_1.next().await.unwrap().unwrap();
-            assert_eq!(entry_1.get().vstring, "world");
-            assert_eq!(entry_1.get().vu32, Some(12));
-            assert_eq!(entry_1.get().vbool, None);
+            assert_eq!(entry_1.get().unwrap().vstring, "world");
+            assert_eq!(entry_1.get().unwrap().vu32, Some(12));
+            assert_eq!(entry_1.get().unwrap().vbool, None);
         }
         {
             let mut test_ref_2 = open_sstable::<Test, TokioExecutor>(&table_path)
@@ -309,14 +309,14 @@ pub(crate) mod tests {
                 .unwrap();
 
             let entry_0 = test_ref_2.next().await.unwrap().unwrap();
-            assert_eq!(entry_0.get().vstring, "hello");
-            assert_eq!(entry_0.get().vu32, None);
-            assert_eq!(entry_0.get().vbool, Some(true));
+            assert_eq!(entry_0.get().unwrap().vstring, "hello");
+            assert_eq!(entry_0.get().unwrap().vu32, None);
+            assert_eq!(entry_0.get().unwrap().vbool, Some(true));
 
             let entry_1 = test_ref_2.next().await.unwrap().unwrap();
-            assert_eq!(entry_1.get().vstring, "world");
-            assert_eq!(entry_1.get().vu32, None);
-            assert_eq!(entry_1.get().vbool, None);
+            assert_eq!(entry_1.get().unwrap().vstring, "world");
+            assert_eq!(entry_1.get().unwrap().vu32, None);
+            assert_eq!(entry_1.get().unwrap().vbool, None);
         }
         {
             let mut test_ref_3 = open_sstable::<Test, TokioExecutor>(&table_path)
@@ -334,14 +334,14 @@ pub(crate) mod tests {
                 .unwrap();
 
             let entry_0 = test_ref_3.next().await.unwrap().unwrap();
-            assert_eq!(entry_0.get().vstring, "hello");
-            assert_eq!(entry_0.get().vu32, None);
-            assert_eq!(entry_0.get().vbool, None);
+            assert_eq!(entry_0.get().unwrap().vstring, "hello");
+            assert_eq!(entry_0.get().unwrap().vu32, None);
+            assert_eq!(entry_0.get().unwrap().vbool, None);
 
             let entry_1 = test_ref_3.next().await.unwrap().unwrap();
-            assert_eq!(entry_1.get().vstring, "world");
-            assert_eq!(entry_1.get().vu32, None);
-            assert_eq!(entry_1.get().vbool, None);
+            assert_eq!(entry_1.get().unwrap().vstring, "world");
+            assert_eq!(entry_1.get().unwrap().vu32, None);
+            assert_eq!(entry_1.get().unwrap().vbool, None);
         }
     }
 }
