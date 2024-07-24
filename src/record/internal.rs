@@ -1,7 +1,10 @@
 use std::{marker::PhantomData, mem::transmute};
 
 use super::{Key, Record, RecordRef};
-use crate::timestamp::{Timestamp, Timestamped};
+use crate::{
+    serdes::Encode,
+    timestamp::{Timestamp, Timestamped},
+};
 
 #[derive(Debug)]
 pub(crate) struct InternalRecordRef<'r, R>
@@ -37,7 +40,29 @@ where
         unsafe { transmute(Timestamped::new(self.record.key(), self.ts)) }
     }
 
-    pub(crate) fn get(&self) -> R {
-        self.record
+    pub(crate) fn get(&self) -> Option<R> {
+        if self.null {
+            return None;
+        }
+
+        Some(self.record)
     }
 }
+
+// impl<'r, R> Encode for InternalRecordRef<'r, R>
+// where
+//     R: RecordRef<'r>,
+// {
+//     type Error;
+
+//     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+//     where
+//         W: futures_io::AsyncWrite + Unpin + Send + Sync,
+//     {
+//         todo!()
+//     }
+
+//     fn size(&self) -> usize {
+//         todo!()
+//     }
+// }

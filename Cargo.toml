@@ -10,6 +10,7 @@ tokio = ["dep:tokio"]
 [dependencies]
 arrow = "52"
 async-lock = "3"
+crc32fast = "1"
 crossbeam-skiplist = "0.1"
 flume = { version = "0.11", features = ["async"] }
 futures-core = "0.3"

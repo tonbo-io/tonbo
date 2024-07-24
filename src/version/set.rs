@@ -206,7 +206,7 @@ pub(crate) mod tests {
     async fn timestamp_persistence() {
         let temp_dir = TempDir::new().unwrap();
         let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::new(temp_dir.path()));
+        let option = Arc::new(DbOption::from(temp_dir.path()));
 
         let version_set: VersionSet<String, TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone())

@@ -163,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::new(temp_dir.path()));
+        let option = Arc::new(DbOption::from(temp_dir.path()));
 
         let (_, version) = build_version(&option).await;
 
@@ -184,23 +184,23 @@ mod tests {
             .unwrap();
 
             let entry_0 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_0.get().vu32.is_some());
-            assert!(entry_0.get().vbool.is_none());
+            assert!(entry_0.get().unwrap().vu32.is_some());
+            assert!(entry_0.get().unwrap().vbool.is_none());
             let entry_1 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_1.get().vu32.is_some());
-            assert!(entry_1.get().vbool.is_none());
+            assert!(entry_1.get().unwrap().vu32.is_some());
+            assert!(entry_1.get().unwrap().vbool.is_none());
             let entry_2 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_2.get().vu32.is_some());
-            assert!(entry_2.get().vbool.is_none());
+            assert!(entry_2.get().unwrap().vu32.is_some());
+            assert!(entry_2.get().unwrap().vbool.is_none());
             let entry_3 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_3.get().vu32.is_some());
-            assert!(entry_3.get().vbool.is_none());
+            assert!(entry_3.get().unwrap().vu32.is_some());
+            assert!(entry_3.get().unwrap().vbool.is_none());
             let entry_4 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_4.get().vu32.is_some());
-            assert!(entry_4.get().vbool.is_none());
+            assert!(entry_4.get().unwrap().vu32.is_some());
+            assert!(entry_4.get().unwrap().vbool.is_none());
             let entry_5 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_5.get().vu32.is_some());
-            assert!(entry_5.get().vbool.is_none());
+            assert!(entry_5.get().unwrap().vu32.is_some());
+            assert!(entry_5.get().unwrap().vbool.is_none());
         }
         {
             let mut level_stream_1 = LevelStream::new(
@@ -219,23 +219,23 @@ mod tests {
             .unwrap();
 
             let entry_0 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_0.get().vu32.is_none());
-            assert!(entry_0.get().vbool.is_some());
+            assert!(entry_0.get().unwrap().vu32.is_none());
+            assert!(entry_0.get().unwrap().vbool.is_some());
             let entry_1 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_1.get().vu32.is_none());
-            assert!(entry_1.get().vbool.is_some());
+            assert!(entry_1.get().unwrap().vu32.is_none());
+            assert!(entry_1.get().unwrap().vbool.is_some());
             let entry_2 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_2.get().vu32.is_none());
-            assert!(entry_2.get().vbool.is_some());
+            assert!(entry_2.get().unwrap().vu32.is_none());
+            assert!(entry_2.get().unwrap().vbool.is_some());
             let entry_3 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_3.get().vu32.is_none());
-            assert!(entry_3.get().vbool.is_some());
+            assert!(entry_3.get().unwrap().vu32.is_none());
+            assert!(entry_3.get().unwrap().vbool.is_some());
             let entry_4 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_4.get().vu32.is_none());
-            assert!(entry_4.get().vbool.is_some());
+            assert!(entry_4.get().unwrap().vu32.is_none());
+            assert!(entry_4.get().unwrap().vbool.is_some());
             let entry_5 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_5.get().vu32.is_none());
-            assert!(entry_5.get().vbool.is_some());
+            assert!(entry_5.get().unwrap().vu32.is_none());
+            assert!(entry_5.get().unwrap().vbool.is_some());
         }
         {
             let mut level_stream_1 = LevelStream::new(
@@ -254,23 +254,23 @@ mod tests {
             .unwrap();
 
             let entry_0 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_0.get().vu32.is_none());
-            assert!(entry_0.get().vbool.is_none());
+            assert!(entry_0.get().unwrap().vu32.is_none());
+            assert!(entry_0.get().unwrap().vbool.is_none());
             let entry_1 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_1.get().vu32.is_none());
-            assert!(entry_1.get().vbool.is_none());
+            assert!(entry_1.get().unwrap().vu32.is_none());
+            assert!(entry_1.get().unwrap().vbool.is_none());
             let entry_2 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_2.get().vu32.is_none());
-            assert!(entry_2.get().vbool.is_none());
+            assert!(entry_2.get().unwrap().vu32.is_none());
+            assert!(entry_2.get().unwrap().vbool.is_none());
             let entry_3 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_3.get().vu32.is_none());
-            assert!(entry_3.get().vbool.is_none());
+            assert!(entry_3.get().unwrap().vu32.is_none());
+            assert!(entry_3.get().unwrap().vbool.is_none());
             let entry_4 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_4.get().vu32.is_none());
-            assert!(entry_4.get().vbool.is_none());
+            assert!(entry_4.get().unwrap().vu32.is_none());
+            assert!(entry_4.get().unwrap().vbool.is_none());
             let entry_5 = level_stream_1.next().await.unwrap().unwrap();
-            assert!(entry_5.get().vu32.is_none());
-            assert!(entry_5.get().vbool.is_none());
+            assert!(entry_5.get().unwrap().vu32.is_none());
+            assert!(entry_5.get().unwrap().vbool.is_none());
         }
     }
 }
