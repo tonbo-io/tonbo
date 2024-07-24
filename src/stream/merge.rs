@@ -13,7 +13,7 @@ use super::{Entry, ScanStream};
 use crate::{fs::FileProvider, record::Record};
 
 pin_project! {
-    pub(crate) struct MergeStream<'merge, R, FP>
+    pub struct MergeStream<'merge, R, FP>
     where
         R: Record,
         FP: FileProvider,

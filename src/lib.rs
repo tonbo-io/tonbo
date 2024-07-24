@@ -208,25 +208,26 @@ where
 
     async fn get<'get>(
         &'get self,
+        version: &'get Version<R, FP>,
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
-    ) -> Result<Option<Entry<'get, R>>, ParquetError> {
-        let mut scan = self.scan(Bound::Included(key), Bound::Unbounded, ts);
+    ) -> Result<Option<Entry<'get, R>>, WriteError<R>>
+    where
+        FP: FileProvider,
+    {
+        let mut scan = Scan::new(
+            self,
+            (Bound::Included(key), Bound::Unbounded),
+            ts,
+            version,
+            vec![],
+        );
 
-        if let Projection::Parts(projection) = projection {
-            scan = scan.projection(projection)
+        if let Projection::Parts(mask) = projection {
+            scan = scan.projection(mask);
         }
-        scan.take().await?.next().await.transpose()
-    }
-
-    fn scan<'scan>(
-        &'scan self,
-        lower: Bound<&'scan R::Key>,
-        uppwer: Bound<&'scan R::Key>,
-        ts: Timestamp,
-    ) -> Scan<'scan, R, FP> {
-        Scan::new(self, lower, uppwer, ts)
+        Ok(scan.take().await?.next().await.transpose()?)
     }
 
     fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
@@ -251,9 +252,13 @@ where
 {
     schema: &'scan Schema<R, FP>,
     lower: Bound<&'scan R::Key>,
-    uppwer: Bound<&'scan R::Key>,
+    upper: Bound<&'scan R::Key>,
     ts: Timestamp,
 
+    version: &'scan Version<R, FP>,
+    streams: Vec<ScanStream<'scan, R, FP>>,
+
+    limit: Option<usize>,
     projection: ProjectionMask,
 }
 
@@ -264,17 +269,25 @@ where
 {
     fn new(
         schema: &'scan Schema<R, FP>,
-        lower: Bound<&'scan R::Key>,
-        uppwer: Bound<&'scan R::Key>,
+        (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
+        version: &'scan Version<R, FP>,
+        streams: Vec<ScanStream<'scan, R, FP>>,
     ) -> Self {
         Self {
             schema,
             lower,
-            uppwer,
+            upper,
             ts,
+            version,
+            streams,
+            limit: None,
             projection: ProjectionMask::all(),
         }
+    }
+
+    pub fn limit(self, limit: Option<usize>) -> Self {
+        Self { limit, ..self }
     }
 
     pub fn projection(self, mut projection: Vec<usize>) -> Self {
@@ -295,25 +308,32 @@ where
     }
 
     pub async fn take(
-        self,
-    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, ParquetError> {
-        let mut streams = Vec::<ScanStream<R, FP>>::with_capacity(self.schema.immutables.len() + 1);
-        streams.push(
+        mut self,
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, WriteError<R>> {
+        self.streams.push(
             self.schema
                 .mutable
-                .scan((self.lower, self.uppwer), self.ts)
+                .scan((self.lower, self.upper), self.ts)
                 .into(),
         );
         for immutable in &self.schema.immutables {
-            streams.push(
+            self.streams.push(
                 immutable
-                    .scan((self.lower, self.uppwer), self.ts, self.projection.clone())
+                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
                     .into(),
             );
         }
-        // TODO: sstable scan
+        self.version
+            .streams(
+                &mut self.streams,
+                (self.lower, self.upper),
+                self.ts,
+                self.limit,
+                self.projection,
+            )
+            .await?;
 
-        MergeStream::from_vec(streams).await
+        Ok(MergeStream::from_vec(self.streams).await?)
     }
 }
 
@@ -326,24 +346,32 @@ where
     Io(#[from] io::Error),
     #[error("write version error: {0}")]
     Version(#[from] VersionError<R>),
+    #[error("write parquet error: {0}")]
+    Parquet(#[from] ParquetError),
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::Arc;
+    use std::{collections::VecDeque, sync::Arc};
 
     use arrow::{
         array::{Array, AsArray, RecordBatch},
         datatypes::{DataType, Field, Schema, UInt32Type},
     };
+    use async_lock::RwLock;
     use once_cell::sync::Lazy;
     use parquet::arrow::ProjectionMask;
+    use tracing::error;
 
     use crate::{
-        executor::Executor,
-        inmem::immutable::tests::TestImmutableArrays,
+        executor::{tokio::TokioExecutor, Executor},
+        inmem::{
+            immutable::{tests::TestImmutableArrays, Immutable},
+            mutable::Mutable,
+        },
         record::{internal::InternalRecordRef, RecordRef},
-        DbOption, Record, DB,
+        version::{cleaner::Cleaner, set::tests::build_version_set, Version},
+        DbOption, Record, WriteError, DB,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -438,6 +466,7 @@ pub(crate) mod tests {
                 if !vbool_array.is_null(offset) {
                     vbool = Some(vbool_array.value(offset));
                 }
+                column_i += 1;
             }
 
             let record = TestRef {
@@ -481,5 +510,102 @@ pub(crate) mod tests {
         schema.freeze();
 
         schema.immutables[0].as_record_batch().clone()
+    }
+
+    pub(crate) async fn build_schema() -> crate::Schema<Test, TokioExecutor> {
+        let mutable = Mutable::new();
+
+        mutable.insert(
+            Test {
+                vstring: "alice".to_string(),
+                vu32: 1,
+                vobool: Some(true),
+            },
+            1_u32.into(),
+        );
+        mutable.insert(
+            Test {
+                vstring: "ben".to_string(),
+                vu32: 2,
+                vobool: Some(true),
+            },
+            1_u32.into(),
+        );
+        mutable.insert(
+            Test {
+                vstring: "carl".to_string(),
+                vu32: 3,
+                vobool: Some(true),
+            },
+            1_u32.into(),
+        );
+
+        let immutables = {
+            let mutable = Mutable::new();
+
+            mutable.insert(
+                Test {
+                    vstring: "dice".to_string(),
+                    vu32: 4,
+                    vobool: Some(true),
+                },
+                1_u32.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: "erika".to_string(),
+                    vu32: 5,
+                    vobool: Some(true),
+                },
+                1_u32.into(),
+            );
+            mutable.insert(
+                Test {
+                    vstring: "funk".to_string(),
+                    vu32: 6,
+                    vobool: Some(true),
+                },
+                1_u32.into(),
+            );
+
+            VecDeque::from(vec![Immutable::from(mutable)])
+        };
+
+        crate::Schema {
+            mutable,
+            immutables,
+            _marker: Default::default(),
+        }
+    }
+
+    pub(crate) async fn build_db<R, E>(
+        option: Arc<DbOption>,
+        executor: E,
+        schema: crate::Schema<R, E>,
+        version: Version<R, E>,
+    ) -> Result<DB<R, E>, WriteError<R>>
+    where
+        R: Record,
+        E: Executor,
+    {
+        E::create_dir_all(&option.path).await?;
+
+        let schema = Arc::new(RwLock::new(schema));
+
+        let (mut cleaner, clean_sender) = Cleaner::new(option.clone());
+        let version_set = build_version_set(version, clean_sender, option.clone()).await?;
+
+        executor.spawn(async move {
+            if let Err(err) = cleaner.listen().await {
+                error!("[Cleaner Error]: {}", err)
+            }
+        });
+
+        Ok(DB {
+            schema,
+            version_set,
+            lock_map: Arc::new(Default::default()),
+            _p: Default::default(),
+        })
     }
 }

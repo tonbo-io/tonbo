@@ -21,12 +21,14 @@ use crate::{
     record::{Key, Record},
     stream::level::LevelStream,
     timestamp::Timestamped,
+    transaction::TransactionScan,
 };
 
 pub enum Entry<'entry, R>
 where
     R: Record,
 {
+    Transaction((Timestamped<<R::Key as Key>::Ref<'entry>>, &'entry Option<R>)),
     Mutable(crossbeam_skiplist::map::Entry<'entry, Timestamped<R::Key>, Option<R>>),
     Immutable(RecordBatchEntry<R>),
     SsTable(RecordBatchEntry<R>),
@@ -39,6 +41,10 @@ where
 {
     pub(crate) fn key(&self) -> Timestamped<<R::Key as Key>::Ref<'_>> {
         match self {
+            Entry::Transaction((key, _)) => {
+                // Safety: shorter lifetime must be safe
+                unsafe { transmute(*key) }
+            }
             Entry::Mutable(entry) => entry.key().map(|key| {
                 // Safety: shorter lifetime must be safe
                 unsafe { transmute(key.as_key_ref()) }
@@ -51,6 +57,7 @@ where
 
     pub(crate) fn value(&self) -> R::Ref<'_> {
         match self {
+            Entry::Transaction((_, value)) => value.as_ref().map(R::as_record_ref).unwrap(),
             Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref).unwrap(),
             Entry::SsTable(entry) => entry.get(),
             Entry::Immutable(entry) => entry.get(),
@@ -66,6 +73,9 @@ where
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Entry::Transaction((key, value)) => {
+                write!(f, "Entry::Transaction({:?} -> {:?})", key, value)
+            }
             Entry::Mutable(mutable) => write!(
                 f,
                 "Entry::Mutable({:?} -> {:?})",
@@ -86,6 +96,10 @@ pin_project! {
         R: Record,
         FP: FileProvider,
     {
+        Transaction {
+            #[pin]
+            inner: stream::Iter<TransactionScan<'scan, R>>,
+        },
         Mutable {
             #[pin]
             inner: stream::Iter<MutableScan<'scan, R>>,
@@ -101,6 +115,18 @@ pin_project! {
         Level {
             #[pin]
             inner: LevelStream<'scan, R, FP>,
+        }
+    }
+}
+
+impl<'scan, R, FP> From<TransactionScan<'scan, R>> for ScanStream<'scan, R, FP>
+where
+    R: Record,
+    FP: FileProvider,
+{
+    fn from(inner: TransactionScan<'scan, R>) -> Self {
+        ScanStream::Transaction {
+            inner: stream::iter(inner),
         }
     }
 }
@@ -146,6 +172,7 @@ where
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            ScanStream::Transaction { .. } => write!(f, "ScanStream::Transaction"),
             ScanStream::Mutable { .. } => write!(f, "ScanStream::Mutable"),
             ScanStream::SsTable { .. } => write!(f, "ScanStream::SsTable"),
             ScanStream::Immutable { .. } => write!(f, "ScanStream::Immutable"),
@@ -163,6 +190,9 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.project() {
+            ScanStreamProject::Transaction { inner } => {
+                Poll::Ready(ready!(inner.poll_next(cx)).map(Entry::Transaction).map(Ok))
+            }
             ScanStreamProject::Mutable { inner } => {
                 Poll::Ready(ready!(inner.poll_next(cx)).map(Entry::Mutable).map(Ok))
             }
