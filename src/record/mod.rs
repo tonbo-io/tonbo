@@ -15,7 +15,9 @@ use crate::{
     serdes::{Decode, Encode},
 };
 
-pub trait Key: 'static + Encode + Decode + Ord + Clone + Send + Hash + std::fmt::Debug {
+pub trait Key:
+    'static + Encode + Decode + Ord + Clone + Send + Sync + Hash + std::fmt::Debug
+{
     type Ref<'r>: KeyRef<'r, Key = Self> + Copy + Debug
     where
         Self: 'r;

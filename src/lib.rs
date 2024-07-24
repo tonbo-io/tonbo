@@ -1,21 +1,20 @@
 #![allow(dead_code)]
-pub(crate) mod arrows;
+mod arrows;
 mod compaction;
 pub mod executor;
 pub mod fs;
 mod inmem;
 mod ondisk;
+pub mod option;
 mod record;
 mod scope;
 pub mod serdes;
 mod stream;
 mod timestamp;
 mod transaction;
-pub(crate) mod version;
+mod version;
 
-use std::{
-    collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, path::PathBuf, sync::Arc,
-};
+use std::{collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, sync::Arc};
 
 use async_lock::{RwLock, RwLockReadGuard};
 use fs::FileProvider;
@@ -26,7 +25,6 @@ use lockable::LockableHashMap;
 use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,
-    file::properties::WriterProperties,
 };
 use record::Record;
 use thiserror::Error;
@@ -34,31 +32,12 @@ use timestamp::Timestamp;
 use tracing::error;
 use transaction::Transaction;
 
+pub use crate::option::*;
 use crate::{
     executor::Executor,
-    fs::{FileId, FileType},
     stream::{merge::MergeStream, Entry, ScanStream},
     version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
 };
-
-type LockMap<K> = Arc<LockableHashMap<K, ()>>;
-
-pub enum Projection {
-    All,
-    Parts(Vec<usize>),
-}
-
-#[derive(Debug)]
-pub struct DbOption {
-    pub path: PathBuf,
-    pub max_mem_table_size: usize,
-    pub immutable_chunk_num: usize,
-    pub major_threshold_with_sst_size: usize,
-    pub level_sst_magnification: usize,
-    pub max_sst_file_size: usize,
-    pub clean_channel_buffer: usize,
-    pub write_parquet_option: Option<WriterProperties>,
-}
 
 pub struct DB<R, E>
 where
@@ -69,46 +48,6 @@ where
     version_set: VersionSet<R, E>,
     lock_map: LockMap<R::Key>,
     _p: PhantomData<E>,
-}
-
-impl DbOption {
-    pub fn new(path: impl Into<PathBuf> + Send) -> Self {
-        DbOption {
-            path: path.into(),
-            max_mem_table_size: 8 * 1024 * 1024,
-            immutable_chunk_num: 3,
-            major_threshold_with_sst_size: 10,
-            level_sst_magnification: 10,
-            max_sst_file_size: 24 * 1024 * 1024,
-            clean_channel_buffer: 10,
-            write_parquet_option: None,
-        }
-    }
-
-    pub(crate) fn table_path(&self, gen: &FileId) -> PathBuf {
-        self.path.join(format!("{}.{}", gen, FileType::Parquet))
-    }
-
-    pub(crate) fn wal_path(&self, gen: &FileId) -> PathBuf {
-        self.path.join(format!("{}.{}", gen, FileType::Wal))
-    }
-
-    pub(crate) fn version_path(&self) -> PathBuf {
-        self.path.join(format!("version.{}", FileType::Log))
-    }
-
-    pub(crate) fn is_threshold_exceeded_major<R, E>(
-        &self,
-        version: &Version<R, E>,
-        level: usize,
-    ) -> bool
-    where
-        R: Record,
-        E: FileProvider,
-    {
-        Version::<R, E>::tables_len(version, level)
-            >= (self.major_threshold_with_sst_size * self.level_sst_magnification.pow(level as u32))
-    }
 }
 
 impl<R, E> DB<R, E>
@@ -350,6 +289,13 @@ where
     Parquet(#[from] ParquetError),
 }
 
+type LockMap<K> = Arc<LockableHashMap<K, ()>>;
+
+pub enum Projection {
+    All,
+    Parts(Vec<usize>),
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::{collections::VecDeque, sync::Arc};
@@ -359,6 +305,7 @@ pub(crate) mod tests {
         datatypes::{DataType, Field, Schema, UInt32Type},
     };
     use async_lock::RwLock;
+    use futures_util::io;
     use once_cell::sync::Lazy;
     use parquet::arrow::ProjectionMask;
     use tracing::error;
@@ -370,6 +317,7 @@ pub(crate) mod tests {
             mutable::Mutable,
         },
         record::{internal::InternalRecordRef, RecordRef},
+        serdes::{Decode, Encode},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         DbOption, Record, WriteError, DB,
     };
@@ -379,6 +327,17 @@ pub(crate) mod tests {
         pub vstring: String,
         pub vu32: u32,
         pub vobool: Option<bool>,
+    }
+
+    impl Decode for Test {
+        type Error = io::Error;
+
+        async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: futures_io::AsyncRead + Unpin,
+        {
+            todo!()
+        }
     }
 
     impl Record for Test {
@@ -426,6 +385,21 @@ pub(crate) mod tests {
         pub vbool: Option<bool>,
     }
 
+    impl<'r> Encode for TestRef<'r> {
+        type Error = io::Error;
+
+        async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+        where
+            W: io::AsyncWrite + Unpin + Send + Sync,
+        {
+            todo!()
+        }
+
+        fn size(&self) -> usize {
+            todo!()
+        }
+    }
+
     impl<'r> RecordRef<'r> for TestRef<'r> {
         type Record = Test;
 
@@ -466,7 +440,6 @@ pub(crate) mod tests {
                 if !vbool_array.is_null(offset) {
                     vbool = Some(vbool_array.value(offset));
                 }
-                column_i += 1;
             }
 
             let record = TestRef {

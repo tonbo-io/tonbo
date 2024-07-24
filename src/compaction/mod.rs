@@ -330,7 +330,7 @@ where
             max = Some(key.value.to_key());
 
             written_size += key.size();
-            builder.push(key, Some(entry.value()));
+            builder.push(key, entry.value());
 
             if written_size >= option.max_sst_file_size {
                 Self::build_table(
@@ -523,7 +523,7 @@ pub(crate) mod tests {
         });
 
         let scope = Compactor::<Test, TokioExecutor>::minor_compaction(
-            &DbOption::new(temp_dir.path()),
+            &DbOption::from(temp_dir.path()),
             VecDeque::from(vec![batch_2, batch_1]),
         )
         .await
@@ -537,7 +537,7 @@ pub(crate) mod tests {
     async fn major_compaction() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(temp_dir.path());
+        let mut option = DbOption::from(temp_dir.path());
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
 

@@ -42,7 +42,7 @@ where
         *self.record_ref.value().value()
     }
 
-    pub fn get(&self) -> R::Ref<'_> {
+    pub fn get(&self) -> Option<R::Ref<'_>> {
         // Safety: shorter lifetime of the key must be safe
         unsafe { transmute(self.record_ref.get()) }
     }

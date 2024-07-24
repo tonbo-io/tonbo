@@ -8,17 +8,17 @@ use std::{future::Future, io};
 
 use futures_io::{AsyncRead, AsyncWrite};
 
-pub trait Encode: Send + Sync {
+pub trait Encode {
     type Error: From<io::Error> + std::error::Error + Send + Sync + 'static;
 
-    fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>> + Send
+    fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>>
     where
         W: AsyncWrite + Unpin + Send + Sync;
 
     fn size(&self) -> usize;
 }
 
-impl<T: Encode + Sync> Encode for &T {
+impl<T: Encode> Encode for &T {
     type Error = T::Error;
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
