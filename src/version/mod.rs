@@ -15,7 +15,7 @@ use crate::{
     record::Record,
     scope::Scope,
     serdes::Encode,
-    stream::{record_batch::RecordBatchEntry, ScanStream},
+    stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TimestampedRef},
     version::cleaner::CleanTag,
     DbOption,
@@ -144,10 +144,10 @@ where
         self.level_slice[level].len()
     }
 
-    pub(crate) async fn iters<'iters>(
+    pub(crate) async fn streams<'streams>(
         &self,
-        iters: &mut Vec<ScanStream<'iters, R, FP>>,
-        range: (Bound<&'iters R::Key>, Bound<&'iters R::Key>),
+        streams: &mut Vec<ScanStream<'streams, R, FP>>,
+        range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
@@ -158,22 +158,31 @@ where
                 .map_err(VersionError::Io)?;
             let table = SsTable::open(file);
 
-            iters.push(ScanStream::SsTable {
+            streams.push(ScanStream::SsTable {
                 inner: table
                     .scan(range, ts, limit, projection_mask.clone())
                     .await
                     .map_err(VersionError::Parquet)?,
             })
         }
-        for scopes in self.level_slice[1..].iter() {
+        for (i, scopes) in self.level_slice[1..].iter().enumerate() {
             if scopes.is_empty() {
                 continue;
             }
-            let _gens = scopes.iter().map(|scope| scope.gen).collect::<Vec<_>>();
-            todo!("level stream")
-            // iters.push(EStreamImpl::Level(
-            //     LevelStream::new(option, gens, lower, upper).await?,
-            // ));
+            streams.push(ScanStream::Level {
+                // SAFETY: checked scopes no empty
+                inner: LevelStream::new(
+                    self,
+                    i + 1,
+                    0,
+                    scopes.len() - 1,
+                    range,
+                    ts,
+                    limit,
+                    projection_mask.clone(),
+                )
+                .unwrap(),
+            });
         }
         Ok(())
     }

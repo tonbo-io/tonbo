@@ -1,7 +1,7 @@
 pub(crate) mod internal;
 mod str;
 
-use std::{hash::Hash, sync::Arc};
+use std::{fmt::Debug, hash::Hash, sync::Arc};
 
 use arrow::{
     array::{Datum, RecordBatch},
@@ -16,7 +16,7 @@ use crate::{
 };
 
 pub trait Key: 'static + Encode + Decode + Ord + Clone + Send + Hash + std::fmt::Debug {
-    type Ref<'r>: KeyRef<'r, Key = Self> + Copy
+    type Ref<'r>: KeyRef<'r, Key = Self> + Copy + Debug
     where
         Self: 'r;
 

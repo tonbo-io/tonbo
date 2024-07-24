@@ -1,5 +1,8 @@
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{
+        btree_map::{Entry, Range},
+        BTreeMap, Bound,
+    },
     io,
     mem::transmute,
 };
@@ -11,12 +14,30 @@ use thiserror::Error;
 
 use crate::{
     fs::FileProvider,
-    record::KeyRef,
+    record::{Key, KeyRef},
     stream,
-    timestamp::Timestamp,
+    timestamp::{Timestamp, Timestamped},
     version::{set::transaction_ts, VersionRef},
-    LockMap, Projection, Record, Schema,
+    LockMap, Projection, Record, Scan, Schema, WriteError,
 };
+
+pub(crate) struct TransactionScan<'scan, R: Record> {
+    inner: Range<'scan, R::Key, Option<R>>,
+    ts: Timestamp,
+}
+
+impl<'scan, R> Iterator for TransactionScan<'scan, R>
+where
+    R: Record,
+{
+    type Item = (Timestamped<<R::Key as Key>::Ref<'scan>>, &'scan Option<R>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|(key, value)| (Timestamped::new(key.as_key_ref(), self.ts), value))
+    }
+}
 
 pub struct Transaction<'txn, R, FP>
 where
@@ -53,15 +74,26 @@ where
         &'get self,
         key: &'get R::Key,
         projection: Projection,
-    ) -> Result<Option<TransactionEntry<'get, R>>, ParquetError> {
+    ) -> Result<Option<TransactionEntry<'get, R>>, WriteError<R>> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
                 .share
-                .get(key, self.ts, projection)
+                .get(&self.version, key, self.ts, projection)
                 .await?
                 .map(TransactionEntry::Stream),
         })
+    }
+
+    pub async fn scan<'scan>(
+        &'scan self,
+        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+    ) -> Scan<'scan, R, FP> {
+        let streams = vec![TransactionScan {
+            inner: self.local.range(range),
+            ts: self.ts,
+        }.into()];
+        Scan::new(&self.share, range, self.ts, &self.version, streams)
     }
 
     pub fn set(&mut self, value: R) {
@@ -146,13 +178,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::Bound, sync::Arc};
 
+    use futures_util::StreamExt;
     use tempfile::TempDir;
 
     use crate::{
-        executor::tokio::TokioExecutor, tests::Test, transaction::CommitError, DbOption,
-        Projection, DB,
+        compaction::tests::build_version,
+        executor::tokio::TokioExecutor,
+        tests::{build_db, build_schema, Test},
+        transaction::CommitError,
+        DbOption, Projection, DB,
     };
 
     #[tokio::test]
@@ -253,5 +289,64 @@ mod tests {
         drop(entry);
 
         txn1.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_scan() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::new(temp_dir.path()));
+
+        let (_, version) = build_version(&option).await;
+        let schema = build_schema().await;
+        let db = build_db(option, TokioExecutor::new(), schema, version)
+            .await
+            .unwrap();
+
+        let mut txn = db.transaction().await;
+        txn.set(Test {
+            vstring: "king".to_string(),
+            vu32: 8,
+            vobool: Some(true),
+        });
+
+        let mut stream = txn
+            .scan((Bound::Unbounded, Bound::Unbounded))
+            .await
+            .take()
+            .await
+            .unwrap();
+
+        let entry_0 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_0.key().value, "1");
+        let entry_1 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_1.key().value, "2");
+        let entry_2 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_2.key().value, "3");
+        let entry_3 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_3.key().value, "4");
+        let entry_4 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_4.key().value, "5");
+        let entry_5 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_5.key().value, "6");
+        let entry_6 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_6.key().value, "7");
+        let entry_7 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_7.key().value, "8");
+        let entry_8 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_8.key().value, "9");
+        let entry_9 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_9.key().value, "alice");
+        let entry_10 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_10.key().value, "ben");
+        let entry_11 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_11.key().value, "carl");
+        let entry_12 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_12.key().value, "dice");
+        let entry_13 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_13.key().value, "erika");
+        let entry_14 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_14.key().value, "funk");
+        let entry_15 = stream.next().await.unwrap().unwrap();
+        assert_eq!(entry_15.key().value, "king");
     }
 }
