@@ -49,6 +49,10 @@ impl Record for String {
         self
     }
 
+    fn primary_key_index() -> usize {
+        2
+    }
+
     fn as_record_ref(&self) -> Self::Ref<'_> {
         self
     }

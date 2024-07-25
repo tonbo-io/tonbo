@@ -280,6 +280,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                 self.#field_name.append_value(key.value);
                             },
                             base_ty: field.ty.clone(),
+                            index: field_index,
                         });
 
                         if is_nullable {
@@ -321,6 +322,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         name: primary_key_name,
         base_ty,
         builder_append_value: builder_append_primary_key,
+        index: primary_key_index,
     } = primary_key_definitions.unwrap();
 
     let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
@@ -345,6 +347,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
 
             fn key(&self) -> <<Self as Record>::Key as Key>::Ref<'_> {
                 &self.#primary_key_name
+            }
+
+            fn primary_key_index() -> usize {
+                #primary_key_index
             }
 
             fn as_record_ref(&self) -> Self::Ref<'_> {

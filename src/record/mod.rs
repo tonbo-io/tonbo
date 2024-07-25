@@ -46,6 +46,8 @@ pub trait Record: 'static + Sized + Decode {
         self.as_record_ref().key()
     }
 
+    fn primary_key_index() -> usize;
+
     fn as_record_ref(&self) -> Self::Ref<'_>;
 
     fn arrow_schema() -> &'static Arc<Schema>;
