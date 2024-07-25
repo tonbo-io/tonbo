@@ -39,7 +39,7 @@ impl Encode for Timestamp {
     type Error = io::Error;
     fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>>
     where
-        W: AsyncWrite + Unpin + Send + Sync,
+        W: AsyncWrite + Unpin,
     {
         self.0.encode(writer)
     }

@@ -329,6 +329,7 @@ where
             }
             max = Some(key.value.to_key());
 
+            // FIXIT: it is not the real size in arrows;
             written_size += key.size();
             builder.push(key, entry.value());
 

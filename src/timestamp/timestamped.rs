@@ -5,7 +5,12 @@ use std::{
     mem::{size_of, transmute},
 };
 
-use crate::{serdes::Encode, timestamp::Timestamp};
+use futures_io::{AsyncRead, AsyncWrite};
+
+use crate::{
+    serdes::{Decode, Encode},
+    timestamp::Timestamp,
+};
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Timestamped<V> {
@@ -129,6 +134,41 @@ where
         self.value()
             .cmp(other.value())
             .then_with(|| other.ts().cmp(&self.ts()))
+    }
+}
+
+impl<V> Encode for Timestamped<V>
+where
+    V: Encode,
+{
+    type Error = V::Error;
+
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        self.ts.encode(writer).await?;
+        self.value.encode(writer).await
+    }
+
+    fn size(&self) -> usize {
+        self.ts.size() + self.value.size()
+    }
+}
+
+impl<V> Decode for Timestamped<V>
+where
+    V: Decode,
+{
+    type Error = V::Error;
+
+    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let ts = Timestamp::decode(reader).await?;
+        let value = V::decode(reader).await?;
+        Ok(Timestamped::new(value, ts))
     }
 }
 

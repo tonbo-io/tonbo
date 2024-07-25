@@ -51,10 +51,10 @@ where
 {
     type Error = <K as Encode>::Error;
 
-    async fn encode<W: AsyncWrite + Unpin + Send + Sync>(
-        &self,
-        writer: &mut W,
-    ) -> Result<(), Self::Error> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
         self.min.encode(writer).await?;
         self.max.encode(writer).await?;
 
