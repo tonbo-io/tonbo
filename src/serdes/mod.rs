@@ -1,7 +1,7 @@
 mod arc;
 mod boolean;
 mod num;
-mod option;
+pub(crate) mod option;
 mod string;
 
 use std::{future::Future, io};

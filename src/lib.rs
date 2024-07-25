@@ -309,6 +309,7 @@ pub(crate) mod tests {
         datatypes::{DataType, Field, Schema, UInt32Type},
     };
     use async_lock::RwLock;
+    use futures_util::io;
     use morseldb_marco::morsel_record;
     use once_cell::sync::Lazy;
     use parquet::arrow::ProjectionMask;
@@ -321,6 +322,10 @@ pub(crate) mod tests {
             mutable::Mutable,
         },
         record::{internal::InternalRecordRef, Key, RecordRef},
+        serdes::{
+            option::{DecodeError, EncodeError},
+            Decode, Encode,
+        },
         timestamp::Timestamped,
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         DbOption, Immutable, Record, WriteError, DB,
