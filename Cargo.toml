@@ -1,3 +1,5 @@
+workspace = { members = [ "src/morseldb_marco"] }
+
 [package]
 edition = "2021"
 name = "morseldb"
@@ -18,6 +20,7 @@ futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"
 lockable = "0.0"
+morseldb_marco = { path = "src/morseldb_marco" }
 once_cell = "1"
 parquet = { version = "52", features = ["async"] }
 pin-project-lite = "0.2"

@@ -475,7 +475,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 3.to_string(),
                     vu32: 0,
-                    vobool: None,
+                    vbool: None,
                 },
                 0.into(),
             );
@@ -483,7 +483,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 5.to_string(),
                     vu32: 0,
-                    vobool: None,
+                    vbool: None,
                 },
                 0.into(),
             );
@@ -491,7 +491,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 6.to_string(),
                     vu32: 0,
-                    vobool: None,
+                    vbool: None,
                 },
                 0.into(),
             );
@@ -501,7 +501,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 4.to_string(),
                     vu32: 0,
-                    vobool: None,
+                    vbool: None,
                 },
                 0.into(),
             );
@@ -509,7 +509,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 2.to_string(),
                     vu32: 0,
-                    vobool: None,
+                    vbool: None,
                 },
                 0.into(),
             );
@@ -517,7 +517,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 1.to_string(),
                     vu32: 0,
-                    vobool: None,
+                    vbool: None,
                 },
                 0.into(),
             );
@@ -601,7 +601,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 1.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 1.into(),
             );
@@ -609,7 +609,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 2.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 1.into(),
             );
@@ -617,7 +617,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 3.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -629,7 +629,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 4.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 1.into(),
             );
@@ -637,7 +637,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 5.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 1.into(),
             );
@@ -645,7 +645,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 6.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -662,7 +662,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 1.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -670,7 +670,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 2.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -678,7 +678,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 3.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -690,7 +690,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 4.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -698,7 +698,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 5.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -706,7 +706,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 6.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -718,7 +718,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 7.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -726,7 +726,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 8.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );
@@ -734,7 +734,7 @@ pub(crate) mod tests {
                 Test {
                     vstring: 9.to_string(),
                     vu32: 0,
-                    vobool: Some(true),
+                    vbool: Some(true),
                 },
                 0.into(),
             );

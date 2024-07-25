@@ -1,0 +1,13 @@
+[package]
+name = "morseldb_marco"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syn = "1.0"
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[lib]
+proc-macro = true
+path = "src/lib.rs"

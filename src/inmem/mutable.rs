@@ -143,7 +143,7 @@ mod tests {
             Test {
                 vstring: key_1.clone(),
                 vu32: 1,
-                vobool: Some(true),
+                vbool: Some(true),
             },
             0_u32.into(),
         );
@@ -151,7 +151,7 @@ mod tests {
             Test {
                 vstring: key_2.clone(),
                 vu32: 2,
-                vobool: None,
+                vbool: None,
             },
             1_u32.into(),
         );
