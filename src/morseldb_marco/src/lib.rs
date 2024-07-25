@@ -28,6 +28,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
 
     let mut primary_key_definitions = None;
 
+    let mut encode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut encode_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut decode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
     let mut to_ref_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut ref_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -194,6 +198,12 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 builder_as_any_fields.push(quote! {
                     Arc::clone(&#field_name) as Arc<dyn Array>,
                 });
+                encode_method_fields.push(quote! {
+                    self.#field_name.encode(writer).await?;
+                });
+                encode_size_fields.push(quote! {
+                    + self.#field_name.size()
+                });
 
                 match ModelAttributes::parse_field(field) {
                     Ok(false) => {
@@ -246,6 +256,9 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             builder_push_none_fields.push(quote! {
                                 self.#field_name.append_null();
                             });
+                            decode_method_fields.push(quote! {
+                                let #field_name = Option::<#field_ty>::decode(reader).await?;
+                            });
                         } else {
                             from_record_batch_fields.push(quote! {
                                 let mut #field_name = None;
@@ -270,6 +283,9 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             });
                             builder_push_none_fields.push(quote! {
                                 self.#field_name.append_value(#default);
+                            });
+                            decode_method_fields.push(quote! {
+                                let #field_name = Option::<#field_ty>::decode(reader).await?.unwrap();
                             });
                         }
                     }
@@ -307,6 +323,9 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         });
                         arrays_get_fields.push(quote! {
                            let #field_name = self.#field_name.value(offset);
+                        });
+                        decode_method_fields.push(quote! {
+                            let #field_name = #field_ty::decode(reader).await?;
                         });
                     }
                     Err(err) => return TokenStream::from(err.to_compile_error()),
@@ -372,6 +391,21 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
 
+        impl Decode for #struct_name {
+            type Error = DecodeError<io::Error>;
+
+            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            where
+                R: futures_io::AsyncRead + Unpin,
+            {
+                #(#decode_method_fields)*
+
+                Ok(Self {
+                    #(#field_names)*
+                })
+            }
+        }
+
         #[derive(Debug, PartialEq, Eq, Clone, Copy)]
         pub struct #struct_ref_name<'r> {
             #(#ref_fields)*
@@ -404,6 +438,23 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     #(#field_names)*
                 };
                 InternalRecordRef::new(ts, record, null)
+            }
+        }
+
+        impl<'r> Encode for #struct_ref_name<'r> {
+            type Error = EncodeError<io::Error>;
+
+            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+            where
+                W: io::AsyncWrite + Unpin,
+            {
+                #(#encode_method_fields)*
+
+                Ok(())
+            }
+
+            fn size(&self) -> usize {
+                0 #(#encode_size_fields)*
             }
         }
 

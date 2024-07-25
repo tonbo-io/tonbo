@@ -19,6 +19,7 @@ use crate::{
     ondisk::sstable::SsTable,
     record::{KeyRef, Record},
     scope::Scope,
+    serdes::Encode,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
     version::{
         edit::VersionEdit,
@@ -329,8 +330,7 @@ where
             }
             max = Some(key.value.to_key());
 
-            // FIXIT: it is not the real size in arrows;
-            written_size += key.size();
+            written_size += key.size() + entry.value().size();
             builder.push(key, entry.value());
 
             if written_size >= option.max_sst_file_size {
