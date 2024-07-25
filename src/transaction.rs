@@ -284,7 +284,7 @@ mod tests {
         txn1.set(Test {
             vstring: 0.to_string(),
             vu32: 0,
-            vobool: Some(true),
+            vbool: Some(true),
         });
 
         let key = 0.to_string();
@@ -313,7 +313,7 @@ mod tests {
         txn.set(Test {
             vstring: "king".to_string(),
             vu32: 8,
-            vobool: Some(true),
+            vbool: Some(true),
         });
 
         let mut stream = txn
