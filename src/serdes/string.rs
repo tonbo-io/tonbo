@@ -8,10 +8,10 @@ use super::{Decode, Encode};
 impl<'r> Encode for &'r str {
     type Error = io::Error;
 
-    async fn encode<W: AsyncWrite + Unpin + Send>(
-        &self,
-        writer: &mut W,
-    ) -> Result<(), Self::Error> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
         writer.write_all(&(self.len() as u16).to_le_bytes()).await?;
         writer.write_all(self.as_bytes()).await
     }
@@ -24,10 +24,10 @@ impl<'r> Encode for &'r str {
 impl Encode for String {
     type Error = io::Error;
 
-    async fn encode<W: AsyncWrite + Unpin + Send + Sync>(
-        &self,
-        writer: &mut W,
-    ) -> Result<(), Self::Error> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
         self.as_str().encode(writer).await
     }
 
