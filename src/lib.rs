@@ -13,6 +13,7 @@ mod stream;
 mod timestamp;
 mod transaction;
 mod version;
+mod wal;
 
 use std::{collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, sync::Arc};
 
@@ -390,7 +391,7 @@ pub(crate) mod tests {
 
         async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
         where
-            W: io::AsyncWrite + Unpin + Send + Sync,
+            W: io::AsyncWrite + Unpin,
         {
             todo!()
         }

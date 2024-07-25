@@ -38,10 +38,10 @@ where
 {
     type Error = <K as Encode>::Error;
 
-    async fn encode<W: AsyncWrite + Unpin + Send + Sync>(
-        &self,
-        writer: &mut W,
-    ) -> Result<(), Self::Error> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
         match self {
             VersionEdit::Add { scope, level } => {
                 writer.write_all(&0u8.to_le_bytes()).await?;

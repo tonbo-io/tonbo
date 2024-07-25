@@ -1,10 +1,7 @@
 use std::{marker::PhantomData, mem::transmute};
 
 use super::{Key, Record, RecordRef};
-use crate::{
-    serdes::Encode,
-    timestamp::{Timestamp, Timestamped},
-};
+use crate::timestamp::{Timestamp, Timestamped};
 
 #[derive(Debug)]
 pub(crate) struct InternalRecordRef<'r, R>
@@ -48,21 +45,3 @@ where
         Some(self.record)
     }
 }
-
-// impl<'r, R> Encode for InternalRecordRef<'r, R>
-// where
-//     R: RecordRef<'r>,
-// {
-//     type Error;
-
-//     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
-//     where
-//         W: futures_io::AsyncWrite + Unpin + Send + Sync,
-//     {
-//         todo!()
-//     }
-
-//     fn size(&self) -> usize {
-//         todo!()
-//     }
-// }

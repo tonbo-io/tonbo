@@ -13,7 +13,7 @@ pub trait Encode {
 
     fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>>
     where
-        W: AsyncWrite + Unpin + Send + Sync;
+        W: AsyncWrite + Unpin;
 
     fn size(&self) -> usize;
 }
@@ -23,7 +23,7 @@ impl<T: Encode> Encode for &T {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send + Sync,
+        W: AsyncWrite + Unpin,
     {
         Encode::encode(*self, writer).await
     }

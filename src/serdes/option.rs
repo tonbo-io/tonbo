@@ -36,10 +36,10 @@ where
 {
     type Error = EncodeError<V::Error>;
 
-    async fn encode<W: AsyncWrite + Unpin + Send + Sync>(
-        &self,
-        writer: &mut W,
-    ) -> Result<(), Self::Error> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
         match self {
             None => writer.write_all(&[0]).await?,
             Some(v) => {
