@@ -3,10 +3,10 @@ mod arrows;
 mod compaction;
 pub mod executor;
 pub mod fs;
-mod inmem;
+pub mod inmem;
 mod ondisk;
 pub mod option;
-mod record;
+pub mod record;
 mod scope;
 pub mod serdes;
 mod stream;
@@ -23,6 +23,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use lockable::LockableHashMap;
+pub use morseldb_marco::morsel_record;
 use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,

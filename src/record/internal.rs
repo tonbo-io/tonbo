@@ -4,7 +4,7 @@ use super::{Key, Record, RecordRef};
 use crate::timestamp::{Timestamp, Timestamped};
 
 #[derive(Debug)]
-pub(crate) struct InternalRecordRef<'r, R>
+pub struct InternalRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
@@ -18,7 +18,7 @@ impl<'r, R> InternalRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
-    pub(crate) fn new(ts: Timestamp, record: R, null: bool) -> Self {
+    pub fn new(ts: Timestamp, record: R, null: bool) -> Self {
         Self {
             ts,
             record,
