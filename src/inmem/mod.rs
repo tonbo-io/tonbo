@@ -1,2 +1,2 @@
-pub(crate) mod immutable;
+pub mod immutable;
 pub(crate) mod mutable;
