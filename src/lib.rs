@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+mod arrows;
 mod compaction;
 pub mod executor;
 pub mod fs;
@@ -16,13 +17,13 @@ mod wal;
 
 use std::{collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, sync::Arc};
 
-use async_lock::{RwLock, RwLockReadGuard};
+use async_lock::{Mutex, RwLock, RwLockReadGuard};
+use flume::{bounded, Sender};
 use fs::FileProvider;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use lockable::LockableHashMap;
-pub use morseldb_marco::morsel_record;
 use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,
@@ -39,6 +40,9 @@ use crate::{
     stream::{merge::MergeStream, Entry, ScanStream},
     version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
 };
+use crate::compaction::{Compactor, CompactTask};
+use crate::fs::FileId;
+use crate::wal::log::LogType;
 
 pub struct DB<R, E>
 where
@@ -53,22 +57,40 @@ where
 
 impl<R, E> DB<R, E>
 where
-    R: Record + Send,
-    E: Executor,
+    R: Record + Send + Sync,
+    R::Columns: Send + Sync,
+    E: Executor +Send + Sync + 'static,
 {
     pub async fn new(option: DbOption, executor: E) -> Result<Self, WriteError<R>> {
         let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
 
-        let schema = Arc::new(RwLock::new(Schema::default()));
+        let (task_tx, mut task_rx) = bounded(1);
+        let schema = Arc::new(RwLock::new(Schema::new(option.clone(), task_tx).await?));
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone());
 
         let version_set = VersionSet::new(clean_sender, option.clone()).await?;
+        let mut compactor = Compactor::<R, E>::new(
+            schema.clone(),
+            option.clone(),
+            version_set.clone(),
+        );
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
                 error!("[Cleaner Error]: {}", err)
+            }
+        });
+        executor.spawn(async move {
+            while let Ok(task) = task_rx.recv_async().await {
+                match task {
+                    CompactTask::Flush  => {
+                        if let Err(err) = compactor.check_then_compaction().await {
+                            error!("[Compaction Error]: {}", err)
+                        }
+                    }
+                }
             }
         });
 
@@ -88,20 +110,42 @@ where
         )
     }
 
-    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
-        let schema = self.schema.read().await;
-        schema.write(record, ts).await
+    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), WriteError<R>> {
+        let is_excess = {
+            let schema = self.schema.read().await;
+            schema.write(LogType::Full, record, ts).await?
+        };
+        if is_excess {
+            let mut schema = self.schema.write().await;
+            schema.freeze().await?;
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn write_batch(
         &self,
-        records: impl Iterator<Item = R>,
+        mut records: impl ExactSizeIterator<Item = R>,
         ts: Timestamp,
-    ) -> io::Result<()> {
-        let columns = self.schema.read().await;
-        for record in records {
-            columns.write(record, ts).await?;
+    ) -> Result<(), WriteError<R>> {
+        let schema = self.schema.read().await;
+
+        if let Some(first) = records.next() {
+            if let Some(record) = records.next() {
+                schema.write(LogType::First, first, ts).await?;
+
+                let mut last_buf = record;
+
+                while let Some(record) = records.next() {
+                    schema.write(LogType::Middle, mem::replace(&mut last_buf, record), ts).await?;
+                }
+                schema.write(LogType::Last, last_buf, ts).await?;
+            } else {
+                schema.write(LogType::Full, first, ts).await?;
+            }
         }
+        // TODO: is_excess
+
         Ok(())
     }
 
@@ -113,23 +157,12 @@ where
 pub(crate) struct Schema<R, FP>
 where
     R: Record,
+    FP: FileProvider,
 {
-    mutable: Mutable<R>,
-    immutables: VecDeque<Immutable<R::Columns>>,
-    _marker: PhantomData<FP>,
-}
-
-impl<R, FP> Default for Schema<R, FP>
-where
-    R: Record,
-{
-    fn default() -> Self {
-        Self {
-            mutable: Mutable::default(),
-            immutables: VecDeque::default(),
-            _marker: Default::default(),
-        }
-    }
+    mutable: Mutable<R, FP>,
+    immutables: VecDeque<(FileId, Immutable<R::Columns>)>,
+    compaction_tx: Sender<CompactTask>,
+    option: Arc<DbOption>,
 }
 
 impl<R, FP> Schema<R, FP>
@@ -137,14 +170,21 @@ where
     R: Record + Send,
     FP: FileProvider,
 {
-    async fn write(&self, record: R, ts: Timestamp) -> io::Result<()> {
-        self.mutable.insert(record, ts);
-        Ok(())
+    async fn new(option: Arc<DbOption>, compaction_tx: Sender<CompactTask>) -> io::Result<Self> {
+       Ok(Schema {
+           mutable: Mutable::new(&option).await?,
+           immutables: Default::default(),
+           compaction_tx,
+           option,
+       })
     }
 
-    async fn remove(&self, key: R::Key, ts: Timestamp) -> io::Result<()> {
-        self.mutable.remove(key, ts);
-        Ok(())
+    async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, WriteError<R>> {
+        Ok(self.mutable.insert(log_ty, record, ts).await? > self.option.max_mem_table_size)
+    }
+
+    async fn remove(&self, log_ty: LogType, key: R::Key, ts: Timestamp) -> Result<bool, WriteError<R>> {
+        Ok(self.mutable.remove(log_ty, key, ts).await? > self.option.max_mem_table_size)
     }
 
     async fn get<'get>(
@@ -176,13 +216,19 @@ where
             || self
                 .immutables
                 .iter()
-                .any(|immutable| immutable.check_conflict(key, ts))
+                .any(|(_, immutable)| immutable.check_conflict(key, ts))
     }
 
-    fn freeze(&mut self) {
-        let mutable = mem::replace(&mut self.mutable, Mutable::new());
-        let immutable = Immutable::from(mutable);
-        self.immutables.push_front(immutable);
+    async fn freeze(&mut self) -> Result<(), WriteError<R>> {
+        let mutable = mem::replace(&mut self.mutable, Mutable::new(&self.option).await?);
+        let (file_id, immutable) = mutable.to_immutable().await?;
+
+        self.immutables.push_front((file_id, immutable));
+        if self.immutables.len() > self.option.immutable_chunk_num {
+            let _ = self.compaction_tx.try_send(CompactTask::Flush);
+        }
+
+        Ok(())
     }
 }
 
@@ -257,7 +303,7 @@ where
                 .scan((self.lower, self.upper), self.ts)
                 .into(),
         );
-        for immutable in &self.schema.immutables {
+        for (_, immutable) in &self.schema.immutables {
             self.streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
@@ -300,13 +346,14 @@ pub enum Projection {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{collections::VecDeque, sync::Arc};
+    use std::{collections::VecDeque, mem, sync::Arc};
 
     use arrow::{
         array::{Array, AsArray, RecordBatch},
         datatypes::{DataType, Field, Schema, UInt32Type},
     };
-    use async_lock::RwLock;
+    use async_lock::{Mutex, RwLock};
+    use flume::{bounded, Receiver};
     use futures_util::io;
     use once_cell::sync::Lazy;
     use parquet::arrow::ProjectionMask;
@@ -320,6 +367,9 @@ pub(crate) mod tests {
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         DbOption, Immutable, Record, WriteError, DB,
     };
+    use crate::compaction::{Compactor, CompactTask};
+    use crate::fs::FileId;
+    use crate::wal::log::LogType;
 
     #[derive(Debug, PartialEq, Eq)]
     pub struct Test {
@@ -536,86 +586,97 @@ pub(crate) mod tests {
 
         let mut schema = db.schema.write().await;
 
-        schema.freeze();
+        let mutable = mem::replace(&mut schema.mutable, Mutable::new(&option).await.unwrap());
 
-        schema.immutables[0].as_record_batch().clone()
+        Immutable::<<Test as Record>::Columns>::from(mutable.data).as_record_batch().clone()
     }
 
-    pub(crate) async fn build_schema() -> crate::Schema<Test, TokioExecutor> {
-        let mutable = Mutable::new();
+    pub(crate) async fn build_schema(option: DbOption) -> io::Result<(crate::Schema<Test, TokioExecutor>, Receiver<CompactTask>)> {
+        let mutable = Mutable::new(&option).await?;
 
         mutable.insert(
+            LogType::Full,
             Test {
                 vstring: "alice".to_string(),
                 vu32: 1,
                 vbool: Some(true),
             },
             1_u32.into(),
-        );
+        ).await.unwrap();
         mutable.insert(
+            LogType::Full,
             Test {
                 vstring: "ben".to_string(),
                 vu32: 2,
                 vbool: Some(true),
             },
             1_u32.into(),
-        );
+        ).await.unwrap();
         mutable.insert(
+            LogType::Full,
             Test {
                 vstring: "carl".to_string(),
                 vu32: 3,
                 vbool: Some(true),
             },
             1_u32.into(),
-        );
+        ).await.unwrap();
 
         let immutables = {
-            let mutable = Mutable::new();
+            let mutable: Mutable<Test, TokioExecutor> = Mutable::new(&option).await?;
 
             mutable.insert(
+                LogType::Full,
                 Test {
                     vstring: "dice".to_string(),
                     vu32: 4,
                     vbool: Some(true),
                 },
                 1_u32.into(),
-            );
+            ).await.unwrap();
             mutable.insert(
+                LogType::Full,
                 Test {
                     vstring: "erika".to_string(),
                     vu32: 5,
                     vbool: Some(true),
                 },
                 1_u32.into(),
-            );
+            ).await.unwrap();
             mutable.insert(
+                LogType::Full,
                 Test {
                     vstring: "funk".to_string(),
                     vu32: 6,
                     vbool: Some(true),
                 },
                 1_u32.into(),
-            );
+            ).await.unwrap();
 
-            VecDeque::from(vec![Immutable::from(mutable)])
+            VecDeque::from(vec![(FileId::new(), Immutable::from(mutable.data))])
         };
 
-        crate::Schema {
+        let (compaction_tx, compaction_rx) = bounded(1);
+
+        Ok((crate::Schema {
             mutable,
             immutables,
-            _marker: Default::default(),
-        }
+            compaction_tx,
+            option,
+        }, compaction_rx))
     }
 
     pub(crate) async fn build_db<R, E>(
         option: Arc<DbOption>,
+        compaction_rx: Receiver<CompactTask>,
         executor: E,
         schema: crate::Schema<R, E>,
         version: Version<R, E>,
     ) -> Result<DB<R, E>, WriteError<R>>
     where
-        R: Record,
-        E: Executor,
+        R: Record + Send + Sync,
+        R::Columns: Send + Sync,
+        E: Executor +Send + Sync + 'static,
     {
         E::create_dir_all(&option.path).await?;
 
@@ -623,10 +684,26 @@ pub(crate) mod tests {
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone());
         let version_set = build_version_set(version, clean_sender, option.clone()).await?;
+        let mut compactor = Compactor::<R, E>::new(
+            schema.clone(),
+            option.clone(),
+            version_set.clone(),
+        );
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
                 error!("[Cleaner Error]: {}", err)
+            }
+        });
+        executor.spawn(async move {
+            while let Ok(task) = compaction_rx.recv_async().await {
+                match task {
+                    CompactTask::Flush  => {
+                        if let Err(err) = compactor.check_then_compaction().await {
+                            error!("[Compaction Error]: {}", err)
+                        }
+                    }
+                }
             }
         });
 
