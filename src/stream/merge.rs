@@ -138,22 +138,26 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::MergeStream;
-    use crate::{executor::tokio::TokioExecutor, inmem::mutable::Mutable};
+    use crate::{DbOption, executor::tokio::TokioExecutor, inmem::mutable::Mutable};
+    use crate::wal::log::LogType;
 
     #[tokio::test]
     async fn merge_mutable() {
-        let m1 = Mutable::<String>::new();
-        m1.remove("b".into(), 3.into());
-        m1.insert("c".into(), 4.into());
-        m1.insert("d".into(), 5.into());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let option = DbOption::from(temp_dir.path());
 
-        let m2 = Mutable::<String>::new();
-        m2.insert("a".into(), 1.into());
-        m2.insert("b".into(), 2.into());
-        m2.insert("c".into(), 3.into());
+        let m1 = Mutable::<String, TokioExecutor>::new(&option).await.unwrap();
+        m1.remove(LogType::Full,"b".into(), 3.into()).await.unwrap();
+        m1.insert(LogType::Full,"c".into(), 4.into()).await.unwrap();
+        m1.insert(LogType::Full,"d".into(), 5.into()).await.unwrap();
 
-        let m3 = Mutable::<String>::new();
-        m3.insert("e".into(), 4.into());
+        let m2 = Mutable::<String, TokioExecutor>::new(&option).await.unwrap();
+        m2.insert(LogType::Full,"a".into(), 1.into()).await.unwrap();
+        m2.insert(LogType::Full,"b".into(), 2.into()).await.unwrap();
+        m2.insert(LogType::Full,"c".into(), 3.into()).await.unwrap();
+
+        let m3 = Mutable::<String, TokioExecutor>::new(&option).await.unwrap();
+        m3.insert(LogType::Full,"e".into(), 4.into()).await.unwrap();
 
         let lower = "a".to_string();
         let upper = "e".to_string();
@@ -176,12 +180,15 @@ mod tests {
 
     #[tokio::test]
     async fn merge_mutable_remove_duplicates() {
-        let m1 = Mutable::<String>::new();
-        m1.insert("1".into(), 0_u32.into());
-        m1.insert("2".into(), 0_u32.into());
-        m1.insert("2".into(), 1_u32.into());
-        m1.insert("3".into(), 1_u32.into());
-        m1.insert("4".into(), 0_u32.into());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let option = DbOption::from(temp_dir.path());
+
+        let m1 = Mutable::<String, TokioExecutor>::new(&option).await.unwrap();
+        m1.insert(LogType::Full,"1".into(), 0_u32.into()).await.unwrap();
+        m1.insert(LogType::Full,"2".into(), 0_u32.into()).await.unwrap();
+        m1.insert(LogType::Full,"2".into(), 1_u32.into()).await.unwrap();
+        m1.insert(LogType::Full,"3".into(), 1_u32.into()).await.unwrap();
+        m1.insert(LogType::Full,"4".into(), 0_u32.into()).await.unwrap();
 
         let lower = "1".to_string();
         let upper = "4".to_string();

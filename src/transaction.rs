@@ -20,6 +20,7 @@ use crate::{
     version::{set::transaction_ts, VersionRef},
     LockMap, Projection, Record, Scan, Schema, WriteError,
 };
+use crate::wal::log::LogType;
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
     inner: Range<'scan, R::Key, Option<R>>,
@@ -120,7 +121,7 @@ where
         }
     }
 
-    pub async fn commit(self) -> Result<(), CommitError<R>> {
+    pub async fn commit(mut self) -> Result<(), CommitError<R>> {
         let mut _key_guards = Vec::new();
 
         for (key, _) in self.local.iter() {
@@ -136,14 +137,40 @@ where
                 return Err(CommitError::WriteConflict(key.clone()));
             }
         }
-        for (key, record) in self.local {
-            let new_ts = transaction_ts();
-            match record {
-                Some(record) => self.share.write(record, new_ts).await?,
-                None => self.share.remove(key, new_ts).await?,
+
+        let len = self.local.len();
+        let is_excess = match len {
+            0 => false,
+            1 => {
+                let new_ts = transaction_ts();
+                let (key ,record) = self.local.pop_first().unwrap();
+                Self::append(&self.share, LogType::Full, key, record, new_ts).await?
             }
-        }
+            _ => {
+                let new_ts = transaction_ts();
+                let mut iter = self.local.into_iter();
+
+                let (key, record) = iter.next().unwrap();
+                Self::append(&self.share, LogType::First, key, record, new_ts).await?;
+
+                for (key, record) in (&mut iter).take(len - 2) {
+                    Self::append(&self.share, LogType::Middle, key, record, new_ts).await?;
+                }
+
+                let (key, record) = iter.next().unwrap();
+                Self::append(&self.share, LogType::Last, key, record, new_ts).await?
+            }
+        };
+
+        // TODO: is excess
         Ok(())
+    }
+
+    async fn append(schema: &Schema<R, FP>, log_ty: LogType, key: <R as Record>::Key, record: Option<R>, new_ts: Timestamp) -> Result<bool, CommitError<R>> {
+        Ok(match record {
+            Some(record) => schema.write(log_ty, record, new_ts).await?,
+            None => schema.remove(log_ty, key, new_ts).await?,
+        })
     }
 }
 
@@ -179,6 +206,8 @@ where
     Io(#[from] io::Error),
     #[error("transaction parquet error {:?}", .0)]
     Parquet(#[from] ParquetError),
+    #[error("transaction write error {:?}", .0)]
+    Write(#[from] WriteError<R>),
     #[error("transaction write conflict: {:?}", .0)]
     WriteConflict(R::Key),
 }
@@ -298,8 +327,8 @@ mod tests {
         let option = Arc::new(DbOption::from(temp_dir.path()));
 
         let (_, version) = build_version(&option).await;
-        let schema = build_schema().await;
-        let db = build_db(option, TokioExecutor::new(), schema, version)
+        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
+        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
             .await
             .unwrap();
 

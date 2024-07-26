@@ -1,5 +1,6 @@
 mod checksum;
-mod log;
+pub(crate) mod log;
+pub(crate) mod record_entry;
 
 use std::{io, marker::PhantomData};
 
@@ -20,6 +21,9 @@ use crate::{
     serdes::{Decode, Encode},
     timestamp::Timestamped,
 };
+use crate::record::Key;
+use crate::wal::log::LogType;
+use crate::wal::record_entry::RecordEntry;
 
 #[derive(Debug)]
 pub(crate) struct WalFile<F, R> {
@@ -47,17 +51,19 @@ where
     F: AsyncWrite + Unpin,
     R: Record,
 {
-    async fn write<'r>(
+    pub(crate) async fn write<'r>(
         &mut self,
-        log: Log<Timestamped<R::Ref<'r>>>,
+        log_ty: LogType,
+        key: Timestamped<<R::Key as Key>::Ref<'r>>,
+        value: Option<R::Ref<'r>>,
     ) -> Result<(), <R::Ref<'r> as Encode>::Error> {
         let mut writer = HashWriter::new(&mut self.file);
-        log.encode(&mut writer).await?;
+        Log::new(log_ty, RecordEntry::<R>::Encode((key, value))).encode(&mut writer).await?;
         writer.eol().await?;
         Ok(())
     }
 
-    async fn flush(&mut self) -> io::Result<()> {
+    pub(crate) async fn flush(&mut self) -> io::Result<()> {
         self.file.flush().await
     }
 }
@@ -69,7 +75,7 @@ where
 {
     fn recover(
         &mut self,
-    ) -> impl Stream<Item = Result<Log<Timestamped<R>>, RecoverError<<R as Decode>::Error>>> + '_
+    ) -> impl Stream<Item = Result<(LogType, Timestamped<R::Key>, Option<R>), RecoverError<<R as Decode>::Error>>> + '_
     {
         stream! {
             let mut file = BufReader::new(&mut self.file);
@@ -81,14 +87,17 @@ where
 
                 let mut reader = HashReader::new(&mut file);
 
-                let record = Log::decode(&mut reader).await.map_err(RecoverError::Decode)?;
+                let record = Log::<RecordEntry<'static, R>>::decode(&mut reader).await.map_err(RecoverError::Io)?;
 
                 if !reader.checksum().await? {
                     yield Err(RecoverError::Checksum);
                     return;
                 }
-
-                yield Ok(record);
+                if let RecordEntry::Decode((key, value)) = record.record {
+                    yield Ok((record.log_type, key, value));
+                } else {
+                    unreachable!()
+                }
             }
         }
     }
@@ -113,13 +122,14 @@ mod tests {
 
     use super::{log::LogType, FileId, Log, WalFile};
     use crate::timestamp::Timestamped;
+    use crate::wal::record_entry::RecordEntry;
 
     #[tokio::test]
     async fn write_and_recover() {
         let mut file = Vec::new();
         {
             let mut wal = WalFile::<_, String>::new(Cursor::new(&mut file).compat(), FileId::new());
-            wal.write(Log::new(LogType::Full, Timestamped::new("hello", 0.into())))
+            wal.write(LogType::Full, Timestamped::new("hello", 0.into()), Some("hello"))
                 .await
                 .unwrap();
             wal.flush().await.unwrap();
@@ -129,12 +139,12 @@ mod tests {
 
             {
                 let mut stream = pin!(wal.recover());
-                let log = stream.next().await.unwrap().unwrap();
-                assert_eq!(log.record.ts, 0.into());
-                assert_eq!(log.record.value, "hello".to_string());
+                let (log_ty, key, value) = stream.next().await.unwrap().unwrap();
+                assert_eq!(key.ts, 0.into());
+                assert_eq!(value, Some("hello".to_string()));
             }
 
-            wal.write(Log::new(LogType::Full, Timestamped::new("world", 1.into())))
+            wal.write(LogType::Full, Timestamped::new("world", 1.into()), Some("world"))
                 .await
                 .unwrap();
         }
@@ -144,12 +154,12 @@ mod tests {
 
             {
                 let mut stream = pin!(wal.recover());
-                let log = stream.next().await.unwrap().unwrap();
-                assert_eq!(log.record.ts, 0.into());
-                assert_eq!(log.record.value, "hello".to_string());
-                let log = stream.next().await.unwrap().unwrap();
-                assert_eq!(log.record.ts, 1.into());
-                assert_eq!(log.record.value, "world".to_string());
+                let (_, key, value) = stream.next().await.unwrap().unwrap();
+                assert_eq!(key.ts, 0.into());
+                assert_eq!(value, Some("hello".to_string()));
+                let (_, key, value) = stream.next().await.unwrap().unwrap();
+                assert_eq!(key.ts, 1.into());
+                assert_eq!(value, Some("world".to_string()));
             }
         }
     }
