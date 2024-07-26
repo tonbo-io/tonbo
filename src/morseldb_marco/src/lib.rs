@@ -50,6 +50,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
     let mut builder_push_some_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     // only normal fields
     let mut builder_push_none_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     if let Data::Struct(data_struct) = &ast.data {
         if let Fields::Named(fields) = &data_struct.fields {
@@ -69,6 +70,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     builder_with_capacity_method,
                     builder,
                     default,
+                    size_method,
                 ) = match to_data_type(&field.ty) {
                     Some((DataType::UInt8, is_nullable)) => (
                         is_nullable,
@@ -79,6 +81,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<UInt8Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<UInt8Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt16, is_nullable)) => (
                         is_nullable,
@@ -89,6 +92,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<UInt16Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<UInt16Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt32, is_nullable)) => (
                         is_nullable,
@@ -99,6 +103,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<UInt32Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<UInt32Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt64, is_nullable)) => (
                         is_nullable,
@@ -109,6 +114,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<UInt64Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<UInt64Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
                     Some((DataType::Int8, is_nullable)) => (
@@ -120,6 +126,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<Int8Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<Int8Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int16, is_nullable)) => (
                         is_nullable,
@@ -130,6 +137,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<Int16Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<Int16Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int32, is_nullable)) => (
                         is_nullable,
@@ -140,6 +148,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<Int32Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<Int32Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int64, is_nullable)) => (
                         is_nullable,
@@ -150,6 +159,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(PrimitiveBuilder::<Int64Type>::with_capacity(capacity)),
                         quote!(PrimitiveBuilder<Int64Type>),
                         quote!(0),
+                        quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
                     Some((DataType::String, is_nullable)) => {
@@ -163,6 +173,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             quote!(StringBuilder::with_capacity(capacity, 0)),
                             quote!(StringBuilder),
                             quote!(""),
+                            quote!(self.#field_name.values_slice().len()),
                         )
                     }
                     Some((DataType::Boolean, is_nullable)) => (
@@ -174,6 +185,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(BooleanBuilder::with_capacity(capacity)),
                         quote!(BooleanBuilder),
                         quote!(false),
+                        quote!(self.#field_name.values_slice().len()),
                     ),
 
                     None => unreachable!(),
@@ -203,6 +215,9 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 });
                 encode_size_fields.push(quote! {
                     + self.#field_name.size()
+                });
+                builder_size_fields.push(quote! {
+                    + #size_method
                 });
 
                 match ModelAttributes::parse_field(field) {
@@ -532,6 +547,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         self._ts.append_value(key.ts.into());
                     }
                 }
+            }
+
+            fn written_size(&self) -> usize {
+                0 #(#builder_size_fields)*
             }
 
             fn finish(&mut self) -> #struct_arrays_name {

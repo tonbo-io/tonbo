@@ -40,6 +40,8 @@ where
         row: Option<<S::Record as Record>::Ref<'_>>,
     );
 
+    fn written_size(&self) -> usize;
+
     fn finish(&mut self) -> S;
 }
 
