@@ -455,7 +455,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
 
                 #(#from_record_batch_fields)*
 
-                let record = TestRef {
+                let record = #struct_ref_name {
                     #(#field_names)*
                 };
                 ::morseldb::record::internal::InternalRecordRef::new(ts, record, null)
@@ -495,7 +495,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             type Builder = #struct_builder_name;
 
             fn builder(capacity: usize) -> Self::Builder {
-                TestBuilder {
+                #struct_builder_name {
                     #(#builder_init_fields)*
 
                     _null: ::arrow::array::BooleanBufferBuilder::new(capacity),
@@ -536,8 +536,8 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             _ts: ::arrow::array::UInt32Builder,
         }
 
-        impl ::morseldb::inmem::immutable::Builder<TestImmutableArrays> for #struct_builder_name {
-            fn push(&mut self, key: Timestamped<&str>, row: Option<TestRef>) {
+        impl ::morseldb::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
+            fn push(&mut self, key: Timestamped<&str>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {
                     Some(row) => {

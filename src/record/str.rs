@@ -1,4 +1,4 @@
-use std::{mem::size_of, sync::Arc};
+use std::{mem, sync::Arc};
 
 use arrow::{
     array::{
@@ -153,7 +153,7 @@ impl Builder<StringColumns> for StringColumnsBuilder {
 
     fn written_size(&self) -> usize {
         self._null.as_slice().len()
-            + self._ts.values_slice().len() * size_of::<u32>()
+            + mem::size_of_val(self._ts.values_slice())
             + self.string.values_slice().len()
     }
 
