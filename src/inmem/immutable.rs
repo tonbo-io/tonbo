@@ -5,6 +5,7 @@ use std::{
 };
 
 use arrow::array::RecordBatch;
+use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
 use super::mutable::Mutable;
@@ -13,6 +14,7 @@ use crate::{
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Timestamped, TimestampedRef, EPOCH},
 };
+use crate::fs::FileProvider;
 
 pub trait ArrowArrays: Sized {
     type Record: Record;
@@ -53,12 +55,12 @@ where
     index: BTreeMap<Timestamped<<A::Record as Record>::Key>, u32>,
 }
 
-impl<A> From<Mutable<A::Record>> for Immutable<A>
+impl<A> From<SkipMap<Timestamped<<A::Record as Record>::Key>, Option<A::Record>>> for Immutable<A>
 where
     A: ArrowArrays,
     A::Record: Send,
 {
-    fn from(mutable: Mutable<A::Record>) -> Self {
+    fn from(mutable: SkipMap<Timestamped<<A::Record as Record>::Key>, Option<A::Record>>) -> Self {
         let mut index = BTreeMap::new();
         let mut builder = A::builder(mutable.len());
 

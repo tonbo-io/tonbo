@@ -34,7 +34,7 @@ pub trait KeyRef<'r>: Clone + Encode + PartialEq<Self::Key> + Ord {
     fn to_key(&self) -> Self::Key;
 }
 
-pub trait Record: 'static + Sized + Decode {
+pub trait Record: 'static + Sized + Decode + Debug {
     type Columns: ArrowArrays<Record = Self>;
 
     type Key: Key;
