@@ -19,7 +19,6 @@ use crate::{
     ondisk::sstable::SsTable,
     record::{KeyRef, Record},
     scope::Scope,
-    serdes::Encode,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
     version::{
         edit::VersionEdit,
@@ -317,7 +316,6 @@ where
 
         // Kould: is the capacity parameter necessary?
         let mut builder = R::Columns::builder(8192);
-        let mut written_size = 0;
         let mut min = None;
         let mut max = None;
 
@@ -329,11 +327,9 @@ where
                 min = Some(key.value.to_key())
             }
             max = Some(key.value.to_key());
-
-            written_size += key.size() + entry.value().size();
             builder.push(key, entry.value());
 
-            if written_size >= option.max_sst_file_size {
+            if builder.written_size() >= option.max_sst_file_size {
                 Self::build_table(
                     option,
                     version_edits,
@@ -343,10 +339,9 @@ where
                     &mut max,
                 )
                 .await?;
-                written_size = 0;
             }
         }
-        if written_size > 0 {
+        if builder.written_size() > 0 {
             Self::build_table(
                 option,
                 version_edits,
