@@ -1,4 +1,4 @@
-pub(crate) mod internal;
+pub mod internal;
 mod str;
 
 use std::{fmt::Debug, hash::Hash, sync::Arc};
