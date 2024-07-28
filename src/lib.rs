@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-mod arrows;
 mod compaction;
 pub mod executor;
 pub mod fs;

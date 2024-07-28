@@ -14,9 +14,8 @@ use parquet::{
 };
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
 
-use super::scan::SsTableScan;
+use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    arrows::get_range_filter,
     fs::{AsyncFile, FileProvider},
     record::Record,
     stream::record_batch::RecordBatchEntry,
