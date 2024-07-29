@@ -9,7 +9,7 @@ pub mod record;
 mod scope;
 pub mod serdes;
 mod stream;
-mod timestamp;
+pub mod timestamp;
 mod transaction;
 mod version;
 mod wal;
@@ -302,41 +302,208 @@ pub(crate) mod tests {
     use std::{collections::VecDeque, sync::Arc};
 
     use arrow::{
-        array::{
-            Array, AsArray, BooleanArray, BooleanBufferBuilder, BooleanBuilder, PrimitiveBuilder,
-            RecordBatch, StringArray, StringBuilder, UInt32Array, UInt32Builder,
-        },
+        array::{Array, AsArray, RecordBatch},
         datatypes::{DataType, Field, Schema, UInt32Type},
     };
     use async_lock::RwLock;
     use futures_util::io;
-    use morseldb_marco::morsel_record;
     use once_cell::sync::Lazy;
     use parquet::arrow::ProjectionMask;
     use tracing::error;
 
     use crate::{
         executor::{tokio::TokioExecutor, Executor},
-        inmem::{
-            immutable::{ArrowArrays, Builder},
-            mutable::Mutable,
-        },
-        record::{internal::InternalRecordRef, Key, RecordRef},
-        serdes::{
-            option::{DecodeError, EncodeError},
-            Decode, Encode,
-        },
-        timestamp::Timestamped,
+        inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
+        record::{internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordRef},
+        serdes::{Decode, Encode},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         DbOption, Immutable, Record, WriteError, DB,
     };
 
-    #[morsel_record]
+    #[derive(Debug, PartialEq, Eq)]
     pub struct Test {
-        #[primary_key]
         pub vstring: String,
         pub vu32: u32,
         pub vbool: Option<bool>,
+    }
+
+    impl Decode for Test {
+        type Error = RecordDecodeError;
+
+        async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+        where
+            R: futures_io::AsyncRead + Unpin,
+        {
+            let vstring =
+                String::decode(reader)
+                    .await
+                    .map_err(|err| RecordDecodeError::Decode {
+                        field_name: "vstring".to_string(),
+                        error: Box::new(err),
+                    })?;
+            let vu32 = Option::<u32>::decode(reader)
+                .await
+                .map_err(|err| RecordDecodeError::Decode {
+                    field_name: "vu32".to_string(),
+                    error: Box::new(err),
+                })?
+                .unwrap();
+            let vbool =
+                Option::<bool>::decode(reader)
+                    .await
+                    .map_err(|err| RecordDecodeError::Decode {
+                        field_name: "vbool".to_string(),
+                        error: Box::new(err),
+                    })?;
+
+            Ok(Self {
+                vstring,
+                vu32,
+                vbool,
+            })
+        }
+    }
+
+    impl Record for Test {
+        type Columns = TestImmutableArrays;
+
+        type Key = String;
+
+        type Ref<'r> = TestRef<'r>
+        where
+            Self: 'r;
+
+        fn key(&self) -> &str {
+            &self.vstring
+        }
+
+        fn primary_key_index() -> usize {
+            2
+        }
+
+        fn as_record_ref(&self) -> Self::Ref<'_> {
+            TestRef {
+                vstring: &self.vstring,
+                vu32: Some(self.vu32),
+                vbool: self.vbool,
+            }
+        }
+
+        fn arrow_schema() -> &'static Arc<Schema> {
+            static SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+                Arc::new(Schema::new(vec![
+                    Field::new("_null", DataType::Boolean, false),
+                    Field::new("_ts", DataType::UInt32, false),
+                    Field::new("vstring", DataType::Utf8, false),
+                    Field::new("vu32", DataType::UInt32, false),
+                    Field::new("vbool", DataType::Boolean, true),
+                ]))
+            });
+
+            &SCHEMA
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub struct TestRef<'r> {
+        pub vstring: &'r str,
+        pub vu32: Option<u32>,
+        pub vbool: Option<bool>,
+    }
+
+    impl<'r> Encode for TestRef<'r> {
+        type Error = RecordEncodeError;
+
+        async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+        where
+            W: io::AsyncWrite + Unpin,
+        {
+            self.vstring
+                .encode(writer)
+                .await
+                .map_err(|err| RecordEncodeError::Encode {
+                    field_name: "vstring".to_string(),
+                    error: Box::new(err),
+                })?;
+            self.vu32
+                .encode(writer)
+                .await
+                .map_err(|err| RecordEncodeError::Encode {
+                    field_name: "vu32".to_string(),
+                    error: Box::new(err),
+                })?;
+            self.vbool
+                .encode(writer)
+                .await
+                .map_err(|err| RecordEncodeError::Encode {
+                    field_name: "vbool".to_string(),
+                    error: Box::new(err),
+                })?;
+
+            Ok(())
+        }
+
+        fn size(&self) -> usize {
+            self.vstring.size() + self.vu32.size() + self.vbool.size()
+        }
+    }
+
+    impl<'r> RecordRef<'r> for TestRef<'r> {
+        type Record = Test;
+
+        fn key(self) -> <<Self::Record as Record>::Key as crate::record::Key>::Ref<'r> {
+            self.vstring
+        }
+
+        fn from_record_batch(
+            record_batch: &'r RecordBatch,
+            offset: usize,
+            projection_mask: &'r ProjectionMask,
+        ) -> InternalRecordRef<'r, Self> {
+            let mut column_i = 2;
+            let null = record_batch.column(0).as_boolean().value(offset);
+
+            let ts = record_batch
+                .column(1)
+                .as_primitive::<UInt32Type>()
+                .value(offset)
+                .into();
+
+            let vstring = record_batch
+                .column(column_i)
+                .as_string::<i32>()
+                .value(offset);
+            column_i += 1;
+
+            let mut vu32 = None;
+
+            if projection_mask.leaf_included(3) {
+                vu32 = Some(
+                    record_batch
+                        .column(column_i)
+                        .as_primitive::<UInt32Type>()
+                        .value(offset),
+                );
+                column_i += 1;
+            }
+
+            let mut vbool = None;
+
+            if projection_mask.leaf_included(4) {
+                let vbool_array = record_batch.column(column_i).as_boolean();
+
+                if !vbool_array.is_null(offset) {
+                    vbool = Some(vbool_array.value(offset));
+                }
+            }
+
+            let record = TestRef {
+                vstring,
+                vu32,
+                vbool,
+            };
+            InternalRecordRef::new(ts, record, null)
+        }
     }
 
     pub(crate) async fn get_test_record_batch<E: Executor>(
