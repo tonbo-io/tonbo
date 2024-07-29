@@ -34,7 +34,7 @@ pub trait KeyRef<'r>: Clone + Encode + PartialEq<Self::Key> + Ord {
     fn to_key(&self) -> Self::Key;
 }
 
-pub trait Record: 'static + Sized + Decode + Debug {
+pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     type Columns: ArrowArrays<Record = Self>;
 
     type Key: Key;
@@ -54,7 +54,7 @@ pub trait Record: 'static + Sized + Decode + Debug {
     fn arrow_schema() -> &'static Arc<Schema>;
 }
 
-pub trait RecordRef<'r>: Clone + Sized + Copy + Encode {
+pub trait RecordRef<'r>: Clone + Sized + Copy + Encode + Send + Sync {
     type Record: Record;
 
     fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;

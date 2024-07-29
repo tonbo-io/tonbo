@@ -28,9 +28,9 @@ pub trait FileProvider {
 
     fn create_dir_all(path: impl AsRef<Path>) -> impl Future<Output = io::Result<()>>;
 
-    fn open(path: impl AsRef<Path>) -> impl Future<Output = io::Result<Self::File>>;
+    fn open(path: impl AsRef<Path> + Send) -> impl Future<Output = io::Result<Self::File>> + Send;
 
-    fn remove(path: impl AsRef<Path>) -> impl Future<Output = io::Result<()>>;
+    fn remove(path: impl AsRef<Path> + Send) -> impl Future<Output = io::Result<()>> + Send;
 }
 
 impl Display for FileType {
