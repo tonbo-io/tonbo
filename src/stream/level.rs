@@ -28,9 +28,15 @@ where
 {
     Init(FileId),
     Ready(SsTableScan<'level, R, FP>),
-    OpenFile(Pin<Box<dyn Future<Output = io::Result<FP::File>> + 'level>>),
+    OpenFile(Pin<Box<dyn Future<Output = io::Result<FP::File>> + Send + 'level>>),
     LoadStream(
-        Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R, FP>, ParquetError>> + 'level>>,
+        Pin<
+            Box<
+                dyn Future<Output = Result<SsTableScan<'level, R, FP>, ParquetError>>
+                    + Send
+                    + 'level,
+            >,
+        >,
     ),
 }
 

@@ -40,7 +40,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
         match self {
             VersionEdit::Add { scope, level } => {

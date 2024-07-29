@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
-use std::intrinsics::transmute;
-use std::ops::Bound;
+use std::{collections::BTreeMap, intrinsics::transmute, ops::Bound};
+
 use async_lock::Mutex;
 use crossbeam_skiplist::{
     map::{Entry, Range},
@@ -8,16 +7,22 @@ use crossbeam_skiplist::{
 };
 use futures_util::io;
 use ulid::Ulid;
-use crate::{DbOption, record::{KeyRef, Record}, timestamp::{
-    timestamped::{Timestamped, TimestampedRef},
-    Timestamp, EPOCH,
-}, WriteError};
-use crate::fs::{FileId, FileProvider};
-use crate::inmem::immutable::{ArrowArrays, Builder, Immutable};
-use crate::record::Key;
-use crate::wal::log::{Log, LogType};
-use crate::wal::record_entry::RecordEntry;
-use crate::wal::WalFile;
+
+use crate::{
+    fs::{FileId, FileProvider},
+    inmem::immutable::{ArrowArrays, Builder, Immutable},
+    record::{Key, KeyRef, Record},
+    timestamp::{
+        timestamped::{Timestamped, TimestampedRef},
+        Timestamp, EPOCH,
+    },
+    wal::{
+        log::{Log, LogType},
+        record_entry::RecordEntry,
+        WalFile,
+    },
+    DbOption, WriteError,
+};
 
 pub(crate) type MutableScan<'scan, R> = Range<
     'scan,
@@ -37,7 +42,7 @@ where
     FP: FileProvider,
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
-    wal: Mutex<WalFile<FP::File, R>>
+    wal: Mutex<WalFile<FP::File, R>>,
 }
 
 impl<R, FP> Mutable<R, FP>
@@ -61,23 +66,46 @@ where
     R: Record + Send,
     FP: FileProvider,
 {
-    pub(crate) async fn insert(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<usize, WriteError<R>> {
-        self.append(log_ty, record.key().to_key(), ts, Some(record), false).await
+    pub(crate) async fn insert(
+        &self,
+        log_ty: LogType,
+        record: R,
+        ts: Timestamp,
+    ) -> Result<usize, WriteError<R>> {
+        self.append(log_ty, record.key().to_key(), ts, Some(record), false)
+            .await
     }
 
-    pub(crate) async fn remove(&self, log_ty: LogType, key: R::Key, ts: Timestamp) -> Result<usize, WriteError<R>> {
+    pub(crate) async fn remove(
+        &self,
+        log_ty: LogType,
+        key: R::Key,
+        ts: Timestamp,
+    ) -> Result<usize, WriteError<R>> {
         self.append(log_ty, key, ts, None, false).await
     }
 
-    async fn append(&self, log_ty: LogType, key: R::Key, ts: Timestamp, value: Option<R>, is_recover: bool) -> Result<usize, WriteError<R>> {
+    async fn append(
+        &self,
+        log_ty: LogType,
+        key: R::Key,
+        ts: Timestamp,
+        value: Option<R>,
+        is_recover: bool,
+    ) -> Result<usize, WriteError<R>> {
         let timestamped_key = Timestamped::new(key, ts);
 
         if !is_recover {
             let mut wal_guard = self.wal.lock().await;
 
             wal_guard
-                .write(log_ty, timestamped_key.map(|key| unsafe { transmute(key.as_key_ref()) }), value.as_ref().map(R::as_record_ref))
-                .await.unwrap();
+                .write(
+                    log_ty,
+                    timestamped_key.map(|key| unsafe { transmute(key.as_key_ref()) }),
+                    value.as_ref().map(R::as_record_ref),
+                )
+                .await
+                .unwrap();
         }
         self.data.insert(timestamped_key, value);
 
@@ -151,9 +179,14 @@ mod tests {
     use std::ops::Bound;
 
     use super::Mutable;
-    use crate::{DbOption, record::Record, tests::{Test, TestRef}, timestamp::Timestamped};
-    use crate::executor::tokio::TokioExecutor;
-    use crate::wal::log::LogType;
+    use crate::{
+        executor::tokio::TokioExecutor,
+        record::Record,
+        tests::{Test, TestRef},
+        timestamp::Timestamped,
+        wal::log::LogType,
+        DbOption,
+    };
 
     #[tokio::test]
     async fn insert_and_get() {
@@ -161,26 +194,34 @@ mod tests {
         let key_2 = "key_2".to_owned();
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let mem_table = Mutable::<Test, TokioExecutor>::new(&DbOption::from(temp_dir.path())).await.unwrap();
+        let mem_table = Mutable::<Test, TokioExecutor>::new(&DbOption::from(temp_dir.path()))
+            .await
+            .unwrap();
 
-        mem_table.insert(
-            LogType::Full,
-            Test {
-                vstring: key_1.clone(),
-                vu32: 1,
-                vbool: Some(true),
-            },
-            0_u32.into(),
-        ).await.unwrap();
-        mem_table.insert(
-            LogType::Full,
-            Test {
-                vstring: key_2.clone(),
-                vu32: 2,
-                vbool: None,
-            },
-            1_u32.into(),
-        ).await.unwrap();
+        mem_table
+            .insert(
+                LogType::Full,
+                Test {
+                    vstring: key_1.clone(),
+                    vu32: 1,
+                    vbool: Some(true),
+                },
+                0_u32.into(),
+            )
+            .await
+            .unwrap();
+        mem_table
+            .insert(
+                LogType::Full,
+                Test {
+                    vstring: key_2.clone(),
+                    vu32: 2,
+                    vbool: None,
+                },
+                1_u32.into(),
+            )
+            .await
+            .unwrap();
 
         let entry = mem_table.get(&key_1, 0_u32.into()).unwrap();
         assert_eq!(
@@ -196,13 +237,30 @@ mod tests {
     #[tokio::test]
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let mutable = Mutable::<String, TokioExecutor>::new(&DbOption::from(temp_dir.path())).await.unwrap();
+        let mutable = Mutable::<String, TokioExecutor>::new(&DbOption::from(temp_dir.path()))
+            .await
+            .unwrap();
 
-        mutable.insert(LogType::Full,"1".into(), 0_u32.into()).await.unwrap();
-        mutable.insert(LogType::Full,"2".into(), 0_u32.into()).await.unwrap();
-        mutable.insert(LogType::Full,"2".into(), 1_u32.into()).await.unwrap();
-        mutable.insert(LogType::Full,"3".into(), 1_u32.into()).await.unwrap();
-        mutable.insert(LogType::Full,"4".into(), 0_u32.into()).await.unwrap();
+        mutable
+            .insert(LogType::Full, "1".into(), 0_u32.into())
+            .await
+            .unwrap();
+        mutable
+            .insert(LogType::Full, "2".into(), 0_u32.into())
+            .await
+            .unwrap();
+        mutable
+            .insert(LogType::Full, "2".into(), 1_u32.into())
+            .await
+            .unwrap();
+        mutable
+            .insert(LogType::Full, "3".into(), 1_u32.into())
+            .await
+            .unwrap();
+        mutable
+            .insert(LogType::Full, "4".into(), 0_u32.into())
+            .await
+            .unwrap();
 
         let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
 

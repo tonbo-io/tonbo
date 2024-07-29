@@ -38,7 +38,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
         match self {
             None => writer.write_all(&[0]).await?,

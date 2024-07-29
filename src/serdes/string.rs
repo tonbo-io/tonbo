@@ -26,7 +26,7 @@ impl Encode for String {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
         self.as_str().encode(writer).await
     }
