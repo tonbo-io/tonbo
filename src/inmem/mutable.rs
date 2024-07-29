@@ -143,6 +143,10 @@ where
         self.data.range((lower, upper))
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     pub(crate) fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
         self.data
             .range::<TimestampedRef<<R as Record>::Key>, _>((

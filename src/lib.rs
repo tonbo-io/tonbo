@@ -82,15 +82,16 @@ where
         executor.spawn(async move {
             while let Ok(task) = task_rx.recv_async().await {
                 match task {
-                    CompactTask::Flush => {
+                    CompactTask::Freeze => {
                         if let Err(err) = compactor.check_then_compaction().await {
-                            todo!();
-                            // error!("[Compaction Error]: {}", err)
+                            // todo!();
+                            error!("[Compaction Error]: {}", err)
                         }
                     }
                 }
             }
         });
+        // TODO: Recover
 
         Ok(Self {
             schema,
@@ -109,13 +110,10 @@ where
     }
 
     pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), WriteError<R>> {
-        let is_excess = {
-            let schema = self.schema.read().await;
-            schema.write(LogType::Full, record, ts).await?
-        };
-        if is_excess {
-            let mut schema = self.schema.write().await;
-            schema.freeze().await?;
+        let schema = self.schema.read().await;
+
+        if schema.write(LogType::Full, record, ts).await? {
+            let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
         }
 
         Ok(())
@@ -129,7 +127,7 @@ where
         let schema = self.schema.read().await;
 
         if let Some(first) = records.next() {
-            if let Some(record) = records.next() {
+            let is_excess = if let Some(record) = records.next() {
                 schema.write(LogType::First, first, ts).await?;
 
                 let mut last_buf = record;
@@ -139,12 +137,14 @@ where
                         .write(LogType::Middle, mem::replace(&mut last_buf, record), ts)
                         .await?;
                 }
-                schema.write(LogType::Last, last_buf, ts).await?;
+                schema.write(LogType::Last, last_buf, ts).await?
             } else {
-                schema.write(LogType::Full, first, ts).await?;
+                schema.write(LogType::Full, first, ts).await?
+            };
+            if is_excess {
+                let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
             }
-        }
-        // TODO: is_excess
+        };
 
         Ok(())
     }
@@ -227,18 +227,6 @@ where
                 .immutables
                 .iter()
                 .any(|(_, immutable)| immutable.check_conflict(key, ts))
-    }
-
-    async fn freeze(&mut self) -> Result<(), WriteError<R>> {
-        let mutable = mem::replace(&mut self.mutable, Mutable::new(&self.option).await?);
-        let (file_id, immutable) = mutable.to_immutable().await?;
-
-        self.immutables.push_front((file_id, immutable));
-        if self.immutables.len() > self.option.immutable_chunk_num {
-            let _ = self.compaction_tx.try_send(CompactTask::Flush);
-        }
-
-        Ok(())
     }
 }
 
@@ -367,26 +355,18 @@ pub(crate) mod tests {
     use futures_util::io;
     use once_cell::sync::Lazy;
     use parquet::arrow::ProjectionMask;
+    use tempfile::TempDir;
     use tracing::error;
 
-    use crate::{
-        compaction::{CompactTask, Compactor},
-        executor::{tokio::TokioExecutor, Executor},
-        fs::FileId,
-        inmem::{
-            immutable::{ArrowArrays, Builder},
-            mutable::Mutable,
-        },
-        record::{internal::InternalRecordRef, Key, RecordRef},
-        serdes::{
-            option::{DecodeError, EncodeError},
-            Decode, Encode,
-        },
-        timestamp::Timestamped,
-        version::{cleaner::Cleaner, set::tests::build_version_set, Version},
-        wal::log::LogType,
-        DbOption, Immutable, Record, WriteError, DB,
-    };
+    use crate::{compaction::{CompactTask, Compactor}, executor::{tokio::TokioExecutor, Executor}, fs::FileId, inmem::{
+        immutable::{ArrowArrays, Builder},
+        mutable::Mutable,
+    }, record::{internal::InternalRecordRef, Key, RecordRef}, serdes::{
+        option::{DecodeError, EncodeError},
+        Decode, Encode,
+    }, timestamp::Timestamped, version::{cleaner::Cleaner, set::tests::build_version_set, Version}, wal::log::LogType, DbOption, Immutable, Record, WriteError, DB, Projection};
+    use crate::inmem::immutable::tests::TestImmutableArrays;
+    use crate::record::{RecordDecodeError, RecordEncodeError};
 
     #[derive(Debug, PartialEq, Eq)]
     pub struct Test {
@@ -484,7 +464,7 @@ pub(crate) mod tests {
 
         async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
         where
-            W: io::AsyncWrite + Unpin,
+            W: io::AsyncWrite + Unpin + Send,
         {
             self.vstring
                 .encode(writer)
@@ -735,7 +715,7 @@ pub(crate) mod tests {
         executor.spawn(async move {
             while let Ok(task) = compaction_rx.recv_async().await {
                 match task {
-                    CompactTask::Flush => {
+                    CompactTask::Freeze => {
                         if let Err(err) = compactor.check_then_compaction().await {
                             error!("[Compaction Error]: {}", err)
                         }
@@ -750,5 +730,238 @@ pub(crate) mod tests {
             lock_map: Arc::new(Default::default()),
             _p: Default::default(),
         })
+    }
+
+    fn test_items() -> Vec<Test> {
+        vec![
+            Test {
+                vstring: 0.to_string(),
+                vu32: 0,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 1.to_string(),
+                vu32: 1,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 2.to_string(),
+                vu32: 2,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 3.to_string(),
+                vu32: 3,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 4.to_string(),
+                vu32: 4,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 5.to_string(),
+                vu32: 5,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 6.to_string(),
+                vu32: 6,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 7.to_string(),
+                vu32: 7,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 8.to_string(),
+                vu32: 8,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 9.to_string(),
+                vu32: 9,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 10.to_string(),
+                vu32: 0,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 11.to_string(),
+                vu32: 1,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 12.to_string(),
+                vu32: 2,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 13.to_string(),
+                vu32: 3,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 14.to_string(),
+                vu32: 4,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 15.to_string(),
+                vu32: 5,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 16.to_string(),
+                vu32: 6,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 17.to_string(),
+                vu32: 7,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 18.to_string(),
+                vu32: 8,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 19.to_string(),
+                vu32: 9,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 20.to_string(),
+                vu32: 0,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 21.to_string(),
+                vu32: 1,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 22.to_string(),
+                vu32: 2,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 23.to_string(),
+                vu32: 3,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 24.to_string(),
+                vu32: 4,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 25.to_string(),
+                vu32: 5,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 26.to_string(),
+                vu32: 6,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 27.to_string(),
+                vu32: 7,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 28.to_string(),
+                vu32: 8,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 29.to_string(),
+                vu32: 9,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 30.to_string(),
+                vu32: 0,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 31.to_string(),
+                vu32: 1,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 32.to_string(),
+                vu32: 2,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 33.to_string(),
+                vu32: 3,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 34.to_string(),
+                vu32: 4,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 35.to_string(),
+                vu32: 5,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 36.to_string(),
+                vu32: 6,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 37.to_string(),
+                vu32: 7,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 38.to_string(),
+                vu32: 8,
+                vbool: Some(true),
+            },
+            Test {
+                vstring: 39.to_string(),
+                vu32: 9,
+                vbool: Some(true),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn read_from_disk() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::from(temp_dir.path());
+        option.max_mem_table_size = 5;
+        option.immutable_chunk_num = 1;
+        option.major_threshold_with_sst_size = 5;
+        option.level_sst_magnification = 10;
+        option.max_sst_file_size = 2 * 1024 * 1024;
+
+        let db: DB<Test, TokioExecutor> = DB::new(Arc::new(option), TokioExecutor::new()).await.unwrap();
+
+        for item in test_items() {
+            db.write(item, 0.into()).await.unwrap();
+        }
+
+        // let tx = db.transaction().await;
+        // let key = 20.to_string();
+        // let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
+        //
+        // assert_eq!(option1.get().map(|test_ref| test_ref.vstring), Some("20"));
+        // assert_eq!(option1.get().map(|test_ref| test_ref.vu32), Some(Some(0)));
+        // assert_eq!(option1.get().map(|test_ref| test_ref.vbool), Some(Some(true)));
+
+        // dbg!(db.version_set.current().await);
     }
 }

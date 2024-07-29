@@ -16,6 +16,7 @@ pub mod tokio {
 
     use super::Executor;
 
+    #[derive(Debug)]
     pub struct TokioExecutor {
         handle: Handle,
     }

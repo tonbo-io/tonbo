@@ -29,7 +29,7 @@ where
     fn from(path: P) -> Self {
         DbOption {
             path: path.into(),
-            max_mem_table_size: 8 * 1024 * 1024,
+            max_mem_table_size: 3000,
             immutable_chunk_num: 3,
             major_threshold_with_sst_size: 10,
             level_sst_magnification: 10,
