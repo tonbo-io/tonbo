@@ -14,7 +14,6 @@ use crate::{
 pub(crate) enum VersionEdit<K> {
     Add { level: u8, scope: Scope<K> },
     Remove { level: u8, gen: FileId },
-    // TODO: on compaction
     LatestTimeStamp { ts: Timestamp },
 }
 
