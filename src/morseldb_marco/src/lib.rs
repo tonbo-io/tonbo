@@ -69,7 +69,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     as_method,
                     builder_with_capacity_method,
                     builder,
-                    default,
                     size_method,
                 ) = match to_data_type(&field.ty) {
                     Some((DataType::UInt8, is_nullable)) => (
@@ -82,7 +81,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::UInt8Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt8Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt16, is_nullable)) => (
@@ -95,7 +93,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::UInt16Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt16Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt32, is_nullable)) => (
@@ -108,7 +105,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::UInt32Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt32Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt64, is_nullable)) => (
@@ -121,7 +117,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::UInt64Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt64Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
@@ -135,7 +130,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::Int8Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int8Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int16, is_nullable)) => (
@@ -148,7 +142,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::Int16Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int16Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int32, is_nullable)) => (
@@ -161,7 +154,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::Int32Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int32Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int64, is_nullable)) => (
@@ -174,7 +166,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             ::arrow::datatypes::Int64Type,
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int64Type>),
-                        quote!(0),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
@@ -188,7 +179,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             quote!(as_string::<i32>()),
                             quote!(::arrow::array::StringBuilder::with_capacity(capacity, 0)),
                             quote!(::arrow::array::StringBuilder),
-                            quote!(""),
                             quote!(self.#field_name.values_slice().len()),
                         )
                     }
@@ -200,7 +190,6 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(as_boolean()),
                         quote!(::arrow::array::BooleanBuilder::with_capacity(capacity)),
                         quote!(::arrow::array::BooleanBuilder),
-                        quote!(false),
                         quote!(self.#field_name.values_slice().len()),
                     ),
 
@@ -319,7 +308,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                 self.#field_name.append_value(row.#field_name.unwrap());
                             });
                             builder_push_none_fields.push(quote! {
-                                self.#field_name.append_value(#default);
+                                self.#field_name.append_value(Default::default());
                             });
                             decode_method_fields.push(quote! {
                                 let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::morseldb::record::RecordDecodeError::Decode {
