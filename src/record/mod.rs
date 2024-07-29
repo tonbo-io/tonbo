@@ -1,7 +1,7 @@
 pub mod internal;
 mod str;
 
-use std::{fmt::Debug, hash::Hash, sync::Arc};
+use std::{error::Error, fmt::Debug, hash::Hash, io, sync::Arc};
 
 use arrow::{
     array::{Datum, RecordBatch},
@@ -9,6 +9,7 @@ use arrow::{
 };
 use internal::InternalRecordRef;
 use parquet::arrow::ProjectionMask;
+use thiserror::Error;
 
 use crate::{
     inmem::immutable::ArrowArrays,
@@ -63,4 +64,26 @@ pub trait RecordRef<'r>: Clone + Sized + Copy + Encode {
         offset: usize,
         projection_mask: &'r ProjectionMask,
     ) -> InternalRecordRef<'r, Self>;
+}
+
+#[derive(Debug, Error)]
+pub enum RecordEncodeError {
+    #[error("record's field: {field_name} encode error: {error}")]
+    Encode {
+        field_name: String,
+        error: Box<dyn Error + Send + Sync + 'static>,
+    },
+    #[error("record io error: {0}")]
+    Io(#[from] io::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum RecordDecodeError {
+    #[error("record's field: {field_name} decode error: {error}")]
+    Decode {
+        field_name: String,
+        error: Box<dyn Error + Send + Sync + 'static>,
+    },
+    #[error("record io error: {0}")]
+    Io(#[from] io::Error),
 }
