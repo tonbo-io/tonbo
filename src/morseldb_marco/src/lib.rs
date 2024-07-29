@@ -215,7 +215,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     ::std::sync::Arc::clone(&#field_name) as ::std::sync::Arc<dyn ::arrow::array::Array>,
                 });
                 encode_method_fields.push(quote! {
-                    self.#field_name.encode(writer).await?;
+                    ::morseldb::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::morseldb::record::RecordEncodeError::Encode {
+                        field_name: stringify!(#field_name).to_string(),
+                        error: Box::new(err),
+                    })?;
                 });
                 encode_size_fields.push(quote! {
                     + self.#field_name.size()
@@ -276,7 +279,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                 self.#field_name.append_null();
                             });
                             decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await?;
+                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::morseldb::record::RecordDecodeError::Decode {
+                                    field_name: stringify!(#field_name).to_string(),
+                                    error: Box::new(err),
+                                })?;
                             });
                         } else {
                             from_record_batch_fields.push(quote! {
@@ -304,7 +310,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                 self.#field_name.append_value(#default);
                             });
                             decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await?.unwrap();
+                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::morseldb::record::RecordDecodeError::Decode {
+                                    field_name: stringify!(#field_name).to_string(),
+                                    error: Box::new(err),
+                                })?.unwrap();
                             });
                         }
                     }
@@ -344,7 +353,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                            let #field_name = self.#field_name.value(offset);
                         });
                         decode_method_fields.push(quote! {
-                            let #field_name = #field_ty::decode(reader).await?;
+                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::morseldb::record::RecordDecodeError::Decode {
+                                field_name: stringify!(#field_name).to_string(),
+                                error: Box::new(err),
+                            })?;
                         });
                     }
                     Err(err) => return TokenStream::from(err.to_compile_error()),
@@ -358,7 +370,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
     }
     let PrimaryKey {
         name: primary_key_name,
-        base_ty,
+        base_ty: primary_key_ty,
         builder_append_value: builder_append_primary_key,
         index: primary_key_index,
     } = primary_key_definitions.unwrap();
@@ -377,7 +389,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         impl ::morseldb::record::Record for #struct_name {
             type Columns = #struct_arrays_name;
 
-            type Key = #base_ty;
+            type Key = #primary_key_ty;
 
             type Ref<'r> = #struct_ref_name<'r>
             where
@@ -411,7 +423,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         impl ::morseldb::serdes::Decode for #struct_name {
-            type Error = ::std::io::Error;
+            type Error = ::morseldb::record::RecordDecodeError;
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
@@ -463,7 +475,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         impl<'r> ::morseldb::serdes::Encode for #struct_ref_name<'r> {
-            type Error = ::std::io::Error;
+            type Error = ::morseldb::record::RecordEncodeError;
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
@@ -510,7 +522,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             ) -> Option<Option<<Self::Record as ::morseldb::record::Record>::Ref<'_>>> {
                 let offset = offset as usize;
 
-                if offset >= self.vstring.len() {
+                if offset >= ::arrow::array::Array::len(self.#primary_key_name.as_ref()) {
                     return None;
                 }
                 if self._null.value(offset) {
@@ -537,7 +549,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         impl ::morseldb::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
-            fn push(&mut self, key: Timestamped<&str>, row: Option<#struct_ref_name>) {
+            fn push(&mut self, key: ::morseldb::timestamp::timestamped::Timestamped<<<#struct_name as ::morseldb::record::Record>::Key as ::morseldb::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {
                     Some(row) => {

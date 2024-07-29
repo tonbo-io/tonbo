@@ -1,7 +1,8 @@
 use morseldb::morsel_record;
 
+// Tips: must be public
 #[morsel_record]
-struct Post {
+pub struct Post {
     #[primary_key]
     name: String,
 }

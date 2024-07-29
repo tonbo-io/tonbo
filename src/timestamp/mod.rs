@@ -1,4 +1,4 @@
-pub(crate) mod timestamped;
+pub mod timestamped;
 
 use std::{future::Future, io};
 

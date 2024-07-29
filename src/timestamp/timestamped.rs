@@ -14,8 +14,8 @@ use crate::{
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Timestamped<V> {
-    pub(crate) ts: Timestamp,
-    pub(crate) value: V,
+    pub ts: Timestamp,
+    pub value: V,
 }
 
 impl<V> Copy for Timestamped<V> where V: Copy {}
