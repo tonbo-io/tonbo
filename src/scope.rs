@@ -53,7 +53,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
         self.min.encode(writer).await?;
         self.max.encode(writer).await?;

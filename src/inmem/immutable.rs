@@ -10,11 +10,11 @@ use parquet::arrow::ProjectionMask;
 
 use super::mutable::Mutable;
 use crate::{
+    fs::FileProvider,
     record::{internal::InternalRecordRef, Key, Record, RecordRef},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Timestamped, TimestampedRef, EPOCH},
 };
-use crate::fs::FileProvider;
 
 pub trait ArrowArrays: Sized {
     type Record: Record;
@@ -32,7 +32,7 @@ pub trait ArrowArrays: Sized {
     fn as_record_batch(&self) -> &RecordBatch;
 }
 
-pub trait Builder<S>
+pub trait Builder<S>: Send
 where
     S: ArrowArrays,
 {

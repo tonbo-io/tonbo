@@ -17,13 +17,11 @@ use thiserror::Error;
 
 use crate::{
     fs::FileId,
-    record::Record,
+    record::{Key, Record},
     serdes::{Decode, Encode},
     timestamp::Timestamped,
+    wal::{log::LogType, record_entry::RecordEntry},
 };
-use crate::record::Key;
-use crate::wal::log::LogType;
-use crate::wal::record_entry::RecordEntry;
 
 #[derive(Debug)]
 pub(crate) struct WalFile<F, R> {
@@ -48,7 +46,7 @@ impl<F, R> WalFile<F, R> {
 
 impl<F, R> WalFile<F, R>
 where
-    F: AsyncWrite + Unpin,
+    F: AsyncWrite + Unpin + Send,
     R: Record,
 {
     pub(crate) async fn write<'r>(
@@ -58,7 +56,9 @@ where
         value: Option<R::Ref<'r>>,
     ) -> Result<(), <R::Ref<'r> as Encode>::Error> {
         let mut writer = HashWriter::new(&mut self.file);
-        Log::new(log_ty, RecordEntry::<R>::Encode((key, value))).encode(&mut writer).await?;
+        Log::new(log_ty, RecordEntry::<R>::Encode((key, value)))
+            .encode(&mut writer)
+            .await?;
         writer.eol().await?;
         Ok(())
     }
@@ -75,8 +75,12 @@ where
 {
     fn recover(
         &mut self,
-    ) -> impl Stream<Item = Result<(LogType, Timestamped<R::Key>, Option<R>), RecoverError<<R as Decode>::Error>>> + '_
-    {
+    ) -> impl Stream<
+        Item = Result<
+            (LogType, Timestamped<R::Key>, Option<R>),
+            RecoverError<<R as Decode>::Error>,
+        >,
+    > + '_ {
         stream! {
             let mut file = BufReader::new(&mut self.file);
 
@@ -121,17 +125,20 @@ mod tests {
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
     use super::{log::LogType, FileId, Log, WalFile};
-    use crate::timestamp::Timestamped;
-    use crate::wal::record_entry::RecordEntry;
+    use crate::{timestamp::Timestamped, wal::record_entry::RecordEntry};
 
     #[tokio::test]
     async fn write_and_recover() {
         let mut file = Vec::new();
         {
             let mut wal = WalFile::<_, String>::new(Cursor::new(&mut file).compat(), FileId::new());
-            wal.write(LogType::Full, Timestamped::new("hello", 0.into()), Some("hello"))
-                .await
-                .unwrap();
+            wal.write(
+                LogType::Full,
+                Timestamped::new("hello", 0.into()),
+                Some("hello"),
+            )
+            .await
+            .unwrap();
             wal.flush().await.unwrap();
         }
         {
@@ -144,9 +151,13 @@ mod tests {
                 assert_eq!(value, Some("hello".to_string()));
             }
 
-            wal.write(LogType::Full, Timestamped::new("world", 1.into()), Some("world"))
-                .await
-                .unwrap();
+            wal.write(
+                LogType::Full,
+                Timestamped::new("world", 1.into()),
+                Some("world"),
+            )
+            .await
+            .unwrap();
         }
 
         {

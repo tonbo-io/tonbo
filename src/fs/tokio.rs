@@ -13,7 +13,7 @@ impl FileProvider for TokioExecutor {
         create_dir_all(path).await
     }
 
-    async fn open(path: impl AsRef<Path>) -> io::Result<Self::File> {
+    async fn open(path: impl AsRef<Path> + Send) -> io::Result<Self::File> {
         OpenOptions::new()
             .truncate(false)
             .create(true)
@@ -24,7 +24,7 @@ impl FileProvider for TokioExecutor {
             .map(TokioAsyncReadCompatExt::compat)
     }
 
-    async fn remove(path: impl AsRef<Path>) -> io::Result<()> {
+    async fn remove(path: impl AsRef<Path> + Send) -> io::Result<()> {
         remove_file(path).await
     }
 }

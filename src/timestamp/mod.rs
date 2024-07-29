@@ -37,11 +37,11 @@ impl Timestamp {
 
 impl Encode for Timestamp {
     type Error = io::Error;
-    fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
-        self.0.encode(writer)
+        self.0.encode(writer).await
     }
     fn size(&self) -> usize {
         self.0.size()

@@ -18,9 +18,9 @@ use crate::{
     stream,
     timestamp::{Timestamp, Timestamped},
     version::{set::transaction_ts, VersionRef},
+    wal::log::LogType,
     LockMap, Projection, Record, Scan, Schema, WriteError,
 };
-use crate::wal::log::LogType;
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
     inner: Range<'scan, R::Key, Option<R>>,
@@ -143,7 +143,7 @@ where
             0 => false,
             1 => {
                 let new_ts = transaction_ts();
-                let (key ,record) = self.local.pop_first().unwrap();
+                let (key, record) = self.local.pop_first().unwrap();
                 Self::append(&self.share, LogType::Full, key, record, new_ts).await?
             }
             _ => {
@@ -166,7 +166,13 @@ where
         Ok(())
     }
 
-    async fn append(schema: &Schema<R, FP>, log_ty: LogType, key: <R as Record>::Key, record: Option<R>, new_ts: Timestamp) -> Result<bool, CommitError<R>> {
+    async fn append(
+        schema: &Schema<R, FP>,
+        log_ty: LogType,
+        key: <R as Record>::Key,
+        record: Option<R>,
+        new_ts: Timestamp,
+    ) -> Result<bool, CommitError<R>> {
         Ok(match record {
             Some(record) => schema.write(log_ty, record, new_ts).await?,
             None => schema.remove(log_ty, key, new_ts).await?,

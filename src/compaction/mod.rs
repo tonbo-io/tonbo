@@ -421,10 +421,19 @@ pub(crate) mod tests {
     use tempfile::TempDir;
     use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-    use crate::{compaction::Compactor, executor::{tokio::TokioExecutor, Executor}, fs::FileId, inmem::{immutable::Immutable, mutable::Mutable}, record::Record, scope::Scope, tests::Test, version::{edit::VersionEdit, Version}, DbOption, WriteError};
-    use crate::fs::FileProvider;
-    use crate::timestamp::Timestamp;
-    use crate::wal::log::LogType;
+    use crate::{
+        compaction::Compactor,
+        executor::{tokio::TokioExecutor, Executor},
+        fs::{FileId, FileProvider},
+        inmem::{immutable::Immutable, mutable::Mutable},
+        record::Record,
+        scope::Scope,
+        tests::Test,
+        timestamp::Timestamp,
+        version::{edit::VersionEdit, Version},
+        wal::log::LogType,
+        DbOption, WriteError,
+    };
 
     async fn build_immutable<R, FP>(
         option: &DbOption,
@@ -471,53 +480,75 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let option = DbOption::from(temp_dir.path());
 
-        let batch_1 = build_immutable::<Test, TokioExecutor>(&option, vec![
-            (LogType::Full,
-             Test {
-                vstring: 3.to_string(),
-                vu32: 0,
-                vbool: None,
-            },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 5.to_string(),
-                 vu32: 0,
-                 vbool: None,
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 6.to_string(),
-                 vu32: 0,
-                 vbool: None,
-             },
-             0.into()),
-        ]).await.unwrap();
+        let batch_1 = build_immutable::<Test, TokioExecutor>(
+            &option,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 3.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 5.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 6.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
 
-        let batch_2 = build_immutable::<Test, TokioExecutor>(&option, vec![
-            (LogType::Full,
-             Test {
-                 vstring: 4.to_string(),
-                 vu32: 0,
-                 vbool: None,
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 2.to_string(),
-                 vu32: 0,
-                 vbool: None,
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 1.to_string(),
-                 vu32: 0,
-                 vbool: None,
-             },
-             0.into()),
-        ]).await.unwrap();
+        let batch_2 = build_immutable::<Test, TokioExecutor>(
+            &option,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 4.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 2.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 1.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
 
         let scope = Compactor::<Test, TokioExecutor>::minor_compaction(
             &DbOption::from(temp_dir.path()),
@@ -592,54 +623,74 @@ pub(crate) mod tests {
         // level 0
         let table_gen_1 = FileId::new();
         let table_gen_2 = FileId::new();
-        build_parquet_table::<Test, TokioExecutor>(option, table_gen_1, vec![
-            (LogType::Full,
-             Test {
-                 vstring: 1.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             1.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 2.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             1.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 3.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-        ])
+        build_parquet_table::<Test, TokioExecutor>(
+            option,
+            table_gen_1,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 1.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    1.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 2.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    1.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 3.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+            ],
+        )
         .await
         .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(option, table_gen_2, vec![
-            (LogType::Full,
-             Test {
-                 vstring: 4.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             1.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 5.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             1.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 6.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-        ])
+        build_parquet_table::<Test, TokioExecutor>(
+            option,
+            table_gen_2,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 4.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    1.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 5.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    1.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 6.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+            ],
+        )
         .await
         .unwrap();
 
@@ -647,79 +698,109 @@ pub(crate) mod tests {
         let table_gen_3 = FileId::new();
         let table_gen_4 = FileId::new();
         let table_gen_5 = FileId::new();
-        build_parquet_table::<Test, TokioExecutor>(option, table_gen_3, vec![
-            (LogType::Full,
-             Test {
-                 vstring: 1.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 2.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 3.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-        ])
+        build_parquet_table::<Test, TokioExecutor>(
+            option,
+            table_gen_3,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 1.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 2.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 3.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+            ],
+        )
         .await
         .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(option, table_gen_4, vec![
-            (LogType::Full,
-             Test {
-                 vstring: 4.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 5.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 6.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-        ])
+        build_parquet_table::<Test, TokioExecutor>(
+            option,
+            table_gen_4,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 4.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 5.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 6.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+            ],
+        )
         .await
         .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(option, table_gen_5, vec![
-            (LogType::Full,
-             Test {
-                 vstring: 7.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 8.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-            (LogType::Full,
-             Test {
-                 vstring: 9.to_string(),
-                 vu32: 0,
-                 vbool: Some(true),
-             },
-             0.into()),
-        ])
+        build_parquet_table::<Test, TokioExecutor>(
+            option,
+            table_gen_5,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 7.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 8.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 9.to_string(),
+                        vu32: 0,
+                        vbool: Some(true),
+                    },
+                    0.into(),
+                ),
+            ],
+        )
         .await
         .unwrap();
 
