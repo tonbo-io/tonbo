@@ -25,6 +25,7 @@ pub(crate) const MAX_LEVEL: usize = 7;
 
 pub(crate) type VersionRef<R, FP> = Arc<Version<R, FP>>;
 
+#[derive(Debug)]
 pub(crate) struct Version<R, FP>
 where
     R: Record,

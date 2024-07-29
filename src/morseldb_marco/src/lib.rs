@@ -480,7 +480,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: ::futures_io::AsyncWrite + Unpin,
+                W: ::futures_io::AsyncWrite + Unpin + Send,
             {
                 #(#encode_method_fields)*
 

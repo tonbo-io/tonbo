@@ -21,6 +21,7 @@ use crate::{
     wal::log::LogType,
     LockMap, Projection, Record, Scan, Schema, WriteError,
 };
+use crate::compaction::CompactTask;
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
     inner: Range<'scan, R::Key, Option<R>>,
@@ -161,8 +162,9 @@ where
                 Self::append(&self.share, LogType::Last, key, record, new_ts).await?
             }
         };
-
-        // TODO: is excess
+        if is_excess {
+            let _ = self.share.compaction_tx.try_send(CompactTask::Freeze);
+        }
         Ok(())
     }
 

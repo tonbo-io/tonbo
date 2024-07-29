@@ -27,10 +27,11 @@ use crate::{
     },
     DbOption, Schema,
 };
+use crate::inmem::mutable::Mutable;
 
 #[derive(Debug)]
 pub(crate) enum CompactTask {
-    Flush,
+    Freeze,
 }
 
 pub(crate) struct Compactor<R, FP>
@@ -67,6 +68,14 @@ where
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
+        if guard.mutable.is_empty() {
+            println!("WWWWWW");
+            return Ok(())
+        }
+        let mutable = mem::replace(&mut guard.mutable, Mutable::new(&self.option).await?);
+        let (file_id, immutable) = mutable.to_immutable().await?;
+
+        guard.immutables.push_front((file_id, immutable));
         if guard.immutables.len() > self.option.immutable_chunk_num {
             let excess = guard.immutables.split_off(self.option.immutable_chunk_num);
 
