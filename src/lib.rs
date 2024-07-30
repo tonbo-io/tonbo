@@ -937,7 +937,7 @@ pub(crate) mod tests {
         ]
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -954,14 +954,14 @@ pub(crate) mod tests {
             db.write(item, 0.into()).await.unwrap();
         }
 
-        // let tx = db.transaction().await;
-        // let key = 20.to_string();
-        // let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
-        //
-        // assert_eq!(option1.get().map(|test_ref| test_ref.vstring), Some("20"));
-        // assert_eq!(option1.get().map(|test_ref| test_ref.vu32), Some(Some(0)));
-        // assert_eq!(option1.get().map(|test_ref| test_ref.vbool), Some(Some(true)));
+        let tx = db.transaction().await;
+        let key = 20.to_string();
+        let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
 
-        // dbg!(db.version_set.current().await);
+        assert_eq!(option1.get().map(|test_ref| test_ref.vstring), Some("20"));
+        assert_eq!(option1.get().map(|test_ref| test_ref.vu32), Some(Some(0)));
+        assert_eq!(option1.get().map(|test_ref| test_ref.vbool), Some(Some(true)));
+
+        dbg!(db.version_set.current().await);
     }
 }
