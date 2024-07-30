@@ -69,7 +69,6 @@ where
         let mut guard = self.schema.write().await;
 
         if guard.mutable.is_empty() {
-            println!("WWWWWW");
             return Ok(())
         }
         let mutable = mem::replace(&mut guard.mutable, Mutable::new(&self.option).await?);
