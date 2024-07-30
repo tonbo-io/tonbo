@@ -1,7 +1,8 @@
 use std::ops::Bound;
 
 use futures_util::stream::StreamExt;
-use morseldb::{executor::tokio::TokioExecutor, morsel_record, Projection, DB};
+use morseldb::{executor::tokio::TokioExecutor, Projection, DB};
+use morseldb_marco::morsel_record;
 
 // Tips: must be public
 #[morsel_record]
