@@ -8,9 +8,7 @@ use arrow::array::RecordBatch;
 use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
-use super::mutable::Mutable;
 use crate::{
-    fs::FileProvider,
     record::{internal::InternalRecordRef, Key, Record, RecordRef},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Timestamped, TimestampedRef, EPOCH},

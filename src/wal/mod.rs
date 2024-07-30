@@ -124,8 +124,8 @@ mod tests {
     use futures_util::StreamExt;
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
-    use super::{log::LogType, FileId, Log, WalFile};
-    use crate::{timestamp::Timestamped, wal::record_entry::RecordEntry};
+    use super::{log::LogType, FileId, WalFile};
+    use crate::timestamp::Timestamped;
 
     #[tokio::test]
     async fn write_and_recover() {
@@ -146,7 +146,7 @@ mod tests {
 
             {
                 let mut stream = pin!(wal.recover());
-                let (log_ty, key, value) = stream.next().await.unwrap().unwrap();
+                let (_, key, value) = stream.next().await.unwrap().unwrap();
                 assert_eq!(key.ts, 0.into());
                 assert_eq!(value, Some("hello".to_string()));
             }

@@ -13,6 +13,7 @@ use parquet::errors::ParquetError;
 use thiserror::Error;
 
 use crate::{
+    compaction::CompactTask,
     fs::FileProvider,
     record::{Key, KeyRef},
     stream,
@@ -21,7 +22,6 @@ use crate::{
     wal::log::LogType,
     LockMap, Projection, Record, Scan, Schema, WriteError,
 };
-use crate::compaction::CompactTask;
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
     inner: Range<'scan, R::Key, Option<R>>,

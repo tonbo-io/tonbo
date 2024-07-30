@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, intrinsics::transmute, ops::Bound};
+use std::{intrinsics::transmute, ops::Bound};
 
 use async_lock::Mutex;
 use crossbeam_skiplist::{
@@ -10,17 +10,13 @@ use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileProvider},
-    inmem::immutable::{ArrowArrays, Builder, Immutable},
+    inmem::immutable::Immutable,
     record::{Key, KeyRef, Record},
     timestamp::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
-    wal::{
-        log::{Log, LogType},
-        record_entry::RecordEntry,
-        WalFile,
-    },
+    wal::{log::LogType, WalFile},
     DbOption, WriteError,
 };
 
