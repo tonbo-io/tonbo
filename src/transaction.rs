@@ -85,7 +85,7 @@ where
                     if entry.value().is_none() {
                         None
                     } else {
-                        TransactionEntry::Stream(entry).into()
+                        Some(TransactionEntry::Stream(entry))
                     }
                 }),
         })
@@ -159,12 +159,12 @@ impl<'entry, R> TransactionEntry<'entry, R>
 where
     R: Record,
 {
-    pub fn get(&self) -> Option<R::Ref<'_>> {
+    pub fn get(&self) -> R::Ref<'_> {
         match self {
-            TransactionEntry::Stream(entry) => entry.value(),
+            TransactionEntry::Stream(entry) => entry.value().unwrap(),
             TransactionEntry::Local(value) => {
                 // Safety: shorter lifetime must be safe
-                Some(unsafe { transmute::<R::Ref<'entry>, R::Ref<'_>>(*value) })
+                unsafe { transmute::<R::Ref<'entry>, R::Ref<'_>>(*value) }
             }
         }
     }
@@ -202,12 +202,10 @@ mod tests {
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
 
-        let db = DB::<String, TokioExecutor>::new(
-            Arc::new(DbOption::from(temp_dir.path())),
-            TokioExecutor::new(),
-        )
-        .await
-        .unwrap();
+        let db =
+            DB::<String, TokioExecutor>::new(DbOption::from(temp_dir.path()), TokioExecutor::new())
+                .await
+                .unwrap();
         {
             let mut txn1 = db.transaction().await;
             txn1.set("foo".to_string());
@@ -238,12 +236,10 @@ mod tests {
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
 
-        let db = DB::<String, TokioExecutor>::new(
-            Arc::new(DbOption::from(temp_dir.path())),
-            TokioExecutor::new(),
-        )
-        .await
-        .unwrap();
+        let db =
+            DB::<String, TokioExecutor>::new(DbOption::from(temp_dir.path()), TokioExecutor::new())
+                .await
+                .unwrap();
 
         let mut txn = db.transaction().await;
         txn.set(0.to_string());
@@ -273,12 +269,10 @@ mod tests {
     async fn transaction_projection() {
         let temp_dir = TempDir::new().unwrap();
 
-        let db = DB::<Test, TokioExecutor>::new(
-            Arc::new(DbOption::from(temp_dir.path())),
-            TokioExecutor::new(),
-        )
-        .await
-        .unwrap();
+        let db =
+            DB::<Test, TokioExecutor>::new(DbOption::from(temp_dir.path()), TokioExecutor::new())
+                .await
+                .unwrap();
 
         let mut txn1 = db.transaction().await;
         txn1.set(Test {
@@ -290,9 +284,9 @@ mod tests {
         let key = 0.to_string();
         let entry = txn1.get(&key, Projection::All).await.unwrap().unwrap();
 
-        assert_eq!(entry.get().unwrap().vstring, 0.to_string());
-        assert_eq!(entry.get().unwrap().vu32, Some(0));
-        assert_eq!(entry.get().unwrap().vbool, Some(true));
+        assert_eq!(entry.get().vstring, 0.to_string());
+        assert_eq!(entry.get().vu32, Some(0));
+        assert_eq!(entry.get().vbool, Some(true));
         drop(entry);
 
         txn1.commit().await.unwrap();
