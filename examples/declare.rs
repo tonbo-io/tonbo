@@ -8,7 +8,7 @@ use morseldb::{executor::tokio::TokioExecutor, morsel_record, Projection, DB};
 pub struct User {
     #[primary_key]
     name: String,
-    // email: Option<String>,
+    email: Option<String>,
     age: u8,
 }
 
@@ -25,8 +25,8 @@ async fn main() {
         // set with owned value
         txn.set(User {
             name: "Alice".into(),
-            // email: None,
             age: 22,
+            email: Some("alice@gmail.com".into()),
         });
 
         // get from primary key
@@ -39,7 +39,7 @@ async fn main() {
         let mut scan = txn
             .scan((Bound::Included(&name), Bound::Excluded(&upper)))
             .await
-            .projection(vec![1])
+            .projection(vec![])
             .take()
             .await
             .unwrap();
@@ -52,6 +52,7 @@ async fn main() {
                         Some(UserRef {
                             name: "Alice",
                             age: Some(22),
+                            email: Some("alice@gmail.com")
                         })
                     );
                 }
