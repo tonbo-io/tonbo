@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, fs, io, sync::Arc};
+use std::{collections::BTreeMap, io, sync::Arc};
 
 use flume::{Receiver, Sender};
-
+use tokio::fs;
 use crate::{fs::FileId, timestamp::Timestamp, DbOption};
 
 pub enum CleanTag {
@@ -42,10 +42,10 @@ impl Cleaner {
                     while let Some((first_version, (gens, dropped))) = self.gens_map.pop_first() {
                         if !dropped {
                             let _ = self.gens_map.insert(first_version, (gens, false));
-                            continue;
+                            break;
                         }
                         for gen in gens {
-                            fs::remove_file(self.option.table_path(&gen))?;
+                            fs::remove_file(self.option.table_path(&gen)).await?;
                         }
                     }
                 }
