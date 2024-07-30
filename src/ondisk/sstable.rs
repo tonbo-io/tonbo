@@ -157,7 +157,7 @@ pub(crate) mod tests {
     async fn write_sstable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            Arc::new(DbOption::from(temp_dir.path())),
+            DbOption::from(temp_dir.path()),
             TokioExecutor::new(),
         )
         .await;
@@ -184,7 +184,7 @@ pub(crate) mod tests {
     async fn projection_query() {
         let temp_dir = tempfile::tempdir().unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            Arc::new(DbOption::from(temp_dir.path())),
+            DbOption::from(temp_dir.path()),
             TokioExecutor::new(),
         )
         .await;
@@ -255,7 +255,7 @@ pub(crate) mod tests {
     async fn projection_scan() {
         let temp_dir = tempfile::tempdir().unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            Arc::new(DbOption::from(temp_dir.path())),
+            DbOption::from(temp_dir.path()),
             TokioExecutor::new(),
         )
         .await;

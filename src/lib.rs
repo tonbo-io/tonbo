@@ -56,7 +56,8 @@ where
     R: Record + Send,
     E: Executor,
 {
-    pub async fn new(option: Arc<DbOption>, executor: E) -> Result<Self, WriteError<R>> {
+    pub async fn new(option: DbOption, executor: E) -> Result<Self, WriteError<R>> {
+        let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
 
         let schema = Arc::new(RwLock::new(Schema::default()));
@@ -507,7 +508,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn get_test_record_batch<E: Executor>(
-        option: Arc<DbOption>,
+        option: DbOption,
         executor: E,
     ) -> RecordBatch {
         let db: DB<Test, E> = DB::new(option, executor).await.unwrap();

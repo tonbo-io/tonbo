@@ -55,7 +55,7 @@ where
         }
     }
 
-    pub(crate) fn value(&self) -> Option<R::Ref<'_>> {
+    pub fn value(&self) -> Option<R::Ref<'_>> {
         match self {
             Entry::Transaction((_, value)) => value.as_ref().map(R::as_record_ref),
             Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref),
