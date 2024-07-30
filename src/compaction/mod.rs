@@ -489,6 +489,9 @@ pub(crate) mod tests {
     async fn minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
 
         let batch_1 = build_immutable::<Test, TokioExecutor>(
             &option,
@@ -630,6 +633,10 @@ pub(crate) mod tests {
         (FileId, FileId, FileId, FileId, FileId),
         Version<Test, TokioExecutor>,
     ) {
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
         // level 0
         let table_gen_1 = FileId::new();
         let table_gen_2 = FileId::new();
