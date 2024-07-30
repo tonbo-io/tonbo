@@ -1,21 +1,62 @@
-use morseldb::morsel_record;
+use std::ops::Bound;
+
+use futures_util::stream::StreamExt;
+use morseldb::{executor::tokio::TokioExecutor, morsel_record, Projection, DB};
 
 // Tips: must be public
 #[morsel_record]
-pub struct Post {
+pub struct User {
     #[primary_key]
     name: String,
-    vu8: u8,
-    vu16: u16,
-    vu32: u32,
-    vu64: u64,
-    vi8: i8,
-    vi16: i16,
-    vi32: i32,
-    vi64: i64,
-    vbool: bool,
+    // email: Option<String>,
+    age: u8,
 }
 
-fn main() {
-    println!("Hello, world!");
+#[tokio::main]
+async fn main() {
+    let db = DB::<User, _>::new("./db_path/users".into(), TokioExecutor::default())
+        .await
+        .unwrap();
+
+    {
+        // morseldb supports transaction
+        let mut txn = db.transaction().await;
+
+        // set with owned value
+        txn.set(User {
+            name: "Alice".into(),
+            // email: None,
+            age: 22,
+        });
+
+        // get from primary key
+        let name = "Alice".into();
+        let user = txn.get(&name, Projection::All).await.unwrap();
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().get().age, Some(22));
+
+        let upper = "Blob".into();
+        let mut scan = txn
+            .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+            .await
+            .projection(vec![1])
+            .take()
+            .await
+            .unwrap();
+        loop {
+            let user = scan.next().await.transpose().unwrap();
+            match user {
+                Some(entry) => {
+                    assert_eq!(
+                        entry.value(),
+                        Some(UserRef {
+                            name: "Alice",
+                            age: Some(22),
+                        })
+                    );
+                }
+                None => break,
+            }
+        }
+    }
 }
