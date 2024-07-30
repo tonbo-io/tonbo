@@ -73,7 +73,7 @@ where
     F: AsyncRead + Unpin,
     R: Record,
 {
-    fn recover(
+    pub(crate) fn recover(
         &mut self,
     ) -> impl Stream<
         Item = Result<

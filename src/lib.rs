@@ -13,7 +13,15 @@ mod transaction;
 mod version;
 mod wal;
 
-use std::{collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    io,
+    marker::PhantomData,
+    mem,
+    ops::Bound,
+    pin::pin,
+    sync::Arc,
+};
 
 use async_lock::{RwLock, RwLockReadGuard};
 use flume::{bounded, Sender};
@@ -36,10 +44,16 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, Compactor},
     executor::Executor,
-    fs::FileId,
+    fs::{FileId, FileType},
+    serdes::Decode,
     stream::{merge::MergeStream, Entry, ScanStream},
-    version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
-    wal::log::LogType,
+    timestamp::Timestamped,
+    version::{
+        cleaner::Cleaner,
+        set::{transaction_ts, VersionSet},
+        Version, VersionError,
+    },
+    wal::{log::LogType, RecoverError, WalFile},
 };
 
 pub struct DB<R, E>
@@ -62,6 +76,7 @@ where
     pub async fn new(option: DbOption, executor: E) -> Result<Self, WriteError<R>> {
         let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
+        E::create_dir_all(&option.wal_dir_path()).await?;
 
         let (task_tx, task_rx) = bounded(1);
         let schema = Arc::new(RwLock::new(Schema::new(option.clone(), task_tx).await?));
@@ -130,7 +145,7 @@ where
 
                 let mut last_buf = record;
 
-                while let Some(record) = records.next() {
+                for record in records {
                     schema
                         .write(LogType::Middle, mem::replace(&mut last_buf, record), ts)
                         .await?;
@@ -168,13 +183,64 @@ where
     R: Record + Send,
     FP: FileProvider,
 {
-    async fn new(option: Arc<DbOption>, compaction_tx: Sender<CompactTask>) -> io::Result<Self> {
-        Ok(Schema {
+    async fn new(
+        option: Arc<DbOption>,
+        compaction_tx: Sender<CompactTask>,
+    ) -> Result<Self, WriteError<R>> {
+        let schema = Schema {
             mutable: Mutable::new(&option).await?,
             immutables: Default::default(),
             compaction_tx,
-            option,
-        })
+            option: option.clone(),
+        };
+
+        let mut transaction_map = HashMap::new();
+        let mut wal_stream = pin!(FP::list(option.wal_dir_path(), FileType::Wal)?);
+
+        while let Some(wal) = wal_stream.next().await {
+            let (file, wal_id) = wal?;
+            let mut wal = WalFile::<FP::File, R>::new(file, wal_id);
+
+            let mut recover_stream = pin!(wal.recover());
+            while let Some(record) = recover_stream.next().await {
+                let (log_type, Timestamped { ts, value: key }, value_option) = record?;
+
+                let is_excess = match log_type {
+                    LogType::Full => {
+                        schema
+                            .recover_append(key, transaction_ts(), value_option)
+                            .await?
+                    }
+                    LogType::First => {
+                        transaction_map.insert(ts, vec![(key, value_option)]);
+                        false
+                    }
+                    LogType::Middle => {
+                        transaction_map
+                            .get_mut(&ts)
+                            .unwrap()
+                            .push((key, value_option));
+                        false
+                    }
+                    LogType::Last => {
+                        let mut is_excess = false;
+                        let mut records = transaction_map.remove(&ts).unwrap();
+                        records.push((key, value_option));
+
+                        let ts = transaction_ts();
+                        for (key, value_option) in records {
+                            is_excess = schema.recover_append(key, ts, value_option).await?;
+                        }
+                        is_excess
+                    }
+                };
+                if is_excess {
+                    let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
+                }
+            }
+        }
+
+        Ok(schema)
     }
 
     async fn write(
@@ -193,6 +259,15 @@ where
         ts: Timestamp,
     ) -> Result<bool, WriteError<R>> {
         Ok(self.mutable.remove(log_ty, key, ts).await? > self.option.max_mem_table_size)
+    }
+
+    async fn recover_append(
+        &self,
+        key: R::Key,
+        ts: Timestamp,
+        value: Option<R>,
+    ) -> Result<bool, WriteError<R>> {
+        Ok(self.mutable.append(None, key, ts, value).await? > self.option.max_mem_table_size)
     }
 
     async fn get<'get>(
@@ -331,6 +406,10 @@ where
     Version(#[from] VersionError<R>),
     #[error("write parquet error: {0}")]
     Parquet(#[from] ParquetError),
+    // #[error("write encode error: {0}")]
+    // Encode(<<R as Record>::Ref as Encode>::Error),
+    #[error("write recover error: {0}")]
+    Recover(#[from] RecoverError<<R as Decode>::Error>),
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
@@ -342,7 +421,11 @@ pub enum Projection {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{collections::VecDeque, mem, sync::Arc};
+    use std::{
+        collections::{BTreeMap, Bound, VecDeque},
+        mem,
+        sync::Arc,
+    };
 
     use arrow::{
         array::{Array, AsArray, RecordBatch},
@@ -359,11 +442,15 @@ pub(crate) mod tests {
     use crate::{
         compaction::{CompactTask, Compactor},
         executor::{tokio::TokioExecutor, Executor},
-        fs::FileId,
+        fs::{FileId, FileProvider},
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
         record::{internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordRef},
         serdes::{Decode, Encode},
-        version::{cleaner::Cleaner, set::tests::build_version_set, Version},
+        version::{
+            cleaner::Cleaner,
+            set::{tests::build_version_set, transaction_ts},
+            Version,
+        },
         wal::log::LogType,
         DbOption, Immutable, Projection, Record, WriteError, DB,
     };
@@ -965,5 +1052,48 @@ pub(crate) mod tests {
         assert_eq!(option1.get().vbool, Some(true));
 
         dbg!(db.version_set.current().await);
+    }
+
+    #[tokio::test]
+    async fn schema_recover() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::from(temp_dir.path()));
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (task_tx, task_rx) = bounded(1);
+
+        let schema: crate::Schema<Test, TokioExecutor> =
+            crate::Schema::new(option.clone(), task_tx.clone())
+                .await
+                .unwrap();
+
+        for item in test_items() {
+            schema
+                .write(LogType::Full, item, transaction_ts())
+                .await
+                .unwrap();
+        }
+        drop(schema);
+
+        let schema: crate::Schema<Test, TokioExecutor> =
+            crate::Schema::new(option.clone(), task_tx).await.unwrap();
+        let mut range = schema
+            .mutable
+            .scan((Bound::Unbounded, Bound::Unbounded), u32::MAX.into());
+
+        let mut sort_items = BTreeMap::new();
+        for item in test_items() {
+            sort_items.insert(item.vstring.clone(), item);
+        }
+        for entry in range {
+            let (_, test) = sort_items.pop_first().unwrap();
+
+            assert_eq!(entry.key().value.as_str(), test.key());
+            assert_eq!(entry.value().as_ref().unwrap().vstring, test.vstring);
+            assert_eq!(entry.value().as_ref().unwrap().vu32, test.vu32);
+            assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
+        }
     }
 }
