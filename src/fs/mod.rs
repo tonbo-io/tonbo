@@ -8,6 +8,7 @@ use std::{
     path::Path,
 };
 
+use futures_core::Stream;
 use futures_io::{AsyncRead, AsyncSeek, AsyncWrite};
 use ulid::Ulid;
 
@@ -31,6 +32,11 @@ pub trait FileProvider {
     fn open(path: impl AsRef<Path> + Send) -> impl Future<Output = io::Result<Self::File>> + Send;
 
     fn remove(path: impl AsRef<Path> + Send) -> impl Future<Output = io::Result<()>> + Send;
+
+    fn list(
+        dir_path: impl AsRef<Path> + Send,
+        file_type: FileType,
+    ) -> io::Result<impl Stream<Item = io::Result<(Self::File, FileId)>>>;
 }
 
 impl Display for FileType {
