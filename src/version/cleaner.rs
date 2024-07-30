@@ -1,21 +1,29 @@
-use std::{collections::BTreeMap, io, sync::Arc};
+use std::{collections::BTreeMap, io, marker::PhantomData, sync::Arc};
 
 use flume::{Receiver, Sender};
-use tokio::fs;
-use crate::{fs::FileId, timestamp::Timestamp, DbOption};
+
+use crate::{
+    fs::{FileId, FileProvider},
+    timestamp::Timestamp,
+    DbOption,
+};
 
 pub enum CleanTag {
     Add { ts: Timestamp, gens: Vec<FileId> },
     Clean { ts: Timestamp },
 }
 
-pub(crate) struct Cleaner {
+pub(crate) struct Cleaner<FP: FileProvider> {
     tag_recv: Receiver<CleanTag>,
     gens_map: BTreeMap<Timestamp, (Vec<FileId>, bool)>,
     option: Arc<DbOption>,
+    _p: PhantomData<FP>,
 }
 
-impl Cleaner {
+impl<FP> Cleaner<FP>
+where
+    FP: FileProvider,
+{
     pub(crate) fn new(option: Arc<DbOption>) -> (Self, Sender<CleanTag>) {
         let (tag_send, tag_recv) = flume::bounded(option.clean_channel_buffer);
 
@@ -24,6 +32,7 @@ impl Cleaner {
                 tag_recv,
                 gens_map: Default::default(),
                 option,
+                _p: Default::default(),
             },
             tag_send,
         )
@@ -45,7 +54,7 @@ impl Cleaner {
                             break;
                         }
                         for gen in gens {
-                            fs::remove_file(self.option.table_path(&gen)).await?;
+                            FP::remove(self.option.table_path(&gen)).await?;
                         }
                     }
                 }

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-mod arrows;
 mod compaction;
 pub mod executor;
 pub mod fs;
@@ -17,7 +15,7 @@ mod wal;
 
 use std::{collections::VecDeque, io, marker::PhantomData, mem, ops::Bound, sync::Arc};
 
-use async_lock::{Mutex, RwLock, RwLockReadGuard};
+use async_lock::{RwLock, RwLockReadGuard};
 use flume::{bounded, Sender};
 use fs::FileProvider;
 use futures_core::Stream;
@@ -65,10 +63,10 @@ where
         let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
 
-        let (task_tx, mut task_rx) = bounded(1);
+        let (task_tx, task_rx) = bounded(1);
         let schema = Arc::new(RwLock::new(Schema::new(option.clone(), task_tx).await?));
 
-        let (mut cleaner, clean_sender) = Cleaner::new(option.clone());
+        let (mut cleaner, clean_sender) = Cleaner::<E>::new(option.clone());
 
         let version_set = VersionSet::new(clean_sender, option.clone()).await?;
         let mut compactor =
@@ -350,7 +348,7 @@ pub(crate) mod tests {
         array::{Array, AsArray, RecordBatch},
         datatypes::{DataType, Field, Schema, UInt32Type},
     };
-    use async_lock::{Mutex, RwLock};
+    use async_lock::RwLock;
     use flume::{bounded, Receiver};
     use futures_util::io;
     use once_cell::sync::Lazy;
@@ -358,15 +356,17 @@ pub(crate) mod tests {
     use tempfile::TempDir;
     use tracing::error;
 
-    use crate::{compaction::{CompactTask, Compactor}, executor::{tokio::TokioExecutor, Executor}, fs::FileId, inmem::{
-        immutable::{ArrowArrays, Builder},
-        mutable::Mutable,
-    }, record::{internal::InternalRecordRef, Key, RecordRef}, serdes::{
-        option::{DecodeError, EncodeError},
-        Decode, Encode,
-    }, timestamp::Timestamped, version::{cleaner::Cleaner, set::tests::build_version_set, Version}, wal::log::LogType, DbOption, Immutable, Record, WriteError, DB, Projection};
-    use crate::inmem::immutable::tests::TestImmutableArrays;
-    use crate::record::{RecordDecodeError, RecordEncodeError};
+    use crate::{
+        compaction::{CompactTask, Compactor},
+        executor::{tokio::TokioExecutor, Executor},
+        fs::FileId,
+        inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
+        record::{internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordRef},
+        serdes::{Decode, Encode},
+        version::{cleaner::Cleaner, set::tests::build_version_set, Version},
+        wal::log::LogType,
+        DbOption, Immutable, Projection, Record, WriteError, DB,
+    };
 
     #[derive(Debug, PartialEq, Eq)]
     pub struct Test {
@@ -554,11 +554,11 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn get_test_record_batch<E: Executor>(
+    pub(crate) async fn get_test_record_batch<E: Executor + Send + Sync + 'static>(
         option: DbOption,
         executor: E,
     ) -> RecordBatch {
-        let db: DB<Test, E> = DB::new(option, executor).await.unwrap();
+        let db: DB<Test, E> = DB::new(option.clone(), executor).await.unwrap();
 
         db.write(
             Test {
@@ -590,7 +590,9 @@ pub(crate) mod tests {
             .clone()
     }
 
-    pub(crate) async fn build_schema(option: DbOption) -> io::Result<(crate::Schema<Test, TokioExecutor>, Receiver<CompactTask>)> {
+    pub(crate) async fn build_schema(
+        option: Arc<DbOption>,
+    ) -> io::Result<(crate::Schema<Test, TokioExecutor>, Receiver<CompactTask>)> {
         let mutable = Mutable::new(&option).await?;
 
         mutable
@@ -702,7 +704,7 @@ pub(crate) mod tests {
 
         let schema = Arc::new(RwLock::new(schema));
 
-        let (mut cleaner, clean_sender) = Cleaner::new(option.clone());
+        let (mut cleaner, clean_sender) = Cleaner::<E>::new(option.clone());
         let version_set = build_version_set(version, clean_sender, option.clone()).await?;
         let mut compactor =
             Compactor::<R, E>::new(schema.clone(), option.clone(), version_set.clone());
@@ -948,7 +950,7 @@ pub(crate) mod tests {
         option.level_sst_magnification = 10;
         option.max_sst_file_size = 2 * 1024 * 1024;
 
-        let db: DB<Test, TokioExecutor> = DB::new(Arc::new(option), TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for item in test_items() {
             db.write(item, 0.into()).await.unwrap();
@@ -958,9 +960,9 @@ pub(crate) mod tests {
         let key = 20.to_string();
         let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
 
-        assert_eq!(option1.get().map(|test_ref| test_ref.vstring), Some("20"));
-        assert_eq!(option1.get().map(|test_ref| test_ref.vu32), Some(Some(0)));
-        assert_eq!(option1.get().map(|test_ref| test_ref.vbool), Some(Some(true)));
+        assert_eq!(option1.get().vstring, "20");
+        assert_eq!(option1.get().vu32, Some(0));
+        assert_eq!(option1.get().vbool, Some(true));
 
         dbg!(db.version_set.current().await);
     }
