@@ -15,7 +15,10 @@ use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileProvider},
-    inmem::immutable::{ArrowArrays, Builder, Immutable},
+    inmem::{
+        immutable::{ArrowArrays, Builder, Immutable},
+        mutable::Mutable,
+    },
     ondisk::sstable::SsTable,
     record::{KeyRef, Record},
     scope::Scope,
@@ -27,7 +30,6 @@ use crate::{
     },
     DbOption, Schema,
 };
-use crate::inmem::mutable::Mutable;
 
 #[derive(Debug)]
 pub(crate) enum CompactTask {
@@ -69,7 +71,7 @@ where
         let mut guard = self.schema.write().await;
 
         if guard.mutable.is_empty() {
-            return Ok(())
+            return Ok(());
         }
         let mutable = mem::replace(&mut guard.mutable, Mutable::new(&self.option).await?);
         let (file_id, immutable) = mutable.to_immutable().await?;

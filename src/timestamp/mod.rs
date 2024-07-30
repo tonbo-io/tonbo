@@ -1,6 +1,6 @@
 pub mod timestamped;
 
-use std::{future::Future, io};
+use std::io;
 
 use arrow::{
     array::{PrimitiveArray, Scalar},

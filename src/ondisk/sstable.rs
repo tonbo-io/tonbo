@@ -130,7 +130,7 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{borrow::Borrow, ops::Bound, path::PathBuf, sync::Arc};
+    use std::{borrow::Borrow, ops::Bound, path::PathBuf};
 
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
