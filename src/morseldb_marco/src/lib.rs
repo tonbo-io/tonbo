@@ -232,7 +232,8 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     Ok(false) => {
                         match (is_nullable, is_string) {
                             (true, true) => {
-                                to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
+                                to_ref_init_fields
+                                    .push(quote! { #field_name: self.#field_name.as_deref(), });
                             }
                             (true, false) => {
                                 to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
@@ -260,6 +261,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                         .column(column_i)
                                         .#as_method;
 
+                                    use ::arrow::array::Array;
                                     if !#field_array_name.is_null(offset) {
                                         #field_name = Some(#field_array_name.value(offset));
                                     }
@@ -267,6 +269,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                 }
                             });
                             arrays_get_fields.push(quote! {
+                                use ::arrow::array::Array;
                                 let #field_name = (!self.#field_name.is_null(offset) && projection_mask.leaf_included(#field_index))
                                     .then(|| self.#field_name.value(offset));
                             });
@@ -455,7 +458,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 offset: usize,
                 projection_mask: &'r ::parquet::arrow::ProjectionMask,
             ) -> ::morseldb::record::internal::InternalRecordRef<'r, Self> {
-                use arrow::array::AsArray;
+                use ::arrow::array::AsArray;
 
                 let mut column_i = 2;
                 let null = record_batch.column(0).as_boolean().value(offset);
