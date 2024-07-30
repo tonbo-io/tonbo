@@ -8,7 +8,7 @@ use crate::{
     version::Version,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DbOption {
     pub(crate) path: PathBuf,
     pub(crate) max_mem_table_size: usize,
