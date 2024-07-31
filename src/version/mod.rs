@@ -2,7 +2,14 @@ pub(crate) mod cleaner;
 pub(crate) mod edit;
 pub(crate) mod set;
 
-use std::{marker::PhantomData, ops::Bound, sync::Arc};
+use std::{
+    marker::PhantomData,
+    ops::Bound,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+};
 
 use flume::{SendError, Sender};
 use parquet::arrow::ProjectionMask;
@@ -35,6 +42,7 @@ where
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
+    timestamp: Arc<AtomicU32>,
     _p: PhantomData<FP>,
 }
 
@@ -43,18 +51,27 @@ where
     R: Record,
     FP: FileProvider,
 {
-    pub(crate) fn new(option: Arc<DbOption>, clean_sender: Sender<CleanTag>) -> Self {
+    pub(crate) fn new(
+        option: Arc<DbOption>,
+        clean_sender: Sender<CleanTag>,
+        timestamp: Arc<AtomicU32>,
+    ) -> Self {
         Version {
             ts: Timestamp::from(0),
             level_slice: [const { Vec::new() }; MAX_LEVEL],
             clean_sender,
             option: option.clone(),
+            timestamp,
             _p: Default::default(),
         }
     }
 
     pub(crate) fn option(&self) -> &Arc<DbOption> {
         &self.option
+    }
+
+    pub(crate) fn transaction_ts(&self) -> Timestamp {
+        self.timestamp.fetch_add(1, Ordering::Release).into()
     }
 }
 
@@ -75,6 +92,7 @@ where
             level_slice,
             clean_sender: self.clean_sender.clone(),
             option: self.option.clone(),
+            timestamp: self.timestamp.clone(),
             _p: Default::default(),
         }
     }

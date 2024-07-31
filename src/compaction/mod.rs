@@ -23,11 +23,7 @@ use crate::{
     record::{KeyRef, Record},
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
-    version::{
-        edit::VersionEdit,
-        set::{transaction_ts, VersionSet},
-        Version, VersionError, MAX_LEVEL,
-    },
+    version::{edit::VersionEdit, set::VersionSet, Version, VersionError, MAX_LEVEL},
     DbOption, Schema,
 };
 
@@ -104,7 +100,7 @@ where
                 }
                 version_edits.insert(0, VersionEdit::Add { level: 0, scope });
                 version_edits.push(VersionEdit::LatestTimeStamp {
-                    ts: transaction_ts(),
+                    ts: version_ref.transaction_ts(),
                 });
 
                 self.version_set
@@ -431,7 +427,10 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{collections::VecDeque, sync::Arc};
+    use std::{
+        collections::VecDeque,
+        sync::{atomic::AtomicU32, Arc},
+    };
 
     use flume::bounded;
     use parquet::{arrow::AsyncArrowWriter, errors::ParquetError};
@@ -449,13 +448,13 @@ pub(crate) mod tests {
         timestamp::Timestamp,
         version::{edit::VersionEdit, Version},
         wal::log::LogType,
-        DbOption, WriteError,
+        DataBaseError, DbOption,
     };
 
     async fn build_immutable<R, FP>(
         option: &DbOption,
         records: Vec<(LogType, R, Timestamp)>,
-    ) -> Result<Immutable<R::Columns>, WriteError<R>>
+    ) -> Result<Immutable<R::Columns>, DataBaseError<R>>
     where
         R: Record + Send,
         FP: FileProvider,
@@ -472,7 +471,7 @@ pub(crate) mod tests {
         option: &DbOption,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
-    ) -> Result<(), WriteError<R>>
+    ) -> Result<(), DataBaseError<R>>
     where
         R: Record + Send,
         FP: Executor,
@@ -830,7 +829,11 @@ pub(crate) mod tests {
         .unwrap();
 
         let (sender, _) = bounded(1);
-        let mut version = Version::<Test, TokioExecutor>::new(option.clone(), sender);
+        let mut version = Version::<Test, TokioExecutor>::new(
+            option.clone(),
+            sender,
+            Arc::new(AtomicU32::default()),
+        );
         version.level_slice[0].push(Scope {
             min: 1.to_string(),
             max: 3.to_string(),
