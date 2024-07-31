@@ -157,7 +157,7 @@ impl Builder<StringColumns> for StringColumnsBuilder {
             + self.string.values_slice().len()
     }
 
-    fn finish(&mut self) -> StringColumns {
+    fn finish(&mut self, _: Option<&[usize]>) -> StringColumns {
         let _null = Arc::new(BooleanArray::new(self._null.finish(), None));
         let _ts = Arc::new(self._ts.finish());
         let string = Arc::new(self.string.finish());

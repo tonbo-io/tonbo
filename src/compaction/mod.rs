@@ -389,7 +389,7 @@ where
         debug_assert!(max.is_some());
 
         let gen = Ulid::new();
-        let columns = builder.finish();
+        let columns = builder.finish(None);
         let mut writer = AsyncArrowWriter::try_new(
             FP::open(option.table_path(&gen)).await?.compat(),
             R::arrow_schema().clone(),

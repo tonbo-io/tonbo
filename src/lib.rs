@@ -46,7 +46,7 @@ use crate::{
     executor::Executor,
     fs::{FileId, FileType},
     serdes::Decode,
-    stream::{merge::MergeStream, Entry, ScanStream},
+    stream::{merge::MergeStream, package::PackageStream, Entry, ScanStream},
     timestamp::Timestamped,
     version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
@@ -321,6 +321,7 @@ where
     streams: Vec<ScanStream<'scan, R, FP>>,
 
     limit: Option<usize>,
+    projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
 }
 
@@ -344,6 +345,7 @@ where
             version,
             streams,
             limit: None,
+            projection_indices: None,
             projection: ProjectionMask::all(),
         }
     }
@@ -360,11 +362,12 @@ where
         projection.extend([0, 1, R::primary_key_index()]);
         let mask = ProjectionMask::roots(
             &arrow_to_parquet_schema(R::arrow_schema()).unwrap(),
-            projection,
+            projection.clone(),
         );
 
         Self {
             projection: mask,
+            projection_indices: Some(projection),
             ..self
         }
     }
@@ -396,6 +399,41 @@ where
             .await?;
 
         Ok(MergeStream::from_vec(self.streams).await?)
+    }
+
+    pub async fn package(
+        mut self,
+        batch_size: usize,
+    ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, WriteError<R>> {
+        self.streams.push(
+            self.schema
+                .mutable
+                .scan((self.lower, self.upper), self.ts)
+                .into(),
+        );
+        for immutable in &self.schema.immutables {
+            self.streams.push(
+                immutable
+                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .into(),
+            );
+        }
+        self.version
+            .streams(
+                &mut self.streams,
+                (self.lower, self.upper),
+                self.ts,
+                self.limit,
+                self.projection,
+            )
+            .await?;
+        let merge_stream = MergeStream::from_vec(self.streams).await?;
+
+        Ok(PackageStream::new(
+            batch_size,
+            merge_stream,
+            self.projection_indices,
+        ))
     }
 }
 

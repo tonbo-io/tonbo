@@ -1,5 +1,6 @@
 pub(crate) mod level;
 pub(crate) mod merge;
+pub(crate) mod package;
 pub(crate) mod record_batch;
 
 use std::{
