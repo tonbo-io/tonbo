@@ -176,6 +176,7 @@ where
     immutables: VecDeque<(FileId, Immutable<R::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     option: Arc<DbOption>,
+    recover_wal_ids: Option<Vec<FileId>>,
 }
 
 impl<R, FP> Schema<R, FP>
@@ -187,19 +188,22 @@ where
         option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
     ) -> Result<Self, WriteError<R>> {
-        let schema = Schema {
+        let mut schema = Schema {
             mutable: Mutable::new(&option).await?,
             immutables: Default::default(),
             compaction_tx,
             option: option.clone(),
+            recover_wal_ids: None,
         };
 
         let mut transaction_map = HashMap::new();
         let mut wal_stream = pin!(FP::list(option.wal_dir_path(), FileType::Wal)?);
+        let mut wal_ids = Vec::new();
 
         while let Some(wal) = wal_stream.next().await {
             let (file, wal_id) = wal?;
             let mut wal = WalFile::<FP::File, R>::new(file, wal_id);
+            wal_ids.push(wal_id);
 
             let mut recover_stream = pin!(wal.recover());
             while let Some(record) = recover_stream.next().await {
@@ -239,6 +243,7 @@ where
                 }
             }
         }
+        schema.recover_wal_ids = Some(wal_ids);
 
         Ok(schema)
     }
@@ -770,6 +775,7 @@ pub(crate) mod tests {
                 immutables,
                 compaction_tx,
                 option,
+                recover_wal_ids: None,
             },
             compaction_rx,
         ))
