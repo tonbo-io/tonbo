@@ -42,7 +42,7 @@ where
 
     fn written_size(&self) -> usize;
 
-    fn finish(&mut self) -> S;
+    fn finish(&mut self, indices: Option<&[usize]>) -> S;
 }
 
 pub(crate) struct Immutable<A>
@@ -70,7 +70,7 @@ where
             index.insert(key, offset as u32);
         }
 
-        let data = builder.finish();
+        let data = builder.finish(None);
 
         Self { data, index }
     }
@@ -294,13 +294,13 @@ pub(crate) mod tests {
                 + mem::size_of_val(self.vobool.values_slice())
         }
 
-        fn finish(&mut self) -> TestImmutableArrays {
+        fn finish(&mut self, indices: Option<&[usize]>) -> TestImmutableArrays {
             let vstring = Arc::new(self.vstring.finish());
             let vu32 = Arc::new(self.vu32.finish());
             let vbool = Arc::new(self.vobool.finish());
             let _null = Arc::new(BooleanArray::new(self._null.finish(), None));
             let _ts = Arc::new(self._ts.finish());
-            let record_batch = RecordBatch::try_new(
+            let mut record_batch = RecordBatch::try_new(
                 Arc::clone(
                     <<TestImmutableArrays as ArrowArrays>::Record as Record>::arrow_schema(),
                 ),
@@ -313,6 +313,11 @@ pub(crate) mod tests {
                 ],
             )
             .expect("create record batch must be successful");
+            if let Some(indices) = indices {
+                record_batch = record_batch
+                    .project(indices)
+                    .expect("projection indices must be successful");
+            }
 
             TestImmutableArrays {
                 vstring,
