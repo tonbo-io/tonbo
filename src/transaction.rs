@@ -18,9 +18,9 @@ use crate::{
     record::{Key, KeyRef},
     stream,
     timestamp::{Timestamp, Timestamped},
-    version::{set::transaction_ts, VersionRef},
+    version::VersionRef,
     wal::log::LogType,
-    LockMap, Projection, Record, Scan, Schema, WriteError,
+    DataBaseError, LockMap, Projection, Record, Scan, Schema,
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
@@ -64,7 +64,7 @@ where
         lock_map: LockMap<R::Key>,
     ) -> Self {
         Self {
-            ts: transaction_ts(),
+            ts: version.transaction_ts(),
             local: BTreeMap::new(),
             share,
             version,
@@ -76,7 +76,7 @@ where
         &'get self,
         key: &'get R::Key,
         projection: Projection,
-    ) -> Result<Option<TransactionEntry<'get, R>>, WriteError<R>> {
+    ) -> Result<Option<TransactionEntry<'get, R>>, DataBaseError<R>> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
@@ -143,12 +143,12 @@ where
         let is_excess = match len {
             0 => false,
             1 => {
-                let new_ts = transaction_ts();
+                let new_ts = self.version.transaction_ts();
                 let (key, record) = self.local.pop_first().unwrap();
                 Self::append(&self.share, LogType::Full, key, record, new_ts).await?
             }
             _ => {
-                let new_ts = transaction_ts();
+                let new_ts = self.version.transaction_ts();
                 let mut iter = self.local.into_iter();
 
                 let (key, record) = iter.next().unwrap();
@@ -214,8 +214,8 @@ where
     Io(#[from] io::Error),
     #[error("transaction parquet error {:?}", .0)]
     Parquet(#[from] ParquetError),
-    #[error("transaction write error {:?}", .0)]
-    Write(#[from] WriteError<R>),
+    #[error("transaction database error {:?}", .0)]
+    DataBase(#[from] DataBaseError<R>),
     #[error("transaction write conflict: {:?}", .0)]
     WriteConflict(R::Key),
 }

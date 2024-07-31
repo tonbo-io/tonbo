@@ -20,8 +20,6 @@ use crate::{
     DbOption,
 };
 
-static GLOBAL_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
-
 pub(crate) struct VersionSetInner<R, FP>
 where
     R: Record,
@@ -38,6 +36,7 @@ where
 {
     inner: Arc<RwLock<VersionSetInner<R, FP>>>,
     clean_sender: Sender<CleanTag>,
+    timestamp: Arc<AtomicU32>,
     option: Arc<DbOption>,
 }
 
@@ -50,6 +49,7 @@ where
         VersionSet {
             inner: self.inner.clone(),
             clean_sender: self.clean_sender.clone(),
+            timestamp: self.timestamp.clone(),
             option: self.option.clone(),
         }
     }
@@ -68,6 +68,7 @@ where
         let edits = VersionEdit::recover(&mut log).await;
         log.seek(SeekFrom::End(0)).await?;
 
+        let timestamp = Arc::new(AtomicU32::default());
         let set = VersionSet::<R, FP> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(Version::<R, FP> {
@@ -75,11 +76,13 @@ where
                     level_slice: [const { Vec::new() }; MAX_LEVEL],
                     clean_sender: clean_sender.clone(),
                     option: option.clone(),
+                    timestamp: timestamp.clone(),
                     _p: Default::default(),
                 }),
                 log,
             })),
             clean_sender,
+            timestamp,
             option,
         };
         set.apply_edits(edits, None, true).await?;
@@ -129,7 +132,7 @@ where
                 }
                 VersionEdit::LatestTimeStamp { ts } => {
                     if is_recover {
-                        GLOBAL_TIMESTAMP.store(u32::from(ts), Ordering::Release);
+                        self.timestamp.store(u32::from(ts), Ordering::Release);
                     }
                     new_version.ts = ts;
                 }
@@ -149,18 +152,15 @@ where
         guard.current = Arc::new(new_version);
         Ok(())
     }
-}
 
-pub(crate) fn transaction_ts() -> Timestamp {
-    GLOBAL_TIMESTAMP.fetch_add(1, Ordering::Release).into()
+    pub(crate) fn transaction_ts(&self) -> Timestamp {
+        self.timestamp.fetch_add(1, Ordering::Release).into()
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{
-        io::SeekFrom,
-        sync::{atomic::Ordering, Arc},
-    };
+    use std::{io::SeekFrom, sync::Arc};
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
@@ -174,7 +174,7 @@ pub(crate) mod tests {
         version::{
             cleaner::CleanTag,
             edit::VersionEdit,
-            set::{transaction_ts, VersionSet, VersionSetInner, GLOBAL_TIMESTAMP},
+            set::{VersionSet, VersionSetInner},
             Version, VersionError,
         },
         DbOption,
@@ -198,6 +198,7 @@ pub(crate) mod tests {
                 log,
             })),
             clean_sender,
+            timestamp: Arc::new(Default::default()),
             option,
         })
     }
@@ -213,10 +214,6 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(
-            transaction_ts(),
-            (GLOBAL_TIMESTAMP.load(Ordering::SeqCst) - 1).into()
-        );
         version_set
             .apply_edits(
                 vec![VersionEdit::LatestTimeStamp { ts: 20_u32.into() }],
@@ -228,10 +225,10 @@ pub(crate) mod tests {
 
         drop(version_set);
 
-        let _version_set: VersionSet<String, TokioExecutor> =
+        let version_set: VersionSet<String, TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone())
                 .await
                 .unwrap();
-        assert_eq!(transaction_ts(), 20_u32.into());
+        assert_eq!(version_set.transaction_ts(), 20_u32.into());
     }
 }
