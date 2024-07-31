@@ -17,7 +17,7 @@ use crate::{
         Timestamp, EPOCH,
     },
     wal::{log::LogType, WalFile},
-    DbOption, WriteError,
+    DataBaseError, DbOption,
 };
 
 pub(crate) type MutableScan<'scan, R> = Range<
@@ -67,7 +67,7 @@ where
         log_ty: LogType,
         record: R,
         ts: Timestamp,
-    ) -> Result<usize, WriteError<R>> {
+    ) -> Result<usize, DataBaseError<R>> {
         self.append(Some(log_ty), record.key().to_key(), ts, Some(record))
             .await
     }
@@ -77,7 +77,7 @@ where
         log_ty: LogType,
         key: R::Key,
         ts: Timestamp,
-    ) -> Result<usize, WriteError<R>> {
+    ) -> Result<usize, DataBaseError<R>> {
         self.append(Some(log_ty), key, ts, None).await
     }
 
@@ -87,7 +87,7 @@ where
         key: R::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<usize, WriteError<R>> {
+    ) -> Result<usize, DataBaseError<R>> {
         let timestamped_key = Timestamped::new(key, ts);
 
         if let Some(log_ty) = log_ty {
