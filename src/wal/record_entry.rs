@@ -94,7 +94,7 @@ mod tests {
         {
             assert_eq!(key_1.value, key_2.value.as_str());
             assert_eq!(key_1.ts, key_2.ts);
-            assert_eq!(value_1, value_2.as_ref().map(String::as_str));
+            assert_eq!(value_1, value_2.as_deref());
 
             return;
         }

@@ -51,6 +51,7 @@ where
     R: Record,
     FP: FileProvider,
 {
+    #[cfg(test)]
     pub(crate) fn new(
         option: Arc<DbOption>,
         clean_sender: Sender<CleanTag>,
@@ -103,6 +104,7 @@ where
     R: Record,
     FP: FileProvider,
 {
+    #[allow(unused)]
     pub(crate) async fn query(
         &self,
         key: &TimestampedRef<R::Key>,
@@ -138,6 +140,7 @@ where
         Ok(None)
     }
 
+    #[allow(unused)]
     async fn table_query(
         &self,
         key: &TimestampedRef<<R as Record>::Key>,

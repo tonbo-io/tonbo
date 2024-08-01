@@ -23,7 +23,7 @@ use std::{
     sync::Arc,
 };
 
-use async_lock::{RwLock, RwLockReadGuard};
+use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
 use fs::FileProvider;
@@ -224,10 +224,6 @@ where
         };
 
         Ok(())
-    }
-
-    pub(crate) async fn read(&self) -> RwLockReadGuard<'_, Schema<R, E>> {
-        self.schema.read().await
     }
 }
 
