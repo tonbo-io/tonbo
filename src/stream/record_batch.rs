@@ -16,7 +16,7 @@ pub struct RecordBatchEntry<R>
 where
     R: Record,
 {
-    record_batch: RecordBatch,
+    _record_batch: RecordBatch,
     record_ref: InternalRecordRef<'static, R::Ref<'static>>,
 }
 
@@ -25,11 +25,11 @@ where
     R: Record,
 {
     pub(crate) fn new(
-        record_batch: RecordBatch,
+        _record_batch: RecordBatch,
         record_ref: InternalRecordRef<'static, R::Ref<'static>>,
     ) -> Self {
         Self {
-            record_batch,
+            _record_batch,
             record_ref,
         }
     }

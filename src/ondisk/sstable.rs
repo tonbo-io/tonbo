@@ -1,6 +1,5 @@
 use std::{marker::PhantomData, ops::Bound};
 
-use arrow::array::RecordBatch;
 use futures_util::StreamExt;
 use parquet::{
     arrow::{
@@ -43,6 +42,7 @@ where
         }
     }
 
+    #[allow(unused)]
     fn create_writer(&mut self) -> AsyncArrowWriter<Compat<&mut dyn AsyncFile>> {
         // TODO: expose writer options
         let options = ArrowWriterOptions::new().with_properties(
@@ -59,7 +59,11 @@ where
         .expect("Failed to create writer")
     }
 
-    async fn write(&mut self, record_batch: RecordBatch) -> parquet::errors::Result<()> {
+    #[cfg(test)]
+    async fn write(
+        &mut self,
+        record_batch: arrow::array::RecordBatch,
+    ) -> parquet::errors::Result<()> {
         let mut writer = self.create_writer();
         writer.write(&record_batch).await?;
 
