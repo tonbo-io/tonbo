@@ -73,11 +73,14 @@ async fn main() {
         let name = "Alice".into();
 
         // get the zero-copy reference of record without any allocations.
-        let user = txn.get(
-            &name,
-            // tonbo supports pushing down projection
-            Projection::All
-        ).await.unwrap();
+        let user = txn
+            .get(
+                &name,
+                // tonbo supports pushing down projection
+                Projection::All,
+            )
+            .await
+            .unwrap();
         assert!(user.is_some());
         assert_eq!(user.unwrap().get().age, Some(22));
 
@@ -94,12 +97,12 @@ async fn main() {
                 .unwrap();
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 assert_eq!(
-                  entry.value(),
-                  Some(UserRef {
-                    name: "Alice",
-                    email: Some("alice@gmail.com"),
-                    age: Some(22),
-                  })
+                    entry.value(),
+                    Some(UserRef {
+                        name: "Alice",
+                        email: Some("alice@gmail.com"),
+                        age: Some(22),
+                    })
                 );
             }
         }
