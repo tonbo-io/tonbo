@@ -82,8 +82,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::Bound;
+    use std::{collections::Bound, sync::Arc};
 
+    use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array};
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
@@ -94,6 +95,7 @@ mod tests {
             immutable::{tests::TestImmutableArrays, ArrowArrays},
             mutable::Mutable,
         },
+        record::Record,
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
         wal::log::LogType,
@@ -188,9 +190,24 @@ mod tests {
             batch_size: 8192,
             inner: merge,
             builder: TestImmutableArrays::builder(8192),
-            projection_indices: Some(projection_indices),
+            projection_indices: Some(projection_indices.clone()),
         };
 
-        dbg!(package.next().await);
+        let arrays = package.next().await.unwrap().unwrap();
+        assert_eq!(
+            arrays.as_record_batch(),
+            &RecordBatch::try_new(
+                Arc::new(Test::arrow_schema().project(&projection_indices).unwrap(),),
+                vec![
+                    Arc::new(BooleanArray::from(vec![
+                        false, false, false, false, false, false
+                    ])),
+                    Arc::new(UInt32Array::from(vec![0, 1, 2, 3, 4, 5])),
+                    Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e", "f"])),
+                    Arc::new(UInt32Array::from(vec![0, 1, 2, 3, 4, 5])),
+                ],
+            )
+            .unwrap()
+        )
     }
 }
