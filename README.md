@@ -1,8 +1,8 @@
-# MorselDB (WIP)
+# Tonbo (WIP)
 
 ## Introduction
 
-**MorselDB** is an embedded schema database based on **Arrow** & **Parquet**. Allow structured data to be **Filtered**, **Projected**, and **Stored** in **LSM** Tree.
+**Tonbo** is an embedded schema database based on **Arrow** & **Parquet**. Allow structured data to be **Filtered**, **Projected**, and **Stored** in **LSM** Tree.
 
 ## Features
 
@@ -37,7 +37,7 @@
 use std::ops::Bound;
 
 use futures_util::stream::StreamExt;
-use morseldb::{executor::tokio::TokioExecutor, record, Projection, DB};
+use tonbo::{executor::tokio::TokioExecutor, record, Projection, DB};
 
 // use macro to define schema of column family just like ORM
 // it provides type safety read & write API
@@ -64,7 +64,7 @@ async fn main() {
     });
 
     {
-        // morseldb supports transaction
+        // tonbo supports transaction
         let mut txn = db.transaction().await;
 
         // get from primary key
@@ -73,7 +73,7 @@ async fn main() {
         // get the zero-copy reference of record without any allocations.
         let user = txn.get(
             &name,
-            // morseldb supports pushing down projection
+            // tonbo supports pushing down projection
             Projection::All
         ).await.unwrap();
         assert!(user.is_some());
@@ -85,7 +85,7 @@ async fn main() {
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 .await
-                // morseldb supports pushing down projection
+                // tonbo supports pushing down projection
                 .projection(vec![1])
                 .take()
                 .await
@@ -109,5 +109,5 @@ async fn main() {
 
 ```
 
-## Contributing to MorselDB
+## Contributing to Tonbo
 Please feel free to ask any question or contact us on Github Discussions.

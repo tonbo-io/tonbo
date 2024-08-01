@@ -216,7 +216,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     ::std::sync::Arc::clone(&#field_name) as ::std::sync::Arc<dyn ::arrow::array::Array>,
                 });
                 encode_method_fields.push(quote! {
-                    ::morseldb::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::morseldb::record::RecordEncodeError::Encode {
+                    ::tonbo::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
                         field_name: stringify!(#field_name).to_string(),
                         error: Box::new(err),
                     })?;
@@ -283,7 +283,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                 self.#field_name.append_null();
                             });
                             decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::morseldb::record::RecordDecodeError::Decode {
+                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
                                     field_name: stringify!(#field_name).to_string(),
                                     error: Box::new(err),
                                 })?;
@@ -314,7 +314,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                                 self.#field_name.append_value(Default::default());
                             });
                             decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::morseldb::record::RecordDecodeError::Decode {
+                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
                                     field_name: stringify!(#field_name).to_string(),
                                     error: Box::new(err),
                                 })?.unwrap();
@@ -357,7 +357,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                            let #field_name = self.#field_name.value(offset);
                         });
                         decode_method_fields.push(quote! {
-                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::morseldb::record::RecordDecodeError::Decode {
+                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
                                 field_name: stringify!(#field_name).to_string(),
                                 error: Box::new(err),
                             })?;
@@ -387,10 +387,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
     let struct_builder_name = Ident::new(&format!("{}Builder", struct_name), struct_name.span());
 
     let gen = quote! {
-        #[derive(morseldb_marco::KeyAttributes, Debug, PartialEq, Eq, Clone)]
+        #[derive(tonbo_marco::KeyAttributes, Debug, PartialEq, Eq, Clone)]
         #ast
 
-        impl ::morseldb::record::Record for #struct_name {
+        impl ::tonbo::record::Record for #struct_name {
             type Columns = #struct_arrays_name;
 
             type Key = #primary_key_ty;
@@ -399,7 +399,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             where
                 Self: 'r;
 
-            fn key(&self) -> <<Self as ::morseldb::record::Record>::Key as ::morseldb::record::Key>::Ref<'_> {
+            fn key(&self) -> <<Self as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'_> {
                 &self.#primary_key_name
             }
 
@@ -426,8 +426,8 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ::morseldb::serdes::Decode for #struct_name {
-            type Error = ::morseldb::record::RecordDecodeError;
+        impl ::tonbo::serdes::Decode for #struct_name {
+            type Error = ::tonbo::record::RecordDecodeError;
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
@@ -446,10 +446,10 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             #(#ref_fields)*
         }
 
-        impl<'r> ::morseldb::record::RecordRef<'r> for #struct_ref_name<'r> {
+        impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_name<'r> {
             type Record = #struct_name;
 
-            fn key(self) -> <<Self::Record as ::morseldb::record::Record>::Key as ::morseldb::record::Key>::Ref<'r> {
+            fn key(self) -> <<Self::Record as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'r> {
                 self.#primary_key_name
             }
 
@@ -457,7 +457,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 record_batch: &'r ::arrow::record_batch::RecordBatch,
                 offset: usize,
                 projection_mask: &'r ::parquet::arrow::ProjectionMask,
-            ) -> ::morseldb::record::internal::InternalRecordRef<'r, Self> {
+            ) -> ::tonbo::record::internal::InternalRecordRef<'r, Self> {
                 use ::arrow::array::AsArray;
 
                 let mut column_i = 2;
@@ -474,12 +474,12 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 let record = #struct_ref_name {
                     #(#field_names)*
                 };
-                ::morseldb::record::internal::InternalRecordRef::new(ts, record, null)
+                ::tonbo::record::internal::InternalRecordRef::new(ts, record, null)
             }
         }
 
-        impl<'r> ::morseldb::serdes::Encode for #struct_ref_name<'r> {
-            type Error = ::morseldb::record::RecordEncodeError;
+        impl<'r> ::tonbo::serdes::Encode for #struct_ref_name<'r> {
+            type Error = ::tonbo::record::RecordEncodeError;
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
@@ -505,7 +505,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             record_batch: ::arrow::record_batch::RecordBatch,
         }
 
-        impl ::morseldb::inmem::immutable::ArrowArrays for #struct_arrays_name {
+        impl ::tonbo::inmem::immutable::ArrowArrays for #struct_arrays_name {
             type Record = #struct_name;
 
             type Builder = #struct_builder_name;
@@ -523,7 +523,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 &self,
                 offset: u32,
                 projection_mask: &::parquet::arrow::ProjectionMask,
-            ) -> Option<Option<<Self::Record as ::morseldb::record::Record>::Ref<'_>>> {
+            ) -> Option<Option<<Self::Record as ::tonbo::record::Record>::Ref<'_>>> {
                 let offset = offset as usize;
 
                 if offset >= ::arrow::array::Array::len(self.#primary_key_name.as_ref()) {
@@ -552,8 +552,8 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
             _ts: ::arrow::array::UInt32Builder,
         }
 
-        impl ::morseldb::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
-            fn push(&mut self, key: ::morseldb::timestamp::timestamped::Timestamped<<<#struct_name as ::morseldb::record::Record>::Key as ::morseldb::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
+        impl ::tonbo::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
+            fn push(&mut self, key: ::tonbo::timestamp::timestamped::Timestamped<<<#struct_name as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {
                     Some(row) => {
@@ -582,7 +582,7 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 let _ts = ::std::sync::Arc::new(self._ts.finish());
                 let mut record_batch = ::arrow::record_batch::RecordBatch::try_new(
                     ::std::sync::Arc::clone(
-                        <<#struct_arrays_name as ::morseldb::inmem::immutable::ArrowArrays>::Record as ::morseldb::record::Record>::arrow_schema(),
+                        <<#struct_arrays_name as ::tonbo::inmem::immutable::ArrowArrays>::Record as ::tonbo::record::Record>::arrow_schema(),
                     ),
                     vec![
                         ::std::sync::Arc::clone(&_null) as ::std::sync::Arc<dyn ::arrow::array::Array>,
