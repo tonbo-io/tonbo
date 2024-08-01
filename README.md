@@ -2,33 +2,35 @@
 
 ## Introduction
 
-**Tonbo** is an embedded schema database based on **Arrow** & **Parquet**. Allow structured data to be **Filtered**, **Projected**, and **Stored** in **LSM** Tree.
+Tonbo is an embedded KV database built on [Apache Arrow & Parquet](https://github.com/apache/arrow-rs), designed to store, filter, and project structured data using LSM Tree.
+
+Our goal is to provide a lean, modern solution for storing data in a tiered storage, which is arranged by RAM, flash, SSD, S3 and any others.
 
 ## Features
 
-- [x] Fully asynchronous API support.
+- [x] Fully asynchronous API.
 - [x] Zero-copy rusty API ensuring safety with compile-time type and lifetime checks.
 - [x] Vendor-agnostic:
-  - [ ] Supports various usage methods, async runtimes, and file systems:
+  - [ ] Various usage methods, async runtimes, and file systems:
     - [x] Rust library:
-      - [x] Customizable async runtime and file system support.
-      - [x] Tokio and Tokio fs.
-      - [ ] Async-std.
-    - [ ] Python library (via PyO3):
+      - [x] [Customizable async runtime and file system](https://github.com/from-the-basement/tonbo/blob/main/src/executor.rs#L5).
+      - [x] [Tokio and Tokio fs](https://github.com/tokio-rs/tokio).
+      - [ ] [Async-std](https://github.com/async-rs/async-std).
+    - [ ] Python library (via [PyO3](https://github.com/PyO3/pyo3) & [pydantic](https://github.com/pydantic/pydantic)):
       - [ ] asyncio (via [pyo3-asyncio](https://github.com/awestlake87/pyo3-asyncio)).
     - [ ] JavaScript library:
       - [ ] WASM and OPFS.
     - [ ] Dynamic library with a C interface.
-  - [x] Implements a lightweight and a standard approach to Arrow / Parquet LSM Trees:
-    - [x] Define column-family using just Arrow schema and store data in Parquet files.
+  - [x] Most lightweight implementation to Arrow / Parquet LSM Trees:
+    - [x] Define schema using just Arrow schema and store data in Parquet files.
     - [x] (Optimistic) Transactions.
     - [x] Leveled compaction strategy.
     - [x] Push down filter, limit and projection.
 - [ ] Runtime schema definition (*in next release*).
-- [ ] Support SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
+- [ ] SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
 - [ ] Fusion storage across RAM, flash, SSD, and remote Object Storage Service (OSS) for each column-family, balancing performance and cost efficiency per data block:
-  - [ ] Supports remote storage (via [Arrow object_store](https://github.com/apache/arrow-rs/tree/master/object_store) or [Apache OpenDAL](https://github.com/apache/opendal)).
-  - [ ] Supports distributed query and compaction.
+  - [ ] Remote storage (via [Arrow object_store](https://github.com/apache/arrow-rs/tree/master/object_store) or [Apache OpenDAL](https://github.com/apache/opendal)).
+  - [ ] Distributed query and compaction.
 - [ ] Blob storage (like [BlobDB in RocksDB](https://github.com/facebook/rocksdb/wiki/BlobDB)).
 
 ## Example
