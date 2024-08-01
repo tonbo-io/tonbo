@@ -448,13 +448,13 @@ pub(crate) mod tests {
         timestamp::Timestamp,
         version::{edit::VersionEdit, Version},
         wal::log::LogType,
-        DataBaseError, DbOption,
+        DbError, DbOption,
     };
 
     async fn build_immutable<R, FP>(
         option: &DbOption,
         records: Vec<(LogType, R, Timestamp)>,
-    ) -> Result<Immutable<R::Columns>, DataBaseError<R>>
+    ) -> Result<Immutable<R::Columns>, DbError<R>>
     where
         R: Record + Send,
         FP: FileProvider,
@@ -471,7 +471,7 @@ pub(crate) mod tests {
         option: &DbOption,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
-    ) -> Result<(), DataBaseError<R>>
+    ) -> Result<(), DbError<R>>
     where
         R: Record + Send,
         FP: Executor,

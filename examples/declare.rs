@@ -24,7 +24,7 @@ async fn main() {
         let mut txn = db.transaction().await;
 
         // set with owned value
-        txn.set(User {
+        txn.insert(User {
             name: "Alice".into(),
             age: 22,
             email: Some("alice@gmail.com".into()),

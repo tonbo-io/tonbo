@@ -108,7 +108,7 @@ where
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum RecoverError<E: std::error::Error> {
+pub enum RecoverError<E: std::error::Error> {
     #[error("wal recover decode error: {0}")]
     Decode(E),
     #[error("wal recover checksum error")]
