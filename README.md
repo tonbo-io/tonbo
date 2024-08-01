@@ -1,6 +1,8 @@
 # MorselDB (WIP)
 
-MorselDB is an embedded persistent column-family database. Extreme performance, safety, and scalability — choose any three.
+## Introduction
+
+**MorselDB** is an embedded schema database based on **Arrow** & **Parquet**. Allow structured data to be **Filtered**, **Projected**, and **Stored** in **LSM** Tree.
 
 ## Features
 
@@ -88,21 +90,15 @@ async fn main() {
                 .take()
                 .await
                 .unwrap();
-            loop {
-                let user = scan.next().await.transpose().unwrap();
-                match user {
-                    Some(entry) => {
-                        assert_eq!(
-                            entry.value(),
-                            Some(UserRef {
-                                name: "Alice",
-                                email: Some("alice@gmail.com")
-                                age: Some(22),
-                            })
-                        );
-                    }
-                    None => break,
-                }
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                assert_eq!(
+                  entry.value(),
+                  Some(UserRef {
+                    name: "Alice",
+                    email: Some("alice@gmail.com"),
+                    age: Some(22),
+                  })
+                );
             }
         }
 
