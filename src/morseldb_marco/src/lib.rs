@@ -575,12 +575,12 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 0 #(#builder_size_fields)*
             }
 
-            fn finish(&mut self) -> #struct_arrays_name {
+            fn finish(&mut self, indices: Option<&[usize]>) -> #struct_arrays_name {
                 #(#builder_finish_fields)*
 
                 let _null = ::std::sync::Arc::new(::arrow::array::BooleanArray::new(self._null.finish(), None));
                 let _ts = ::std::sync::Arc::new(self._ts.finish());
-                let record_batch = ::arrow::record_batch::RecordBatch::try_new(
+                let mut record_batch = ::arrow::record_batch::RecordBatch::try_new(
                     ::std::sync::Arc::clone(
                         <<#struct_arrays_name as ::morseldb::inmem::immutable::ArrowArrays>::Record as ::morseldb::record::Record>::arrow_schema(),
                     ),
@@ -592,6 +592,11 @@ pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     ],
                 )
                 .expect("create record batch must be successful");
+                if let Some(indices) = indices {
+                    record_batch = record_batch
+                        .project(indices)
+                        .expect("projection indices must be successful");
+                }
 
                 #struct_arrays_name {
                     #(#field_names)*
