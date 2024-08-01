@@ -22,7 +22,7 @@ enum DataType {
 }
 
 #[proc_macro_attribute]
-pub fn morsel_record(_args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn tonbo_record(_args: TokenStream, input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let struct_name = ast.ident.clone();
 

@@ -1,11 +1,11 @@
 use std::ops::Bound;
 
 use futures_util::stream::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, Projection, DB};
-use tonbo_marco::morsel_record;
+use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
 
-// Tips: must be public
-#[morsel_record]
+// use macro to define schema of column family just like ORM
+// it provides type safety read & write API
+#[tonbo_record]
 pub struct User {
     #[primary_key]
     name: String,
@@ -15,50 +15,63 @@ pub struct User {
 
 #[tokio::main]
 async fn main() {
-    let db = DB::<User, _>::new("./db_path/users".into(), TokioExecutor::default())
+    // pluggable async runtime and I/O
+    let db = DB::new("./db_path/users".into(), TokioExecutor::default())
         .await
         .unwrap();
 
+    // insert with owned value
+    db.insert(User {
+        name: "Alice".into(),
+        email: Some("alice@gmail.com".into()),
+        age: 22,
+    })
+    .await
+    .unwrap();
+
     {
         // tonbo supports transaction
-        let mut txn = db.transaction().await;
-
-        // set with owned value
-        txn.insert(User {
-            name: "Alice".into(),
-            age: 22,
-            email: Some("alice@gmail.com".into()),
-        });
+        let txn = db.transaction().await;
 
         // get from primary key
         let name = "Alice".into();
-        let user = txn.get(&name, Projection::All).await.unwrap();
+
+        // get the zero-copy reference of record without any allocations.
+        let user = txn
+            .get(
+                &name,
+                // tonbo supports pushing down projection
+                Projection::All,
+            )
+            .await
+            .unwrap();
         assert!(user.is_some());
         assert_eq!(user.unwrap().get().age, Some(22));
 
-        let upper = "Blob".into();
-        let mut scan = txn
-            .scan((Bound::Included(&name), Bound::Excluded(&upper)))
-            .await
-            .projection(vec![])
-            .take()
-            .await
-            .unwrap();
-        loop {
-            let user = scan.next().await.transpose().unwrap();
-            match user {
-                Some(entry) => {
-                    assert_eq!(
-                        entry.value(),
-                        Some(UserRef {
-                            name: "Alice",
-                            age: Some(22),
-                            email: Some("alice@gmail.com")
-                        })
-                    );
-                }
-                None => break,
+        {
+            let upper = "Blob".into();
+            // range scan of
+            let mut scan = txn
+                .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+                .await
+                // tonbo supports pushing down projection
+                .projection(vec![1])
+                .take()
+                .await
+                .unwrap();
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                assert_eq!(
+                    entry.value(),
+                    Some(UserRef {
+                        name: "Alice",
+                        email: Some("alice@gmail.com"),
+                        age: Some(22),
+                    })
+                );
             }
         }
+
+        // commit transaction
+        txn.commit().await.unwrap();
     }
 }
