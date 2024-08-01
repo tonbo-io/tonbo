@@ -109,8 +109,13 @@ impl DbOption {
         self.path.join(format!("{}.{}", gen, FileType::Parquet))
     }
 
+    pub(crate) fn wal_dir_path(&self) -> PathBuf {
+        self.path.join("wal")
+    }
+
     pub(crate) fn wal_path(&self, gen: &FileId) -> PathBuf {
-        self.path.join(format!("{}.{}", gen, FileType::Wal))
+        self.wal_dir_path()
+            .join(format!("{}.{}", gen, FileType::Wal))
     }
 
     pub(crate) fn version_path(&self) -> PathBuf {

@@ -139,13 +139,17 @@ mod tests {
 
     use super::MergeStream;
     use crate::{
-        executor::tokio::TokioExecutor, inmem::mutable::Mutable, wal::log::LogType, DbOption,
+        executor::tokio::TokioExecutor, fs::FileProvider, inmem::mutable::Mutable,
+        wal::log::LogType, DbOption,
     };
 
     #[tokio::test]
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
 
         let m1 = Mutable::<String, TokioExecutor>::new(&option)
             .await
@@ -203,6 +207,9 @@ mod tests {
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
         let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
 
         let m1 = Mutable::<String, TokioExecutor>::new(&option)
             .await
