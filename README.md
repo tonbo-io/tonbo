@@ -39,11 +39,11 @@ Our goal is to provide a lean, modern solution for storing data in a tiered stor
 use std::ops::Bound;
 
 use futures_util::stream::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, record, Projection, DB};
+use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
 
 // use macro to define schema of column family just like ORM
 // it provides type safety read & write API
-#[record]
+#[tonbo_record]
 pub struct User {
     #[primary_key]
     name: String,
@@ -63,11 +63,13 @@ async fn main() {
         name: "Alice".into(),
         email: Some("alice@gmail.com".into()),
         age: 22,
-    });
+    })
+    .await
+    .unwrap();
 
     {
         // tonbo supports transaction
-        let mut txn = db.transaction().await;
+        let txn = db.transaction().await;
 
         // get from primary key
         let name = "Alice".into();
