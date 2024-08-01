@@ -404,14 +404,15 @@ where
     pub async fn package(
         mut self,
         batch_size: usize,
-    ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, WriteError<R>> {
+    ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, DataBaseError<R>>
+    {
         self.streams.push(
             self.schema
                 .mutable
                 .scan((self.lower, self.upper), self.ts)
                 .into(),
         );
-        for immutable in &self.schema.immutables {
+        for (_, immutable) in &self.schema.immutables {
             self.streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
