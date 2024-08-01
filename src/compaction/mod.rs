@@ -80,9 +80,12 @@ where
         if guard.immutables.len() > self.option.immutable_chunk_num {
             let excess = guard.immutables.split_off(self.option.immutable_chunk_num);
 
-            if let Some(scope) =
-                Self::minor_compaction(&self.option, mem::replace(&mut guard.immutables, excess))
-                    .await?
+            if let Some(scope) = Self::minor_compaction(
+                &self.option,
+                guard.recover_wal_ids.take(),
+                mem::replace(&mut guard.immutables, excess),
+            )
+            .await?
             {
                 let version_ref = self.version_set.current().await;
                 let mut version_edits = vec![];
@@ -118,6 +121,7 @@ where
 
     pub(crate) async fn minor_compaction(
         option: &DbOption,
+        recover_wal_ids: Option<Vec<FileId>>,
         batches: VecDeque<(FileId, Immutable<R::Columns>)>,
     ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
         if !batches.is_empty() {
@@ -133,6 +137,9 @@ where
                 option.write_parquet_option.clone(),
             )?;
 
+            if let Some(mut recover_wal_ids) = recover_wal_ids {
+                wal_ids.append(&mut recover_wal_ids);
+            }
             for (file_id, batch) in batches {
                 if let (Some(batch_min), Some(batch_max)) = batch.scope() {
                     if matches!(min.as_ref().map(|min| min > batch_min), Some(true) | None) {
@@ -489,6 +496,9 @@ pub(crate) mod tests {
     async fn minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
 
         let batch_1 = build_immutable::<Test, TokioExecutor>(
             &option,
@@ -562,6 +572,7 @@ pub(crate) mod tests {
 
         let scope = Compactor::<Test, TokioExecutor>::minor_compaction(
             &DbOption::from(temp_dir.path()),
+            None,
             VecDeque::from(vec![(FileId::new(), batch_2), (FileId::new(), batch_1)]),
         )
         .await
@@ -630,6 +641,10 @@ pub(crate) mod tests {
         (FileId, FileId, FileId, FileId, FileId),
         Version<Test, TokioExecutor>,
     ) {
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
         // level 0
         let table_gen_1 = FileId::new();
         let table_gen_2 = FileId::new();

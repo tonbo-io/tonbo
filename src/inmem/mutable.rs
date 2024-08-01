@@ -68,7 +68,7 @@ where
         record: R,
         ts: Timestamp,
     ) -> Result<usize, WriteError<R>> {
-        self.append(log_ty, record.key().to_key(), ts, Some(record), false)
+        self.append(Some(log_ty), record.key().to_key(), ts, Some(record))
             .await
     }
 
@@ -78,20 +78,19 @@ where
         key: R::Key,
         ts: Timestamp,
     ) -> Result<usize, WriteError<R>> {
-        self.append(log_ty, key, ts, None, false).await
+        self.append(Some(log_ty), key, ts, None).await
     }
 
-    async fn append(
+    pub(crate) async fn append(
         &self,
-        log_ty: LogType,
+        log_ty: Option<LogType>,
         key: R::Key,
         ts: Timestamp,
         value: Option<R>,
-        is_recover: bool,
     ) -> Result<usize, WriteError<R>> {
         let timestamped_key = Timestamped::new(key, ts);
 
-        if !is_recover {
+        if let Some(log_ty) = log_ty {
             let mut wal_guard = self.wal.lock().await;
 
             wal_guard
@@ -102,6 +101,7 @@ where
                 )
                 .await
                 .unwrap();
+            // .map_err(WriteError::Encode)?;
         }
         self.data.insert(timestamped_key, value);
 
@@ -181,6 +181,7 @@ mod tests {
     use super::Mutable;
     use crate::{
         executor::tokio::TokioExecutor,
+        fs::FileProvider,
         record::Record,
         tests::{Test, TestRef},
         timestamp::Timestamped,
@@ -194,9 +195,12 @@ mod tests {
         let key_2 = "key_2".to_owned();
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let mem_table = Mutable::<Test, TokioExecutor>::new(&DbOption::from(temp_dir.path()))
+        let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
+
+        let mem_table = Mutable::<Test, TokioExecutor>::new(&option).await.unwrap();
 
         mem_table
             .insert(
@@ -237,7 +241,12 @@ mod tests {
     #[tokio::test]
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let mutable = Mutable::<String, TokioExecutor>::new(&DbOption::from(temp_dir.path()))
+        let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let mutable = Mutable::<String, TokioExecutor>::new(&option)
             .await
             .unwrap();
 
