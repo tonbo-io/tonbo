@@ -248,7 +248,7 @@ mod tests {
             txn1.insert("foo".to_string());
 
             let txn2 = db.transaction().await;
-            dbg!(txn2
+            assert!(txn2
                 .get(&"foo".to_string(), Projection::All)
                 .await
                 .unwrap()
@@ -260,11 +260,11 @@ mod tests {
 
         {
             let txn3 = db.transaction().await;
-            dbg!(txn3
+            assert!(txn3
                 .get(&"foo".to_string(), Projection::All)
                 .await
                 .unwrap()
-                .is_none());
+                .is_some());
             txn3.commit().await.unwrap();
         }
     }
