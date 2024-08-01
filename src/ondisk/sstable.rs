@@ -144,7 +144,7 @@ pub(crate) mod tests {
         executor::tokio::TokioExecutor,
         fs::FileProvider,
         record::Record,
-        tests::{get_test_record_batch, Test},
+        tests::{get_test_record_batch, Test, TestRef},
         timestamp::Timestamped,
         DbOption,
     };
@@ -175,13 +175,20 @@ pub(crate) mod tests {
 
         let key = Timestamped::new("hello".to_owned(), 1.into());
 
-        dbg!(open_sstable::<Test, TokioExecutor>(&table_path)
-            .await
-            .get(key.borrow(), ProjectionMask::all())
-            .await
-            .unwrap()
-            .unwrap()
-            .get());
+        assert_eq!(
+            open_sstable::<Test, TokioExecutor>(&table_path)
+                .await
+                .get(key.borrow(), ProjectionMask::all())
+                .await
+                .unwrap()
+                .unwrap()
+                .get(),
+            Some(TestRef {
+                vstring: "hello",
+                vu32: Some(12),
+                vbool: Some(true),
+            })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

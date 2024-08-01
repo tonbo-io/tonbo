@@ -139,7 +139,7 @@ mod tests {
 
     use super::MergeStream;
     use crate::{
-        executor::tokio::TokioExecutor, fs::FileProvider, inmem::mutable::Mutable,
+        executor::tokio::TokioExecutor, fs::FileProvider, inmem::mutable::Mutable, stream::Entry,
         wal::log::LogType, DbOption,
     };
 
@@ -195,12 +195,42 @@ mod tests {
         .await
         .unwrap();
 
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "a");
+            assert_eq!(entry.key().ts, 1.into());
+            assert_eq!(entry.value().as_deref(), Some("a"));
+        } else {
+            unreachable!()
+        }
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "b");
+            assert_eq!(entry.key().ts, 3.into());
+            assert!(entry.value().is_none());
+        } else {
+            unreachable!()
+        }
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "c");
+            assert_eq!(entry.key().ts, 4.into());
+            assert_eq!(entry.value().as_deref(), Some("c"));
+        } else {
+            unreachable!()
+        }
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "d");
+            assert_eq!(entry.key().ts, 5.into());
+            assert_eq!(entry.value().as_deref(), Some("d"));
+        } else {
+            unreachable!()
+        }
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "e");
+            assert_eq!(entry.key().ts, 4.into());
+            assert_eq!(entry.value().as_deref(), Some("e"));
+        } else {
+            unreachable!()
+        }
+        assert!(merge.next().await.is_none());
     }
 
     #[tokio::test]
@@ -238,9 +268,25 @@ mod tests {
                 .await
                 .unwrap();
 
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "1");
+            assert_eq!(entry.key().ts, 0.into());
+            assert_eq!(entry.value().as_deref(), Some("1"));
+        };
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "2");
+            assert_eq!(entry.key().ts, 1.into());
+            assert_eq!(entry.value().as_deref(), Some("2"));
+        } else {
+            unreachable!()
+        }
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "3");
+            assert_eq!(entry.key().ts, 1.into());
+            assert_eq!(entry.value().as_deref(), Some("3"));
+        } else {
+            unreachable!()
+        }
 
         let lower = "1".to_string();
         let upper = "4".to_string();
@@ -250,8 +296,26 @@ mod tests {
                 .await
                 .unwrap();
 
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
-        dbg!(merge.next().await);
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "1");
+            assert_eq!(entry.key().ts, 0.into());
+            assert_eq!(entry.value().as_deref(), Some("1"));
+        } else {
+            unreachable!()
+        }
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "2");
+            assert_eq!(entry.key().ts, 1.into());
+            assert_eq!(entry.value().as_deref(), Some("2"));
+        } else {
+            unreachable!()
+        }
+        if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+            assert_eq!(entry.key().value, "3");
+            assert_eq!(entry.key().ts, 1.into());
+            assert_eq!(entry.value().as_deref(), Some("3"));
+        } else {
+            unreachable!()
+        };
     }
 }
