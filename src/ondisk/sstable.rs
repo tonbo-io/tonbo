@@ -47,7 +47,7 @@ where
         // TODO: expose writer options
         let options = ArrowWriterOptions::new().with_properties(
             WriterProperties::builder()
-                .set_created_by(concat!("morseldb version ", env!("CARGO_PKG_VERSION")).to_owned())
+                .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
                 .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
                 .build(),
         );

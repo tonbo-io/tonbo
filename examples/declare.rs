@@ -1,8 +1,8 @@
 use std::ops::Bound;
 
 use futures_util::stream::StreamExt;
-use morseldb::{executor::tokio::TokioExecutor, Projection, DB};
-use morseldb_marco::morsel_record;
+use tonbo::{executor::tokio::TokioExecutor, Projection, DB};
+use tonbo_marco::morsel_record;
 
 // Tips: must be public
 #[morsel_record]
@@ -20,7 +20,7 @@ async fn main() {
         .unwrap();
 
     {
-        // morseldb supports transaction
+        // tonbo supports transaction
         let mut txn = db.transaction().await;
 
         // set with owned value
