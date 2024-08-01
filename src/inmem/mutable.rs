@@ -108,6 +108,7 @@ where
         Ok(self.data.len())
     }
 
+    #[allow(unused)]
     fn get(
         &self,
         key: &R::Key,
@@ -153,7 +154,7 @@ where
             .is_some()
     }
 
-    pub(crate) async fn to_immutable(self) -> io::Result<(FileId, Immutable<R::Columns>)> {
+    pub(crate) async fn into_immutable(self) -> io::Result<(FileId, Immutable<R::Columns>)> {
         let file_id = {
             let mut wal_guard = self.wal.lock().await;
             wal_guard.flush().await?;
@@ -169,6 +170,7 @@ where
     R: Record,
     FP: FileProvider,
 {
+    #[allow(unused)]
     pub(crate) fn len(&self) -> usize {
         self.data.len()
     }

@@ -14,7 +14,7 @@ use ulid::Ulid;
 
 pub(crate) type FileId = Ulid;
 
-pub(crate) enum FileType {
+pub enum FileType {
     Wal,
     Parquet,
     Log,

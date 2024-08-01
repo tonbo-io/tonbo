@@ -19,6 +19,7 @@ pub struct DbOption {
     pub(crate) clean_channel_buffer: usize,
     pub(crate) write_parquet_option: Option<WriterProperties>,
 
+    #[allow(unused)]
     pub(crate) use_wal: bool,
 }
 

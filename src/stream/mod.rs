@@ -44,7 +44,12 @@ where
         match self {
             Entry::Transaction((key, _)) => {
                 // Safety: shorter lifetime must be safe
-                unsafe { transmute(*key) }
+                unsafe {
+                    transmute::<
+                        Timestamped<<<R as Record>::Key as Key>::Ref<'_>>,
+                        Timestamped<<<R as Record>::Key as Key>::Ref<'_>>,
+                    >(*key)
+                }
             }
             Entry::Mutable(entry) => entry.key().map(|key| {
                 // Safety: shorter lifetime must be safe

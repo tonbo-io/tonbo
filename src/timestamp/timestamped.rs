@@ -36,10 +36,12 @@ impl<V> Timestamped<V> {
         &self.value
     }
 
+    #[allow(unused)]
     pub(crate) fn ts(&self) -> Timestamp {
         self.ts
     }
 
+    #[allow(unused)]
     pub(crate) fn into_parts(self) -> (V, Timestamp) {
         (self.value, self.ts)
     }

@@ -70,7 +70,7 @@ where
             return Ok(());
         }
         let mutable = mem::replace(&mut guard.mutable, Mutable::new(&self.option).await?);
-        let (file_id, immutable) = mutable.to_immutable().await?;
+        let (file_id, immutable) = mutable.into_immutable().await?;
 
         guard.immutables.push_front((file_id, immutable));
         if guard.immutables.len() > self.option.immutable_chunk_num {

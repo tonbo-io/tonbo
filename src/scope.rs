@@ -36,6 +36,7 @@ where
         &self.min <= key && key <= &self.max
     }
 
+    #[allow(unused)]
     pub(crate) fn meets(&self, target: &Self) -> bool {
         self.contains(&target.min) || self.contains(&target.max)
     }
