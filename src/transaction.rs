@@ -20,7 +20,7 @@ use crate::{
     timestamp::{Timestamp, Timestamped},
     version::VersionRef,
     wal::log::LogType,
-    DataBaseError, LockMap, Projection, Record, Scan, Schema,
+    DbError, LockMap, Projection, Record, Scan, Schema,
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
@@ -76,7 +76,7 @@ where
         &'get self,
         key: &'get R::Key,
         projection: Projection,
-    ) -> Result<Option<TransactionEntry<'get, R>>, DataBaseError<R>> {
+    ) -> Result<Option<TransactionEntry<'get, R>>, DbError<R>> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
@@ -105,7 +105,7 @@ where
         Scan::new(&self.share, range, self.ts, &self.version, streams)
     }
 
-    pub fn set(&mut self, value: R) {
+    pub fn insert(&mut self, value: R) {
         self.entry(value.key().to_key(), Some(value))
     }
 
@@ -215,7 +215,7 @@ where
     #[error("transaction parquet error {:?}", .0)]
     Parquet(#[from] ParquetError),
     #[error("transaction database error {:?}", .0)]
-    DataBase(#[from] DataBaseError<R>),
+    Database(#[from] DbError<R>),
     #[error("transaction write conflict: {:?}", .0)]
     WriteConflict(R::Key),
 }
@@ -245,7 +245,7 @@ mod tests {
                 .unwrap();
         {
             let mut txn1 = db.transaction().await;
-            txn1.set("foo".to_string());
+            txn1.insert("foo".to_string());
 
             let txn2 = db.transaction().await;
             dbg!(txn2
@@ -279,18 +279,18 @@ mod tests {
                 .unwrap();
 
         let mut txn = db.transaction().await;
-        txn.set(0.to_string());
-        txn.set(1.to_string());
+        txn.insert(0.to_string());
+        txn.insert(1.to_string());
         txn.commit().await.unwrap();
 
         let mut txn_0 = db.transaction().await;
         let mut txn_1 = db.transaction().await;
         let mut txn_2 = db.transaction().await;
 
-        txn_0.set(1.to_string());
-        txn_1.set(1.to_string());
-        txn_1.set(2.to_string());
-        txn_2.set(2.to_string());
+        txn_0.insert(1.to_string());
+        txn_1.insert(1.to_string());
+        txn_1.insert(2.to_string());
+        txn_2.insert(2.to_string());
 
         txn_0.commit().await.unwrap();
 
@@ -312,7 +312,7 @@ mod tests {
                 .unwrap();
 
         let mut txn1 = db.transaction().await;
-        txn1.set(Test {
+        txn1.insert(Test {
             vstring: 0.to_string(),
             vu32: 0,
             vbool: Some(true),
@@ -341,7 +341,7 @@ mod tests {
             .unwrap();
 
         let mut txn = db.transaction().await;
-        txn.set(Test {
+        txn.insert(Test {
             vstring: "king".to_string(),
             vu32: 8,
             vbool: Some(true),

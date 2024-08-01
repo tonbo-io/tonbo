@@ -24,6 +24,7 @@ use std::{
 };
 
 use async_lock::{RwLock, RwLockReadGuard};
+use async_stream::stream;
 use flume::{bounded, Sender};
 use fs::FileProvider;
 use futures_core::Stream;
@@ -38,7 +39,7 @@ use record::Record;
 use thiserror::Error;
 use timestamp::Timestamp;
 use tracing::error;
-use transaction::Transaction;
+use transaction::{CommitError, Transaction, TransactionEntry};
 
 pub use crate::option::*;
 use crate::{
@@ -69,7 +70,7 @@ where
     R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
-    pub async fn new(option: DbOption, executor: E) -> Result<Self, DataBaseError<R>> {
+    pub async fn new(option: DbOption, executor: E) -> Result<Self, DbError<R>> {
         let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
         E::create_dir_all(&option.wal_dir_path()).await?;
@@ -120,7 +121,72 @@ where
         )
     }
 
-    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), DataBaseError<R>> {
+    pub async fn insert(&self, record: R) -> Result<(), CommitError<R>> {
+        Ok(self
+            .write(record, self.version_set.transaction_ts())
+            .await?)
+    }
+
+    pub async fn insert_batch(
+        &self,
+        records: impl ExactSizeIterator<Item = R>,
+    ) -> Result<(), CommitError<R>> {
+        Ok(self
+            .write_batch(records, self.version_set.transaction_ts())
+            .await?)
+    }
+
+    pub async fn remove(&self, key: R::Key) -> Result<bool, CommitError<R>> {
+        Ok(self
+            .schema
+            .read()
+            .await
+            .remove(LogType::Full, key, self.version_set.transaction_ts())
+            .await?)
+    }
+
+    pub async fn get<T>(
+        &self,
+        key: &R::Key,
+        mut f: impl FnMut(TransactionEntry<'_, R>) -> T,
+    ) -> Result<Option<T>, CommitError<R>> {
+        Ok(self
+            .schema
+            .read()
+            .await
+            .get(
+                &*self.version_set.current().await,
+                key,
+                self.version_set.transaction_ts(),
+                Projection::All,
+            )
+            .await?
+            .map(|e| f(TransactionEntry::Stream(e))))
+    }
+
+    pub async fn scan<'scan, T: 'scan>(
+        &'scan self,
+        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
+    ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
+        stream! {
+            let schema = self.schema.read().await;
+            let current = self.version_set.current().await;
+            let mut scan = Scan::new(
+                &schema,
+                range,
+                self.version_set.transaction_ts(),
+                &*current,
+                Vec::new(),
+            ).take().await?;
+
+            while let Some(record) = scan.next().await {
+                yield Ok(f(TransactionEntry::Stream(record?)))
+            }
+        }
+    }
+
+    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), DbError<R>> {
         let schema = self.schema.read().await;
 
         if schema.write(LogType::Full, record, ts).await? {
@@ -134,7 +200,7 @@ where
         &self,
         mut records: impl ExactSizeIterator<Item = R>,
         ts: Timestamp,
-    ) -> Result<(), DataBaseError<R>> {
+    ) -> Result<(), DbError<R>> {
         let schema = self.schema.read().await;
 
         if let Some(first) = records.next() {
@@ -186,7 +252,7 @@ where
         option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
         version_set: &VersionSet<R, FP>,
-    ) -> Result<Self, DataBaseError<R>> {
+    ) -> Result<Self, DbError<R>> {
         let mut schema = Schema {
             mutable: Mutable::new(&option).await?,
             immutables: Default::default(),
@@ -247,12 +313,7 @@ where
         Ok(schema)
     }
 
-    async fn write(
-        &self,
-        log_ty: LogType,
-        record: R,
-        ts: Timestamp,
-    ) -> Result<bool, DataBaseError<R>> {
+    async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
         Ok(self.mutable.insert(log_ty, record, ts).await? > self.option.max_mem_table_size)
     }
 
@@ -261,7 +322,7 @@ where
         log_ty: LogType,
         key: R::Key,
         ts: Timestamp,
-    ) -> Result<bool, DataBaseError<R>> {
+    ) -> Result<bool, DbError<R>> {
         Ok(self.mutable.remove(log_ty, key, ts).await? > self.option.max_mem_table_size)
     }
 
@@ -270,7 +331,7 @@ where
         key: R::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<bool, DataBaseError<R>> {
+    ) -> Result<bool, DbError<R>> {
         Ok(self.mutable.append(None, key, ts, value).await? > self.option.max_mem_table_size)
     }
 
@@ -280,7 +341,7 @@ where
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
-    ) -> Result<Option<Entry<'get, R>>, DataBaseError<R>>
+    ) -> Result<Option<Entry<'get, R>>, DbError<R>>
     where
         FP: FileProvider,
     {
@@ -374,7 +435,7 @@ where
 
     pub async fn take(
         mut self,
-    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DataBaseError<R>> {
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
         self.streams.push(
             self.schema
                 .mutable
@@ -404,8 +465,7 @@ where
     pub async fn package(
         mut self,
         batch_size: usize,
-    ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, DataBaseError<R>>
-    {
+    ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, DbError<R>> {
         self.streams.push(
             self.schema
                 .mutable
@@ -439,7 +499,7 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum DataBaseError<R>
+pub enum DbError<R>
 where
     R: Record,
 {
@@ -491,7 +551,7 @@ pub(crate) mod tests {
         serdes::{Decode, Encode},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
-        DataBaseError, DbOption, Immutable, Projection, Record, DB,
+        DbError, DbOption, Immutable, Projection, Record, DB,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -821,7 +881,7 @@ pub(crate) mod tests {
         executor: E,
         schema: crate::Schema<R, E>,
         version: Version<R, E>,
-    ) -> Result<DB<R, E>, DataBaseError<R>>
+    ) -> Result<DB<R, E>, DbError<R>>
     where
         R: Record + Send + Sync,
         R::Columns: Send + Sync,
