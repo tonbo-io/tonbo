@@ -85,68 +85,96 @@ mod tests {
     use std::collections::Bound;
 
     use futures_util::StreamExt;
+    use tempfile::TempDir;
 
     use crate::{
         executor::tokio::TokioExecutor,
+        fs::FileProvider,
         inmem::{
             immutable::{tests::TestImmutableArrays, ArrowArrays},
             mutable::Mutable,
         },
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
+        wal::log::LogType,
+        DbOption,
     };
 
     #[tokio::test]
     async fn iter() {
-        let m1 = Mutable::<Test>::new();
+        let temp_dir = TempDir::new().unwrap();
+        let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let m1 = Mutable::<Test, TokioExecutor>::new(&option).await.unwrap();
         m1.insert(
+            LogType::Full,
             Test {
                 vstring: "a".into(),
                 vu32: 0,
                 vbool: Some(true),
             },
             0.into(),
-        );
+        )
+        .await
+        .unwrap();
         m1.insert(
+            LogType::Full,
             Test {
                 vstring: "b".into(),
                 vu32: 1,
                 vbool: Some(true),
             },
             1.into(),
-        );
+        )
+        .await
+        .unwrap();
         m1.insert(
+            LogType::Full,
             Test {
                 vstring: "c".into(),
                 vu32: 2,
                 vbool: Some(true),
             },
             2.into(),
-        );
+        )
+        .await
+        .unwrap();
         m1.insert(
+            LogType::Full,
             Test {
                 vstring: "d".into(),
                 vu32: 3,
                 vbool: Some(true),
             },
             3.into(),
-        );
+        )
+        .await
+        .unwrap();
         m1.insert(
+            LogType::Full,
             Test {
                 vstring: "e".into(),
                 vu32: 4,
                 vbool: Some(true),
             },
             4.into(),
-        );
+        )
+        .await
+        .unwrap();
         m1.insert(
+            LogType::Full,
             Test {
                 vstring: "f".into(),
                 vu32: 5,
                 vbool: Some(true),
             },
             5.into(),
-        );
+        )
+        .await
+        .unwrap();
 
         let merge = MergeStream::<Test, TokioExecutor>::from_vec(vec![m1
             .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
