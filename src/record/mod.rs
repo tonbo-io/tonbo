@@ -1,14 +1,13 @@
 pub mod internal;
-mod num;
+mod key;
+#[cfg(test)]
 mod str;
 
-use std::{error::Error, fmt::Debug, hash::Hash, io, sync::Arc};
+use std::{error::Error, fmt::Debug, io, sync::Arc};
 
-use arrow::{
-    array::{Datum, RecordBatch},
-    datatypes::Schema,
-};
+use arrow::{array::RecordBatch, datatypes::Schema};
 use internal::InternalRecordRef;
+pub use key::{Key, KeyRef};
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 
@@ -16,24 +15,6 @@ use crate::{
     inmem::immutable::ArrowArrays,
     serdes::{Decode, Encode},
 };
-
-pub trait Key:
-    'static + Encode + Decode + Ord + Clone + Send + Sync + Hash + std::fmt::Debug
-{
-    type Ref<'r>: KeyRef<'r, Key = Self> + Copy + Debug
-    where
-        Self: 'r;
-
-    fn as_key_ref(&self) -> Self::Ref<'_>;
-
-    fn to_arrow_datum(&self) -> impl Datum;
-}
-
-pub trait KeyRef<'r>: Clone + Encode + Ord {
-    type Key: Key<Ref<'r> = Self>;
-
-    fn to_key(&self) -> Self::Key;
-}
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     type Columns: ArrowArrays<Record = Self>;
