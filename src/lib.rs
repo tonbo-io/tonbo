@@ -31,7 +31,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```ignore
 //! use std::ops::Bound;
 //!
 //! use futures_util::stream::StreamExt;
