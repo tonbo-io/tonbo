@@ -50,7 +50,7 @@ async fn main() {
 
         {
             let upper = "Blob".into();
-            // range scan of
+            // range scan of user
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 .await
