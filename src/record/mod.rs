@@ -1,4 +1,5 @@
 pub mod internal;
+mod num;
 mod str;
 
 use std::{error::Error, fmt::Debug, hash::Hash, io, sync::Arc};
@@ -28,7 +29,7 @@ pub trait Key:
     fn to_arrow_datum(&self) -> impl Datum;
 }
 
-pub trait KeyRef<'r>: Clone + Encode + PartialEq<Self::Key> + Ord {
+pub trait KeyRef<'r>: Clone + Encode + Ord {
     type Key: Key<Ref<'r> = Self>;
 
     fn to_key(&self) -> Self::Key;
