@@ -8,10 +8,11 @@ use crate::{
     version::Version,
 };
 
+/// configure the operating parameters of each component in the [`DB`](../struct.DB.html)
 #[derive(Debug, Clone)]
 pub struct DbOption {
     pub(crate) path: PathBuf,
-    pub(crate) max_mem_table_size: usize,
+    pub(crate) max_mutable_len: usize,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) major_threshold_with_sst_size: usize,
     pub(crate) level_sst_magnification: usize,
@@ -27,10 +28,11 @@ impl<P> From<P> for DbOption
 where
     P: Into<PathBuf>,
 {
+    /// build the default configured [`DbOption`](struct.DbOption.html) based on the passed path
     fn from(path: P) -> Self {
         DbOption {
             path: path.into(),
-            max_mem_table_size: 3000,
+            max_mutable_len: 3000,
             immutable_chunk_num: 3,
             major_threshold_with_sst_size: 10,
             level_sst_magnification: 10,
@@ -44,6 +46,7 @@ where
 }
 
 impl DbOption {
+    /// build the [`DB`](../struct.DB.html) storage directory based on the passed path
     pub fn path(self, path: impl Into<PathBuf>) -> Self {
         DbOption {
             path: path.into(),
@@ -51,13 +54,15 @@ impl DbOption {
         }
     }
 
-    pub fn max_mem_table_size(self, max_mem_table_size: usize) -> Self {
+    /// len threshold of `mutable` when freeze is triggered
+    pub fn max_mutable_len(self, max_mutable_len: usize) -> Self {
         DbOption {
-            max_mem_table_size,
+            max_mutable_len,
             ..self
         }
     }
 
+    /// len threshold of `immutables` when minor compaction is triggered
     pub fn immutable_chunk_num(self, immutable_chunk_num: usize) -> Self {
         DbOption {
             immutable_chunk_num,
@@ -65,6 +70,7 @@ impl DbOption {
         }
     }
 
+    /// threshold for the number of `parquet` when major compaction is triggered
     pub fn major_threshold_with_sst_size(self, major_threshold_with_sst_size: usize) -> Self {
         DbOption {
             major_threshold_with_sst_size,
@@ -72,6 +78,7 @@ impl DbOption {
         }
     }
 
+    /// magnification that triggers major compaction between different levels
     pub fn level_sst_magnification(self, level_sst_magnification: usize) -> Self {
         DbOption {
             level_sst_magnification,
@@ -79,6 +86,7 @@ impl DbOption {
         }
     }
 
+    /// Maximum size of each parquet
     pub fn max_sst_file_size(self, max_sst_file_size: usize) -> Self {
         DbOption {
             max_sst_file_size,
@@ -86,6 +94,7 @@ impl DbOption {
         }
     }
 
+    /// cached message size in parquet cleaner
     pub fn clean_channel_buffer(self, clean_channel_buffer: usize) -> Self {
         DbOption {
             clean_channel_buffer,
@@ -93,6 +102,7 @@ impl DbOption {
         }
     }
 
+    /// specific settings for Parquet
     pub fn write_parquet_option(self, write_parquet_option: WriterProperties) -> Self {
         DbOption {
             write_parquet_option: Some(write_parquet_option),
