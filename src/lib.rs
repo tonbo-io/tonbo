@@ -1,3 +1,115 @@
+//! `tonbo` is a structured embedded database, built
+//! on Apache `Arrow` & `Parquet`, designed to
+//! store, filter, and project
+//! structured data using `LSM` Tree.
+//! Its name comes from the Japanese word for `dragonfly`.
+//!
+//! This database is fully thread-safe and all operations
+//! are atomic to ensure data consistency.
+//! most operations are asynchronous and non-blocking,
+//! providing efficient concurrent processing capabilities.
+//!
+//! `tonbo` constructs an instance using the [`DB::new`](struct.DB.html#method.new) method
+//! to serve a specific `Tonbo Record` type.
+//!
+//! `Tonbo Record` is automatically implemented by the macro [`tonbo_record`].
+//! Support type
+//! - String
+//! - Boolean
+//! - Int8
+//! - Int16
+//! - Int32
+//! - Int64
+//! - UInt8
+//! - UInt16
+//! - UInt32
+//! - UInt64
+//!
+//! ACID `optimistic` transactions for concurrent data
+//! reading and writing are supported with the
+//! [`DB::transaction`](struct.DB.html#method.transaction) method.
+//!
+//! # Examples
+//!
+//! ```
+//! use std::ops::Bound;
+//!
+//! use futures_util::stream::StreamExt;
+//! use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
+//!
+//! // use macro to define schema of column family just like ORM
+//! // it provides type safety read & write API
+//! #[tonbo_record]
+//! pub struct User {
+//!     #[primary_key]
+//!     name: String,
+//!     email: Option<String>,
+//!     age: u8,
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     // pluggable async runtime and I/O
+//!     let db = DB::new("./db_path/users".into(), TokioExecutor::default())
+//!         .await
+//!         .unwrap();
+//!
+//!     // insert with owned value
+//!     db.insert(User {
+//!         name: "Alice".into(),
+//!         email: Some("alice@gmail.com".into()),
+//!         age: 22,
+//!     })
+//!     .await
+//!     .unwrap();
+//!
+//!     {
+//!         // tonbo supports transaction
+//!         let txn = db.transaction().await;
+//!
+//!         // get from primary key
+//!         let name = "Alice".into();
+//!
+//!         // get the zero-copy reference of record without any allocations.
+//!         let user = txn
+//!             .get(
+//!                 &name,
+//!                 // tonbo supports pushing down projection
+//!                 Projection::All,
+//!             )
+//!             .await
+//!             .unwrap();
+//!         assert!(user.is_some());
+//!         assert_eq!(user.unwrap().get().age, Some(22));
+//!
+//!         {
+//!             let upper = "Blob".into();
+//!             // range scan of
+//!             let mut scan = txn
+//!                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+//!                 .await
+//!                 // tonbo supports pushing down projection
+//!                 .projection(vec![1])
+//!                 .take()
+//!                 .await
+//!                 .unwrap();
+//!             while let Some(entry) = scan.next().await.transpose().unwrap() {
+//!                 assert_eq!(
+//!                     entry.value(),
+//!                     Some(UserRef {
+//!                         name: "Alice",
+//!                         email: Some("alice@gmail.com"),
+//!                         age: Some(22),
+//!                     })
+//!                 );
+//!             }
+//!         }
+//!
+//!         // commit transaction
+//!         txn.commit().await.unwrap();
+//!     }
+//! }
+//! ```
 mod compaction;
 pub mod executor;
 pub mod fs;
@@ -71,6 +183,11 @@ where
     R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
+    /// Open [`DB`](struct.DB.html) with a [`DbOption`](struct.DbOption.html). This will create a new directory at the path
+    /// specified in [`DbOption`](struct.DbOption.html) (if it does not exist before) and
+    /// run it according to the configuration of [`DbOption`](struct.DbOption.html).
+    ///
+    /// For more configurable options, please refer to [`DbOption`](struct.DbOption.html)
     pub async fn new(option: DbOption, executor: E) -> Result<Self, DbError<R>> {
         let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
@@ -104,7 +221,6 @@ where
                 }
             }
         });
-        // TODO: Recover
 
         Ok(Self {
             schema,
@@ -114,6 +230,7 @@ where
         })
     }
 
+    /// open an optimistic ACID transaction
     pub async fn transaction(&self) -> Transaction<'_, R, E> {
         Transaction::new(
             self.version_set.current().await,
@@ -122,12 +239,14 @@ where
         )
     }
 
+    /// insert a single tonbo record
     pub async fn insert(&self, record: R) -> Result<(), CommitError<R>> {
         Ok(self
             .write(record, self.version_set.transaction_ts())
             .await?)
     }
 
+    /// insert a sequence of data as a single batch
     pub async fn insert_batch(
         &self,
         records: impl ExactSizeIterator<Item = R>,
@@ -137,6 +256,7 @@ where
             .await?)
     }
 
+    /// delete the record with the primary key as the `key`
     pub async fn remove(&self, key: R::Key) -> Result<bool, CommitError<R>> {
         Ok(self
             .schema
@@ -146,6 +266,7 @@ where
             .await?)
     }
 
+    /// get the record with `key` as the primary key and process it using closure `f`
     pub async fn get<T>(
         &self,
         key: &R::Key,
@@ -165,6 +286,7 @@ where
             .map(|e| f(TransactionEntry::Stream(e))))
     }
 
+    /// scan records with primary keys in the `range` and process them using closure `f`
     pub async fn scan<'scan, T: 'scan>(
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
@@ -311,7 +433,7 @@ where
     }
 
     async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
-        Ok(self.mutable.insert(log_ty, record, ts).await? > self.option.max_mem_table_size)
+        Ok(self.mutable.insert(log_ty, record, ts).await? > self.option.max_mutable_len)
     }
 
     async fn remove(
@@ -320,7 +442,7 @@ where
         key: R::Key,
         ts: Timestamp,
     ) -> Result<bool, DbError<R>> {
-        Ok(self.mutable.remove(log_ty, key, ts).await? > self.option.max_mem_table_size)
+        Ok(self.mutable.remove(log_ty, key, ts).await? > self.option.max_mutable_len)
     }
 
     async fn recover_append(
@@ -329,7 +451,7 @@ where
         ts: Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
-        Ok(self.mutable.append(None, key, ts, value).await? > self.option.max_mem_table_size)
+        Ok(self.mutable.append(None, key, ts, value).await? > self.option.max_mutable_len)
     }
 
     async fn get<'get>(
@@ -365,6 +487,7 @@ where
     }
 }
 
+/// scan configuration intermediate structure
 pub struct Scan<'scan, R, FP>
 where
     R: Record,
@@ -408,10 +531,12 @@ where
         }
     }
 
-    pub fn limit(self, limit: Option<usize>) -> Self {
-        Self { limit, ..self }
+    /// limit for the scan
+    pub fn limit(self, limit: usize) -> Self {
+        Self { limit: Some(limit), ..self }
     }
 
+    /// fields in projection Record by field indices
     pub fn projection(self, mut projection: Vec<usize>) -> Self {
         // skip two columns: _null and _ts
         for p in &mut projection {
@@ -430,6 +555,7 @@ where
         }
     }
 
+    /// get a Stream that returns single row of Record
     pub async fn take(
         mut self,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
@@ -459,6 +585,7 @@ where
         Ok(MergeStream::from_vec(self.streams).await?)
     }
 
+    /// Get a Stream that returns RecordBatch consisting of a `batch_size` number of records
     pub async fn package(
         mut self,
         batch_size: usize,
@@ -1128,7 +1255,7 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let mut option = DbOption::from(temp_dir.path());
-        option.max_mem_table_size = 5;
+        option.max_mutable_len = 5;
         option.immutable_chunk_num = 1;
         option.major_threshold_with_sst_size = 5;
         option.level_sst_magnification = 10;

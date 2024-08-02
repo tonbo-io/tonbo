@@ -40,7 +40,8 @@ where
             .map(|(key, value)| (Timestamped::new(key.as_key_ref(), self.ts), value))
     }
 }
-
+/// optimistic ACID transaction, open with
+/// [`DB::transaction`](../struct.DB.html#method.transaction) method
 pub struct Transaction<'txn, R, FP>
 where
     R: Record,
@@ -72,6 +73,7 @@ where
         }
     }
 
+    /// get the record with `key` as the primary key and get only the data specified in [`Projection`](../enum.Projection.html)
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
@@ -93,6 +95,7 @@ where
         })
     }
 
+    /// scan records with primary keys in the `range`
     pub async fn scan<'scan>(
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
@@ -105,10 +108,12 @@ where
         Scan::new(&self.share, range, self.ts, &self.version, streams)
     }
 
+    /// insert a sequence of data as a single batch on this transaction
     pub fn insert(&mut self, value: R) {
         self.entry(value.key().to_key(), Some(value))
     }
 
+    /// delete the record with the primary key as the `key` on this transaction
     pub fn remove(&mut self, key: R::Key) {
         self.entry(key, None)
     }
@@ -122,6 +127,7 @@ where
         }
     }
 
+    /// commit the data in the [`Transaction`](struct.Transaction.html) to the corresponding [`DB`](../struct.DB.html)
     pub async fn commit(mut self) -> Result<(), CommitError<R>> {
         let mut _key_guards = Vec::new();
 
