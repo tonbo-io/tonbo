@@ -51,7 +51,10 @@ where
     }
 
     fn size(&self) -> usize {
-        1
+        match self {
+            None => 1,
+            Some(v) => 1 + v.size(),
+        }
     }
 }
 
