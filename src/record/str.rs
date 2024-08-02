@@ -2,7 +2,7 @@ use std::{mem, sync::Arc};
 
 use arrow::{
     array::{
-        Array, AsArray, BooleanArray, BooleanBufferBuilder, Datum, RecordBatch, StringArray,
+        Array, AsArray, BooleanArray, BooleanBufferBuilder, RecordBatch, StringArray,
         StringBuilder, UInt32Array, UInt32Builder,
     },
     datatypes::{DataType, Field, Schema, UInt32Type},
@@ -10,31 +10,11 @@ use arrow::{
 use once_cell::sync::Lazy;
 use parquet::arrow::ProjectionMask;
 
-use super::{internal::InternalRecordRef, Key, KeyRef, Record, RecordRef};
+use super::{internal::InternalRecordRef, Key, Record, RecordRef};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     timestamp::Timestamped,
 };
-
-impl Key for String {
-    type Ref<'r> = &'r str;
-
-    fn as_key_ref(&self) -> Self::Ref<'_> {
-        self
-    }
-
-    fn to_arrow_datum(&self) -> impl Datum {
-        StringArray::new_scalar(self)
-    }
-}
-
-impl<'r> KeyRef<'r> for &'r str {
-    type Key = String;
-
-    fn to_key(&self) -> Self::Key {
-        self.to_string()
-    }
-}
 
 impl Record for String {
     type Columns = StringColumns;
