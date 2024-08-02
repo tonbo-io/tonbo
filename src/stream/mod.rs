@@ -31,9 +31,7 @@ where
 {
     Transaction((Timestamped<<R::Key as Key>::Ref<'entry>>, &'entry Option<R>)),
     Mutable(crossbeam_skiplist::map::Entry<'entry, Timestamped<R::Key>, Option<R>>),
-    Immutable(RecordBatchEntry<R>),
-    SsTable(RecordBatchEntry<R>),
-    Level(RecordBatchEntry<R>),
+    RecordBatch(RecordBatchEntry<R>),
 }
 
 impl<R> Entry<'_, R>
@@ -55,9 +53,7 @@ where
                 // Safety: shorter lifetime must be safe
                 unsafe { transmute(key.as_key_ref()) }
             }),
-            Entry::SsTable(entry) => entry.internal_key(),
-            Entry::Immutable(entry) => entry.internal_key(),
-            Entry::Level(entry) => entry.internal_key(),
+            Entry::RecordBatch(entry) => entry.internal_key(),
         }
     }
 
@@ -65,9 +61,7 @@ where
         match self {
             Entry::Transaction((_, value)) => value.as_ref().map(R::as_record_ref),
             Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref),
-            Entry::SsTable(entry) => entry.get(),
-            Entry::Immutable(entry) => entry.get(),
-            Entry::Level(entry) => entry.get(),
+            Entry::RecordBatch(entry) => entry.get(),
         }
     }
 }
@@ -88,9 +82,7 @@ where
                 mutable.key(),
                 mutable.value()
             ),
-            Entry::SsTable(sstable) => write!(f, "Entry::SsTable({:?})", sstable),
-            Entry::Immutable(immutable) => write!(f, "Entry::Immutable({:?})", immutable),
-            Entry::Level(level) => write!(f, "Entry::Level({:?})", level),
+            Entry::RecordBatch(sstable) => write!(f, "Entry::SsTable({:?})", sstable),
         }
     }
 }
@@ -203,13 +195,13 @@ where
                 Poll::Ready(ready!(inner.poll_next(cx)).map(Entry::Mutable).map(Ok))
             }
             ScanStreamProject::SsTable { inner } => {
-                Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| entry.map(Entry::SsTable)))
+                Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| entry.map(Entry::RecordBatch)))
             }
             ScanStreamProject::Immutable { inner } => {
-                Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| Ok(Entry::Immutable(entry))))
+                Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| Ok(Entry::RecordBatch(entry))))
             }
             ScanStreamProject::Level { inner } => {
-                Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| entry.map(Entry::Level)))
+                Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| entry.map(Entry::RecordBatch)))
             }
         }
     }
