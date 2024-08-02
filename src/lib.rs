@@ -183,9 +183,10 @@ where
     R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
-    /// Open [`DB`](struct.DB.html) with a [`DbOption`](struct.DbOption.html). This will create a new directory at the path
-    /// specified in [`DbOption`](struct.DbOption.html) (if it does not exist before) and
-    /// run it according to the configuration of [`DbOption`](struct.DbOption.html).
+    /// Open [`DB`](struct.DB.html) with a [`DbOption`](struct.DbOption.html). This will create a
+    /// new directory at the path specified in [`DbOption`](struct.DbOption.html) (if it does
+    /// not exist before) and run it according to the configuration of
+    /// [`DbOption`](struct.DbOption.html).
     ///
     /// For more configurable options, please refer to [`DbOption`](struct.DbOption.html)
     pub async fn new(option: DbOption, executor: E) -> Result<Self, DbError<R>> {
@@ -533,7 +534,10 @@ where
 
     /// limit for the scan
     pub fn limit(self, limit: usize) -> Self {
-        Self { limit: Some(limit), ..self }
+        Self {
+            limit: Some(limit),
+            ..self
+        }
     }
 
     /// fields in projection Record by field indices

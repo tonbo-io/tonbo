@@ -73,7 +73,8 @@ where
         }
     }
 
-    /// get the record with `key` as the primary key and get only the data specified in [`Projection`](../enum.Projection.html)
+    /// get the record with `key` as the primary key and get only the data specified in
+    /// [`Projection`](../enum.Projection.html)
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
@@ -127,7 +128,8 @@ where
         }
     }
 
-    /// commit the data in the [`Transaction`](struct.Transaction.html) to the corresponding [`DB`](../struct.DB.html)
+    /// commit the data in the [`Transaction`](struct.Transaction.html) to the corresponding
+    /// [`DB`](../struct.DB.html)
     pub async fn commit(mut self) -> Result<(), CommitError<R>> {
         let mut _key_guards = Vec::new();
 
