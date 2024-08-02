@@ -329,6 +329,11 @@ pub fn tonbo_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                             },
                             base_ty: field.ty.clone(),
                             index: field_index,
+                            fn_key: if is_string {
+                                quote!(&self.#field_name)
+                            } else {
+                                quote!(self.#field_name)
+                            },
                         });
 
                         if is_nullable {
@@ -375,6 +380,7 @@ pub fn tonbo_record(_args: TokenStream, input: TokenStream) -> TokenStream {
     let PrimaryKey {
         name: primary_key_name,
         base_ty: primary_key_ty,
+        fn_key: fn_primary_key,
         builder_append_value: builder_append_primary_key,
         index: primary_key_index,
     } = primary_key_definitions.unwrap();
@@ -400,7 +406,7 @@ pub fn tonbo_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                 Self: 'r;
 
             fn key(&self) -> <<Self as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'_> {
-                &self.#primary_key_name
+                #fn_primary_key
             }
 
             fn primary_key_index() -> usize {
