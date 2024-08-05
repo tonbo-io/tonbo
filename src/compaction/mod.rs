@@ -338,9 +338,9 @@ where
             let key = entry.key();
 
             if min.is_none() {
-                min = Some(key.value.to_key())
+                min = Some(key.value.clone().to_key())
             }
-            max = Some(key.value.to_key());
+            max = Some(key.value.clone().to_key());
             builder.push(key, entry.value());
 
             if builder.written_size() >= option.max_sst_file_size {

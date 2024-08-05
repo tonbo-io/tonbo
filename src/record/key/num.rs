@@ -23,8 +23,8 @@ macro_rules! implement_key {
         impl<'a> KeyRef<'a> for $struct_name {
             type Key = $struct_name;
 
-            fn to_key(&self) -> Self::Key {
-                *self
+            fn to_key(self) -> Self::Key {
+                self
             }
         }
     };
