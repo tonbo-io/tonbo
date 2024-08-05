@@ -207,7 +207,7 @@ where
             TransactionEntry::Stream(entry) => entry.value().unwrap(),
             TransactionEntry::Local(value) => {
                 // Safety: shorter lifetime must be safe
-                unsafe { transmute::<R::Ref<'entry>, R::Ref<'_>>(*value) }
+                unsafe { transmute::<R::Ref<'entry>, R::Ref<'_>>(value.clone()) }
             }
         }
     }

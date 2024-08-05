@@ -17,7 +17,7 @@ impl Key for String {
 impl<'r> KeyRef<'r> for &'r str {
     type Key = String;
 
-    fn to_key(&self) -> Self::Key {
+    fn to_key(self) -> Self::Key {
         self.to_string()
     }
 }

@@ -39,7 +39,7 @@ where
     }
 
     pub fn key(&self) -> <R::Key as Key>::Ref<'_> {
-        *self.record_ref.value().value()
+        self.record_ref.value().value().clone()
     }
 
     pub fn get(&self) -> Option<R::Ref<'_>> {
