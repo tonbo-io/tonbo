@@ -34,7 +34,7 @@ where
 {
     pub(crate) fn value(&self) -> Timestamped<<<R::Record as Record>::Key as Key>::Ref<'_>> {
         // Safety: shorter lifetime of the value must be safe
-        unsafe { transmute(Timestamped::new(self.record.key(), self.ts)) }
+        unsafe { transmute(Timestamped::new(self.record.clone().key(), self.ts)) }
     }
 
     pub(crate) fn get(&self) -> Option<R> {
@@ -42,6 +42,6 @@ where
             return None;
         }
 
-        Some(self.record)
+        Some(self.record.clone())
     }
 }

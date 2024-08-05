@@ -21,7 +21,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
 
     type Key: Key;
 
-    type Ref<'r>: RecordRef<'r, Record = Self> + Copy
+    type Ref<'r>: RecordRef<'r, Record = Self>
     where
         Self: 'r;
 
@@ -36,7 +36,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     fn arrow_schema() -> &'static Arc<Schema>;
 }
 
-pub trait RecordRef<'r>: Clone + Sized + Copy + Encode + Send + Sync {
+pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
     type Record: Record;
 
     fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;

@@ -46,7 +46,7 @@ where
                     transmute::<
                         Timestamped<<<R as Record>::Key as Key>::Ref<'_>>,
                         Timestamped<<<R as Record>::Key as Key>::Ref<'_>>,
-                    >(*key)
+                    >(key.clone())
                 }
             }
             Entry::Mutable(entry) => entry.key().map(|key| {
