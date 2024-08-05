@@ -1,4 +1,4 @@
-workspace = { members = ["src/tonbo_marco"] }
+workspace = { members = ["tonbo_marco"] }
 
 [package]
 edition = "2021"
@@ -32,7 +32,7 @@ regex = "1"
 thiserror = "1"
 tokio = { version = "1", optional = true }
 tokio-util = { version = "0.7", features = ["compat"] }
-tonbo_marco = { path = "src/tonbo_marco" }
+tonbo_marco = { path = "tonbo_marco" }
 tracing = "0.1"
 ulid = "1"
 
