@@ -40,3 +40,10 @@ ulid = "1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+lto = "fat"
+
+[profile.bench]
+debug = true
+inherits = "release"
