@@ -1,3 +1,4 @@
+use std::ptr;
 use std::{
     borrow::Borrow,
     cmp::Ordering,
@@ -61,21 +62,24 @@ where
     V: PartialOrd,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Borrow::<TimestampedRef<_>>::borrow(self)
-            .partial_cmp(Borrow::<TimestampedRef<_>>::borrow(other))
+        TimestampedRef::new(&self.value, self.ts)
+            .partial_cmp(TimestampedRef::new(&other.value, other.ts))
     }
 }
 
 impl<V> Ord for Timestamped<V>
 where
-    V: Ord,
+    V: Ord + std::fmt::Debug,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        Borrow::<TimestampedRef<_>>::borrow(self).cmp(Borrow::<TimestampedRef<_>>::borrow(other))
+        let result = TimestampedRef::new(&self.value, self.ts)
+            .cmp(TimestampedRef::new(&other.value, other.ts));
+        result
     }
 }
 
 #[derive(Debug)]
+#[repr(transparent)]
 pub(crate) struct TimestampedRef<V> {
     _marker: PhantomData<V>,
     _mem: [()],
@@ -85,15 +89,22 @@ impl<V> TimestampedRef<V> {
     pub(crate) fn new(value: &V, ts: Timestamp) -> &Self {
         let value = value as *const _ as usize;
         let ts: u32 = ts.into();
-        unsafe { transmute([value, ts as usize]) }
+
+        let mem = ptr::slice_from_raw_parts(value as *const V, ts as usize) as *const Self;
+        unsafe { &*mem }
+    }
+
+    fn to_timestamped(&self) -> (&V, Timestamp) {
+        let i = self as *const TimestampedRef<V> as *const [()];
+        unsafe { (&*(i as *const ()).cast::<V>(), (i.len() as u32).into()) }
     }
 
     pub(crate) fn value(&self) -> &V {
-        unsafe { transmute::<usize, &V>(transmute::<&Self, [usize; 2]>(self)[0]) }
+        self.to_timestamped().0
     }
 
     pub(crate) fn ts(&self) -> Timestamp {
-        unsafe { transmute::<&Self, [usize; 2]>(self)[1] as u32 }.into()
+        self.to_timestamped().1
     }
 }
 
