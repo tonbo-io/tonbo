@@ -1,9 +1,9 @@
-use std::ptr;
 use std::{
     borrow::Borrow,
     cmp::Ordering,
     marker::PhantomData,
     mem::{size_of, transmute},
+    ptr,
 };
 
 use futures_io::{AsyncRead, AsyncWrite};
@@ -69,12 +69,10 @@ where
 
 impl<V> Ord for Timestamped<V>
 where
-    V: Ord + std::fmt::Debug,
+    V: Ord,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        let result = TimestampedRef::new(&self.value, self.ts)
-            .cmp(TimestampedRef::new(&other.value, other.ts));
-        result
+        TimestampedRef::new(&self.value, self.ts).cmp(TimestampedRef::new(&other.value, other.ts))
     }
 }
 
