@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::{marker::PhantomData, path::PathBuf};
+
 use parquet::basic::Compression;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::format::SortingColumn;
