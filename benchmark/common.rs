@@ -11,7 +11,9 @@ use futures_util::StreamExt;
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
-use tonbo::{executor::tokio::TokioExecutor, record::KeyRef, DbOption, Projection};
+use tonbo::{
+    executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
+};
 use tonbo_marco::tonbo_record;
 
 #[allow(dead_code)]
@@ -19,6 +21,20 @@ const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
 type ItemKey = String;
 type ProjectionField = String;
+
+// Tips: Tonbo only returns reference types
+#[allow(dead_code)]
+pub enum BenchResult<'a> {
+    Ref(TransactionEntry<'a, BenchItem>),
+    Owned(BenchItem),
+}
+
+#[allow(dead_code)]
+pub enum ProjectionResult<'a> {
+    // the entry is directly used to represent the field being projected.
+    Ref(stream::Entry<'a, BenchItem>),
+    Owned(ProjectionField),
+}
 
 #[tonbo_record(::serde::Serialize, ::serde::Deserialize)]
 pub struct BenchItem {
@@ -83,17 +99,17 @@ pub trait BenchReadTransaction {
 
 #[allow(clippy::len_without_is_empty)]
 pub trait BenchReader {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchItem>;
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult>;
 
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchItem> + 'a;
+    ) -> impl Stream<Item = BenchResult> + 'a;
 
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = String> + 'a;
+    ) -> impl Stream<Item = ProjectionResult> + 'a;
 }
 
 pub struct TonboBenchDataBase {
@@ -152,51 +168,23 @@ pub struct TonboBenchReader<'db, 'txn> {
 }
 
 impl BenchReader for TonboBenchReader<'_, '_> {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchItem> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.txn
             .get(key, Projection::All)
             .await
             .unwrap()
-            .map(|entry| BenchItem {
-                primary_key: entry.get().primary_key.to_key(),
-                string_1: entry.get().string_1.unwrap().to_string(),
-                string_2: entry.get().string_2.unwrap().to_string(),
-                string_3: entry.get().string_3.unwrap().to_string(),
-                string_4: entry.get().string_4.unwrap().to_string(),
-                string_5: entry.get().string_5.unwrap().to_string(),
-                string_6: entry.get().string_6.unwrap().to_string(),
-                string_7: entry.get().string_7.unwrap().to_string(),
-                string_8: entry.get().string_8.unwrap().to_string(),
-                string_9: entry.get().string_9.unwrap().to_string(),
-                u32: entry.get().u32.unwrap(),
-                boolean: entry.get().boolean.unwrap(),
-            })
+            .map(|entry| BenchResult::Ref(entry))
     }
 
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchItem> + 'a {
+    ) -> impl Stream<Item = BenchResult> + 'a {
         stream! {
             let mut stream = self.txn.scan(range).await.take().await.unwrap();
 
             while let Some(result) = stream.next().await {
-                if let Some(item_ref) = result.unwrap().value() {
-                    yield BenchItem {
-                        primary_key: item_ref.primary_key.to_key(),
-                        string_1: item_ref.string_1.unwrap().to_string(),
-                        string_2: item_ref.string_2.unwrap().to_string(),
-                        string_3: item_ref.string_3.unwrap().to_string(),
-                        string_4: item_ref.string_4.unwrap().to_string(),
-                        string_5: item_ref.string_5.unwrap().to_string(),
-                        string_6: item_ref.string_6.unwrap().to_string(),
-                        string_7: item_ref.string_7.unwrap().to_string(),
-                        string_8: item_ref.string_8.unwrap().to_string(),
-                        string_9: item_ref.string_9.unwrap().to_string(),
-                        u32: item_ref.u32.unwrap(),
-                        boolean: item_ref.boolean.unwrap(),
-                    };
-                }
+                yield BenchResult::Ref(TransactionEntry::Stream(result.unwrap()));
             }
         }
     }
@@ -204,14 +192,12 @@ impl BenchReader for TonboBenchReader<'_, '_> {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionField> + 'a {
+    ) -> impl Stream<Item = ProjectionResult> + 'a {
         stream! {
             let mut stream = self.txn.scan(range).await.projection(vec![1]).take().await.unwrap();
 
-            while let Some(result) = stream.next().await {
-                if let Some(item_ref) = result.unwrap().value() {
-                    yield item_ref.string_1.unwrap().to_string();
-                }
+            while let Some(entry) = stream.next().await.map(|result| result.unwrap()) {
+                yield ProjectionResult::Ref(entry);
             }
         }
     }
@@ -306,17 +292,16 @@ pub struct RedbBenchReader {
 }
 
 impl BenchReader for RedbBenchReader {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchItem> {
-        self.table
-            .get(key.as_bytes())
-            .unwrap()
-            .map(|guard| bincode::deserialize::<BenchItem>(guard.value()).unwrap())
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+        self.table.get(key.as_bytes()).unwrap().map(|guard| {
+            BenchResult::Owned(bincode::deserialize::<BenchItem>(guard.value()).unwrap())
+        })
     }
 
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchItem> + 'a {
+    ) -> impl Stream<Item = BenchResult> + 'a {
         let (lower, upper) = range;
         let mut iter = self
             .table
@@ -326,7 +311,7 @@ impl BenchReader for RedbBenchReader {
         stream! {
             while let Some(item) = iter.next() {
                 let (_, v) = item.unwrap();
-                yield bincode::deserialize(v.value()).unwrap()
+                yield BenchResult::Owned(bincode::deserialize(v.value()).unwrap());
             }
         }
     }
@@ -334,7 +319,7 @@ impl BenchReader for RedbBenchReader {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionField> + 'a {
+    ) -> impl Stream<Item = ProjectionResult> + 'a {
         let (lower, upper) = range;
         let mut iter = self
             .table
@@ -344,7 +329,7 @@ impl BenchReader for RedbBenchReader {
         stream! {
             while let Some(item) = iter.next() {
                 let (_, v) = item.unwrap();
-                yield bincode::deserialize::<BenchItem>(v.value()).unwrap().string_1
+                yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.value()).unwrap().string_1);
             }
         }
     }
@@ -453,17 +438,16 @@ pub struct SledBenchReader<'db> {
 }
 
 impl<'db> BenchReader for SledBenchReader<'db> {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchItem> {
-        self.db
-            .get(key.as_bytes())
-            .unwrap()
-            .map(|guard| bincode::deserialize::<BenchItem>(guard.as_bytes()).unwrap())
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+        self.db.get(key.as_bytes()).unwrap().map(|guard| {
+            BenchResult::Owned(bincode::deserialize::<BenchItem>(guard.as_bytes()).unwrap())
+        })
     }
 
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchItem> + 'a {
+    ) -> impl Stream<Item = BenchResult> + 'a {
         let (lower, upper) = range;
         let mut iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
             lower.map(ItemKey::as_bytes),
@@ -473,7 +457,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
         stream! {
             while let Some(item) = iter.next() {
                 let (_, v) = item.unwrap();
-                yield bincode::deserialize(v.as_bytes()).unwrap()
+                yield BenchResult::Owned(bincode::deserialize(v.as_bytes()).unwrap());
             }
         }
     }
@@ -481,7 +465,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionField> + 'a {
+    ) -> impl Stream<Item = ProjectionResult> + 'a {
         let (lower, upper) = range;
         let mut iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
             lower.map(ItemKey::as_bytes),
@@ -491,7 +475,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
         stream! {
             while let Some(item) = iter.next() {
                 let (_, v) = item.unwrap();
-                yield bincode::deserialize::<BenchItem>(v.as_bytes()).unwrap().string_1
+                yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.as_bytes()).unwrap().string_1)
             }
         }
     }
@@ -658,17 +642,17 @@ pub struct RocksdbBenchReader<'db, 'txn> {
 }
 
 impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchItem> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.snapshot
             .get(key.as_bytes())
             .unwrap()
-            .map(|bytes| bincode::deserialize::<BenchItem>(&bytes).unwrap())
+            .map(|bytes| BenchResult::Owned(bincode::deserialize::<BenchItem>(&bytes).unwrap()))
     }
 
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchItem> + 'a {
+    ) -> impl Stream<Item = BenchResult> + 'a {
         fn bound_to_include(bound: Bound<&[u8]>) -> Option<&[u8]> {
             match bound {
                 Bound::Included(bytes) | Bound::Excluded(bytes) => Some(bytes),
@@ -692,7 +676,7 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
                         return;
                     }
                 }
-                yield bincode::deserialize(v.as_bytes()).unwrap()
+                yield BenchResult::Owned(bincode::deserialize(v.as_bytes()).unwrap());
             }
         }
     }
@@ -700,7 +684,7 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionField> + 'a {
+    ) -> impl Stream<Item = ProjectionResult> + 'a {
         fn bound_to_include(bound: Bound<&[u8]>) -> Option<&[u8]> {
             match bound {
                 Bound::Included(bytes) | Bound::Excluded(bytes) => Some(bytes),
@@ -724,7 +708,7 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
                         return;
                     }
                 }
-                yield bincode::deserialize::<BenchItem>(v.as_bytes()).unwrap().string_1
+                yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.as_bytes()).unwrap().string_1)
             }
         }
     }

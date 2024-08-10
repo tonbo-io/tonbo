@@ -238,8 +238,8 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
                     reader.range_from((Bound::Included(&record.primary_key), Bound::Unbounded)),
                 );
                 for _ in 0..NUM_SCAN {
-                    if let Some(record) = iter.next().await {
-                        value_sum += record.u32;
+                    if let Some(_record) = iter.next().await {
+                        value_sum += 1;
                     } else {
                         break;
                     }
