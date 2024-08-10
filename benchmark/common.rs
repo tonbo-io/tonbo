@@ -128,7 +128,7 @@ impl BenchDatabase for TonboBenchDataBase {
     }
 
     async fn build(path: impl AsRef<Path>) -> Self {
-        let option = DbOption::from(path.as_ref()).use_wal(false);
+        let option = DbOption::from(path.as_ref()).disable_wal();
 
         let db = tonbo::DB::new(option, TokioExecutor::new()).await.unwrap();
         TonboBenchDataBase::new(db)
