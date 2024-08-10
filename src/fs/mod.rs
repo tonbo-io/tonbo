@@ -1,4 +1,4 @@
-pub mod tokio;
+pub mod tokio_fs;
 
 use std::{
     fmt::{Display, Formatter},
@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use ::tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use futures_core::Stream;
 use ulid::Ulid;
 
