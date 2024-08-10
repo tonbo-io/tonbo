@@ -14,6 +14,7 @@ pub struct DbOption {
     pub(crate) path: PathBuf,
     pub(crate) max_mutable_len: usize,
     pub(crate) immutable_chunk_num: usize,
+    pub(crate) immutable_chunk_max_num: usize,
     pub(crate) major_threshold_with_sst_size: usize,
     pub(crate) level_sst_magnification: usize,
     pub(crate) max_sst_file_size: usize,
@@ -22,6 +23,8 @@ pub struct DbOption {
 
     #[allow(unused)]
     pub(crate) use_wal: bool,
+    pub(crate) major_default_oldest_table_num: usize,
+    pub(crate) major_l_selection_table_max_num: usize,
 }
 
 impl<P> From<P> for DbOption
@@ -34,13 +37,16 @@ where
             path: path.into(),
             max_mutable_len: 3000,
             immutable_chunk_num: 3,
-            major_threshold_with_sst_size: 10,
+            immutable_chunk_max_num: 5,
+            major_threshold_with_sst_size: 4,
             level_sst_magnification: 10,
             max_sst_file_size: 24 * 1024 * 1024,
             clean_channel_buffer: 10,
             write_parquet_option: None,
 
             use_wal: true,
+            major_default_oldest_table_num: 3,
+            major_l_selection_table_max_num: 4,
         }
     }
 }
@@ -110,8 +116,23 @@ impl DbOption {
         }
     }
 
-    pub fn use_wal(self, use_wal: bool) -> Self {
-        DbOption { use_wal, ..self }
+    /// disable WAL
+    ///
+    /// tips: risk of data loss during downtime
+    pub fn disable_wal(self) -> Self {
+        DbOption {
+            use_wal: false,
+            ..self
+        }
+    }
+
+    /// When selecting the compaction level during major compaction, if there are no sstables with
+    /// intersecting targets, the oldest sstables will be selected by default.
+    pub fn major_default_oldest_table_num(self, major_default_oldest_table_num: usize) -> Self {
+        DbOption {
+            major_default_oldest_table_num,
+            ..self
+        }
     }
 }
 
