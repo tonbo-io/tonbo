@@ -125,15 +125,7 @@ pub mod transaction;
 mod version;
 mod wal;
 
-use std::{
-    collections::{HashMap, VecDeque},
-    io,
-    marker::PhantomData,
-    mem,
-    ops::Bound,
-    pin::pin,
-    sync::Arc,
-};
+use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
 
 use async_lock::RwLock;
 use async_stream::stream;
@@ -357,7 +349,7 @@ where
     FP: FileProvider,
 {
     mutable: Mutable<R, FP>,
-    immutables: VecDeque<(Option<FileId>, Immutable<R::Columns>)>,
+    immutables: Vec<(Option<FileId>, Immutable<R::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     option: Arc<DbOption<R>>,
     recover_wal_ids: Option<Vec<FileId>>,
@@ -484,6 +476,7 @@ where
             || self
                 .immutables
                 .iter()
+                .rev()
                 .any(|(_, immutable)| immutable.check_conflict(key, ts))
     }
 }
@@ -569,7 +562,7 @@ where
                 .scan((self.lower, self.upper), self.ts)
                 .into(),
         );
-        for (_, immutable) in &self.schema.immutables {
+        for (_, immutable) in self.schema.immutables.iter().rev() {
             self.streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
@@ -600,7 +593,7 @@ where
                 .scan((self.lower, self.upper), self.ts)
                 .into(),
         );
-        for (_, immutable) in &self.schema.immutables {
+        for (_, immutable) in self.schema.immutables.iter().rev() {
             self.streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
@@ -653,7 +646,7 @@ pub enum Projection {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::{
-        collections::{BTreeMap, Bound, VecDeque},
+        collections::{BTreeMap, Bound},
         mem,
         sync::Arc,
     };
@@ -996,7 +989,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            VecDeque::from(vec![(Some(FileId::new()), Immutable::from(mutable.data))])
+            vec![(Some(FileId::new()), Immutable::from(mutable.data))]
         };
 
         let (compaction_tx, compaction_rx) = bounded(1);
