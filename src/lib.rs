@@ -1271,6 +1271,7 @@ pub(crate) mod tests {
         let mut option = DbOption::from(temp_dir.path());
         option.max_mutable_len = 5;
         option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
         option.level_sst_magnification = 10;
         option.max_sst_file_size = 2 * 1024 * 1024;
@@ -1294,8 +1295,6 @@ pub(crate) mod tests {
         assert_eq!(option1.get().vstring, "20");
         assert_eq!(option1.get().vu32, Some(0));
         assert_eq!(option1.get().vbool, Some(true));
-
-        dbg!(db.version_set.current().await);
     }
 
     #[tokio::test]
