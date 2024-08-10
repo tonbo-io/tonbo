@@ -72,7 +72,7 @@ where
         let (file_id, immutable) = mutable.into_immutable().await?;
 
         guard.immutables.push_front((file_id, immutable));
-        if guard.immutables.len() > self.option.immutable_chunk_num {
+        if guard.immutables.len() > self.option.immutable_chunk_max_num {
             let excess = guard.immutables.split_off(self.option.immutable_chunk_num);
 
             if let Some(scope) = Self::minor_compaction(

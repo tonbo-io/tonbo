@@ -15,7 +15,10 @@ use tempfile::{NamedTempFile, TempDir};
 
 const ITERATIONS: usize = 2;
 const WRITE_TIMES: usize = 10_000;
+const WRITE_BATCH_TIMES: usize = 100;
+const WRITE_BATCH_SIZE: usize = 100;
 const READ_TIMES: usize = 200;
+const NUM_SCAN: usize = 2_000;
 const KEY_SIZE: usize = 24;
 const STRING_SIZE: usize = 2 * 1024;
 const RNG_SEED: u64 = 3;
@@ -96,9 +99,8 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
     results.push(("bulk load".to_string(), duration));
 
     let start = Instant::now();
-    let writes = 100;
     {
-        for _ in 0..writes {
+        for _ in 0..WRITE_TIMES {
             let mut txn = db.write_transaction().await;
             let mut inserter = txn.get_inserter();
             inserter.insert(gen_record(&mut rng)).unwrap();
@@ -112,13 +114,13 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
     println!(
         "{}: Wrote {} individual items in {}ms",
         T::db_type_name(),
-        writes,
+        WRITE_TIMES,
         duration.as_millis()
     );
     results.push(("individual writes".to_string(), duration));
 
-    for num_threads in [4, 16] {
-        let mut rngs = make_rng_shards(num_threads, writes);
+    for num_threads in [4, 8] {
+        let mut rngs = make_rng_shards(num_threads, WRITE_TIMES);
         let start = Instant::now();
 
         let futures = (0..num_threads).map(|_| {
@@ -126,7 +128,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             let mut rng = rngs.pop().unwrap();
 
             async move {
-                for _ in 0..(writes / num_threads) {
+                for _ in 0..(WRITE_TIMES / num_threads) {
                     let mut txn = db2.write_transaction().await;
                     let mut inserter = txn.get_inserter();
                     inserter.insert(gen_record(&mut rng)).unwrap();
@@ -142,7 +144,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         println!(
             "{}: Wrote {} individual items ({} threads) in {}ms",
             T::db_type_name(),
-            writes,
+            WRITE_TIMES,
             num_threads,
             duration.as_millis()
         );
@@ -153,12 +155,11 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
     }
 
     let start = Instant::now();
-    let batch_size = 1000;
     {
-        for _ in 0..writes {
+        for _ in 0..WRITE_BATCH_TIMES {
             let mut txn = db.write_transaction().await;
             let mut inserter = txn.get_inserter();
-            for _ in 0..batch_size {
+            for _ in 0..WRITE_BATCH_SIZE {
                 inserter.insert(gen_record(&mut rng)).unwrap();
             }
             drop(inserter);
@@ -171,14 +172,14 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
     println!(
         "{}: Wrote {} x {} items in {}ms",
         T::db_type_name(),
-        writes,
-        batch_size,
+        WRITE_BATCH_TIMES,
+        WRITE_BATCH_SIZE,
         duration.as_millis()
     );
     results.push(("batch writes".to_string(), duration));
 
-    for num_threads in [4, 16] {
-        let mut rngs = make_rng_shards(num_threads, batch_size);
+    for num_threads in [4, 8] {
+        let mut rngs = make_rng_shards(num_threads, WRITE_BATCH_TIMES);
         let start = Instant::now();
 
         let futures = (0..num_threads).map(|_| {
@@ -186,10 +187,10 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             let mut rng = rngs.pop().unwrap();
 
             async move {
-                for _ in 0..writes {
+                for _ in 0..(WRITE_BATCH_TIMES / num_threads) {
                     let mut txn = db2.write_transaction().await;
                     let mut inserter = txn.get_inserter();
-                    for _ in 0..(batch_size / num_threads) {
+                    for _ in 0..WRITE_BATCH_SIZE {
                         inserter.insert(gen_record(&mut rng)).unwrap();
                     }
                     drop(inserter);
@@ -204,8 +205,8 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         println!(
             "{}: Wrote {} x {} items ({} threads) in {}ms",
             T::db_type_name(),
-            writes,
-            batch_size,
+            WRITE_BATCH_TIMES,
+            WRITE_BATCH_SIZE,
             num_threads,
             duration.as_millis()
         );
@@ -231,13 +232,12 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             let start = Instant::now();
             let reader = txn.get_reader();
             let mut value_sum = 0;
-            let num_scan = 10;
             for _ in 0..READ_TIMES {
                 let record = gen_record(&mut rng);
                 let mut iter = Box::pin(
                     reader.range_from((Bound::Included(&record.primary_key), Bound::Unbounded)),
                 );
-                for _ in 0..num_scan {
+                for _ in 0..NUM_SCAN {
                     if let Some(record) = iter.next().await {
                         value_sum += record.u32;
                     } else {
@@ -251,7 +251,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             println!(
                 "{}: Random range read {} elements in {}ms",
                 T::db_type_name(),
-                READ_TIMES * num_scan,
+                READ_TIMES * NUM_SCAN,
                 duration.as_millis()
             );
             results.push(("random range reads".to_string(), duration));
@@ -262,14 +262,13 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             let start = Instant::now();
             let reader = txn.get_reader();
             let mut value_sum = 0;
-            let num_scan = 10;
             for _ in 0..READ_TIMES {
                 let record = gen_record(&mut rng);
                 let mut iter = Box::pin(reader.projection_range_from((
                     Bound::Included(&record.primary_key),
                     Bound::Unbounded,
                 )));
-                for _ in 0..num_scan {
+                for _ in 0..NUM_SCAN {
                     if let Some(_projection_field) = iter.next().await {
                         value_sum += 1;
                     } else {
@@ -283,7 +282,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             println!(
                 "{}: Random range projection read {} elements in {}ms",
                 T::db_type_name(),
-                READ_TIMES * num_scan,
+                READ_TIMES * NUM_SCAN,
                 duration.as_millis()
             );
             results.push(("random range projection reads".to_string(), duration));
@@ -301,7 +300,6 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
 
             async move {
                 let txn = db2.read_transaction().await;
-                let num_scan = 10;
                 let mut value_sum = 0;
                 let reader = txn.get_reader();
                 for _ in 0..(READ_TIMES / num_threads) {
@@ -310,7 +308,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
                         Bound::Included(&record.primary_key),
                         Bound::Unbounded,
                     )));
-                    for _ in 0..num_scan {
+                    for _ in 0..NUM_SCAN {
                         if let Some(_projection_field) = iter.next().await {
                             value_sum += 1;
                         } else {
@@ -326,10 +324,10 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         let end = Instant::now();
         let duration = end - start;
         println!(
-            "{}: Random range projection reads ({} threads) {} items in {}ms",
+            "{}: Random range projection reads ({} threads) {} elements in {}ms",
             T::db_type_name(),
             num_threads,
-            WRITE_TIMES,
+            READ_TIMES * NUM_SCAN,
             duration.as_millis()
         );
         results.push((
@@ -387,7 +385,7 @@ async fn main() {
         benchmark::<SledBenchDatabase>(tmp_file.path()).await
     };
 
-    fs::remove_dir_all(&tmpdir).unwrap();
+    let _ = fs::remove_dir_all(&tmpdir);
 
     let mut rows: Vec<Vec<String>> = Vec::new();
 
