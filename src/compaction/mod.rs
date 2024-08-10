@@ -1,10 +1,4 @@
-use std::{
-    cmp,
-    collections::{Bound, VecDeque},
-    mem,
-    pin::Pin,
-    sync::Arc,
-};
+use std::{cmp, collections::Bound, mem, pin::Pin, sync::Arc};
 
 use async_lock::RwLock;
 use futures_util::StreamExt;
@@ -71,16 +65,14 @@ where
         let mutable = mem::replace(&mut guard.mutable, Mutable::new(&self.option).await?);
         let (file_id, immutable) = mutable.into_immutable().await?;
 
-        guard.immutables.push_front((file_id, immutable));
+        guard.immutables.push((file_id, immutable));
         if guard.immutables.len() > self.option.immutable_chunk_max_num {
-            let excess = guard.immutables.split_off(self.option.immutable_chunk_num);
+            let recover_wal_ids = guard.recover_wal_ids.take();
+            let chunk_num = self.option.immutable_chunk_num;
+            let excess = &guard.immutables[0..chunk_num];
 
-            if let Some(scope) = Self::minor_compaction(
-                &self.option,
-                guard.recover_wal_ids.take(),
-                mem::replace(&mut guard.immutables, excess),
-            )
-            .await?
+            if let Some(scope) =
+                Self::minor_compaction(&self.option, recover_wal_ids, excess).await?
             {
                 let version_ref = self.version_set.current().await;
                 let mut version_edits = vec![];
@@ -106,6 +98,8 @@ where
                     .apply_edits(version_edits, Some(delete_gens), false)
                     .await?;
             }
+            let sources = guard.immutables.split_off(chunk_num);
+            let _ = mem::replace(&mut guard.immutables, sources);
         }
         // TODO
         // if let Some(tx) = option_tx {
@@ -117,7 +111,7 @@ where
     pub(crate) async fn minor_compaction(
         option: &DbOption<R>,
         recover_wal_ids: Option<Vec<FileId>>,
-        batches: VecDeque<(Option<FileId>, Immutable<R::Columns>)>,
+        batches: &[(Option<FileId>, Immutable<R::Columns>)],
     ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
         if !batches.is_empty() {
             let mut min = None;
@@ -146,7 +140,7 @@ where
                 }
                 writer.write(batch.as_record_batch()).await?;
                 if let Some(file_id) = file_id {
-                    wal_ids.push(file_id);
+                    wal_ids.push(file_id.clone());
                 }
             }
             writer.close().await?;
@@ -442,10 +436,7 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{
-        collections::VecDeque,
-        sync::{atomic::AtomicU32, Arc},
-    };
+    use std::sync::{atomic::AtomicU32, Arc};
 
     use flume::bounded;
     use parquet::{arrow::AsyncArrowWriter, errors::ParquetError};
@@ -585,10 +576,10 @@ pub(crate) mod tests {
         let scope = Compactor::<Test, TokioExecutor>::minor_compaction(
             &DbOption::from(temp_dir.path()),
             None,
-            VecDeque::from(vec![
-                (Some(FileId::new()), batch_2),
+            &vec![
                 (Some(FileId::new()), batch_1),
-            ]),
+                (Some(FileId::new()), batch_2),
+            ],
         )
         .await
         .unwrap()
