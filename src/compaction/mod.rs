@@ -173,11 +173,7 @@ where
             if !option.is_threshold_exceeded_major(version, level) {
                 break;
             }
-            let (meet_scopes_l, start_l, end_l) =
-                match Self::this_level_scopes(version, min, max, level) {
-                    Some(value) => value,
-                    None => return Ok(()),
-                };
+            let (meet_scopes_l, start_l, end_l) = Self::this_level_scopes(version, min, max, level);
             let (meet_scopes_ll, start_ll, end_ll) =
                 Self::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
 
@@ -216,23 +212,25 @@ where
                     inner: level_scan_l,
                 });
             }
-            // Next Level
-            let (lower, upper) = Self::full_scope(&meet_scopes_ll)?;
-            let level_scan_ll = LevelStream::new(
-                version,
-                level + 1,
-                start_ll,
-                end_ll,
-                (Bound::Included(lower), Bound::Included(upper)),
-                u32::MAX.into(),
-                None,
-                ProjectionMask::all(),
-            )
-            .ok_or(CompactionError::EmptyLevel)?;
+            if !meet_scopes_ll.is_empty() {
+                // Next Level
+                let (lower, upper) = Self::full_scope(&meet_scopes_ll)?;
+                let level_scan_ll = LevelStream::new(
+                    version,
+                    level + 1,
+                    start_ll,
+                    end_ll,
+                    (Bound::Included(lower), Bound::Included(upper)),
+                    u32::MAX.into(),
+                    None,
+                    ProjectionMask::all(),
+                )
+                .ok_or(CompactionError::EmptyLevel)?;
 
-            streams.push(ScanStream::Level {
-                inner: level_scan_ll,
-            });
+                streams.push(ScanStream::Level {
+                    inner: level_scan_ll,
+                });
+            }
             Self::build_tables(option, version_edits, level, streams).await?;
 
             for scope in meet_scopes_l {
@@ -267,15 +265,17 @@ where
         let mut end_ll = 0;
 
         if !version.level_slice[level + 1].is_empty() {
-            *min = &meet_scopes_l
-                .first()
-                .ok_or(CompactionError::EmptyLevel)?
-                .min;
-            *max = &meet_scopes_l
+            *min = meet_scopes_l
                 .iter()
-                .last()
-                .ok_or(CompactionError::EmptyLevel)?
-                .max;
+                .map(|scope| &scope.min)
+                .min()
+                .ok_or(CompactionError::EmptyLevel)?;
+
+            *max = meet_scopes_l
+                .iter()
+                .map(|scope| &scope.max)
+                .max()
+                .ok_or(CompactionError::EmptyLevel)?;
 
             start_ll = Version::<R, FP>::scope_search(min, &version.level_slice[level + 1]);
             end_ll = Version::<R, FP>::scope_search(max, &version.level_slice[level + 1]);
@@ -298,13 +298,16 @@ where
         min: &<R as Record>::Key,
         max: &<R as Record>::Key,
         level: usize,
-    ) -> Option<(Vec<&'a Scope<<R as Record>::Key>>, usize, usize)> {
+    ) -> (Vec<&'a Scope<<R as Record>::Key>>, usize, usize) {
         let mut meet_scopes_l = Vec::new();
-        let start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
+        let mut start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
         let mut end_l = start_l;
+        let option = version.option();
 
         for scope in version.level_slice[level][start_l..].iter() {
-            if scope.contains(min) || scope.contains(max) {
+            if (scope.contains(min) || scope.contains(max))
+                && meet_scopes_l.len() <= option.major_l_selection_table_max_num
+            {
                 meet_scopes_l.push(scope);
                 end_l += 1;
             } else {
@@ -312,9 +315,20 @@ where
             }
         }
         if meet_scopes_l.is_empty() {
-            return None;
+            start_l = 0;
+            end_l = cmp::min(
+                option.major_default_oldest_table_num,
+                version.level_slice.len(),
+            );
+
+            for scope in version.level_slice[level][..end_l].iter() {
+                if meet_scopes_l.len() > option.major_l_selection_table_max_num {
+                    break;
+                }
+                meet_scopes_l.push(scope);
+            }
         }
-        Some((meet_scopes_l, start_l, end_l))
+        (meet_scopes_l, start_l, end_l)
     }
 
     async fn build_tables<'scan>(

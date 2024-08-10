@@ -1261,9 +1261,10 @@ pub(crate) mod tests {
         let mut option = DbOption::from(temp_dir.path());
         option.max_mutable_len = 5;
         option.immutable_chunk_num = 1;
-        option.major_threshold_with_sst_size = 5;
+        option.major_threshold_with_sst_size = 3;
         option.level_sst_magnification = 10;
         option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
@@ -1274,6 +1275,11 @@ pub(crate) mod tests {
         let tx = db.transaction().await;
         let key = 20.to_string();
         let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
+
+        dbg!(db.version_set.current().await);
+
+        let version = db.version_set.current().await;
+        assert!(!version.level_slice[1].is_empty());
 
         assert_eq!(option1.get().vstring, "20");
         assert_eq!(option1.get().vu32, Some(0));
