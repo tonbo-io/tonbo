@@ -539,15 +539,18 @@ where
         for p in &mut projection {
             *p += 2;
         }
-        projection.extend([0, 1, R::primary_key_index()]);
+        let mut fixed_projection = vec![0, 1, R::primary_key_index()];
+        fixed_projection.append(&mut projection);
+        fixed_projection.dedup();
+
         let mask = ProjectionMask::roots(
             &arrow_to_parquet_schema(R::arrow_schema()).unwrap(),
-            projection.clone(),
+            fixed_projection.clone(),
         );
 
         Self {
             projection: mask,
-            projection_indices: Some(projection),
+            projection_indices: Some(fixed_projection),
             ..self
         }
     }
