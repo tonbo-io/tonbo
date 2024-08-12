@@ -21,6 +21,23 @@ enum DataType {
     Boolean,
 }
 
+/// used to define the structure of Record,
+/// will generate the implementation required in Tonbo, allowing derive expansion.
+///
+/// # Example
+///
+/// ```
+/// use tonbo_marco::tonbo_record;
+///
+/// #[tonbo_record(::serde::Serialize, ::serde::Deserialize)]
+/// pub struct Music {
+///     #[primary_key]
+///     pub id: u32,
+///     pub name: String,
+///     pub url: Option<String>,
+///     pub is_favorite: bool,
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);

@@ -4,7 +4,10 @@ workspace = { members = ["tonbo_marco"] }
 edition = "2021"
 name = "tonbo"
 resolver = "2"
-version = "0.0.0"
+version = "0.0.1"
+documentation = "https://docs.rs/tonbo"
+license       = "Apache-2.0"
+description   = "An embedded persistent KV database in Rust."
 
 [[example]]
 name = "declare"
@@ -36,7 +39,7 @@ regex = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["fs", "io-util"] }
 tokio-util = { version = "0.7" }
-tonbo_marco = { path = "tonbo_marco" }
+tonbo_marco = "0.0.1"
 tracing = "0.1"
 ulid = "1"
 
