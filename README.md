@@ -1,5 +1,14 @@
 # Tonbo (WIP)
 
+<p align="left">
+  <a href="https://github.com/tonbo-io/tonbo" target="_blank">
+    <a href="https://github.com/tonbo-io/tonbo/actions/workflows/ci.yml"><img src="https://github.com/tonbo-io/tonbo/actions/workflows/ci.yml/badge.svg" alt="CI"></img></a>
+    <a href="https://crates.io/crates/tonbo/"><img src="https://img.shields.io/crates/v/tonbo.svg"></a>
+    <img src="https://img.shields.io/github/stars/tonbo-io/tonbo.svg?style=social" alt="github star"/>
+    <img src="https://img.shields.io/github/forks/tonbo-io/tonbo.svg?style=social" alt="github fork"/>
+  </a>
+</p>
+
 ## Introduction
 
 Tonbo is an embedded KV database built on [Apache Arrow & Parquet](https://github.com/apache/arrow-rs), designed to store, filter, and project structured data using LSM Tree.
