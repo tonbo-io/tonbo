@@ -215,14 +215,7 @@ async fn main() -> Result<()> {
     ctx.register_table("music", Arc::new(provider))?;
 
     let df = ctx.table("music").await?;
-    let df = df.select(vec![
-        // FIXME: `_null` & `_ts` & `id`(primary key column) removal will cause projection
-        // confusion
-        col("_null"),
-        col("_ts"),
-        col("id"),
-        col("name"),
-    ])?;
+    let df = df.select(vec![col("name")])?;
     let batches = df.collect().await?;
     pretty::print_batches(&batches).unwrap();
     Ok(())
