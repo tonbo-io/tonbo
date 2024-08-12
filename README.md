@@ -13,6 +13,8 @@
 
 Tonbo is an embedded KV database built on [Apache Arrow & Parquet](https://github.com/apache/arrow-rs), designed to store, filter, and project structured data using LSM Tree.
 
+It can be very naturally combined with Arrow data processing components such as Datafusion. refer to this [example](examples/datafusion.rs).
+
 Our goal is to provide a lean, modern solution for storing data in a tiered storage, which is arranged by RAM, flash, SSD, S3 and any others.
 
 ## Features
