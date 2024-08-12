@@ -9,9 +9,17 @@ documentation = "https://docs.rs/tonbo"
 license       = "Apache-2.0"
 description   = "An embedded persistent KV database in Rust."
 
+[features]
+datafusion = ["dep:datafusion", "dep:async-trait"]
+
 [[example]]
 name = "declare"
 path = "examples/declare.rs"
+
+[[example]]
+name = "datafusion"
+path = "examples/datafusion.rs"
+required-features = ["datafusion"]
 
 [[bench]]
 name = "benchmark"
@@ -25,8 +33,10 @@ pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
 arrow = "52"
 async-lock = "3"
 async-stream = "0.3"
+async-trait = { version = "0.1", optional = true }
 crc32fast = "1"
 crossbeam-skiplist = "0.1"
+datafusion = { version = "40", optional = true }
 flume = { version = "0.11", features = ["async"] }
 futures-core = "0.3"
 futures-io = "0.3"

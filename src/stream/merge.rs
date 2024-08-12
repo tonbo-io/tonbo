@@ -81,6 +81,7 @@ where
     }
 }
 
+#[derive(Debug)]
 struct CmpEntry<'stream, R>
 where
     R: Record,
