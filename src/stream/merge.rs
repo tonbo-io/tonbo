@@ -34,9 +34,9 @@ where
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
 
-        for stream in &mut streams {
+        for (offset, stream) in streams.iter_mut().enumerate() {
             if let Some(entry) = stream.next().await {
-                peeked.push(CmpEntry::new(peeked.len(), entry?));
+                peeked.push(CmpEntry::new(offset, entry?));
             }
         }
 
