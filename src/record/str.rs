@@ -60,6 +60,10 @@ impl Record for String {
 
         &SCHEMA
     }
+
+    fn size(&self) -> usize {
+        self.len()
+    }
 }
 
 impl<'r> RecordRef<'r> for &'r str {

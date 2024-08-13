@@ -36,6 +36,8 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     fn as_record_ref(&self) -> Self::Ref<'_>;
 
     fn arrow_schema() -> &'static Arc<Schema>;
+
+    fn size(&self) -> usize;
 }
 
 pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
