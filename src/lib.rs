@@ -122,9 +122,9 @@ pub mod serdes;
 pub mod stream;
 pub mod timestamp;
 pub mod transaction;
+mod trigger;
 mod version;
 mod wal;
-mod trigger;
 
 use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
 
@@ -246,7 +246,7 @@ where
     /// insert a sequence of data as a single batch
     pub async fn insert_batch(
         &self,
-        records: impl ExactSizeIterator<Item=R>,
+        records: impl ExactSizeIterator<Item = R>,
     ) -> Result<(), CommitError<R>> {
         Ok(self
             .write_batch(records, self.version_set.transaction_ts())
@@ -288,7 +288,7 @@ where
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
-    ) -> impl Stream<Item=Result<T, CommitError<R>>> + 'scan {
+    ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
             let current = self.version_set.current().await;
@@ -318,7 +318,7 @@ where
 
     pub(crate) async fn write_batch(
         &self,
-        mut records: impl ExactSizeIterator<Item=R>,
+        mut records: impl ExactSizeIterator<Item = R>,
         ts: Timestamp,
     ) -> Result<(), DbError<R>> {
         let schema = self.schema.read().await;
@@ -478,10 +478,10 @@ where
     fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
         self.mutable.check_conflict(key, ts)
             || self
-            .immutables
-            .iter()
-            .rev()
-            .any(|(_, immutable)| immutable.check_conflict(key, ts))
+                .immutables
+                .iter()
+                .rev()
+                .any(|(_, immutable)| immutable.check_conflict(key, ts))
     }
 }
 
@@ -562,7 +562,7 @@ where
     /// get a Stream that returns single row of Record
     pub async fn take(
         mut self,
-    ) -> Result<impl Stream<Item=Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
         self.streams.push(
             self.schema
                 .mutable
@@ -593,7 +593,7 @@ where
     pub async fn package(
         mut self,
         batch_size: usize,
-    ) -> Result<impl Stream<Item=Result<R::Columns, ParquetError>> + 'scan, DbError<R>> {
+    ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, DbError<R>> {
         self.streams.push(
             self.schema
                 .mutable
@@ -677,10 +677,10 @@ pub(crate) mod tests {
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
         record::{internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordRef},
         serdes::{Decode, Encode},
+        trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
         DbError, DbOption, Immutable, Projection, Record, DB,
-        trigger::{TriggerFactory, TriggerType},
     };
 
     #[derive(Debug, PartialEq, Eq, Clone)]

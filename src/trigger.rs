@@ -1,9 +1,11 @@
-use std::fmt;
-use std::fmt::{Debug};
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::record::{Record};
+use std::{
+    fmt,
+    fmt::Debug,
+    marker::PhantomData,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
+use crate::record::Record;
 
 pub trait Trigger<R: Record>: fmt::Debug {
     fn item(&self, item: &Option<R>) -> bool;
@@ -18,7 +20,6 @@ pub struct SizeOfMemTrigger<R> {
     current_size: AtomicUsize,
     _p: PhantomData<R>,
 }
-
 
 impl<T> SizeOfMemTrigger<T> {
     pub fn new(max_size: usize) -> Self {
@@ -75,7 +76,6 @@ impl<R: Record> Trigger<R> for CountTrigger {
     }
 }
 
-
 #[derive(Copy, Clone, Debug)]
 pub enum TriggerType {
     Count,
@@ -86,7 +86,10 @@ pub(crate) struct TriggerFactory<R> {
 }
 
 impl<R: Record> TriggerFactory<R> {
-    pub fn create(trigger_type: TriggerType, threshold: usize) -> Box<dyn Trigger<R> + Send + Sync> {
+    pub fn create(
+        trigger_type: TriggerType,
+        threshold: usize,
+    ) -> Box<dyn Trigger<R> + Send + Sync> {
         match trigger_type {
             TriggerType::SizeOfMem => Box::new(SizeOfMemTrigger::new(threshold)),
             TriggerType::Count => Box::new(CountTrigger::new(threshold)),

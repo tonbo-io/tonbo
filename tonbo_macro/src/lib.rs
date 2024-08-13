@@ -258,7 +258,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                                 quote!(0)
                             } else {
                                 quote!(self.#field_name.len())
-                            }
+                            },
                         )
                     }
                     Some((DataType::Boolean, is_nullable)) => (
@@ -428,8 +428,8 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                                 ast.ident,
                                 "primary key cannot be nullable",
                             )
-                                .to_compile_error()
-                                .into();
+                            .to_compile_error()
+                            .into();
                         }
                         if is_string {
                             to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
