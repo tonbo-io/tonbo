@@ -55,7 +55,7 @@ regex = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["fs", "io-util"] }
 tokio-util = { version = "0.7" }
-tonbo_marco = { path = "tonbo_marco" }
+tonbo_macro = { version = "0.1.0", path = "tonbo_macro" }
 tracing = "0.1"
 ulid = "1"
 

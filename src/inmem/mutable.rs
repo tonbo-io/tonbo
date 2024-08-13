@@ -1,5 +1,5 @@
-use std::{intrinsics::transmute, ops::Bound};
-use std::sync::Arc;
+use std::{intrinsics::transmute, ops::Bound, sync::Arc};
+
 use async_lock::Mutex;
 use crossbeam_skiplist::{
     map::{Entry, Range},
@@ -16,10 +16,10 @@ use crate::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
+    trigger::{Trigger, TriggerFactory, TriggerType},
     wal::{log::LogType, WalFile},
     DbError, DbOption,
 };
-use crate::trigger::{Trigger, TriggerFactory, TriggerType};
 
 pub(crate) type MutableScan<'scan, R> = Range<
     'scan,
@@ -57,7 +57,10 @@ where
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
 
-        let trigger = Arc::new(TriggerFactory::create(TriggerType::Count, option.max_mutable_len));
+        let trigger = Arc::new(TriggerFactory::create(
+            TriggerType::Count,
+            option.max_mutable_len,
+        ));
 
         Ok(Self {
             data: Default::default(),
