@@ -61,6 +61,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut encode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut encode_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut decode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     let mut to_ref_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -100,6 +101,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                     builder_with_capacity_method,
                     builder,
                     size_method,
+                    size_field,
                 ) = match to_data_type(&field.ty) {
                     Some((DataType::UInt8, is_nullable)) => (
                         is_nullable,
@@ -112,6 +114,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt8Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote!(std::mem::size_of::<u8>()),
                     ),
                     Some((DataType::UInt16, is_nullable)) => (
                         is_nullable,
@@ -124,6 +127,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt16Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote!(std::mem::size_of::<u16>()),
                     ),
                     Some((DataType::UInt32, is_nullable)) => (
                         is_nullable,
@@ -136,6 +140,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt32Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote! {std::mem::size_of::<u32>()},
                     ),
                     Some((DataType::UInt64, is_nullable)) => (
                         is_nullable,
@@ -148,6 +153,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt64Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote! {std::mem::size_of::<u64>()},
                     ),
 
                     Some((DataType::Int8, is_nullable)) => (
@@ -161,6 +167,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int8Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote! {std::mem::size_of::<i8>()},
                     ),
                     Some((DataType::Int16, is_nullable)) => (
                         is_nullable,
@@ -173,6 +180,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int16Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote! {std::mem::size_of::<i16>()},
                     ),
                     Some((DataType::Int32, is_nullable)) => (
                         is_nullable,
@@ -185,6 +193,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int32Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote! {std::mem::size_of::<i32>()},
                     ),
                     Some((DataType::Int64, is_nullable)) => (
                         is_nullable,
@@ -197,6 +206,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         >::with_capacity(capacity)),
                         quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int64Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
+                        quote! {std::mem::size_of::<i64>()},
                     ),
 
                     Some((DataType::String, is_nullable)) => {
@@ -210,6 +220,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                             quote!(::arrow::array::StringBuilder::with_capacity(capacity, 0)),
                             quote!(::arrow::array::StringBuilder),
                             quote!(self.#field_name.values_slice().len()),
+                            if is_nullable {
+                                quote!(0)
+                            } else {
+                                quote!(self.#field_name.len())
+                            }
                         )
                     }
                     Some((DataType::Boolean, is_nullable)) => (
@@ -221,6 +236,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::arrow::array::BooleanBuilder::with_capacity(capacity)),
                         quote!(::arrow::array::BooleanBuilder),
                         quote!(self.#field_name.values_slice().len()),
+                        quote! {std::mem::size_of::<bool>()},
                     ),
 
                     None => unreachable!(),
@@ -229,7 +245,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 schema_fields.push(quote! {
                     ::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
                 });
-                field_names.push(quote! (#field_name,));
+                field_names.push(quote!(#field_name,));
                 arrays_init_fields.push(quote! {
                     #field_name: ::std::sync::Arc<#array_ty>,
                 });
@@ -256,6 +272,9 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 });
                 builder_size_fields.push(quote! {
                     + #size_method
+                });
+                size_fields.push(quote! {
+                    + #size_field
                 });
 
                 match ModelAttributes::parse_field(field) {
@@ -373,8 +392,8 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                                 ast.ident,
                                 "primary key cannot be nullable",
                             )
-                            .to_compile_error()
-                            .into();
+                                .to_compile_error()
+                                .into();
                         }
                         if is_string {
                             to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
@@ -468,6 +487,10 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 });
 
                 &SCHEMA
+            }
+
+            fn size(&self) -> usize {
+                0 #(#size_fields)*
             }
         }
 

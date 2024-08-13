@@ -1,5 +1,5 @@
 use std::{intrinsics::transmute, ops::Bound};
-
+use std::sync::Arc;
 use async_lock::Mutex;
 use crossbeam_skiplist::{
     map::{Entry, Range},
@@ -19,6 +19,7 @@ use crate::{
     wal::{log::LogType, WalFile},
     DbError, DbOption,
 };
+use crate::trigger::{Trigger, TriggerFactory, TriggerType};
 
 pub(crate) type MutableScan<'scan, R> = Range<
     'scan,
@@ -39,6 +40,7 @@ where
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<FP::File, R>>>,
+    trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
 impl<R, FP> Mutable<R, FP>
@@ -55,9 +57,12 @@ where
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
 
+        let trigger = Arc::new(TriggerFactory::create(TriggerType::Count, option.max_mutable_len));
+
         Ok(Self {
             data: Default::default(),
             wal,
+            trigger,
         })
     }
 }
@@ -72,7 +77,7 @@ where
         log_ty: LogType,
         record: R,
         ts: Timestamp,
-    ) -> Result<usize, DbError<R>> {
+    ) -> Result<bool, DbError<R>> {
         self.append(Some(log_ty), record.key().to_key(), ts, Some(record))
             .await
     }
@@ -82,7 +87,7 @@ where
         log_ty: LogType,
         key: R::Key,
         ts: Timestamp,
-    ) -> Result<usize, DbError<R>> {
+    ) -> Result<bool, DbError<R>> {
         self.append(Some(log_ty), key, ts, None).await
     }
 
@@ -92,7 +97,7 @@ where
         key: R::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<usize, DbError<R>> {
+    ) -> Result<bool, DbError<R>> {
         let timestamped_key = Timestamped::new(key, ts);
 
         if let (Some(log_ty), Some(wal)) = (log_ty, &self.wal) {
@@ -108,9 +113,11 @@ where
                 .unwrap();
             // .map_err(WriteError::Encode)?;
         }
+
+        self.trigger.item(&value);
         self.data.insert(timestamped_key, value);
 
-        Ok(self.data.len())
+        Ok(self.trigger.exceeded())
     }
 
     #[allow(unused)]
