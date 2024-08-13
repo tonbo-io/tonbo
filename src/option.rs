@@ -48,11 +48,13 @@ where
             max_sst_file_size: 24 * 1024 * 1024,
             clean_channel_buffer: 10,
             write_parquet_properties: WriterProperties::builder()
-                .set_compression(Compression::SNAPPY)
+                .set_compression(Compression::LZ4)
+                .set_column_compression(column_paths.clone(), Compression::UNCOMPRESSED)
                 .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
                 .set_column_bloom_filter_enabled(column_paths.clone(), true)
                 .set_max_row_group_size(256)
                 .set_sorting_columns(Some(sorting_columns))
+                .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
                 .build(),
 
             use_wal: true,
