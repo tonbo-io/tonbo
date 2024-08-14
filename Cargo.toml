@@ -10,6 +10,9 @@ documentation = "https://docs.rs/tonbo"
 license       = "Apache-2.0"
 description   = "An embedded persistent KV database in Rust."
 
+[package.metadata]
+msrv = "1.79.0"
+
 [features]
 datafusion = ["dep:datafusion", "dep:async-trait"]
 
