@@ -56,6 +56,8 @@ async fn main() {
                 .await
                 // tonbo supports pushing down projection
                 .projection(vec![1])
+                // push down limitation
+                .limit(1)
                 .take()
                 .await
                 .unwrap();

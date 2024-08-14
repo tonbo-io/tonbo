@@ -1,21 +1,19 @@
-# Tonbo (WIP)
+# Tonbo
 
 <p align="left">
   <a href="https://github.com/tonbo-io/tonbo" target="_blank">
     <a href="https://github.com/tonbo-io/tonbo/actions/workflows/ci.yml"><img src="https://github.com/tonbo-io/tonbo/actions/workflows/ci.yml/badge.svg" alt="CI"></img></a>
     <a href="https://crates.io/crates/tonbo/"><img src="https://img.shields.io/crates/v/tonbo.svg"></a>
-    <img src="https://img.shields.io/github/stars/tonbo-io/tonbo.svg?style=social" alt="github star"/>
-    <img src="https://img.shields.io/github/forks/tonbo-io/tonbo.svg?style=social" alt="github fork"/>
+    <a href="https://github.com/tonbo-io/tonbo/blob/main/LICENSE"><img src="https://img.shields.io/crates/l/tonbo"></a>
   </a>
 </p>
 
+### [Website](tonbo.io) | [Rust Doc](https://docs.rs/tonbo/latest/tonbo/) | [Blog](https://tonbo.io/blog/introducing-tonbo) | [Community](https://discord.gg/8jm9WMfX)
+
 ## Introduction
 
-Tonbo is an embedded KV database built on [Apache Arrow & Parquet](https://github.com/apache/arrow-rs), designed to store, filter, and project structured data using LSM Tree.
+Tonbo is an embedded persistent database built on [Apache Arrow & Parquet](https://github.com/apache/arrow-rs). It offers essential KV-like methods—insert, filter, and range scan—to efficiently and conveniently query type-safe structured data. Tonbo is able to integrate seamlessly with other Arrow analytical tools, such as DataFusion. For an example, refer to this [example](examples/datafusion.rs). Official support for DataFusion will be included in the next release.
 
-It can be very naturally combined with Arrow data processing components such as Datafusion. refer to this [example](examples/datafusion.rs).
-
-Our goal is to provide a lean, modern solution for storing data in a tiered storage, which is arranged by RAM, flash, SSD, S3 and any others.
 
 ## Features
 
