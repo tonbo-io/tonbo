@@ -1,20 +1,21 @@
-workspace = { members = ["tonbo_marco"] }
+workspace = { members = ["tonbo_macro"] }
 
 [package]
+description = "An embedded persistent KV database in Rust."
+documentation = "https://docs.rs/tonbo"
 edition = "2021"
+license = "Apache-2.0"
 name = "tonbo"
+readme = "README.md"
 resolver = "2"
 version = "0.1.0"
-readme = "README.md"
-documentation = "https://docs.rs/tonbo"
-license       = "Apache-2.0"
-description   = "An embedded persistent KV database in Rust."
 
 [package.metadata]
 msrv = "1.79.0"
 
 [features]
-datafusion = ["dep:datafusion", "dep:async-trait"]
+bench = ["dep:rocksdb", "dep:rocksdb", "dep:sled"]
+datafusion = ["dep:async-trait", "dep:datafusion"]
 
 [[example]]
 name = "declare"
@@ -26,9 +27,10 @@ path = "examples/datafusion.rs"
 required-features = ["datafusion"]
 
 [[bench]]
+harness = false
 name = "benchmark"
 path = "benchmark/bench.rs"
-harness = false
+required-features = ["bench"]
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
@@ -45,7 +47,7 @@ flume = { version = "0.11", features = ["async"] }
 futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"
-lockable = "0.0"
+lockable = "0.0.8"
 once_cell = "1"
 parquet = { version = "52", features = ["async"] }
 pin-project-lite = "0.2"
@@ -53,19 +55,21 @@ regex = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["fs", "io-util"] }
 tokio-util = { version = "0.7" }
-tonbo_marco = "0.1.0"
+tonbo_macro = "0.1.0"
 tracing = "0.1"
 ulid = "1"
+
+# Only used for benchmarks
+redb = { version = "2", optional = true }
+rocksdb = { version = "0.22", optional = true }
+sled = { version = "0.34", optional = true }
 
 [dev-dependencies]
 bincode = "1"
 comfy-table = "7"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 fastrand = "2"
-redb = "2"
-rocksdb = "0.22"
 serde = "1"
-sled = "0.34"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 
