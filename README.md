@@ -8,7 +8,7 @@
   </a>
 </p>
 
-**[Website](tonbo.io) | [Rust Doc](https://docs.rs/tonbo/latest/tonbo/) | [Blog](https://tonbo.io/blog/introducing-tonbo) | [Community](https://discord.gg/8jm9WMfX)**
+**[Website](https://tonbo.io/) | [Rust Doc](https://docs.rs/tonbo/latest/tonbo/) | [Blog](https://tonbo.io/blog/introducing-tonbo) | [Community](https://discord.gg/8jm9WMfX)**
 
 ## Introduction
 
