@@ -14,7 +14,7 @@ use rocksdb::{Direction, IteratorMode, TransactionDB};
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
-use tonbo_marco::tonbo_record;
+use tonbo_macro::tonbo_record;
 
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
@@ -26,7 +26,7 @@ type ProjectionField = String;
 #[allow(dead_code)]
 pub enum BenchResult<'a> {
     Ref(TransactionEntry<'a, BenchItem>),
-    Owned(BenchItem),
+    Owned(Box<BenchItem>),
 }
 
 #[allow(dead_code)]
@@ -173,7 +173,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
             .get(key, Projection::All)
             .await
             .unwrap()
-            .map(|entry| BenchResult::Ref(entry))
+            .map(BenchResult::Ref)
     }
 
     fn range_from<'a>(
@@ -294,7 +294,11 @@ pub struct RedbBenchReader {
 impl BenchReader for RedbBenchReader {
     async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.table.get(key.as_bytes()).unwrap().map(|guard| {
-            BenchResult::Owned(bincode::deserialize::<BenchItem>(guard.value()).unwrap())
+            BenchResult::Owned(
+                bincode::deserialize::<BenchItem>(guard.value())
+                    .unwrap()
+                    .into(),
+            )
         })
     }
 
@@ -303,13 +307,13 @@ impl BenchReader for RedbBenchReader {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = BenchResult> + 'a {
         let (lower, upper) = range;
-        let mut iter = self
+        let iter = self
             .table
             .range::<&[u8]>((lower.map(ItemKey::as_bytes), upper.map(ItemKey::as_bytes)))
             .unwrap();
 
         stream! {
-            while let Some(item) = iter.next() {
+            for item in iter {
                 let (_, v) = item.unwrap();
                 yield BenchResult::Owned(bincode::deserialize(v.value()).unwrap());
             }
@@ -321,13 +325,13 @@ impl BenchReader for RedbBenchReader {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = ProjectionResult> + 'a {
         let (lower, upper) = range;
-        let mut iter = self
+        let iter = self
             .table
             .range::<&[u8]>((lower.map(ItemKey::as_bytes), upper.map(ItemKey::as_bytes)))
             .unwrap();
 
         stream! {
-            while let Some(item) = iter.next() {
+            for item in iter {
                 let (_, v) = item.unwrap();
                 yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.value()).unwrap().string_1);
             }
@@ -440,7 +444,11 @@ pub struct SledBenchReader<'db> {
 impl<'db> BenchReader for SledBenchReader<'db> {
     async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.db.get(key.as_bytes()).unwrap().map(|guard| {
-            BenchResult::Owned(bincode::deserialize::<BenchItem>(guard.as_bytes()).unwrap())
+            BenchResult::Owned(
+                bincode::deserialize::<BenchItem>(guard.as_bytes())
+                    .unwrap()
+                    .into(),
+            )
         })
     }
 
@@ -449,13 +457,13 @@ impl<'db> BenchReader for SledBenchReader<'db> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = BenchResult> + 'a {
         let (lower, upper) = range;
-        let mut iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
+        let iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
             lower.map(ItemKey::as_bytes),
             upper.map(ItemKey::as_bytes),
         ));
 
         stream! {
-            while let Some(item) = iter.next() {
+            for item in iter {
                 let (_, v) = item.unwrap();
                 yield BenchResult::Owned(bincode::deserialize(v.as_bytes()).unwrap());
             }
@@ -467,13 +475,13 @@ impl<'db> BenchReader for SledBenchReader<'db> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = ProjectionResult> + 'a {
         let (lower, upper) = range;
-        let mut iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
+        let iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
             lower.map(ItemKey::as_bytes),
             upper.map(ItemKey::as_bytes),
         ));
 
         stream! {
-            while let Some(item) = iter.next() {
+            for item in iter {
                 let (_, v) = item.unwrap();
                 yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.as_bytes()).unwrap().string_1)
             }
@@ -493,7 +501,7 @@ impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
         Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
-        SledBenchInserter { db: &self.db }
+        SledBenchInserter { db: self.db }
     }
 
     async fn commit(self) -> Result<(), ()> {
@@ -643,10 +651,9 @@ pub struct RocksdbBenchReader<'db, 'txn> {
 
 impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
     async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
-        self.snapshot
-            .get(key.as_bytes())
-            .unwrap()
-            .map(|bytes| BenchResult::Owned(bincode::deserialize::<BenchItem>(&bytes).unwrap()))
+        self.snapshot.get(key.as_bytes()).unwrap().map(|bytes| {
+            BenchResult::Owned(bincode::deserialize::<BenchItem>(&bytes).unwrap().into())
+        })
     }
 
     fn range_from<'a>(
@@ -666,10 +673,10 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
             .unwrap_or(IteratorMode::Start);
         let upper = bound_to_include(upper.map(String::as_bytes));
 
-        let mut iter = self.snapshot.iterator(lower);
+        let iter = self.snapshot.iterator(lower);
 
         stream! {
-            while let Some(item) = iter.next() {
+            for item in iter {
                 let (key, v) = item.unwrap();
                 if let Some(upper) = upper {
                     if upper.cmp(&key).is_lt() {
@@ -698,10 +705,10 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
             .unwrap_or(IteratorMode::Start);
         let upper = bound_to_include(upper.map(String::as_bytes));
 
-        let mut iter = self.snapshot.iterator(lower);
+        let iter = self.snapshot.iterator(lower);
 
         stream! {
-            while let Some(item) = iter.next() {
+            for item in iter {
                 let (key, v) = item.unwrap();
                 if let Some(upper) = upper {
                     if upper.cmp(&key).is_lt() {

@@ -1,10 +1,10 @@
 [package]
+description = "TonboRecord macro"
+documentation = "https://docs.rs/tonbo_marcro"
 edition = "2021"
-name = "tonbo_marco"
+license = "Apache-2.0"
+name = "tonbo_macro"
 version = "0.1.0"
-documentation = "https://docs.rs/tonbo_marco"
-license       = "Apache-2.0"
-description   = "TonboRecord marco"
 
 [dependencies]
 proc-macro2 = "1"
