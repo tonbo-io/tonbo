@@ -40,7 +40,7 @@ where
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<FP::File, R>>>,
-    trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+    pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
 impl<R, FP> Mutable<R, FP>

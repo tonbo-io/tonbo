@@ -59,6 +59,8 @@ where
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
+        guard.mutable.trigger.reset();
+
         if guard.mutable.is_empty() {
             return Ok(());
         }
