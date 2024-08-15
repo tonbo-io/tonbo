@@ -16,7 +16,6 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct DbOption<R> {
     pub(crate) path: PathBuf,
-    pub(crate) max_mutable_len: usize,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,
     pub(crate) major_threshold_with_sst_size: usize,
@@ -39,10 +38,8 @@ where
     /// build the default configured [`DbOption`](struct.DbOption.html) based on the passed path
     fn from(path: P) -> Self {
         let (column_paths, sorting_columns) = R::primary_key_path();
-        let max_mutable_len = 3000;
         DbOption {
             path: path.into(),
-            max_mutable_len,
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
@@ -62,7 +59,7 @@ where
             use_wal: true,
             major_default_oldest_table_num: 3,
             major_l_selection_table_max_num: 4,
-            trigger_type: TriggerType::Length(max_mutable_len),
+            trigger_type: TriggerType::Length(/* max_mutable_len */ 3000),
             _p: Default::default(),
         }
     }
@@ -76,14 +73,6 @@ where
     pub fn path(self, path: impl Into<PathBuf>) -> Self {
         DbOption {
             path: path.into(),
-            ..self
-        }
-    }
-
-    /// len threshold of `mutable` when freeze is triggered
-    pub fn max_mutable_len(self, max_mutable_len: usize) -> Self {
-        DbOption {
-            max_mutable_len,
             ..self
         }
     }

@@ -1277,14 +1277,13 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let mut option = DbOption::from(temp_dir.path());
-        option.max_mutable_len = 5;
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
         option.level_sst_magnification = 10;
         option.max_sst_file_size = 2 * 1024 * 1024;
         option.major_default_oldest_table_num = 1;
-        option.trigger_type = TriggerType::Length(5);
+        option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
