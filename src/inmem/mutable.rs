@@ -16,7 +16,7 @@ use crate::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
-    trigger::{Trigger, TriggerFactory, TriggerType},
+    trigger::{Trigger, TriggerFactory},
     wal::{log::LogType, WalFile},
     DbError, DbOption,
 };
@@ -57,9 +57,7 @@ where
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
 
-        let trigger = Arc::new(TriggerFactory::create(TriggerType::Length(
-            option.max_mutable_len,
-        )));
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
         Ok(Self {
             data: Default::default(),

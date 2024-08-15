@@ -1281,6 +1281,7 @@ pub(crate) mod tests {
         option.level_sst_magnification = 10;
         option.max_sst_file_size = 2 * 1024 * 1024;
         option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
