@@ -34,7 +34,7 @@ impl<T> SizeOfMemTrigger<T> {
 impl<R: Record> Trigger<R> for SizeOfMemTrigger<R> {
     fn item(&self, item: &Option<R>) -> bool {
         let size = item.as_ref().map_or(0, R::size);
-        self.current_size.fetch_add(size, Ordering::SeqCst) + size > self.threshold
+        self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
     }
 
     fn exceeded(&self) -> bool {
@@ -47,28 +47,30 @@ impl<R: Record> Trigger<R> for SizeOfMemTrigger<R> {
 }
 
 #[derive(Debug)]
-pub struct CountTrigger {
+pub struct LengthTrigger<R> {
     threshold: usize,
     count: AtomicUsize,
+    _p: PhantomData<R>,
 }
 
-impl CountTrigger {
+impl<T> LengthTrigger<T> {
     pub fn new(threshold: usize) -> Self {
-        CountTrigger {
+        Self {
             threshold,
             count: AtomicUsize::new(0),
+            _p: Default::default(),
         }
     }
 }
 
-impl<R: Record> Trigger<R> for CountTrigger {
+impl<R: Record> Trigger<R> for LengthTrigger<R> {
     fn item(&self, _: &Option<R>) -> bool {
         self.count.fetch_add(1, Ordering::SeqCst);
-        self.count.load(Ordering::SeqCst) > self.threshold
+        self.count.load(Ordering::SeqCst) >= self.threshold
     }
 
     fn exceeded(&self) -> bool {
-        self.count.load(Ordering::SeqCst) > self.threshold
+        self.count.load(Ordering::SeqCst) >= self.threshold
     }
 
     fn reset(&self) {
@@ -89,7 +91,132 @@ impl<R: Record> TriggerFactory<R> {
     pub fn create(trigger_type: TriggerType) -> Box<dyn Trigger<R> + Send + Sync> {
         match trigger_type {
             TriggerType::SizeOfMem(threshold) => Box::new(SizeOfMemTrigger::new(threshold)),
-            TriggerType::Length(threshold) => Box::new(CountTrigger::new(threshold)),
+            TriggerType::Length(threshold) => Box::new(LengthTrigger::new(threshold)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::Test;
+
+    #[tokio::test]
+    async fn test_size_of_mem_trigger() {
+        let threshold = 10;
+        let trigger = SizeOfMemTrigger::new(threshold);
+
+        let record = Some(Test {
+            vstring: "test".to_string(),
+            vu32: 0,
+            vbool: None,
+        });
+
+        let record_size = record.clone().unwrap().size();
+        assert_eq!(record_size, 8);
+
+        assert_eq!(
+            trigger.exceeded(),
+            false,
+            "Trigger should not be exceeded initially"
+        );
+        trigger.item(&record);
+        assert_eq!(
+            trigger.exceeded(),
+            false,
+            "Trigger should not be exceeded after 1 record"
+        );
+
+        trigger.item(&record);
+        assert_eq!(
+            trigger.exceeded(),
+            true,
+            "Trigger should be exceeded after 2 records"
+        );
+
+        trigger.reset();
+        assert_eq!(
+            trigger.exceeded(),
+            false,
+            "Trigger should not be exceeded after reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_length_trigger() {
+        let threshold = 2;
+        let trigger = LengthTrigger::new(threshold);
+
+        let record = Some(Test {
+            vstring: "test".to_string(),
+            vu32: 0,
+            vbool: None,
+        });
+
+        assert_eq!(
+            trigger.exceeded(),
+            false,
+            "Trigger should not be exceeded initially"
+        );
+        trigger.item(&record);
+
+        assert_eq!(
+            trigger.exceeded(),
+            false,
+            "Trigger should not be exceeded after 1 record"
+        );
+
+        trigger.item(&record);
+        assert_eq!(
+            trigger.exceeded(),
+            true,
+            "Trigger should be exceeded after 2 records"
+        );
+
+        trigger.reset();
+        assert_eq!(
+            trigger.exceeded(),
+            false,
+            "Trigger should not be exceeded after reset"
+        );
+    }
+    #[tokio::test]
+    async fn test_trigger_factory() {
+        let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(9));
+        let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
+
+        assert_eq!(
+            size_of_mem_trigger.item(&Some(Test {
+                vstring: "test".to_string(),
+                vu32: 0,
+                vbool: None
+            })),
+            false
+        );
+        assert_eq!(
+            size_of_mem_trigger.item(&Some(Test {
+                vstring: "test".to_string(),
+                vu32: 0,
+                vbool: None
+            })),
+            true
+        );
+
+        assert_eq!(
+            length_trigger.item(&Some(Test {
+                vstring: "test".to_string(),
+                vu32: 1,
+                vbool: Some(true)
+            })),
+            false
+        );
+        assert_eq!(
+            length_trigger.item(&Some(Test {
+                vstring: "test".to_string(),
+                vu32: 1,
+                vbool: Some(true)
+            })),
+            true
+        );
     }
 }
