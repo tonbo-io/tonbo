@@ -134,14 +134,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Bound;
+    use std::{ops::Bound, sync::Arc};
 
     use futures_util::StreamExt;
 
     use super::MergeStream;
     use crate::{
         executor::tokio::TokioExecutor, fs::FileProvider, inmem::mutable::Mutable, stream::Entry,
-        wal::log::LogType, DbOption,
+        trigger::TriggerFactory, wal::log::LogType, DbOption,
     };
 
     #[tokio::test]
@@ -152,9 +152,12 @@ mod tests {
             .await
             .unwrap();
 
-        let m1 = Mutable::<String, TokioExecutor>::new(&option)
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let m1 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
             .await
             .unwrap();
+
         m1.remove(LogType::Full, "b".into(), 3.into())
             .await
             .unwrap();
@@ -165,7 +168,9 @@ mod tests {
             .await
             .unwrap();
 
-        let m2 = Mutable::<String, TokioExecutor>::new(&option)
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let m2 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
             .await
             .unwrap();
         m2.insert(LogType::Full, "a".into(), 1.into())
@@ -178,7 +183,9 @@ mod tests {
             .await
             .unwrap();
 
-        let m3 = Mutable::<String, TokioExecutor>::new(&option)
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let m3 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
             .await
             .unwrap();
         m3.insert(LogType::Full, "e".into(), 4.into())
@@ -242,7 +249,9 @@ mod tests {
             .await
             .unwrap();
 
-        let m1 = Mutable::<String, TokioExecutor>::new(&option)
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let m1 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
             .await
             .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())

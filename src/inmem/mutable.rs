@@ -16,7 +16,7 @@ use crate::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
-    trigger::{Trigger, TriggerFactory},
+    trigger::Trigger,
     wal::{log::LogType, WalFile},
     DbError, DbOption,
 };
@@ -48,7 +48,10 @@ where
     FP: FileProvider,
     R: Record,
 {
-    pub async fn new(option: &DbOption<R>) -> io::Result<Self> {
+    pub async fn new(
+        option: &DbOption<R>,
+        trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+    ) -> io::Result<Self> {
         let mut wal = None;
         if option.use_wal {
             let file_id = Ulid::new();
@@ -56,8 +59,6 @@ where
 
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
-
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
         Ok(Self {
             data: Default::default(),
@@ -194,7 +195,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Bound;
+    use std::{ops::Bound, sync::Arc};
 
     use super::Mutable;
     use crate::{
@@ -203,6 +204,7 @@ mod tests {
         record::Record,
         tests::{Test, TestRef},
         timestamp::Timestamped,
+        trigger::TriggerFactory,
         wal::log::LogType,
         DbOption,
     };
@@ -218,7 +220,10 @@ mod tests {
             .await
             .unwrap();
 
-        let mem_table = Mutable::<Test, TokioExecutor>::new(&option).await.unwrap();
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let mem_table = Mutable::<Test, TokioExecutor>::new(&option, trigger)
+            .await
+            .unwrap();
 
         mem_table
             .insert(
@@ -264,7 +269,9 @@ mod tests {
             .await
             .unwrap();
 
-        let mutable = Mutable::<String, TokioExecutor>::new(&option)
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let mutable = Mutable::<String, TokioExecutor>::new(&option, trigger)
             .await
             .unwrap();
 

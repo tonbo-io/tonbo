@@ -59,12 +59,17 @@ where
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
-        guard.mutable.trigger.reset();
+        guard.trigger.reset();
 
         if guard.mutable.is_empty() {
             return Ok(());
         }
-        let mutable = mem::replace(&mut guard.mutable, Mutable::new(&self.option).await?);
+
+        let trigger_clone = guard.trigger.clone();
+        let mutable = mem::replace(
+            &mut guard.mutable,
+            Mutable::new(&self.option, trigger_clone).await?,
+        );
         let (file_id, immutable) = mutable.into_immutable().await?;
 
         guard.immutables.push((file_id, immutable));
@@ -453,6 +458,7 @@ pub(crate) mod tests {
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
+        trigger::TriggerFactory,
         version::{edit::VersionEdit, Version},
         wal::log::LogType,
         DbError, DbOption,
@@ -466,7 +472,9 @@ pub(crate) mod tests {
         R: Record + Send,
         FP: FileProvider,
     {
-        let mutable: Mutable<R, FP> = Mutable::new(option).await?;
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let mutable: Mutable<R, FP> = Mutable::new(option, trigger.clone()).await?;
 
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
