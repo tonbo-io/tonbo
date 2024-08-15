@@ -57,10 +57,9 @@ where
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
 
-        let trigger = Arc::new(TriggerFactory::create(
-            TriggerType::Count,
+        let trigger = Arc::new(TriggerFactory::create(TriggerType::Length(
             option.max_mutable_len,
-        ));
+        )));
 
         Ok(Self {
             data: Default::default(),
