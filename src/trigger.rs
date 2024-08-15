@@ -78,21 +78,18 @@ impl<R: Record> Trigger<R> for CountTrigger {
 
 #[derive(Copy, Clone, Debug)]
 pub enum TriggerType {
-    Count,
-    SizeOfMem,
+    SizeOfMem(usize),
+    Length(usize),
 }
 pub(crate) struct TriggerFactory<R> {
     _p: PhantomData<R>,
 }
 
 impl<R: Record> TriggerFactory<R> {
-    pub fn create(
-        trigger_type: TriggerType,
-        threshold: usize,
-    ) -> Box<dyn Trigger<R> + Send + Sync> {
+    pub fn create(trigger_type: TriggerType) -> Box<dyn Trigger<R> + Send + Sync> {
         match trigger_type {
-            TriggerType::SizeOfMem => Box::new(SizeOfMemTrigger::new(threshold)),
-            TriggerType::Count => Box::new(CountTrigger::new(threshold)),
+            TriggerType::SizeOfMem(threshold) => Box::new(SizeOfMemTrigger::new(threshold)),
+            TriggerType::Length(threshold) => Box::new(CountTrigger::new(threshold)),
         }
     }
 }
