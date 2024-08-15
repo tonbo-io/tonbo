@@ -158,6 +158,7 @@ use crate::{
     serdes::Decode,
     stream::{merge::MergeStream, package::PackageStream, Entry, ScanStream},
     timestamp::Timestamped,
+    trigger::{Trigger, TriggerFactory},
     version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
 };
@@ -357,6 +358,7 @@ where
     compaction_tx: Sender<CompactTask>,
     option: Arc<DbOption<R>>,
     recover_wal_ids: Option<Vec<FileId>>,
+    trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
 impl<R, FP> Schema<R, FP>
@@ -369,12 +371,14 @@ where
         compaction_tx: Sender<CompactTask>,
         version_set: &VersionSet<R, FP>,
     ) -> Result<Self, DbError<R>> {
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
         let mut schema = Schema {
-            mutable: Mutable::new(&option).await?,
+            mutable: Mutable::new(&option, trigger.clone()).await?,
             immutables: Default::default(),
             compaction_tx,
             option: option.clone(),
             recover_wal_ids: None,
+            trigger: trigger.clone(),
         };
 
         let mut transaction_map = HashMap::new();
@@ -915,7 +919,11 @@ pub(crate) mod tests {
 
         let mut schema = db.schema.write().await;
 
-        let mutable = mem::replace(&mut schema.mutable, Mutable::new(&option).await.unwrap());
+        let trigger = schema.trigger.clone();
+        let mutable = mem::replace(
+            &mut schema.mutable,
+            Mutable::new(&option, trigger.clone()).await.unwrap(),
+        );
 
         Immutable::<<Test as Record>::Columns>::from(mutable.data)
             .as_record_batch()
@@ -925,7 +933,9 @@ pub(crate) mod tests {
     pub(crate) async fn build_schema(
         option: Arc<DbOption<Test>>,
     ) -> io::Result<(crate::Schema<Test, TokioExecutor>, Receiver<CompactTask>)> {
-        let mutable = Mutable::new(&option).await?;
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let mutable = Mutable::new(&option, trigger.clone()).await?;
 
         mutable
             .insert(
@@ -965,7 +975,10 @@ pub(crate) mod tests {
             .unwrap();
 
         let immutables = {
-            let mutable: Mutable<Test, TokioExecutor> = Mutable::new(&option).await?;
+            let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+            let mutable: Mutable<Test, TokioExecutor> =
+                Mutable::new(&option, trigger.clone()).await?;
 
             mutable
                 .insert(
@@ -1016,6 +1029,7 @@ pub(crate) mod tests {
                 compaction_tx,
                 option,
                 recover_wal_ids: None,
+                trigger: trigger.clone(),
             },
             compaction_rx,
         ))
@@ -1315,12 +1329,14 @@ pub(crate) mod tests {
 
         let (task_tx, _task_rx) = bounded(1);
 
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
         let schema: crate::Schema<Test, TokioExecutor> = crate::Schema {
-            mutable: Mutable::new(&option).await.unwrap(),
+            mutable: Mutable::new(&option, trigger.clone()).await.unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx.clone(),
             option: option.clone(),
             recover_wal_ids: None,
+            trigger: trigger.clone(),
         };
 
         for (i, item) in test_items().into_iter().enumerate() {
@@ -1331,12 +1347,15 @@ pub(crate) mod tests {
         }
         drop(schema);
 
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
         let schema: crate::Schema<Test, TokioExecutor> = crate::Schema {
-            mutable: Mutable::new(&option).await.unwrap(),
+            mutable: Mutable::new(&option, trigger.clone()).await.unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx,
             option: option.clone(),
             recover_wal_ids: None,
+            trigger: trigger.clone(),
         };
         let range = schema
             .mutable
