@@ -98,6 +98,7 @@ mod tests {
         record::Record,
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
+        trigger::TriggerFactory,
         wal::log::LogType,
         DbOption,
     };
@@ -110,7 +111,11 @@ mod tests {
             .await
             .unwrap();
 
-        let m1 = Mutable::<Test, TokioExecutor>::new(&option).await.unwrap();
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let m1 = Mutable::<Test, TokioExecutor>::new(&option, trigger.clone())
+            .await
+            .unwrap();
         m1.insert(
             LogType::Full,
             Test {
