@@ -126,4 +126,4 @@ async fn main() {
 ```
 
 ## Contributing to Tonbo
-Please feel free to ask any question or contact us on Github Discussions.
+Please feel free to ask any question or contact us on Github [Discussions](https://github.com/orgs/tonbo-io/discussions) or [issues](https://github.com/tonbo-io/tonbo/issues).
