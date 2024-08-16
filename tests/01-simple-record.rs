@@ -8,6 +8,4 @@ pub struct User {
     age: u8,
 }
 
-fn main() {
-
-}
+fn main() {}
