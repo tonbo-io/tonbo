@@ -16,7 +16,7 @@ use crate::{
     timestamp::Timestamped,
 };
 
-const PRIMARY_FIELD_NAME: &'static str = "vstring";
+const PRIMARY_FIELD_NAME: &str = "vstring";
 
 impl Record for String {
     type Columns = StringColumns;
