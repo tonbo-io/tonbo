@@ -14,34 +14,6 @@
 
 Tonbo is an embedded persistent database built on [Apache Arrow & Parquet](https://github.com/apache/arrow-rs). It offers essential KV-like methods—insert, filter, and range scan—to efficiently and conveniently query type-safe structured data. Tonbo is able to integrate seamlessly with other Arrow analytical tools, such as DataFusion. For an example, refer to this [example](examples/datafusion.rs). Official support for DataFusion will be included in the next release.
 
-
-## Features
-
-- [x] Fully asynchronous API.
-- [x] Zero-copy rusty API ensuring safety with compile-time type and lifetime checks.
-- [x] Vendor-agnostic:
-  - [ ] Various usage methods, async runtimes, and file systems:
-    - [x] Rust library:
-      - [x] [Customizable async runtime and file system](https://github.com/from-the-basement/tonbo/blob/main/src/executor.rs#L5).
-      - [x] [Tokio and Tokio fs](https://github.com/tokio-rs/tokio).
-      - [ ] [Async-std](https://github.com/async-rs/async-std).
-    - [ ] Python library (via [PyO3](https://github.com/PyO3/pyo3) & [pydantic](https://github.com/pydantic/pydantic)):
-      - [ ] asyncio (via [pyo3-asyncio](https://github.com/awestlake87/pyo3-asyncio)).
-    - [ ] JavaScript library:
-      - [ ] WASM and OPFS.
-    - [ ] Dynamic library with a C interface.
-  - [x] Most lightweight implementation to Arrow / Parquet LSM Trees:
-    - [x] Define schema using just Arrow schema and store data in Parquet files.
-    - [x] (Optimistic) Transactions.
-    - [x] Leveled compaction strategy.
-    - [x] Push down filter, limit and projection.
-- [ ] Runtime schema definition (*in next release*).
-- [ ] SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
-- [ ] Fusion storage across RAM, flash, SSD, and remote Object Storage Service (OSS) for each column-family, balancing performance and cost efficiency per data block:
-  - [ ] Remote storage (via [Arrow object_store](https://github.com/apache/arrow-rs/tree/master/object_store) or [Apache OpenDAL](https://github.com/apache/opendal)).
-  - [ ] Distributed query and compaction.
-- [ ] Blob storage (like [BlobDB in RocksDB](https://github.com/facebook/rocksdb/wiki/BlobDB)).
-
 ## Example
 
 ```rust
@@ -124,6 +96,33 @@ async fn main() {
 }
 
 ```
+
+## Features
+
+- [x] Fully asynchronous API.
+- [x] Zero-copy rusty API ensuring safety with compile-time type and lifetime checks.
+- [x] Vendor-agnostic:
+  - [ ] Various usage methods, async runtimes, and file systems:
+    - [x] Rust library:
+      - [x] [Customizable async runtime and file system](https://github.com/from-the-basement/tonbo/blob/main/src/executor.rs#L5).
+      - [x] [Tokio and Tokio fs](https://github.com/tokio-rs/tokio).
+      - [ ] [Async-std](https://github.com/async-rs/async-std).
+    - [ ] Python library (via [PyO3](https://github.com/PyO3/pyo3) & [pydantic](https://github.com/pydantic/pydantic)):
+      - [ ] asyncio (via [pyo3-asyncio](https://github.com/awestlake87/pyo3-asyncio)).
+    - [ ] JavaScript library:
+      - [ ] WASM and OPFS.
+    - [ ] Dynamic library with a C interface.
+  - [x] Most lightweight implementation to Arrow / Parquet LSM Trees:
+    - [x] Define schema using just Arrow schema and store data in Parquet files.
+    - [x] (Optimistic) Transactions.
+    - [x] Leveled compaction strategy.
+    - [x] Push down filter, limit and projection.
+- [ ] Runtime schema definition (*in next release*).
+- [ ] SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
+- [ ] Fusion storage across RAM, flash, SSD, and remote Object Storage Service (OSS) for each column-family, balancing performance and cost efficiency per data block:
+  - [ ] Remote storage (via [Arrow object_store](https://github.com/apache/arrow-rs/tree/master/object_store) or [Apache OpenDAL](https://github.com/apache/opendal)).
+  - [ ] Distributed query and compaction.
+- [ ] Blob storage (like [BlobDB in RocksDB](https://github.com/facebook/rocksdb/wiki/BlobDB)).
 
 ## Contributing to Tonbo
 Please feel free to ask any question or contact us on Github [Discussions](https://github.com/orgs/tonbo-io/discussions) or [issues](https://github.com/tonbo-io/tonbo/issues).
