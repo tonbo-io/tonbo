@@ -169,8 +169,8 @@ impl ExecutionPlan for MusicExec {
 
     fn execute(&self, _: usize, _: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let db = self.db.clone();
-        let (lower, upper) = self.range.clone();
-        let limit = self.limit.clone();
+        let (lower, upper) = self.range;
+        let limit = self.limit;
         let projection = self.projection.clone();
 
         Ok(Box::pin(MusicStream {
@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
     let db = DB::new("./db_path/music".into(), TokioExecutor::default())
         .await
         .unwrap();
-    for (id, name, like) in vec![
+    for (id, name, like) in [
         (0, "welcome".to_string(), 0),
         (1, "tonbo".to_string(), 999),
         (2, "star".to_string(), 233),
