@@ -1343,4 +1343,10 @@ pub(crate) mod tests {
             assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
         }
     }
+
+    #[test]
+    fn build_test() {
+        let t = trybuild::TestCases::new();
+        t.pass("tests/*.rs");
+    }
 }
