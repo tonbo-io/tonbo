@@ -3,8 +3,8 @@ use std::ops::Bound;
 use futures_util::stream::StreamExt;
 use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
 
-// use macro to define schema of column family just like ORM
-// it provides type safety read & write API
+/// Use macro to define schema of column family just like ORM
+/// It provides type-safe read & write API
 #[tonbo_record]
 pub struct User {
     #[primary_key]
