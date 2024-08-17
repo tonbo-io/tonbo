@@ -177,34 +177,26 @@ mod tests {
         let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(9));
         let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
 
-        assert!(
-            !size_of_mem_trigger.item(&Some(Test {
-                vstring: "test".to_string(),
-                vu32: 0,
-                vbool: None
-            }))
-        );
-        assert!(
-            size_of_mem_trigger.item(&Some(Test {
-                vstring: "test".to_string(),
-                vu32: 0,
-                vbool: None
-            }))
-        );
+        assert!(!size_of_mem_trigger.item(&Some(Test {
+            vstring: "test".to_string(),
+            vu32: 0,
+            vbool: None
+        })));
+        assert!(size_of_mem_trigger.item(&Some(Test {
+            vstring: "test".to_string(),
+            vu32: 0,
+            vbool: None
+        })));
 
-        assert!(
-            !length_trigger.item(&Some(Test {
-                vstring: "test".to_string(),
-                vu32: 1,
-                vbool: Some(true)
-            }))
-        );
-        assert!(
-            length_trigger.item(&Some(Test {
-                vstring: "test".to_string(),
-                vu32: 1,
-                vbool: Some(true)
-            }))
-        );
+        assert!(!length_trigger.item(&Some(Test {
+            vstring: "test".to_string(),
+            vu32: 1,
+            vbool: Some(true)
+        })));
+        assert!(length_trigger.item(&Some(Test {
+            vstring: "test".to_string(),
+            vu32: 1,
+            vbool: Some(true)
+        })));
     }
 }
