@@ -110,7 +110,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::UInt8Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt8Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::UInt8Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt16, is_nullable)) => (
@@ -122,7 +126,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::UInt16Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt16Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::UInt16Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt32, is_nullable)) => (
@@ -134,7 +142,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::UInt32Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt32Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::UInt32Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt64, is_nullable)) => (
@@ -146,7 +158,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::UInt64Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt64Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::UInt64Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
@@ -159,7 +175,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::Int8Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int8Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::Int8Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int16, is_nullable)) => (
@@ -171,7 +191,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::Int16Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int16Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::Int16Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int32, is_nullable)) => (
@@ -183,7 +207,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::Int32Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int32Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::Int32Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int64, is_nullable)) => (
@@ -195,7 +223,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                             ::tonbo::arrow::datatypes::Int64Type,
                         >::with_capacity(capacity)),
-                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int64Type>),
+                        quote!(
+                            ::tonbo::arrow::array::PrimitiveBuilder<
+                                ::tonbo::arrow::datatypes::Int64Type,
+                            >
+                        ),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
@@ -207,7 +239,9 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                             quote!(::tonbo::arrow::datatypes::DataType::Utf8),
                             quote!(::tonbo::arrow::array::StringArray),
                             quote!(as_string::<i32>()),
-                            quote!(::tonbo::arrow::array::StringBuilder::with_capacity(capacity, 0)),
+                            quote!(::tonbo::arrow::array::StringBuilder::with_capacity(
+                                capacity, 0
+                            )),
                             quote!(::tonbo::arrow::array::StringBuilder),
                             quote!(self.#field_name.values_slice().len()),
                         )
@@ -218,7 +252,9 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote!(::tonbo::arrow::datatypes::DataType::Boolean),
                         quote!(::tonbo::arrow::array::BooleanArray),
                         quote!(as_boolean()),
-                        quote!(::tonbo::arrow::array::BooleanBuilder::with_capacity(capacity)),
+                        quote!(::tonbo::arrow::array::BooleanBuilder::with_capacity(
+                            capacity
+                        )),
                         quote!(::tonbo::arrow::array::BooleanBuilder),
                         quote!(self.#field_name.values_slice().len()),
                     ),
