@@ -127,6 +127,7 @@ mod wal;
 
 use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
 
+pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
@@ -135,6 +136,8 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use lockable::LockableHashMap;
+pub use once_cell;
+pub use parquet;
 use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,
@@ -157,10 +160,6 @@ use crate::{
     version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
 };
-
-pub use arrow;
-pub use once_cell;
-pub use parquet;
 
 pub struct DB<R, E>
 where
