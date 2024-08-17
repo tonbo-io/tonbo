@@ -431,7 +431,7 @@ where
     }
 
     async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
-        Ok(self.mutable.insert(log_ty, record, ts).await?)
+        self.mutable.insert(log_ty, record, ts).await
     }
 
     async fn remove(
@@ -440,7 +440,7 @@ where
         key: R::Key,
         ts: Timestamp,
     ) -> Result<bool, DbError<R>> {
-        Ok(self.mutable.remove(log_ty, key, ts).await?)
+        self.mutable.remove(log_ty, key, ts).await
     }
 
     async fn recover_append(
@@ -449,7 +449,7 @@ where
         ts: Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
-        Ok(self.mutable.append(None, key, ts, value).await?)
+        self.mutable.append(None, key, ts, value).await
     }
 
     async fn get<'get>(

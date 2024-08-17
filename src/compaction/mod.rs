@@ -147,7 +147,7 @@ where
                 }
                 writer.write(batch.as_record_batch()).await?;
                 if let Some(file_id) = file_id {
-                    wal_ids.push(file_id.clone());
+                    wal_ids.push(*file_id);
                 }
             }
             writer.close().await?;

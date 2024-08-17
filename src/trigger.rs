@@ -115,29 +115,25 @@ mod tests {
         let record_size = record.clone().unwrap().size();
         assert_eq!(record_size, 8);
 
-        assert_eq!(
-            trigger.exceeded(),
-            false,
+        assert!(
+            !trigger.exceeded(),
             "Trigger should not be exceeded initially"
         );
         trigger.item(&record);
-        assert_eq!(
-            trigger.exceeded(),
-            false,
+        assert!(
+            !trigger.exceeded(),
             "Trigger should not be exceeded after 1 record"
         );
 
         trigger.item(&record);
-        assert_eq!(
+        assert!(
             trigger.exceeded(),
-            true,
             "Trigger should be exceeded after 2 records"
         );
 
         trigger.reset();
-        assert_eq!(
-            trigger.exceeded(),
-            false,
+        assert!(
+            !trigger.exceeded(),
             "Trigger should not be exceeded after reset"
         );
     }
@@ -153,30 +149,26 @@ mod tests {
             vbool: None,
         });
 
-        assert_eq!(
-            trigger.exceeded(),
-            false,
+        assert!(
+            !trigger.exceeded(),
             "Trigger should not be exceeded initially"
         );
         trigger.item(&record);
 
-        assert_eq!(
-            trigger.exceeded(),
-            false,
+        assert!(
+            !trigger.exceeded(),
             "Trigger should not be exceeded after 1 record"
         );
 
         trigger.item(&record);
-        assert_eq!(
+        assert!(
             trigger.exceeded(),
-            true,
             "Trigger should be exceeded after 2 records"
         );
 
         trigger.reset();
-        assert_eq!(
-            trigger.exceeded(),
-            false,
+        assert!(
+            !trigger.exceeded(),
             "Trigger should not be exceeded after reset"
         );
     }
@@ -185,38 +177,34 @@ mod tests {
         let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(9));
         let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
 
-        assert_eq!(
-            size_of_mem_trigger.item(&Some(Test {
+        assert!(
+            !size_of_mem_trigger.item(&Some(Test {
                 vstring: "test".to_string(),
                 vu32: 0,
                 vbool: None
-            })),
-            false
+            }))
         );
-        assert_eq!(
+        assert!(
             size_of_mem_trigger.item(&Some(Test {
                 vstring: "test".to_string(),
                 vu32: 0,
                 vbool: None
-            })),
-            true
+            }))
         );
 
-        assert_eq!(
-            length_trigger.item(&Some(Test {
+        assert!(
+            !length_trigger.item(&Some(Test {
                 vstring: "test".to_string(),
                 vu32: 1,
                 vbool: Some(true)
-            })),
-            false
+            }))
         );
-        assert_eq!(
+        assert!(
             length_trigger.item(&Some(Test {
                 vstring: "test".to_string(),
                 vu32: 1,
                 vbool: Some(true)
-            })),
-            true
+            }))
         );
     }
 }
