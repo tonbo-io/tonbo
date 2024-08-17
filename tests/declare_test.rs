@@ -13,6 +13,13 @@ pub struct User {
     age: u8,
 }
 
+#[tokio::main]
+async fn main() {
+    test_insert_and_get_user();
+    test_range_scan();
+    test_update_user();
+}
+
 #[tokio::test]
 async fn test_insert_and_get_user() {
     let db = DB::new("./db_path/test_users".into(), TokioExecutor::default())
