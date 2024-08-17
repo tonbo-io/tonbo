@@ -158,6 +158,10 @@ use crate::{
     wal::{log::LogType, RecoverError, WalFile},
 };
 
+pub use arrow;
+pub use once_cell;
+pub use parquet;
+
 pub struct DB<R, E>
 where
     R: Record,
