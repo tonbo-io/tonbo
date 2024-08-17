@@ -154,7 +154,7 @@ mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m1 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
+        let m1 = Mutable::<String, TokioExecutor>::new(&option, trigger)
             .await
             .unwrap();
 
@@ -170,7 +170,7 @@ mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m2 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
+        let m2 = Mutable::<String, TokioExecutor>::new(&option, trigger)
             .await
             .unwrap();
         m2.insert(LogType::Full, "a".into(), 1.into())
@@ -185,7 +185,7 @@ mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m3 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
+        let m3 = Mutable::<String, TokioExecutor>::new(&option, trigger)
             .await
             .unwrap();
         m3.insert(LogType::Full, "e".into(), 4.into())
@@ -251,7 +251,7 @@ mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m1 = Mutable::<String, TokioExecutor>::new(&option, trigger.clone())
+        let m1 = Mutable::<String, TokioExecutor>::new(&option, trigger)
             .await
             .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())

@@ -474,7 +474,7 @@ pub(crate) mod tests {
     {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let mutable: Mutable<R, FP> = Mutable::new(option, trigger.clone()).await?;
+        let mutable: Mutable<R, FP> = Mutable::new(option, trigger).await?;
 
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
