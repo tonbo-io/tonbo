@@ -65,30 +65,30 @@ async fn test_range_scan() {
         .await
         .unwrap();
 
-        while let Some(entry) = scan.next().await.transpose().unwrap() {
-            let user_ref = entry.value();
-            if user_ref.unwrap().name == "Alice" {
-                assert_eq!(
-                    user_ref,
-                    Some(UserRef {
-                        name: "Alice",
-                        email: Some("alice@gmail.com"),
-                        age: Some(22),
-                    })
-                );
-            } else if user_ref.unwrap().name == "Bob" {
-                assert_eq!(
-                    user_ref,
-                    Some(UserRef {
-                        name: "Bob",
-                        email: Some("bob@gmail.com"),
-                        age: Some(30),
-                    })
-                );
-            } else {
-                panic!("Unexpected user: {:?}", user_ref);
-            }
+    while let Some(entry) = scan.next().await.transpose().unwrap() {
+        let user_ref = entry.value();
+        if user_ref.unwrap().name == "Alice" {
+            assert_eq!(
+                user_ref,
+                Some(UserRef {
+                    name: "Alice",
+                    email: Some("alice@gmail.com"),
+                    age: Some(22),
+                })
+            );
+        } else if user_ref.unwrap().name == "Bob" {
+            assert_eq!(
+                user_ref,
+                Some(UserRef {
+                    name: "Bob",
+                    email: Some("bob@gmail.com"),
+                    age: Some(30),
+                })
+            );
+        } else {
+            panic!("Unexpected user: {:?}", user_ref);
         }
+    }
 }
 
 #[tokio::test]
