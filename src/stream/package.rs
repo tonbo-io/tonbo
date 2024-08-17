@@ -113,7 +113,7 @@ mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m1 = Mutable::<Test, TokioExecutor>::new(&option, trigger.clone())
+        let m1 = Mutable::<Test, TokioExecutor>::new(&option, trigger)
             .await
             .unwrap();
         m1.insert(
