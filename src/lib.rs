@@ -378,7 +378,7 @@ where
             compaction_tx,
             option: option.clone(),
             recover_wal_ids: None,
-            trigger: trigger.clone(),
+            trigger,
         };
 
         let mut transaction_map = HashMap::new();
@@ -922,7 +922,7 @@ pub(crate) mod tests {
         let trigger = schema.trigger.clone();
         let mutable = mem::replace(
             &mut schema.mutable,
-            Mutable::new(&option, trigger.clone()).await.unwrap(),
+            Mutable::new(&option, trigger).await.unwrap(),
         );
 
         Immutable::<<Test as Record>::Columns>::from(mutable.data)
@@ -1029,7 +1029,7 @@ pub(crate) mod tests {
                 compaction_tx,
                 option,
                 recover_wal_ids: None,
-                trigger: trigger.clone(),
+                trigger,
             },
             compaction_rx,
         ))
@@ -1336,7 +1336,7 @@ pub(crate) mod tests {
             compaction_tx: task_tx.clone(),
             option: option.clone(),
             recover_wal_ids: None,
-            trigger: trigger.clone(),
+            trigger,
         };
 
         for (i, item) in test_items().into_iter().enumerate() {
@@ -1355,7 +1355,7 @@ pub(crate) mod tests {
             compaction_tx: task_tx,
             option: option.clone(),
             recover_wal_ids: None,
-            trigger: trigger.clone(),
+            trigger,
         };
         let range = schema
             .mutable
