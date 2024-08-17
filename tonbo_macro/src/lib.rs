@@ -104,98 +104,98 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                     Some((DataType::UInt8, is_nullable)) => (
                         is_nullable,
                         quote!(u8),
-                        quote!(::arrow::datatypes::DataType::UInt8),
-                        quote!(::arrow::array::UInt8Array),
-                        quote!(as_primitive::<::arrow::datatypes::UInt8Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::UInt8Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::UInt8),
+                        quote!(::tonbo::arrow::array::UInt8Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::UInt8Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::UInt8Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt8Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt8Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt16, is_nullable)) => (
                         is_nullable,
                         quote!(u16),
-                        quote!(::arrow::datatypes::DataType::UInt16),
-                        quote!(::arrow::array::UInt16Array),
-                        quote!(as_primitive::<::arrow::datatypes::UInt16Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::UInt16Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::UInt16),
+                        quote!(::tonbo::arrow::array::UInt16Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::UInt16Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::UInt16Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt16Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt16Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt32, is_nullable)) => (
                         is_nullable,
                         quote!(u32),
-                        quote!(::arrow::datatypes::DataType::UInt32),
-                        quote!(::arrow::array::UInt32Array),
-                        quote!(as_primitive::<::arrow::datatypes::UInt32Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::UInt32Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::UInt32),
+                        quote!(::tonbo::arrow::array::UInt32Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::UInt32Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::UInt32Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt32Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt32Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::UInt64, is_nullable)) => (
                         is_nullable,
                         quote!(u64),
-                        quote!(::arrow::datatypes::DataType::UInt64),
-                        quote!(::arrow::array::UInt64Array),
-                        quote!(as_primitive::<::arrow::datatypes::UInt64Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::UInt64Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::UInt64),
+                        quote!(::tonbo::arrow::array::UInt64Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::UInt64Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::UInt64Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::UInt64Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::UInt64Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
                     Some((DataType::Int8, is_nullable)) => (
                         is_nullable,
                         quote!(i8),
-                        quote!(::arrow::datatypes::DataType::Int8),
-                        quote!(::arrow::array::Int8Array),
-                        quote!(as_primitive::<::arrow::datatypes::Int8Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::Int8Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::Int8),
+                        quote!(::tonbo::arrow::array::Int8Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::Int8Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::Int8Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int8Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int8Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int16, is_nullable)) => (
                         is_nullable,
                         quote!(i16),
-                        quote!(::arrow::datatypes::DataType::Int16),
-                        quote!(::arrow::array::Int16Array),
-                        quote!(as_primitive::<::arrow::datatypes::Int16Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::Int16Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::Int16),
+                        quote!(::tonbo::arrow::array::Int16Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::Int16Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::Int16Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int16Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int16Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int32, is_nullable)) => (
                         is_nullable,
                         quote!(i32),
-                        quote!(::arrow::datatypes::DataType::Int32),
-                        quote!(::arrow::array::Int32Array),
-                        quote!(as_primitive::<::arrow::datatypes::Int32Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::Int32Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::Int32),
+                        quote!(::tonbo::arrow::array::Int32Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::Int32Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::Int32Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int32Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int32Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
                     Some((DataType::Int64, is_nullable)) => (
                         is_nullable,
                         quote!(i64),
-                        quote!(::arrow::datatypes::DataType::Int64),
-                        quote!(::arrow::array::Int64Array),
-                        quote!(as_primitive::<::arrow::datatypes::Int64Type>()),
-                        quote!(::arrow::array::PrimitiveBuilder::<
-                            ::arrow::datatypes::Int64Type,
+                        quote!(::tonbo::arrow::datatypes::DataType::Int64),
+                        quote!(::tonbo::arrow::array::Int64Array),
+                        quote!(as_primitive::<::tonbo::arrow::datatypes::Int64Type>()),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                            ::tonbo::arrow::datatypes::Int64Type,
                         >::with_capacity(capacity)),
-                        quote!(::arrow::array::PrimitiveBuilder<::arrow::datatypes::Int64Type>),
+                        quote!(::tonbo::arrow::array::PrimitiveBuilder<::tonbo::arrow::datatypes::Int64Type>),
                         quote!(std::mem::size_of_val(self.#field_name.values_slice())),
                     ),
 
@@ -204,22 +204,22 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                         (
                             is_nullable,
                             quote!(String),
-                            quote!(::arrow::datatypes::DataType::Utf8),
-                            quote!(::arrow::array::StringArray),
+                            quote!(::tonbo::arrow::datatypes::DataType::Utf8),
+                            quote!(::tonbo::arrow::array::StringArray),
                             quote!(as_string::<i32>()),
-                            quote!(::arrow::array::StringBuilder::with_capacity(capacity, 0)),
-                            quote!(::arrow::array::StringBuilder),
+                            quote!(::tonbo::arrow::array::StringBuilder::with_capacity(capacity, 0)),
+                            quote!(::tonbo::arrow::array::StringBuilder),
                             quote!(self.#field_name.values_slice().len()),
                         )
                     }
                     Some((DataType::Boolean, is_nullable)) => (
                         is_nullable,
                         quote!(bool),
-                        quote!(::arrow::datatypes::DataType::Boolean),
-                        quote!(::arrow::array::BooleanArray),
+                        quote!(::tonbo::arrow::datatypes::DataType::Boolean),
+                        quote!(::tonbo::arrow::array::BooleanArray),
                         quote!(as_boolean()),
-                        quote!(::arrow::array::BooleanBuilder::with_capacity(capacity)),
-                        quote!(::arrow::array::BooleanBuilder),
+                        quote!(::tonbo::arrow::array::BooleanBuilder::with_capacity(capacity)),
+                        quote!(::tonbo::arrow::array::BooleanBuilder),
                         quote!(self.#field_name.values_slice().len()),
                     ),
 
@@ -227,7 +227,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 };
 
                 schema_fields.push(quote! {
-                    ::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
+                    ::tonbo::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
                 });
                 field_names.push(quote! (#field_name,));
                 arrays_init_fields.push(quote! {
@@ -243,7 +243,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                     let #field_name = ::std::sync::Arc::new(self.#field_name.finish());
                 });
                 builder_as_any_fields.push(quote! {
-                    ::std::sync::Arc::clone(&#field_name) as ::std::sync::Arc<dyn ::arrow::array::Array>,
+                    ::std::sync::Arc::clone(&#field_name) as ::std::sync::Arc<dyn ::tonbo::arrow::array::Array>,
                 });
                 encode_method_fields.push(quote! {
                     ::tonbo::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
@@ -291,7 +291,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                                         .column(column_i)
                                         .#as_method;
 
-                                    use ::arrow::array::Array;
+                                    use ::tonbo::arrow::array::Array;
                                     if !#field_array_name.is_null(offset) {
                                         #field_name = Some(#field_array_name.value(offset));
                                     }
@@ -299,7 +299,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                                 }
                             });
                             arrays_get_fields.push(quote! {
-                                use ::arrow::array::Array;
+                                use ::tonbo::arrow::array::Array;
                                 let #field_name = (!self.#field_name.is_null(offset) && projection_mask.leaf_included(#field_index))
                                     .then(|| self.#field_name.value(offset));
                             });
@@ -445,10 +445,10 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 #primary_key_index
             }
 
-            fn primary_key_path() -> (::parquet::schema::types::ColumnPath, Vec<::parquet::format::SortingColumn>) {
+            fn primary_key_path() -> (::tonbo::parquet::schema::types::ColumnPath, Vec<::tonbo::parquet::format::SortingColumn>) {
                 (
-                    ::parquet::schema::types::ColumnPath::new(vec!["_ts".to_string(), stringify!(#primary_key_name).to_string()]),
-                    vec![::parquet::format::SortingColumn::new(1_i32, true, true), ::parquet::format::SortingColumn::new(#primary_key_index as i32, false, true)]
+                    ::tonbo::parquet::schema::types::ColumnPath::new(vec!["_ts".to_string(), stringify!(#primary_key_name).to_string()]),
+                    vec![::tonbo::parquet::format::SortingColumn::new(1_i32, true, true), ::tonbo::parquet::format::SortingColumn::new(#primary_key_index as i32, false, true)]
                 )
             }
 
@@ -458,11 +458,11 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn arrow_schema() -> &'static ::std::sync::Arc<::arrow::datatypes::Schema> {
-                static SCHEMA: ::once_cell::sync::Lazy<::std::sync::Arc<::arrow::datatypes::Schema>> = ::once_cell::sync::Lazy::new(|| {
-                    ::std::sync::Arc::new(::arrow::datatypes::Schema::new(vec![
-                        ::arrow::datatypes::Field::new("_null", ::arrow::datatypes::DataType::Boolean, false),
-                        ::arrow::datatypes::Field::new("_ts", ::arrow::datatypes::DataType::UInt32, false),
+            fn arrow_schema() -> &'static ::std::sync::Arc<::tonbo::arrow::datatypes::Schema> {
+                static SCHEMA: ::tonbo::once_cell::sync::Lazy<::std::sync::Arc<::tonbo::arrow::datatypes::Schema>> = ::tonbo::once_cell::sync::Lazy::new(|| {
+                    ::std::sync::Arc::new(::tonbo::arrow::datatypes::Schema::new(vec![
+                        ::tonbo::arrow::datatypes::Field::new("_null", ::tonbo::arrow::datatypes::DataType::Boolean, false),
+                        ::tonbo::arrow::datatypes::Field::new("_ts", ::tonbo::arrow::datatypes::DataType::UInt32, false),
                         #(#schema_fields)*
                     ]))
                 });
@@ -499,18 +499,18 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
             }
 
             fn from_record_batch(
-                record_batch: &'r ::arrow::record_batch::RecordBatch,
+                record_batch: &'r ::tonbo::arrow::record_batch::RecordBatch,
                 offset: usize,
-                projection_mask: &'r ::parquet::arrow::ProjectionMask,
+                projection_mask: &'r ::tonbo::parquet::arrow::ProjectionMask,
             ) -> ::tonbo::record::internal::InternalRecordRef<'r, Self> {
-                use ::arrow::array::AsArray;
+                use ::tonbo::arrow::array::AsArray;
 
                 let mut column_i = 2;
                 let null = record_batch.column(0).as_boolean().value(offset);
 
                 let ts = record_batch
                     .column(1)
-                    .as_primitive::<::arrow::datatypes::UInt32Type>()
+                    .as_primitive::<::tonbo::arrow::datatypes::UInt32Type>()
                     .value(offset)
                     .into();
 
@@ -542,12 +542,12 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
 
         #[derive(Debug)]
         pub struct #struct_arrays_name {
-            _null: ::std::sync::Arc<::arrow::array::BooleanArray>,
-            _ts: ::std::sync::Arc<::arrow::array::UInt32Array>,
+            _null: ::std::sync::Arc<::tonbo::arrow::array::BooleanArray>,
+            _ts: ::std::sync::Arc<::tonbo::arrow::array::UInt32Array>,
 
             #(#arrays_init_fields)*
 
-            record_batch: ::arrow::record_batch::RecordBatch,
+            record_batch: ::tonbo::arrow::record_batch::RecordBatch,
         }
 
         impl ::tonbo::inmem::immutable::ArrowArrays for #struct_arrays_name {
@@ -559,19 +559,19 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 #struct_builder_name {
                     #(#builder_init_fields)*
 
-                    _null: ::arrow::array::BooleanBufferBuilder::new(capacity),
-                    _ts: ::arrow::array::UInt32Builder::with_capacity(capacity),
+                    _null: ::tonbo::arrow::array::BooleanBufferBuilder::new(capacity),
+                    _ts: ::tonbo::arrow::array::UInt32Builder::with_capacity(capacity),
                 }
             }
 
             fn get(
                 &self,
                 offset: u32,
-                projection_mask: &::parquet::arrow::ProjectionMask,
+                projection_mask: &::tonbo::parquet::arrow::ProjectionMask,
             ) -> Option<Option<<Self::Record as ::tonbo::record::Record>::Ref<'_>>> {
                 let offset = offset as usize;
 
-                if offset >= ::arrow::array::Array::len(self.#primary_key_name.as_ref()) {
+                if offset >= ::tonbo::arrow::array::Array::len(self.#primary_key_name.as_ref()) {
                     return None;
                 }
                 if self._null.value(offset) {
@@ -585,7 +585,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                 }))
             }
 
-            fn as_record_batch(&self) -> &::arrow::record_batch::RecordBatch {
+            fn as_record_batch(&self) -> &::tonbo::arrow::record_batch::RecordBatch {
                 &self.record_batch
             }
         }
@@ -593,8 +593,8 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
         pub struct #struct_builder_name {
             #(#builder_fields)*
 
-            _null: ::arrow::array::BooleanBufferBuilder,
-            _ts: ::arrow::array::UInt32Builder,
+            _null: ::tonbo::arrow::array::BooleanBufferBuilder,
+            _ts: ::tonbo::arrow::array::UInt32Builder,
         }
 
         impl ::tonbo::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
@@ -623,15 +623,15 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
             fn finish(&mut self, indices: Option<&[usize]>) -> #struct_arrays_name {
                 #(#builder_finish_fields)*
 
-                let _null = ::std::sync::Arc::new(::arrow::array::BooleanArray::new(self._null.finish(), None));
+                let _null = ::std::sync::Arc::new(::tonbo::arrow::array::BooleanArray::new(self._null.finish(), None));
                 let _ts = ::std::sync::Arc::new(self._ts.finish());
-                let mut record_batch = ::arrow::record_batch::RecordBatch::try_new(
+                let mut record_batch = ::tonbo::arrow::record_batch::RecordBatch::try_new(
                     ::std::sync::Arc::clone(
                         <<#struct_arrays_name as ::tonbo::inmem::immutable::ArrowArrays>::Record as ::tonbo::record::Record>::arrow_schema(),
                     ),
                     vec![
-                        ::std::sync::Arc::clone(&_null) as ::std::sync::Arc<dyn ::arrow::array::Array>,
-                        ::std::sync::Arc::clone(&_ts) as ::std::sync::Arc<dyn ::arrow::array::Array>,
+                        ::std::sync::Arc::clone(&_null) as ::std::sync::Arc<dyn ::tonbo::arrow::array::Array>,
+                        ::std::sync::Arc::clone(&_ts) as ::std::sync::Arc<dyn ::tonbo::arrow::array::Array>,
 
                         #(#builder_as_any_fields)*
                     ],
