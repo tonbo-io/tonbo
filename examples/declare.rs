@@ -36,18 +36,6 @@ async fn main() {
         // get from primary key
         let name = "Alice".into();
 
-        // get the zero-copy reference of record without any allocations.
-        let user = txn
-            .get(
-                &name,
-                // tonbo supports pushing down projection
-                Projection::All,
-            )
-            .await
-            .unwrap();
-        assert!(user.is_some());
-        assert_eq!(user.unwrap().get().age, Some(22));
-
         {
             let upper = "Blob".into();
             // range scan of user
