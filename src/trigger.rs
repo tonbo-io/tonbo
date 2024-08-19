@@ -80,6 +80,7 @@ impl<R: Record> Trigger<R> for LengthTrigger<R> {
 
 #[derive(Copy, Clone, Debug)]
 pub enum TriggerType {
+    #[allow(unused)]
     SizeOfMem(usize),
     Length(usize),
 }

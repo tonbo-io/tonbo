@@ -31,7 +31,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```no_run
 //! use std::ops::Bound;
 //!
 //! use futures_util::stream::StreamExt;
@@ -356,7 +356,6 @@ where
     mutable: Mutable<R, FP>,
     immutables: Vec<(Option<FileId>, Immutable<R::Columns>)>,
     compaction_tx: Sender<CompactTask>,
-    option: Arc<DbOption<R>>,
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
@@ -376,7 +375,6 @@ where
             mutable: Mutable::new(&option, trigger.clone()).await?,
             immutables: Default::default(),
             compaction_tx,
-            option: option.clone(),
             recover_wal_ids: None,
             trigger,
         };
@@ -645,6 +643,8 @@ where
     // Encode(<<R as Record>::Ref as Encode>::Error),
     #[error("write recover error: {0}")]
     Recover(#[from] RecoverError<<R as Decode>::Error>),
+    #[error("wal write error: {0}")]
+    WalWrite(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
@@ -1027,7 +1027,6 @@ pub(crate) mod tests {
                 mutable,
                 immutables,
                 compaction_tx,
-                option,
                 recover_wal_ids: None,
                 trigger,
             },
@@ -1334,7 +1333,6 @@ pub(crate) mod tests {
             mutable: Mutable::new(&option, trigger.clone()).await.unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx.clone(),
-            option: option.clone(),
             recover_wal_ids: None,
             trigger,
         };
@@ -1353,7 +1351,6 @@ pub(crate) mod tests {
             mutable: Mutable::new(&option, trigger.clone()).await.unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx,
-            option: option.clone(),
             recover_wal_ids: None,
             trigger,
         };

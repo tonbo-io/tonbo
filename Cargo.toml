@@ -14,12 +14,18 @@ version = "0.1.0"
 msrv = "1.79.0"
 
 [features]
-bench = ["dep:rocksdb", "dep:rocksdb", "dep:sled"]
+bench = ["redb", "rocksdb", "sled"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
+default = ["tokio"]
+redb = ["dep:redb"]
+rocksdb = ["dep:rocksdb"]
+sled = ["dep:sled"]
+tokio = ["tokio/fs"]
 
 [[example]]
 name = "declare"
 path = "examples/declare.rs"
+required-features = ["tokio"]
 
 [[example]]
 name = "datafusion"
@@ -29,11 +35,14 @@ required-features = ["datafusion"]
 [[bench]]
 harness = false
 name = "benchmark"
-path = "benchmark/bench.rs"
+path = "benchmarks/bench.rs"
 required-features = ["bench"]
 
-[target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
+[[bench]]
+harness = false
+name = "writes"
+path = "benchmarks/criterion/writes.rs"
+required-features = ["sled"]
 
 [dependencies]
 arrow = "52"
@@ -53,7 +62,7 @@ parquet = { version = "52", features = ["async"] }
 pin-project-lite = "0.2"
 regex = "1"
 thiserror = "1"
-tokio = { version = "1", features = ["fs", "io-util"] }
+tokio = { version = "1", features = ["io-util"], default-features = false }
 tokio-util = { version = "0.7" }
 tonbo_macro = { version = "0.1.0", path = "tonbo_macro" }
 tracing = "0.1"
@@ -69,13 +78,19 @@ bincode = "1"
 comfy-table = "7"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 fastrand = "2"
+futures = { version = "0.3" }
+mimalloc = "0.1"
 serde = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 trybuild = "1.0"
 
+[target.'cfg(unix)'.dev-dependencies]
+pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
+
 [profile.release]
-lto = "fat"
+codegen-units = 1
+lto = "thin"
 
 [profile.bench]
 debug = true
