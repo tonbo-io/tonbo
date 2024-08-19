@@ -43,8 +43,9 @@ pub trait Decode: Sized {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::io::AsyncWriteExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_encode_decode() {
