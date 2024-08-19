@@ -10,11 +10,12 @@ use std::{
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch, util::pretty};
 use async_stream::stream;
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::{
     common::internal_err,
     datasource::{TableProvider, TableType},
     error::{DataFusionError, Result},
-    execution::{context::SessionState, RecordBatchStream, SendableRecordBatchStream, TaskContext},
+    execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext},
     physical_expr::EquivalenceProperties,
     physical_plan::{DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties},
     prelude::*,
@@ -64,7 +65,7 @@ impl TableProvider for MusicProvider {
 
     async fn scan(
         &self,
-        _: &SessionState,
+        _: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
