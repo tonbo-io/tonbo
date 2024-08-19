@@ -1,6 +1,6 @@
 use std::{iter::repeat_with, sync::Arc};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use mimalloc::MiMalloc;
 use tonbo::{executor::tokio::TokioExecutor, tonbo_record, DbOption, DB};
 
@@ -52,7 +52,7 @@ fn single_write(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("write");
 
-    let batches = [1, 128];
+    let batches = [1, 16, 128];
 
     let _ = std::fs::remove_dir_all("/tmp/tonbo");
     for batch in batches {
@@ -61,32 +61,26 @@ fn single_write(c: &mut Criterion) {
             .block_on(async { DB::new(option, TokioExecutor::default()).await })
             .unwrap();
 
-        group.bench_with_input(
-            format!("tonbo with {} per batch", batch),
-            &batch,
-            |b, batch| {
-                let r = runtime.clone();
-                b.to_async(&*r)
-                    .iter(|| async { tonbo_write(&db, *batch).await });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("Tonbo", batch), &batch, |b, batch| {
+            let r = runtime.clone();
+            b.to_async(&*r)
+                .iter(|| async { tonbo_write(&db, *batch).await });
+        });
         let _ = std::fs::remove_dir_all("/tmp/tonbo");
     }
 
     let _ = std::fs::remove_dir_all("/tmp/sled");
     for batch in batches {
         let sled = sled::open("/tmp/sled").unwrap();
-        group.bench_with_input(
-            format!("sled with {} per batch", batch),
-            &batch,
-            |b, batch| {
-                let r = runtime.clone();
-                b.to_async(&*r)
-                    .iter(|| async { sled_write(&sled, *batch).await });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("Sled", batch), &batch, |b, batch| {
+            let r = runtime.clone();
+            b.to_async(&*r)
+                .iter(|| async { sled_write(&sled, *batch).await });
+        });
         let _ = std::fs::remove_dir_all("/tmp/sled");
     }
+
+    group.finish();
 }
 
 criterion_group!(benches, single_write);
