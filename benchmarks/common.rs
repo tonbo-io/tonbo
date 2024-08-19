@@ -1,56 +1,92 @@
+use crate::gen_record;
+use async_stream::stream;
+use csv::ReaderBuilder;
+use futures_core::Stream;
+use futures_util::StreamExt;
+use parquet::data_type::AsBytes;
+use redb::TableDefinition;
+use rocksdb::{Direction, IteratorMode, TransactionDB};
+use std::env::current_dir;
+use std::error::Error;
 use std::{
     collections::Bound,
     fs,
     fs::File,
     path::{Path, PathBuf},
 };
-
-use async_stream::stream;
-use futures_core::Stream;
-use futures_util::StreamExt;
-use parquet::data_type::AsBytes;
-use redb::TableDefinition;
-use rocksdb::{Direction, IteratorMode, TransactionDB};
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
 use tonbo_macro::tonbo_record;
 
+const RNG_SEED: u64 = 3;
+pub(crate) const ITERATIONS: usize = 2;
+pub(crate) const READ_TIMES: usize = 200;
+pub(crate) const NUM_SCAN: usize = 2_000;
+
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
-type ItemKey = String;
+type ItemKey = i32;
 type ProjectionField = String;
 
 // Tips: Tonbo only returns reference types
 #[allow(dead_code)]
 pub enum BenchResult<'a> {
-    Ref(TransactionEntry<'a, BenchItem>),
-    Owned(Box<BenchItem>),
+    Ref(TransactionEntry<'a, Customer>),
+    Owned(Box<Customer>),
 }
 
 #[allow(dead_code)]
 pub enum ProjectionResult<'a> {
     // the entry is directly used to represent the field being projected.
-    Ref(stream::Entry<'a, BenchItem>),
+    Ref(stream::Entry<'a, Customer>),
     Owned(ProjectionField),
 }
 
 #[tonbo_record(::serde::Serialize, ::serde::Deserialize)]
-pub struct BenchItem {
+pub struct Customer {
     #[primary_key]
-    pub primary_key: String,
-    pub string_1: String,
-    pub string_2: String,
-    pub string_3: String,
-    pub string_4: String,
-    pub string_5: String,
-    pub string_6: String,
-    pub string_7: String,
-    pub string_8: String,
-    pub string_9: String,
-    pub u32: u32,
-    pub boolean: bool,
+    pub c_custkey: i32,
+    pub c_name: String,
+    pub c_address: String,
+    pub c_nationkey: i32,
+    pub c_phone: String,
+    pub c_acctbal: String,
+    pub c_mktsegment: String,
+    pub c_comment: String,
+}
+
+pub(crate) fn make_rng() -> fastrand::Rng {
+    fastrand::Rng::with_seed(RNG_SEED)
+}
+
+pub(crate) fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
+    let mut rngs = vec![];
+    let elements_per_shard = elements / shards;
+    for i in 0..shards {
+        let mut rng = make_rng();
+        for _ in 0..(i * elements_per_shard) {
+            gen_record(&mut rng);
+        }
+        rngs.push(rng);
+    }
+
+    rngs
+}
+
+fn read_csv(file_path: impl AsRef<Path>) -> Result<Vec<Customer>, Box<dyn Error>> {
+    let file = File::open(file_path)?;
+
+    let mut rdr = ReaderBuilder::new().delimiter(b',').from_reader(file);
+
+    let mut records = Vec::new();
+    for result in rdr.deserialize() {
+        let record: Customer = result?;
+        records.push(record);
+    }
+
+    Ok(records)
 }
 
 pub trait BenchDatabase {
@@ -83,7 +119,7 @@ pub trait BenchWriteTransaction {
 
 pub trait BenchInserter {
     #[allow(clippy::result_unit_err)]
-    fn insert(&mut self, record: BenchItem) -> Result<(), ()>;
+    fn insert(&mut self, record: Customer) -> Result<(), ()>;
 
     #[allow(clippy::result_unit_err)]
     fn remove(&mut self, key: ItemKey) -> Result<(), ()>;
@@ -113,12 +149,12 @@ pub trait BenchReader {
 }
 
 pub struct TonboBenchDataBase {
-    db: tonbo::DB<BenchItem, TokioExecutor>,
+    db: tonbo::DB<Customer, TokioExecutor>,
 }
 
 impl TonboBenchDataBase {
     #[allow(dead_code)]
-    pub fn new(db: tonbo::DB<BenchItem, TokioExecutor>) -> Self {
+    pub fn new(db: tonbo::DB<Customer, TokioExecutor>) -> Self {
         TonboBenchDataBase { db }
     }
 }
@@ -152,7 +188,7 @@ impl BenchDatabase for TonboBenchDataBase {
 }
 
 pub struct TonboBenchReadTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, BenchItem, TokioExecutor>,
+    txn: tonbo::transaction::Transaction<'a, Customer, TokioExecutor>,
 }
 
 impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
@@ -164,7 +200,7 @@ impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
 }
 
 pub struct TonboBenchReader<'db, 'txn> {
-    txn: &'txn tonbo::transaction::Transaction<'db, BenchItem, TokioExecutor>,
+    txn: &'txn tonbo::transaction::Transaction<'db, Customer, TokioExecutor>,
 }
 
 impl BenchReader for TonboBenchReader<'_, '_> {
@@ -204,7 +240,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
 }
 
 pub struct TonboBenchWriteTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, BenchItem, TokioExecutor>,
+    txn: tonbo::transaction::Transaction<'a, Customer, TokioExecutor>,
 }
 
 impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
@@ -221,11 +257,11 @@ impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
 }
 
 pub struct TonboBenchInserter<'db, 'txn> {
-    txn: &'txn mut tonbo::transaction::Transaction<'db, BenchItem, TokioExecutor>,
+    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer, TokioExecutor>,
 }
 
 impl BenchInserter for TonboBenchInserter<'_, '_> {
-    fn insert(&mut self, record: BenchItem) -> Result<(), ()> {
+    fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.txn.insert(record);
         Ok(())
     }
@@ -295,7 +331,7 @@ impl BenchReader for RedbBenchReader {
     async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.table.get(key.as_bytes()).unwrap().map(|guard| {
             BenchResult::Owned(
-                bincode::deserialize::<BenchItem>(guard.value())
+                bincode::deserialize::<Customer>(guard.value())
                     .unwrap()
                     .into(),
             )
@@ -333,7 +369,7 @@ impl BenchReader for RedbBenchReader {
         stream! {
             for item in iter {
                 let (_, v) = item.unwrap();
-                yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.value()).unwrap().string_1);
+                yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.value()).unwrap().c_name);
             }
         }
     }
@@ -361,10 +397,10 @@ pub struct RedbBenchInserter<'txn> {
 }
 
 impl BenchInserter for RedbBenchInserter<'_> {
-    fn insert(&mut self, record: BenchItem) -> Result<(), ()> {
+    fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.table
             .insert(
-                record.primary_key.as_bytes(),
+                record.c_custkey.as_bytes(),
                 bincode::serialize(&record).unwrap().as_bytes(),
             )
             .map(|_| ())
@@ -445,7 +481,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
     async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.db.get(key.as_bytes()).unwrap().map(|guard| {
             BenchResult::Owned(
-                bincode::deserialize::<BenchItem>(guard.as_bytes())
+                bincode::deserialize::<Customer>(guard.as_bytes())
                     .unwrap()
                     .into(),
             )
@@ -483,7 +519,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
         stream! {
             for item in iter {
                 let (_, v) = item.unwrap();
-                yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.as_bytes()).unwrap().string_1)
+                yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_custkey)
             }
         }
     }
@@ -525,10 +561,10 @@ pub struct SledBenchInserter<'a> {
 }
 
 impl<'a> BenchInserter for SledBenchInserter<'a> {
-    fn insert(&mut self, record: BenchItem) -> Result<(), ()> {
+    fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.db
             .insert(
-                record.primary_key.as_bytes(),
+                record.c_custkey.as_bytes(),
                 bincode::serialize(&record).unwrap().as_bytes(),
             )
             .map(|_| ())
@@ -613,10 +649,10 @@ pub struct RocksdbBenchInserter<'a> {
 }
 
 impl BenchInserter for RocksdbBenchInserter<'_> {
-    fn insert(&mut self, record: BenchItem) -> Result<(), ()> {
+    fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.txn
             .put(
-                record.primary_key.as_bytes(),
+                record.c_custkey.as_bytes(),
                 bincode::serialize(&record).unwrap().as_bytes(),
             )
             .map(|_| ())
@@ -652,7 +688,7 @@ pub struct RocksdbBenchReader<'db, 'txn> {
 impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
     async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.snapshot.get(key.as_bytes()).unwrap().map(|bytes| {
-            BenchResult::Owned(bincode::deserialize::<BenchItem>(&bytes).unwrap().into())
+            BenchResult::Owned(bincode::deserialize::<Customer>(&bytes).unwrap().into())
         })
     }
 
@@ -715,8 +751,30 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
                         return;
                     }
                 }
-                yield ProjectionResult::Owned(bincode::deserialize::<BenchItem>(v.as_bytes()).unwrap().string_1)
+                yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_custkey)
             }
         }
     }
+}
+
+#[tokio::test]
+async fn load_csv() {
+    let data_dir = current_dir().unwrap().join("benchmark_data");
+    let csv_path = current_dir().unwrap().join("customer.csv");
+
+    async fn load<T: BenchDatabase>(csv_path: impl AsRef<Path>, path: impl AsRef<Path>) {
+        let database = T::build(path).await;
+        let mut tx = database.write_transaction().await;
+        let mut inserter = tx.get_inserter();
+
+        for customer in read_csv(csv_path).unwrap() {
+            inserter.insert(customer).unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    load(&csv_path, data_dir.join("tonbo")).await;
+    load(&csv_path, data_dir.join("rocksdb")).await;
+    load(&csv_path, data_dir.join("redb")).await;
+    load(&csv_path, data_dir.join("sled")).await;
 }

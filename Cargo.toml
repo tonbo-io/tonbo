@@ -34,8 +34,14 @@ required-features = ["datafusion"]
 
 [[bench]]
 harness = false
-name = "benchmark"
-path = "benchmarks/bench.rs"
+name = "write_benchmark"
+path = "benchmark/write_bench.rs"
+required-features = ["bench"]
+
+[[bench]]
+harness = false
+name = "read_benchmark"
+path = "benchmark/read_bench.rs"
 required-features = ["bench"]
 
 [[bench]]
