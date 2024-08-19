@@ -117,6 +117,10 @@ impl ArrowArrays for StringColumns {
         offset: u32,
         _: &ProjectionMask,
     ) -> Option<Option<<Self::Record as Record>::Ref<'_>>> {
+        if offset as usize >= self.string.len() {
+            return None;
+        }
+
         if self._null.value(offset as usize) {
             return Some(None);
         }
