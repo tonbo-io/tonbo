@@ -17,6 +17,7 @@ msrv = "1.79.0"
 bench = ["redb", "rocksdb", "sled"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
 default = ["tokio"]
+load_csv = []
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]
 sled = ["dep:sled"]

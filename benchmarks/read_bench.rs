@@ -1,16 +1,19 @@
+mod common;
+
+use std::{
+    collections::Bound,
+    env::current_dir,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use futures_util::{future::join_all, StreamExt};
+
 use crate::common::{
-    make_rng, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
+    read_csv, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
     RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, NUM_SCAN, READ_TIMES,
 };
-use futures_util::future::join_all;
-use futures_util::StreamExt;
-use std::collections::Bound;
-use std::env::current_dir;
-use std::fs;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tempfile::{NamedTempFile, TempDir};
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
     path: impl AsRef<Path> + Clone,
@@ -131,6 +134,30 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
 #[tokio::main]
 async fn main() {
     let data_dir = current_dir().unwrap().join("benchmark_data");
+
+    #[cfg(feature = "load_csv")]
+    {
+        use crate::common::{BenchInserter, BenchWriteTransaction};
+
+        let csv_path = current_dir().unwrap().join("customer.csv");
+
+        async fn load<T: BenchDatabase>(csv_path: impl AsRef<Path>, path: impl AsRef<Path>) {
+            let database = T::build(path).await;
+            let mut tx = database.write_transaction().await;
+            let mut inserter = tx.get_inserter();
+
+            for customer in read_csv(csv_path).unwrap() {
+                inserter.insert(customer).unwrap();
+            }
+            drop(inserter);
+            tx.commit().await.unwrap();
+        }
+
+        load::<TonboBenchDataBase>(&csv_path, data_dir.join("tonbo")).await;
+        load::<RocksdbBenchDatabase>(&csv_path, data_dir.join("rocksdb")).await;
+        load::<RedbBenchDatabase>(&csv_path, data_dir.join("redb")).await;
+        load::<SledBenchDatabase>(&csv_path, data_dir.join("sled")).await;
+    }
 
     let tonbo_latency_results = { benchmark::<TonboBenchDataBase>(data_dir.join("tonbo")).await };
     let redb_latency_results = { benchmark::<RedbBenchDatabase>(data_dir.join("redb")).await };
