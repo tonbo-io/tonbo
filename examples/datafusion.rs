@@ -10,8 +10,8 @@ use std::{
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch, util::pretty};
 use async_stream::stream;
 use async_trait::async_trait;
-use datafusion::catalog::Session;
 use datafusion::{
+    catalog::Session,
     common::internal_err,
     datasource::{TableProvider, TableType},
     error::{DataFusionError, Result},
