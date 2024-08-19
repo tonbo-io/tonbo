@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "tokio"))]
 pub mod tokio_fs;
 
 use std::{
