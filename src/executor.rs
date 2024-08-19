@@ -8,6 +8,7 @@ pub trait Executor: FileProvider {
         F: Future<Output = ()> + Send + 'static;
 }
 
+#[cfg(any(test, feature = "tokio"))]
 pub mod tokio {
     use std::future::Future;
 

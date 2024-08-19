@@ -111,8 +111,7 @@ where
                     value.as_ref().map(R::as_record_ref),
                 )
                 .await
-                .unwrap();
-            // .map_err(WriteError::Encode)?;
+                .map_err(|e| DbError::WalWrite(Box::new(e)))?;
         }
 
         self.trigger.item(&value);
