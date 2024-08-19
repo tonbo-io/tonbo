@@ -1,4 +1,11 @@
-use crate::gen_record;
+use std::{
+    collections::Bound,
+    error::Error,
+    fs,
+    fs::File,
+    path::{Path, PathBuf},
+};
+
 use async_stream::stream;
 use csv::ReaderBuilder;
 use futures_core::Stream;
@@ -6,14 +13,6 @@ use futures_util::StreamExt;
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
-use std::env::current_dir;
-use std::error::Error;
-use std::{
-    collections::Bound,
-    fs,
-    fs::File,
-    path::{Path, PathBuf},
-};
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
@@ -23,6 +22,7 @@ const RNG_SEED: u64 = 3;
 pub(crate) const ITERATIONS: usize = 2;
 pub(crate) const READ_TIMES: usize = 200;
 pub(crate) const NUM_SCAN: usize = 2_000;
+const STRING_SIZE: usize = 50;
 
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
@@ -75,7 +75,32 @@ pub(crate) fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::R
     rngs
 }
 
-fn read_csv(file_path: impl AsRef<Path>) -> Result<Vec<Customer>, Box<dyn Error>> {
+fn gen_string(rng: &mut fastrand::Rng, len: usize) -> String {
+    let charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    let random_string: String = (0..len)
+        .map(|_| {
+            let idx = rng.usize(0..charset.len());
+            charset.chars().nth(idx).unwrap()
+        })
+        .collect();
+    random_string
+}
+
+pub(crate) fn gen_record(rng: &mut fastrand::Rng) -> Customer {
+    Customer {
+        c_custkey: rng.i32(..),
+        c_name: gen_string(rng, STRING_SIZE),
+        c_address: gen_string(rng, STRING_SIZE),
+        c_nationkey: rng.i32(..),
+        c_phone: gen_string(rng, STRING_SIZE),
+        c_acctbal: gen_string(rng, STRING_SIZE),
+        c_mktsegment: gen_string(rng, STRING_SIZE),
+        c_comment: gen_string(rng, STRING_SIZE),
+    }
+}
+
+pub(crate) fn read_csv(file_path: impl AsRef<Path>) -> Result<Vec<Customer>, Box<dyn Error>> {
     let file = File::open(file_path)?;
 
     let mut rdr = ReaderBuilder::new().delimiter(b',').from_reader(file);
@@ -519,7 +544,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
         stream! {
             for item in iter {
                 let (_, v) = item.unwrap();
-                yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_custkey)
+                yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_name)
             }
         }
     }
@@ -704,10 +729,10 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
         }
 
         let (lower, upper) = range;
-        let lower = bound_to_include(lower.map(String::as_bytes))
+        let lower = bound_to_include(lower.map(i32::as_bytes))
             .map(|bytes| IteratorMode::From(bytes, Direction::Forward))
             .unwrap_or(IteratorMode::Start);
-        let upper = bound_to_include(upper.map(String::as_bytes));
+        let upper = bound_to_include(upper.map(i32::as_bytes));
 
         let iter = self.snapshot.iterator(lower);
 
@@ -736,10 +761,10 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
         }
 
         let (lower, upper) = range;
-        let lower = bound_to_include(lower.map(String::as_bytes))
+        let lower = bound_to_include(lower.map(i32::as_bytes))
             .map(|bytes| IteratorMode::From(bytes, Direction::Forward))
             .unwrap_or(IteratorMode::Start);
-        let upper = bound_to_include(upper.map(String::as_bytes));
+        let upper = bound_to_include(upper.map(i32::as_bytes));
 
         let iter = self.snapshot.iterator(lower);
 
@@ -751,30 +776,8 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
                         return;
                     }
                 }
-                yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_custkey)
+                yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_name)
             }
         }
     }
-}
-
-#[tokio::test]
-async fn load_csv() {
-    let data_dir = current_dir().unwrap().join("benchmark_data");
-    let csv_path = current_dir().unwrap().join("customer.csv");
-
-    async fn load<T: BenchDatabase>(csv_path: impl AsRef<Path>, path: impl AsRef<Path>) {
-        let database = T::build(path).await;
-        let mut tx = database.write_transaction().await;
-        let mut inserter = tx.get_inserter();
-
-        for customer in read_csv(csv_path).unwrap() {
-            inserter.insert(customer).unwrap();
-        }
-        tx.commit().await.unwrap();
-    }
-
-    load(&csv_path, data_dir.join("tonbo")).await;
-    load(&csv_path, data_dir.join("rocksdb")).await;
-    load(&csv_path, data_dir.join("redb")).await;
-    load(&csv_path, data_dir.join("sled")).await;
 }

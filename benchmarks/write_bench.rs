@@ -1,8 +1,6 @@
 mod common;
-mod read_bench;
 
 use std::{
-    collections::Bound,
     env::current_dir,
     fs,
     path::Path,
@@ -17,32 +15,6 @@ use tempfile::{NamedTempFile, TempDir};
 const WRITE_TIMES: usize = 10_000;
 const WRITE_BATCH_TIMES: usize = 100;
 const WRITE_BATCH_SIZE: usize = 100;
-const STRING_SIZE: usize = 50;
-
-fn gen_string(rng: &mut fastrand::Rng, len: usize) -> String {
-    let charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-
-    let random_string: String = (0..len)
-        .map(|_| {
-            let idx = rng.usize(0..charset.len());
-            charset.chars().nth(idx).unwrap()
-        })
-        .collect();
-    random_string
-}
-
-fn gen_record(rng: &mut fastrand::Rng) -> Customer {
-    Customer {
-        c_custkey: rng.i32(..),
-        c_name: gen_string(rng, STRING_SIZE),
-        c_address: gen_string(rng, STRING_SIZE),
-        c_nationkey: rng.i32(..),
-        c_phone: gen_string(rng, STRING_SIZE),
-        c_acctbal: gen_string(rng, STRING_SIZE),
-        c_mktsegment: gen_string(rng, STRING_SIZE),
-        c_comment: gen_string(rng, STRING_SIZE),
-    }
-}
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
     path: impl AsRef<Path> + Clone,
