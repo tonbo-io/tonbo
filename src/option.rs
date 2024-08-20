@@ -12,7 +12,7 @@ use crate::{
     version::Version,
 };
 
-/// configure the operating parameters of each component in the [`DB`](../struct.DB.html)
+/// configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Debug, Clone)]
 pub struct DbOption<R> {
     pub(crate) path: PathBuf,
@@ -35,7 +35,7 @@ where
     P: Into<PathBuf>,
     R: Record,
 {
-    /// build the default configured [`DbOption`](struct.DbOption.html) based on the passed path
+    /// build the default configured [`DbOption`] based on the passed path
     fn from(path: P) -> Self {
         let (column_paths, sorting_columns) = R::primary_key_path();
         DbOption {
@@ -69,7 +69,7 @@ impl<R> DbOption<R>
 where
     R: Record,
 {
-    /// build the [`DB`](../struct.DB.html) storage directory based on the passed path
+    /// build the [`DB`](crate::DB) storage directory based on the passed path
     pub fn path(self, path: impl Into<PathBuf>) -> Self {
         DbOption {
             path: path.into(),
