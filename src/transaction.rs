@@ -41,7 +41,7 @@ where
     }
 }
 /// optimistic ACID transaction, open with
-/// [`DB::transaction`](../struct.DB.html#method.transaction) method
+/// [`DB::transaction`](crate::DB::transaction) method
 pub struct Transaction<'txn, R, FP>
 where
     R: Record,
@@ -74,7 +74,7 @@ where
     }
 
     /// get the record with `key` as the primary key and get only the data specified in
-    /// [`Projection`](../enum.Projection.html)
+    /// [`Projection`]
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
@@ -128,8 +128,8 @@ where
         }
     }
 
-    /// commit the data in the [`Transaction`](struct.Transaction.html) to the corresponding
-    /// [`DB`](../struct.DB.html)
+    /// commit the data in the [`Transaction`] to the corresponding
+    /// [`DB`](crate::DB)
     pub async fn commit(mut self) -> Result<(), CommitError<R>> {
         let mut _key_guards = Vec::new();
 

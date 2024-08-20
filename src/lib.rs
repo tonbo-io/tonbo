@@ -9,8 +9,8 @@
 //! most operations are asynchronous and non-blocking,
 //! providing efficient concurrent processing capabilities.
 //!
-//! `tonbo` constructs an instance using the [`DB::new`](struct.DB.html#method.new) method
-//! to serve a specific `Tonbo Record` type.
+//! `tonbo` constructs an instance using the [`DB::new`] method to serve a
+//! specific `Tonbo Record` type.
 //!
 //! `Tonbo Record` is automatically implemented by the macro [`tonbo_record`].
 //! Support type
@@ -25,9 +25,8 @@
 //! - UInt32
 //! - UInt64
 //!
-//! ACID `optimistic` transactions for concurrent data
-//! reading and writing are supported with the
-//! [`DB::transaction`](struct.DB.html#method.transaction) method.
+//! ACID `optimistic` transactions for concurrent data reading and writing are
+//! supported with the [`DB::transaction`] method.
 //!
 //! # Examples
 //!
@@ -180,12 +179,11 @@ where
     R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
-    /// Open [`DB`](struct.DB.html) with a [`DbOption`](struct.DbOption.html). This will create a
-    /// new directory at the path specified in [`DbOption`](struct.DbOption.html) (if it does
-    /// not exist before) and run it according to the configuration of
-    /// [`DbOption`](struct.DbOption.html).
+    /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
+    /// path specified in [`DbOption`] (if it does not exist before) and run it
+    /// according to the configuration of [`DbOption`].
     ///
-    /// For more configurable options, please refer to [`DbOption`](struct.DbOption.html)
+    /// For more configurable options, please refer to [`DbOption`].
     pub async fn new(option: DbOption<R>, executor: E) -> Result<Self, DbError<R>> {
         let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
