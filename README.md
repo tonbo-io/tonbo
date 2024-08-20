@@ -1,3 +1,11 @@
+<p align="center">
+  <a href="https://tonbo.io">
+    <picture>
+      <img src="https://github.com/user-attachments/assets/589b7411-2e36-4780-a3e4-c8ac2b709b7d" width="200"/>
+    </picture>
+  </a>
+</p>
+
 # Tonbo
 
 <p align="left">
@@ -12,7 +20,18 @@
 
 ## Introduction
 
-Tonbo is an embedded persistent database built on [Apache Arrow & Parquet](https://github.com/apache/arrow-rs). It offers essential KV-like methods—insert, filter, and range scan—to efficiently and conveniently query type-safe structured data. Tonbo is able to integrate seamlessly with other Arrow analytical tools, such as DataFusion. For an example, refer to this [example](examples/datafusion.rs). Official support for DataFusion will be included in the next release.
+Tonbo is an embedded, persistent database offering fast KV-like methods for conveniently writing and scanning type-safe structured data. Tonbo can be used to build data-intensive applications, including other types of databases.
+
+Tonbo is implemented with a [Log-Structured Merge Tree](https://en.wikipedia.org/wiki/Log-structured_merge-tree), constructed using [Apache Arrow & Parquet](https://github.com/apache/arrow-rs) data blocks. Leveraging Arrow and Parquet, Tonbo supports:
+- Pushdown limits, predicates, and projection operators
+- Zero-copy deserialization
+- Various storage backends: OPFS, S3, etc. (to be supported in v0.2.0)
+
+These features enhance the efficiency of queries on structured data.
+
+Tonbo is designed to integrate seamlessly with other Arrow analytical tools, such as DataFusion. For an example, refer to this [preview](examples/datafusion.rs) (official support for DataFusion will be included in v0.2.0).
+
+> Note: Tonbo is currently unstable; API and file formats may change in upcoming minor versions. Please avoid using it in production and stay tuned for updates.
 
 ## Example
 
@@ -69,7 +88,7 @@ async fn main() {
 
         {
             let upper = "Blob".into();
-            // range scan of
+            // range scan of users
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 .await
