@@ -27,7 +27,7 @@ enum DataType {
 /// # Example
 ///
 /// ```
-/// use tonbo_macro::tonbo_record;
+/// use tonbo::tonbo_record;
 ///
 /// #[tonbo_record(::serde::Serialize, ::serde::Deserialize)]
 /// pub struct Music {
@@ -43,13 +43,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let struct_name = ast.ident.clone();
 
-    let mut combined_derives = vec![quote!(
-        tonbo_macro::KeyAttributes,
-        Debug,
-        PartialEq,
-        Eq,
-        Clone
-    )];
+    let mut combined_derives = vec![quote!(::tonbo::KeyAttributes, Debug, PartialEq, Eq, Clone)];
 
     let additional_attrs = args.to_string();
     if !additional_attrs.is_empty() {

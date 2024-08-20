@@ -146,7 +146,7 @@ use parquet::{
 use record::Record;
 use thiserror::Error;
 use timestamp::Timestamp;
-pub use tonbo_macro::tonbo_record;
+pub use tonbo_macro::{tonbo_record, KeyAttributes};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
 
