@@ -146,8 +146,16 @@ where
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
     ) -> MutableScan<'scan, R> {
-        let lower = range.0.map(|key| TimestampedRef::new(key, ts));
-        let upper = range.1.map(|key| TimestampedRef::new(key, EPOCH));
+        let lower = match range.0 {
+            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, ts)),
+            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, EPOCH)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let upper = match range.1 {
+            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, EPOCH)),
+            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, ts)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
 
         self.data.range((lower, upper))
     }

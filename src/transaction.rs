@@ -406,4 +406,162 @@ mod tests {
         let entry_15 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_15.key().value, "king");
     }
+
+    #[tokio::test]
+    async fn test_transaction_scan_bound() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::from(temp_dir.path()));
+
+        let (_, version) = build_version(&option).await;
+        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
+        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+            .await
+            .unwrap();
+
+        // skip timestamp
+        let txn = db.transaction().await;
+        txn.commit().await.unwrap();
+
+        // test inmem
+        {
+            let txn2 = db.transaction().await;
+            let lower = "ben".into();
+            let upper = "dice".into();
+            {
+                let mut stream = txn2
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "ben");
+                let entry_1 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_1.key().value, "carl");
+                let entry_2 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_2.key().value, "dice");
+                assert!(stream.next().await.is_none());
+            }
+
+            {
+                let mut stream = txn2
+                    .scan((Bound::Included(&lower), Bound::Excluded(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "ben");
+                let entry_1 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_1.key().value, "carl");
+                assert!(stream.next().await.is_none());
+            }
+
+            {
+                let mut stream = txn2
+                    .scan((Bound::Excluded(&lower), Bound::Included(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "carl");
+                let entry_1 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_1.key().value, "dice");
+                assert!(stream.next().await.is_none());
+            }
+            {
+                let mut stream = txn2
+                    .scan((Bound::Excluded(&lower), Bound::Excluded(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "carl");
+                assert!(stream.next().await.is_none());
+            }
+        }
+        // test SSTable
+        {
+            let txn3 = db.transaction().await;
+            let lower = "1".into();
+            let upper = "2".into();
+            {
+                let mut stream = txn3
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "1");
+                assert!(entry_0.value().unwrap().vbool.is_none());
+                let entry_1 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_1.key().value, "2");
+                assert!(entry_1.value().unwrap().vbool.is_none());
+                assert!(stream.next().await.is_none());
+            }
+            {
+                let mut stream = txn3
+                    .scan((Bound::Included(&lower), Bound::Excluded(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "1");
+                assert!(entry_0.value().unwrap().vbool.is_none());
+                assert!(stream.next().await.is_none());
+            }
+            {
+                let mut stream = txn3
+                    .scan((Bound::Excluded(&lower), Bound::Included(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "2");
+                assert!(entry_0.value().unwrap().vbool.is_none());
+                assert!(stream.next().await.is_none());
+            }
+            {
+                let mut stream = txn3
+                    .scan((Bound::Excluded(&lower), Bound::Excluded(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+
+                assert!(stream.next().await.is_none());
+            }
+            {
+                let mut stream = txn3
+                    .scan((Bound::Unbounded, Bound::Excluded(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "1");
+                assert!(entry_0.value().unwrap().vbool.is_none());
+                assert!(stream.next().await.is_none());
+            }
+        }
+    }
 }

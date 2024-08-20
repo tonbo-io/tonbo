@@ -83,8 +83,8 @@ where
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
                 upper_cmp(
-                    record_batch.column(0),
                     &upper_key.to_arrow_datum() as &dyn Datum,
+                    record_batch.column(0),
                 )
             },
         )));
