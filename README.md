@@ -1,7 +1,7 @@
 <p align="center">
   <a href="https://tonbo.io">
     <picture>
-      <img src="https://github.com/user-attachments/assets/589b7411-2e36-4780-a3e4-c8ac2b709b7d" width="200"/>
+      <img src="https://github.com/user-attachments/assets/f7625788-0e7f-4fb6-80cd-7f0d2306130b" />
     </picture>
   </a>
 </p>
