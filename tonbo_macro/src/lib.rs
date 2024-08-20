@@ -670,7 +670,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
             }
 
             fn written_size(&self) -> usize {
-                0 #(#builder_size_fields)*
+                self._null.as_slice().len() + ::std::mem::size_of_val(self._ts.values_slice()) #(#builder_size_fields)*
             }
 
             fn finish(&mut self, indices: Option<&[usize]>) -> #struct_arrays_name {

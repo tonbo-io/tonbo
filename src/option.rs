@@ -57,7 +57,7 @@ where
             use_wal: true,
             major_default_oldest_table_num: 3,
             major_l_selection_table_max_num: 4,
-            trigger_type: TriggerType::Length(/* max_mutable_len */ 3000),
+            trigger_type: TriggerType::SizeOfMem(8 * 1024 * 1024),
             _p: Default::default(),
         }
     }

@@ -154,7 +154,7 @@ impl Builder<StringColumns> for StringColumnsBuilder {
     fn written_size(&self) -> usize {
         self._null.as_slice().len()
             + mem::size_of_val(self._ts.values_slice())
-            + self.string.values_slice().len()
+            + mem::size_of_val(self.string.values_slice())
     }
 
     fn finish(&mut self, _: Option<&[usize]>) -> StringColumns {
