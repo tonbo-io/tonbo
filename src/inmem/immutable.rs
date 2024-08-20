@@ -297,7 +297,9 @@ pub(crate) mod tests {
         }
 
         fn written_size(&self) -> usize {
-            mem::size_of_val(self.vstring.values_slice())
+            self._null.as_slice().len()
+                + mem::size_of_val(self._ts.values_slice())
+                + mem::size_of_val(self.vstring.values_slice())
                 + mem::size_of_val(self.vu32.values_slice())
                 + mem::size_of_val(self.vobool.values_slice())
         }
