@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fs,
     fs::File,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
@@ -21,7 +22,6 @@ use tonbo_macro::tonbo_record;
 const RNG_SEED: u64 = 3;
 pub(crate) const ITERATIONS: usize = 2;
 pub(crate) const READ_TIMES: usize = 200;
-pub(crate) const NUM_SCAN: usize = 2_000;
 const STRING_SIZE: usize = 50;
 
 #[allow(dead_code)]
@@ -100,18 +100,29 @@ pub(crate) fn gen_record(rng: &mut fastrand::Rng) -> Customer {
     }
 }
 
-pub(crate) fn read_csv(file_path: impl AsRef<Path>) -> Result<Vec<Customer>, Box<dyn Error>> {
-    let file = File::open(file_path)?;
+pub(crate) fn read_tbl(file_path: impl AsRef<Path>) -> Box<dyn Iterator<Item = Customer>> {
+    let file = File::open(file_path).expect("Cannot open file");
+    let reader = BufReader::new(file);
 
-    let mut rdr = ReaderBuilder::new().delimiter(b',').from_reader(file);
-
-    let mut records = Vec::new();
-    for result in rdr.deserialize() {
-        let record: Customer = result?;
-        records.push(record);
-    }
-
-    Ok(records)
+    Box::new(reader.lines().filter_map(|line| {
+        if let Ok(l) = line {
+            let fields: Vec<&str> = l.split('|').collect();
+            // 确保行数据符合预期
+            if fields.len() > 7 {
+                return Some(Customer {
+                    c_custkey: fields[0].parse().unwrap(),
+                    c_name: fields[1].to_string(),
+                    c_address: fields[2].to_string(),
+                    c_nationkey: fields[3].parse().unwrap(),
+                    c_phone: fields[4].to_string(),
+                    c_acctbal: fields[5].parse().unwrap(),
+                    c_mktsegment: fields[6].to_string(),
+                    c_comment: fields[7].to_string(),
+                });
+            }
+        }
+        None
+    }))
 }
 
 pub trait BenchDatabase {
