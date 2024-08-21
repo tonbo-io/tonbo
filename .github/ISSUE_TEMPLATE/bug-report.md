@@ -6,7 +6,7 @@ about: Something isn't working as expected
 
 ## Bug Report
 
-**What version of Elsm are you using?**
+**What version of Tonbo are you using?**
 
 
 **What version of Rust are you using?**
@@ -15,7 +15,7 @@ about: Something isn't working as expected
 **What's the status of the running?**
 
 **What did you do?**
-<!-- If possible, provide a recipe for reproducing the error. How you start KipDB. -->
+<!-- If possible, provide a recipe for reproducing the error. How you start Tonbo. -->
 
 **What did you expect to see?**
 
