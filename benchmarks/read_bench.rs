@@ -12,7 +12,7 @@ use futures_util::{future::join_all, StreamExt};
 
 use crate::common::{
     read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
-    RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, READ_TIMES,
+    RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, NUM_SCAN, READ_TIMES,
 };
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
@@ -37,13 +37,19 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             let reader = txn.get_reader();
             for _ in 0..READ_TIMES {
                 let mut iter = Box::pin(reader.range_from((Bound::Unbounded, Bound::Unbounded)));
-                while let Some(_result) = iter.next().await {}
+                for _ in 0..NUM_SCAN {
+                    if let Some(_record) = iter.next().await {
+                    } else {
+                        break;
+                    }
+                }
             }
             let end = Instant::now();
             let duration = end - start;
             println!(
-                "{}: Random range read in {}ms",
+                "{}: Random range read {} elements in {}ms",
                 T::db_type_name(),
+                READ_TIMES * NUM_SCAN,
                 duration.as_millis()
             );
             results.push(("random range reads".to_string(), duration));
@@ -55,13 +61,19 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             for _ in 0..READ_TIMES {
                 let mut iter =
                     Box::pin(reader.projection_range_from((Bound::Unbounded, Bound::Unbounded)));
-                while let Some(_result) = iter.next().await {}
+                for _ in 0..NUM_SCAN {
+                    if let Some(_projection_field) = iter.next().await {
+                    } else {
+                        break;
+                    }
+                }
             }
             let end = Instant::now();
             let duration = end - start;
             println!(
-                "{}: Random range projection read in {}ms",
+                "{}: Random range projection read {} elements in {}ms",
                 T::db_type_name(),
+                READ_TIMES * NUM_SCAN,
                 duration.as_millis()
             );
             results.push(("random range projection reads".to_string(), duration));
@@ -82,7 +94,12 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
                     let mut iter = Box::pin(
                         reader.projection_range_from((Bound::Unbounded, Bound::Unbounded)),
                     );
-                    while let Some(_result) = iter.next().await {}
+                    for _ in 0..NUM_SCAN {
+                        if let Some(_projection_field) = iter.next().await {
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -91,9 +108,10 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         let end = Instant::now();
         let duration = end - start;
         println!(
-            "{}: Random range projection reads ({} threads) in {}ms",
+            "{}: Random range projection reads ({} threads) {} elements in {}ms",
             T::db_type_name(),
             num_threads,
+            READ_TIMES * NUM_SCAN,
             duration.as_millis()
         );
         results.push((

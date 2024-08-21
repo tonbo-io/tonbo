@@ -59,8 +59,7 @@ impl<T> LengthTrigger<T> {
 
 impl<R: Record> Trigger<R> for LengthTrigger<R> {
     fn item(&self, _: &Option<R>) -> bool {
-        self.count.fetch_add(1, Ordering::SeqCst);
-        self.count.load(Ordering::SeqCst) + 1 >= self.threshold
+        self.count.fetch_add(1, Ordering::SeqCst) + 1 >= self.threshold
     }
 
     fn reset(&self) {
