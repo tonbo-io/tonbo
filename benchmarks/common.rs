@@ -22,6 +22,7 @@ use tonbo_macro::tonbo_record;
 const RNG_SEED: u64 = 3;
 pub(crate) const ITERATIONS: usize = 2;
 pub(crate) const READ_TIMES: usize = 200;
+pub(crate) const NUM_SCAN: usize = 200_000;
 const STRING_SIZE: usize = 50;
 
 #[allow(dead_code)]

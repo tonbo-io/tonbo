@@ -10,7 +10,7 @@ use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileProvider},
-    inmem::immutable::{ArrowArrays, Builder, Immutable},
+    inmem::immutable::Immutable,
     record::{Key, KeyRef, Record},
     timestamp::{
         timestamped::{Timestamped, TimestampedRef},

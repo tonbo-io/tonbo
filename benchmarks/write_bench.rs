@@ -12,8 +12,8 @@ use common::*;
 use futures_util::{future::join_all, StreamExt};
 use tempfile::{NamedTempFile, TempDir};
 
-const WRITE_TIMES: usize = 50_000;
-const WRITE_BATCH_TIMES: usize = 500;
+const WRITE_TIMES: usize = 500_000;
+const WRITE_BATCH_TIMES: usize = 5000;
 const WRITE_BATCH_SIZE: usize = 100;
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
