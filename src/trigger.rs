@@ -32,9 +32,7 @@ impl<T> SizeOfMemTrigger<T> {
 impl<R: Record> Trigger<R> for SizeOfMemTrigger<R> {
     fn item(&self, item: &Option<R>) -> bool {
         let size = item.as_ref().map_or(0, R::size);
-        let w = self.current_size.fetch_add(size, Ordering::SeqCst) + size;
-        println!("EEE: {w}: {size}");
-        w >= self.threshold
+        self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
     }
 
     fn reset(&self) {
