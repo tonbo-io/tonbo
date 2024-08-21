@@ -126,7 +126,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
 async fn main() {
     let data_dir = current_dir().unwrap().join("benchmark_data");
 
-    #[cfg(feature = "load_csv")]
+    #[cfg(feature = "load_tbl")]
     {
         use crate::common::{BenchInserter, BenchWriteTransaction};
 
