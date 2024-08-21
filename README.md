@@ -144,4 +144,5 @@ async fn main() {
 - [ ] Blob storage (like [BlobDB in RocksDB](https://github.com/facebook/rocksdb/wiki/BlobDB)).
 
 ## Contributing to Tonbo
+Follow the Contributing Guide to [contribute](https://github.com/tonbo-io/tonbo/blob/main/CONTRIBUTING.md).
 Please feel free to ask any question or contact us on Github [Discussions](https://github.com/orgs/tonbo-io/discussions) or [issues](https://github.com/tonbo-io/tonbo/issues).
