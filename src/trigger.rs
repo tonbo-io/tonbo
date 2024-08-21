@@ -10,8 +10,6 @@ use crate::record::Record;
 pub trait Trigger<R: Record>: fmt::Debug {
     fn item(&self, item: &Option<R>) -> bool;
 
-    fn exceeded(&self) -> bool;
-
     fn reset(&self);
 }
 #[derive(Debug)]
@@ -34,11 +32,9 @@ impl<T> SizeOfMemTrigger<T> {
 impl<R: Record> Trigger<R> for SizeOfMemTrigger<R> {
     fn item(&self, item: &Option<R>) -> bool {
         let size = item.as_ref().map_or(0, R::size);
-        self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
-    }
-
-    fn exceeded(&self) -> bool {
-        self.current_size.load(Ordering::SeqCst) >= self.threshold
+        let w = self.current_size.fetch_add(size, Ordering::SeqCst) + size;
+        println!("EEE: {w}: {size}");
+        w >= self.threshold
     }
 
     fn reset(&self) {
@@ -66,11 +62,7 @@ impl<T> LengthTrigger<T> {
 impl<R: Record> Trigger<R> for LengthTrigger<R> {
     fn item(&self, _: &Option<R>) -> bool {
         self.count.fetch_add(1, Ordering::SeqCst);
-        self.count.load(Ordering::SeqCst) >= self.threshold
-    }
-
-    fn exceeded(&self) -> bool {
-        self.count.load(Ordering::SeqCst) >= self.threshold
+        self.count.load(Ordering::SeqCst) + 1 >= self.threshold
     }
 
     fn reset(&self) {
@@ -117,24 +109,19 @@ mod tests {
         assert_eq!(record_size, 8);
 
         assert!(
-            !trigger.exceeded(),
-            "Trigger should not be exceeded initially"
-        );
-        trigger.item(&record);
-        assert!(
-            !trigger.exceeded(),
+            !trigger.item(&record),
             "Trigger should not be exceeded after 1 record"
         );
 
         trigger.item(&record);
         assert!(
-            trigger.exceeded(),
+            trigger.item(&record),
             "Trigger should be exceeded after 2 records"
         );
 
         trigger.reset();
         assert!(
-            !trigger.exceeded(),
+            !trigger.item(&record),
             "Trigger should not be exceeded after reset"
         );
     }
@@ -151,25 +138,19 @@ mod tests {
         });
 
         assert!(
-            !trigger.exceeded(),
-            "Trigger should not be exceeded initially"
-        );
-        trigger.item(&record);
-
-        assert!(
-            !trigger.exceeded(),
+            !trigger.item(&record),
             "Trigger should not be exceeded after 1 record"
         );
 
         trigger.item(&record);
         assert!(
-            trigger.exceeded(),
+            trigger.item(&record),
             "Trigger should be exceeded after 2 records"
         );
 
         trigger.reset();
         assert!(
-            !trigger.exceeded(),
+            !trigger.item(&record),
             "Trigger should not be exceeded after reset"
         );
     }

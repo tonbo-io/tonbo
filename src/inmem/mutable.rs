@@ -10,7 +10,7 @@ use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileProvider},
-    inmem::immutable::Immutable,
+    inmem::immutable::{ArrowArrays, Builder, Immutable},
     record::{Key, KeyRef, Record},
     timestamp::{
         timestamped::{Timestamped, TimestampedRef},
@@ -114,10 +114,10 @@ where
                 .map_err(|e| DbError::WalWrite(Box::new(e)))?;
         }
 
-        self.trigger.item(&value);
+        let is_exceeded = self.trigger.item(&value);
         self.data.insert(timestamped_key, value);
 
-        Ok(self.trigger.exceeded())
+        Ok(is_exceeded)
     }
 
     #[allow(unused)]
