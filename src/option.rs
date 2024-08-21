@@ -44,7 +44,7 @@ where
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
             level_sst_magnification: 10,
-            max_sst_file_size: 128 * 1024 * 1024,
+            max_sst_file_size: 256 * 1024 * 1024,
             clean_channel_buffer: 10,
             write_parquet_properties: WriterProperties::builder()
                 .set_compression(Compression::LZ4)
@@ -57,7 +57,7 @@ where
             use_wal: true,
             major_default_oldest_table_num: 3,
             major_l_selection_table_max_num: 4,
-            trigger_type: TriggerType::SizeOfMem(8 * 1024 * 1024),
+            trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
             _p: Default::default(),
         }
     }
