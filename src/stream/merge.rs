@@ -10,7 +10,7 @@ use futures_util::stream::StreamExt;
 use pin_project_lite::pin_project;
 
 use super::{Entry, ScanStream};
-use crate::{fs::FileProvider, record::Record};
+use crate::{fs::FileProvider, record::Record, timestamp::Timestamp};
 
 pin_project! {
     pub struct MergeStream<'merge, R, FP>
@@ -21,6 +21,7 @@ pin_project! {
         streams: Vec<ScanStream<'merge, R, FP>>,
         peeked: BinaryHeap<CmpEntry<'merge, R>>,
         buf: Option<Entry<'merge, R>>,
+        ts: Timestamp,
     }
 }
 
@@ -31,6 +32,7 @@ where
 {
     pub(crate) async fn from_vec(
         mut streams: Vec<ScanStream<'merge, R, FP>>,
+        ts: Timestamp,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
 
@@ -44,6 +46,7 @@ where
             streams,
             peeked,
             buf: None,
+            ts,
         };
         merge_stream.next().await;
 
@@ -60,6 +63,7 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
+        let ts = this.ts;
         while let Some(offset) = this.peeked.peek().map(|entry| entry.offset) {
             let next = ready!(Pin::new(&mut this.streams[offset]).poll_next(cx)).transpose()?;
             let peeked = match this.peeked.pop() {
@@ -70,7 +74,7 @@ where
                 this.peeked.push(CmpEntry::new(offset, next));
             }
             if let Some(buf) = this.buf {
-                if buf.key().value == peeked.entry.key().value {
+                if peeked.entry.key().ts > *ts || buf.key().value == peeked.entry.key().value {
                     continue;
                 }
             }
@@ -195,11 +199,14 @@ mod tests {
         let lower = "a".to_string();
         let upper = "e".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(vec![
-            m1.scan(bound, 6.into()).into(),
-            m2.scan(bound, 6.into()).into(),
-            m3.scan(bound, 6.into()).into(),
-        ])
+        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
+            vec![
+                m1.scan(bound, 6.into()).into(),
+                m2.scan(bound, 6.into()).into(),
+                m3.scan(bound, 6.into()).into(),
+            ],
+            6.into(),
+        )
         .await
         .unwrap();
 
@@ -273,10 +280,12 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge =
-            MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 0.into()).into()])
-                .await
-                .unwrap();
+        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
+            vec![m1.scan(bound, 0.into()).into()],
+            0.into(),
+        )
+        .await
+        .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
             assert_eq!(entry.key().value, "1");
@@ -285,15 +294,15 @@ mod tests {
         };
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
             assert_eq!(entry.key().value, "2");
-            assert_eq!(entry.key().ts, 1.into());
+            assert_eq!(entry.key().ts, 0.into());
             assert_eq!(entry.value().as_deref(), Some("2"));
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "3");
-            assert_eq!(entry.key().ts, 1.into());
-            assert_eq!(entry.value().as_deref(), Some("3"));
+            assert_eq!(entry.key().value, "4");
+            assert_eq!(entry.key().ts, 0.into());
+            assert_eq!(entry.value().as_deref(), Some("4"));
         } else {
             unreachable!()
         }
@@ -301,10 +310,12 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge =
-            MergeStream::<String, TokioExecutor>::from_vec(vec![m1.scan(bound, 1.into()).into()])
-                .await
-                .unwrap();
+        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
+            vec![m1.scan(bound, 1.into()).into()],
+            1.into(),
+        )
+        .await
+        .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
             assert_eq!(entry.key().value, "1");

@@ -349,6 +349,11 @@ mod tests {
             .await
             .unwrap();
 
+        {
+            // to increase timestamps to 1
+            let txn = db.transaction().await;
+            txn.commit().await.unwrap();
+        }
         let mut txn = db.transaction().await;
         txn.insert(Test {
             vstring: "king".to_string(),
