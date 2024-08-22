@@ -10,5 +10,5 @@ This is a pure rust project, so only `cargo` is needed.
 - `cargo fmt` to format the current code.
 - `cargo build` to compile the current package.
 - `cargo clippy` to catch common mistakes and improve code.
-- `cargo test` to run unit tests.
+- `cargo +nightly fmt` to run unit tests.
 - `cargo bench` to run benchmark tests.
