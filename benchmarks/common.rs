@@ -8,7 +8,6 @@ use std::{
 };
 
 use async_stream::stream;
-use csv::ReaderBuilder;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use parquet::data_type::AsBytes;
