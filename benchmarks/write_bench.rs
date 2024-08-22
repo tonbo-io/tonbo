@@ -191,21 +191,14 @@ async fn main() {
     let tmpdir = current_dir().unwrap().join(".benchmark");
     fs::create_dir(&tmpdir).unwrap();
 
+    // Tips: Sled and Redb always get stuck in this benchmark, so remove them
     let tonbo_latency_results = {
         let tmp_dir: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         benchmark::<TonboBenchDataBase>(tmp_dir.path()).await
     };
-    let redb_latency_results = {
-        let tmp_file: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        benchmark::<RedbBenchDatabase>(tmp_file.path()).await
-    };
     let rocksdb_results = {
         let tmp_file: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         benchmark::<RocksdbBenchDatabase>(tmp_file.path()).await
-    };
-    let sled_results = {
-        let tmp_file: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
-        benchmark::<SledBenchDatabase>(tmp_file.path()).await
     };
 
     let _ = fs::remove_dir_all(&tmpdir);
@@ -216,12 +209,7 @@ async fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [
-        tonbo_latency_results,
-        redb_latency_results,
-        rocksdb_results,
-        sled_results,
-    ] {
+    for results in [tonbo_latency_results, rocksdb_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -229,7 +217,7 @@ async fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "tonbo", "redb", "rocksdb", "sled"]);
+    table.set_header(["", "tonbo", "rocksdb"]);
     for row in rows {
         table.add_row(row);
     }
