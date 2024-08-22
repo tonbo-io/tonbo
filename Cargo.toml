@@ -36,13 +36,13 @@ required-features = ["datafusion"]
 [[bench]]
 harness = false
 name = "write_benchmark"
-path = "benchmark/write_bench.rs"
+path = "benchmarks/write_bench.rs"
 required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "read_benchmark"
-path = "benchmark/read_bench.rs"
+path = "benchmarks/read_bench.rs"
 required-features = ["bench"]
 
 [[bench]]
