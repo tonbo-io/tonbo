@@ -463,7 +463,7 @@ where
     {
         let mut scan = Scan::new(
             self,
-            (Bound::Included(key), Bound::Unbounded),
+            (Bound::Included(key), Bound::Included(key)),
             ts,
             version,
             vec![],
@@ -472,7 +472,7 @@ where
         if let Projection::Parts(mask) = projection {
             scan = scan.projection(mask);
         }
-        Ok(scan.take().await?.next().await.transpose()?)
+        Ok(scan.limit(1).take().await?.next().await.transpose()?)
     }
 
     fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
