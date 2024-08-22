@@ -342,7 +342,7 @@ where
     where
         FP: 'scan,
     {
-        let mut stream = MergeStream::<R, FP>::from_vec(streams).await?;
+        let mut stream = MergeStream::<R, FP>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
         let mut builder = R::Columns::builder(8192);

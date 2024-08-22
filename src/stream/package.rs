@@ -183,9 +183,12 @@ mod tests {
         .await
         .unwrap();
 
-        let merge = MergeStream::<Test, TokioExecutor>::from_vec(vec![m1
-            .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
-            .into()])
+        let merge = MergeStream::<Test, TokioExecutor>::from_vec(
+            vec![m1
+                .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
+                .into()],
+            6.into(),
+        )
         .await
         .unwrap();
         let projection_indices = vec![0, 1, 2, 3];

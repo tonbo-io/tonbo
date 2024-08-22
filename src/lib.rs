@@ -586,7 +586,7 @@ where
             )
             .await?;
 
-        Ok(MergeStream::from_vec(self.streams).await?)
+        Ok(MergeStream::from_vec(self.streams, self.ts).await?)
     }
 
     /// Get a Stream that returns RecordBatch consisting of a `batch_size` number of records
@@ -616,7 +616,7 @@ where
                 self.projection,
             )
             .await?;
-        let merge_stream = MergeStream::from_vec(self.streams).await?;
+        let merge_stream = MergeStream::from_vec(self.streams, self.ts).await?;
 
         Ok(PackageStream::new(
             batch_size,
