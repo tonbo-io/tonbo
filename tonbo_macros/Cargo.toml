@@ -1,9 +1,9 @@
 [package]
 description = "TonboRecord macro"
-documentation = "https://docs.rs/tonbo_marcro"
+documentation = "https://docs.rs/tonbo_macros"
 edition = "2021"
 license = "Apache-2.0"
-name = "tonbo_macro"
+name = "tonbo_macros"
 version = "0.1.0"
 
 [dependencies]
