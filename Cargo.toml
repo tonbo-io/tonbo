@@ -25,30 +25,26 @@ tokio = ["tokio/fs"]
 
 [[example]]
 name = "declare"
-path = "examples/declare.rs"
 required-features = ["tokio"]
 
 [[example]]
 name = "datafusion"
-path = "examples/datafusion.rs"
 required-features = ["datafusion"]
 
 [[bench]]
 harness = false
-name = "write_benchmark"
-path = "benchmarks/write_bench.rs"
+name = "write_bench"
 required-features = ["bench"]
 
 [[bench]]
 harness = false
-name = "read_benchmark"
-path = "benchmarks/read_bench.rs"
+name = "read_bench"
 required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "writes"
-path = "benchmarks/criterion/writes.rs"
+path = "benches/criterion/writes.rs"
 required-features = ["sled"]
 
 [dependencies]
