@@ -16,7 +16,7 @@ use rocksdb::{Direction, IteratorMode, TransactionDB};
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
-use tonbo_macro::tonbo_record;
+use tonbo_macros::tonbo_record;
 
 const RNG_SEED: u64 = 3;
 pub(crate) const ITERATIONS: usize = 2;
