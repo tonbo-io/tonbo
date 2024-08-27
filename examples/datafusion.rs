@@ -23,7 +23,7 @@ use datafusion::{
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tonbo::{executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DB};
-use tonbo_macro::tonbo_record;
+use tonbo_macros::tonbo_record;
 
 #[tonbo_record]
 pub struct Music {

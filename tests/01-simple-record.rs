@@ -1,4 +1,4 @@
-use tonbo_macro::tonbo_record;
+use tonbo_macros::tonbo_record;
 
 #[tonbo_record]
 pub struct User {
