@@ -208,7 +208,11 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let (sender, _) = bounded(1);
         let table_root_url = Url::from_str("memory:").unwrap();
-        let option = Arc::new(DbOption::build(&temp_dir.path(), table_root_url));
+        let option = Arc::new(
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
+        );
 
         let version_set: VersionSet<String, TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone())

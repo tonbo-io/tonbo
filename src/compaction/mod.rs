@@ -488,7 +488,7 @@ pub(crate) mod tests {
         tests::Test,
         timestamp::Timestamp,
         trigger::TriggerFactory,
-        version::{edit::VersionEdit, Version, MAX_LEVEL},
+        version::{edit::VersionEdit, Version},
         wal::log::LogType,
         DbError, DbOption,
     };
@@ -536,13 +536,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let path_buf = temp_dir.path().to_path_buf();
         let table_root_url = Url::from_str("memory:").unwrap();
-        let option = DbOption::build(path_buf, table_root_url.clone());
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
-        let store_manager = Arc::new(StoreManager::new(&vec![table_root_url; MAX_LEVEL]).unwrap());
+        let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
         let batch_1 = build_immutable::<Test, TokioExecutor>(
             &option,
@@ -635,7 +636,9 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
 
-        let mut option = DbOption::build(&temp_dir.path(), table_root_url);
+        let mut option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url);
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
         let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());

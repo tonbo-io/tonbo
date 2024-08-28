@@ -31,7 +31,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! use std::{ops::Bound, str::FromStr};
+//! use std::{ops::Bound, path::PathBuf, str::FromStr};
 //!
 //! use futures_util::stream::StreamExt;
 //! use tonbo::{executor::tokio::TokioExecutor, tonbo_record, DbOption, Projection, DB};
@@ -49,7 +49,9 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let option = DbOption::build("./db_path/users", Url::from_str("memory:").unwrap());
+//!     let option = DbOption::try_from(PathBuf::from("./db_path/users"))
+//!         .unwrap()
+//!         .all_level_url(Url::from_str("memory:").unwrap());
 //!     // pluggable async runtime and I/O
 //!     let db = DB::new(option, TokioExecutor::default()).await.unwrap();
 //!
@@ -660,13 +662,15 @@ where
     #[error("write object_store error: {0}")]
     ObjectStore(#[from] object_store::Error),
     #[error("write store manager error: {0}")]
-    StoreManagerError(#[from] StoreManagerError),
+    StoreManager(#[from] StoreManagerError),
     // #[error("write encode error: {0}")]
     // Encode(<<R as Record>::Ref as Encode>::Error),
     #[error("write recover error: {0}")]
     Recover(#[from] RecoverError<<R as Decode>::Error>),
     #[error("wal write error: {0}")]
     WalWrite(Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error("url: {0} parse fail")]
+    UrlParse(String),
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
@@ -1320,7 +1324,9 @@ pub(crate) mod tests {
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
-        let mut option = DbOption::build(&temp_dir.path(), table_root_url);
+        let mut option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url);
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1353,7 +1359,9 @@ pub(crate) mod tests {
     async fn schema_recover() {
         let temp_dir = TempDir::new().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
-        let option = Arc::new(DbOption::build(&temp_dir.path(), table_root_url));
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

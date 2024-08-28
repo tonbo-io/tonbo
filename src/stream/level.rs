@@ -178,7 +178,11 @@ mod tests {
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
-        let option = Arc::new(DbOption::build(&temp_dir.path(), table_root_url));
+        let option = Arc::new(
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
+        );
         let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
         let (_, version) = build_version(&option, &store_manager).await;

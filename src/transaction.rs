@@ -263,7 +263,9 @@ mod tests {
         let table_root_url = Url::from_str("memory:").unwrap();
 
         let db = DB::<String, TokioExecutor>::new(
-            DbOption::build(&temp_dir.path(), table_root_url),
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
             TokioExecutor::new(),
         )
         .await
@@ -300,7 +302,9 @@ mod tests {
         let table_root_url = Url::from_str("memory:").unwrap();
 
         let db = DB::<String, TokioExecutor>::new(
-            DbOption::build(&temp_dir.path(), table_root_url),
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
             TokioExecutor::new(),
         )
         .await
@@ -336,7 +340,9 @@ mod tests {
         let table_root_url = Url::from_str("memory:").unwrap();
 
         let db = DB::<Test, TokioExecutor>::new(
-            DbOption::build(&temp_dir.path(), table_root_url),
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
             TokioExecutor::new(),
         )
         .await
@@ -365,7 +371,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
 
-        let option = Arc::new(DbOption::build(&temp_dir.path(), table_root_url));
+        let option = Arc::new(
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
+        );
         let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
         let (_, version) = build_version(&option, &store_manager).await;
@@ -448,7 +458,11 @@ mod tests {
     async fn test_transaction_scan_bound() {
         let temp_dir = TempDir::new().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
-        let option = Arc::new(DbOption::build(&temp_dir.path(), table_root_url));
+        let option = Arc::new(
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
+        );
         let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
         let (_, version) = build_version(&option, &store_manager).await;

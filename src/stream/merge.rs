@@ -150,7 +150,9 @@ mod tests {
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
-        let option = DbOption::build(&temp_dir.path(), table_root_url);
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -251,7 +253,9 @@ mod tests {
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
-        let option = DbOption::build(&temp_dir.path(), table_root_url);
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

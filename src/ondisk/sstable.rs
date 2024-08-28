@@ -96,7 +96,7 @@ pub(crate) mod tests {
 
     use arrow::array::RecordBatch;
     use futures_util::StreamExt;
-    use object_store::{buffered::BufWriter, local::LocalFileSystem, path::Path, ObjectStore};
+    use object_store::{buffered::BufWriter, memory::InMemory, path::Path, ObjectStore};
     use parquet::{
         arrow::{arrow_to_parquet_schema, AsyncArrowWriter, ProjectionMask},
         errors::ParquetError,
@@ -134,12 +134,13 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::build(&temp_dir.path(), table_root_url),
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
             TokioExecutor::new(),
         )
         .await;
-        let store = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).unwrap())
-            as Arc<dyn ObjectStore>;
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
         let table_path = Path::from("write_test.parquet");
         write_parquet(&record_batch, &store, table_path.clone())
             .await
@@ -167,12 +168,13 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::build(&temp_dir.path(), table_root_url),
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
             TokioExecutor::new(),
         )
         .await;
-        let store = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).unwrap())
-            as Arc<dyn ObjectStore>;
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
         let table_path = Path::from("projection_query_test.parquet");
         write_parquet(&record_batch, &store, table_path.clone())
             .await
@@ -244,12 +246,13 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let table_root_url = Url::from_str("memory:").unwrap();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::build(&temp_dir.path(), table_root_url),
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url),
             TokioExecutor::new(),
         )
         .await;
-        let store = Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path()).unwrap())
-            as Arc<dyn ObjectStore>;
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
         let table_path = Path::from("projection_scan_test.parquet");
 
         write_parquet(&record_batch, &store, table_path.clone())

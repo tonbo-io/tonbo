@@ -37,17 +37,21 @@ pub struct DbOption<R> {
     _p: PhantomData<R>,
 }
 
-impl<R> DbOption<R>
+impl<R> TryFrom<PathBuf> for DbOption<R>
 where
     R: Record,
 {
-    pub fn build<P: Into<PathBuf>>(wal_path: P, table_base_url: Url) -> Self {
-        let (column_paths, sorting_columns) = R::primary_key_path();
-        let wal_path = wal_path.into();
+    type Error = DbError<R>;
 
-        DbOption {
-            wal_path,
-            table_urls: vec![table_base_url; MAX_LEVEL],
+    /// build the default configured [`DbOption`] based on the passed path
+    fn try_from(base_path: PathBuf) -> Result<Self, Self::Error> {
+        let (column_paths, sorting_columns) = R::primary_key_path();
+        let table_url = Url::from_directory_path(&base_path)
+            .map_err(|_| DbError::UrlParse(base_path.to_string_lossy().to_string()))?;
+
+        Ok(DbOption {
+            wal_path: base_path,
+            table_urls: vec![table_url; MAX_LEVEL],
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
@@ -67,9 +71,14 @@ where
             major_l_selection_table_max_num: 4,
             trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
             _p: Default::default(),
-        }
+        })
     }
+}
 
+impl<R> DbOption<R>
+where
+    R: Record,
+{
     /// build the [`DB`](crate::DB) storage directory based on the passed path
     pub fn path(self, path: impl Into<PathBuf>) -> Self {
         DbOption {
@@ -84,6 +93,13 @@ where
         }
         self.table_urls[level] = url;
         Ok(self)
+    }
+
+    pub fn all_level_url(mut self, url: Url) -> Self {
+        for table_url in self.table_urls.iter_mut() {
+            *table_url = url.clone();
+        }
+        self
     }
 
     /// len threshold of `immutables` when minor compaction is triggered
