@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_lock::RwLockReadGuard;
+use flume::SendError;
 use lockable::AsyncLimit;
 use parquet::errors::ParquetError;
 use thiserror::Error;
@@ -227,6 +228,10 @@ where
     Database(#[from] DbError<R>),
     #[error("transaction write conflict: {:?}", .0)]
     WriteConflict(R::Key),
+    #[error("Failed to send compact task")]
+    SendCompactTaskError(#[from] SendError<CompactTask>),
+    #[error("Channel is closed")]
+    ChannelClose,
 }
 
 #[cfg(test)]

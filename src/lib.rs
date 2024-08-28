@@ -145,6 +145,7 @@ use parquet::{
 use record::Record;
 use thiserror::Error;
 use timestamp::Timestamp;
+use tokio::sync::oneshot;
 pub use tonbo_macros::{tonbo_record, KeyAttributes};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
@@ -209,9 +210,14 @@ where
             while let Ok(task) = task_rx.recv_async().await {
                 match task {
                     CompactTask::Freeze => {
-                        if let Err(err) = compactor.check_then_compaction().await {
+                        if let Err(err) = compactor.check_then_compaction(None).await {
                             // todo!();
                             error!("[Compaction Error]: {}", err)
+                        }
+                    }
+                    CompactTask::Flush(option_tx) => {
+                        if let Err(err) = compactor.check_then_compaction(option_tx).await {
+                            error!("[Compactor][compaction][error happen]: {:?}", err);
                         }
                     }
                 }
@@ -260,6 +266,19 @@ where
             .await
             .remove(LogType::Full, key, self.version_set.transaction_ts())
             .await?)
+    }
+
+    async fn flush(&self) -> Result<(), CommitError<R>> {
+        let (tx, rx) = oneshot::channel();
+        self.schema
+            .read()
+            .await
+            .compaction_tx
+            .send(CompactTask::Flush(Some(tx)))?;
+
+        rx.await.map_err(|_| CommitError::ChannelClose)?;
+
+        Ok(())
     }
 
     /// get the record with `key` as the primary key and process it using closure `f`
@@ -1062,8 +1081,13 @@ pub(crate) mod tests {
             while let Ok(task) = compaction_rx.recv_async().await {
                 match task {
                     CompactTask::Freeze => {
-                        if let Err(err) = compactor.check_then_compaction().await {
+                        if let Err(err) = compactor.check_then_compaction(None).await {
                             error!("[Compaction Error]: {}", err)
+                        }
+                    }
+                    CompactTask::Flush(option_tx) => {
+                        if let Err(err) = compactor.check_then_compaction(option_tx).await {
+                            error!("[Compaction Error]: {}", err);
                         }
                     }
                 }
