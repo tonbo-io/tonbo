@@ -1,21 +1,28 @@
-use std::{marker::PhantomData, path::PathBuf};
+use std::{marker::PhantomData, path::PathBuf, sync::Arc};
 
+use object_store::ObjectStore;
 use parquet::{
     basic::Compression,
     file::properties::{EnabledStatistics, WriterProperties},
 };
+use url::Url;
 
 use crate::{
-    fs::{FileId, FileProvider, FileType},
+    fs::{
+        store_manager::{StoreManager, StoreManagerError},
+        FileId, FileProvider, FileType,
+    },
     record::Record,
     trigger::TriggerType,
-    version::Version,
+    version::{Version, MAX_LEVEL},
+    DbError,
 };
 
 /// configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Debug, Clone)]
 pub struct DbOption<R> {
-    pub(crate) path: PathBuf,
+    pub(crate) wal_path: PathBuf,
+    pub(crate) table_urls: Vec<Url>,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,
     pub(crate) major_threshold_with_sst_size: usize,
@@ -30,16 +37,17 @@ pub struct DbOption<R> {
     _p: PhantomData<R>,
 }
 
-impl<R, P> From<P> for DbOption<R>
+impl<R> DbOption<R>
 where
-    P: Into<PathBuf>,
     R: Record,
 {
-    /// build the default configured [`DbOption`] based on the passed path
-    fn from(path: P) -> Self {
+    pub fn build<P: Into<PathBuf>>(wal_path: P, table_base_url: Url) -> Self {
         let (column_paths, sorting_columns) = R::primary_key_path();
+        let wal_path = wal_path.into();
+
         DbOption {
-            path: path.into(),
+            wal_path,
+            table_urls: vec![table_base_url; MAX_LEVEL],
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
@@ -61,18 +69,21 @@ where
             _p: Default::default(),
         }
     }
-}
 
-impl<R> DbOption<R>
-where
-    R: Record,
-{
     /// build the [`DB`](crate::DB) storage directory based on the passed path
     pub fn path(self, path: impl Into<PathBuf>) -> Self {
         DbOption {
-            path: path.into(),
+            wal_path: path.into(),
             ..self
         }
+    }
+
+    pub fn level_url(mut self, level: usize, url: Url) -> Result<Self, DbError<R>> {
+        if level >= MAX_LEVEL {
+            Err(StoreManagerError::ExceedsMaxLevel)?;
+        }
+        self.table_urls[level] = url;
+        Ok(self)
     }
 
     /// len threshold of `immutables` when minor compaction is triggered
@@ -147,12 +158,25 @@ impl<R> DbOption<R>
 where
     R: Record,
 {
-    pub(crate) fn table_path(&self, gen: &FileId) -> PathBuf {
-        self.path.join(format!("{}.{}", gen, FileType::Parquet))
+    pub(crate) fn level_store<'a>(
+        &'a self,
+        level: usize,
+        store_manager: &'a StoreManager,
+    ) -> Result<&'a Arc<dyn ObjectStore>, StoreManagerError> {
+        if level >= MAX_LEVEL {
+            return Err(StoreManagerError::ExceedsMaxLevel);
+        }
+        store_manager
+            .get(&self.table_urls[level])
+            .ok_or(StoreManagerError::StoreNotFound(level))
+    }
+
+    pub(crate) fn table_path(&self, gen: &FileId) -> object_store::path::Path {
+        object_store::path::Path::from(format!("{}.{}", gen, FileType::Parquet))
     }
 
     pub(crate) fn wal_dir_path(&self) -> PathBuf {
-        self.path.join("wal")
+        self.wal_path.join("wal")
     }
 
     pub(crate) fn wal_path(&self, gen: &FileId) -> PathBuf {
@@ -161,7 +185,7 @@ where
     }
 
     pub(crate) fn version_path(&self) -> PathBuf {
-        self.path.join(format!("version.{}", FileType::Log))
+        self.wal_path.join(format!("version.{}", FileType::Log))
     }
 
     pub(crate) fn is_threshold_exceeded_major<E>(

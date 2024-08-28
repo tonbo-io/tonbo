@@ -1,17 +1,20 @@
 use std::{
     collections::{Bound, VecDeque},
     future::Future,
-    io,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
 use futures_core::Stream;
-use parquet::{arrow::ProjectionMask, errors::ParquetError};
+use object_store::ObjectStore;
+use parquet::{
+    arrow::{async_reader::ParquetObjectReader, ProjectionMask},
+    errors::ParquetError,
+};
 
 use crate::{
-    fs::{FileId, FileProvider},
+    fs::{build_reader, FileId, FileProvider},
     ondisk::{scan::SsTableScan, sstable::SsTable},
     record::Record,
     scope::Scope,
@@ -21,29 +24,29 @@ use crate::{
     DbOption,
 };
 
-enum FutureStatus<'level, R, FP>
+enum FutureStatus<'level, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     Init(FileId),
-    Ready(SsTableScan<'level, R, FP>),
-    OpenFile(Pin<Box<dyn Future<Output = io::Result<FP::File>> + Send + 'level>>),
-    LoadStream(
+    Ready(SsTableScan<'level, R>),
+    OpenFile(
         Pin<
             Box<
-                dyn Future<Output = Result<SsTableScan<'level, R, FP>, ParquetError>>
+                dyn Future<Output = Result<ParquetObjectReader, object_store::Error>>
                     + Send
                     + 'level,
             >,
         >,
     ),
+    LoadStream(
+        Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
+    ),
 }
 
-pub(crate) struct LevelStream<'level, R, FP>
+pub(crate) struct LevelStream<'level, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     lower: Bound<&'level R::Key>,
     upper: Bound<&'level R::Key>,
@@ -52,18 +55,19 @@ where
     gens: VecDeque<FileId>,
     limit: Option<usize>,
     projection_mask: ProjectionMask,
-    status: FutureStatus<'level, R, FP>,
+    status: FutureStatus<'level, R>,
+    store: Arc<dyn ObjectStore>,
 }
 
-impl<'level, R, FP> LevelStream<'level, R, FP>
+impl<'level, R> LevelStream<'level, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     // Kould: only used by Compaction now, and the start and end of the sstables range are known
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) fn new<FP: FileProvider>(
         version: &Version<R, FP>,
+        store: Arc<dyn ObjectStore>,
         level: usize,
         start: usize,
         end: usize,
@@ -89,14 +93,14 @@ where
             limit,
             projection_mask,
             status,
+            store,
         })
     }
 }
 
-impl<'level, R, FP> Stream for LevelStream<'level, R, FP>
+impl<'level, R> Stream for LevelStream<'level, R>
 where
     R: Record,
-    FP: FileProvider + 'level,
 {
     type Item = Result<RecordBatchEntry<R>, ParquetError>;
 
@@ -105,17 +109,19 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.status =
-                        FutureStatus::OpenFile(Box::pin(FP::open(self.option.table_path(&gen))));
+                    let reader = build_reader(self.store.clone(), self.option.table_path(&gen));
+
+                    self.status = FutureStatus::OpenFile(Box::pin(reader));
                     continue;
                 }
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.status = FutureStatus::OpenFile(Box::pin(FP::open(
-                                self.option.table_path(&gen),
-                            )));
+                            let reader =
+                                build_reader(self.store.clone(), self.option.table_path(&gen));
+
+                            self.status = FutureStatus::OpenFile(Box::pin(reader));
                             continue;
                         }
                     },
@@ -127,14 +133,15 @@ where
                     }
                     Poll::Pending => Poll::Pending,
                 },
-                FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
-                    Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::LoadStream(Box::pin(SsTable::open(file).scan(
-                            (self.lower, self.upper),
-                            self.ts,
-                            self.limit,
-                            self.projection_mask.clone(),
-                        )));
+                FutureStatus::OpenFile(reader_future) => match Pin::new(reader_future).poll(cx) {
+                    Poll::Ready(Ok(reader)) => {
+                        self.status =
+                            FutureStatus::LoadStream(Box::pin(SsTable::open(reader).scan(
+                                (self.lower, self.upper),
+                                self.ts,
+                                self.limit,
+                                self.projection_mask.clone(),
+                            )));
                         continue;
                     }
                     Poll::Ready(Err(err)) => Poll::Ready(Some(Err(ParquetError::from(err)))),
@@ -155,27 +162,32 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::Bound, sync::Arc};
+    use std::{collections::Bound, str::FromStr, sync::Arc};
 
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
+    use url::Url;
 
     use crate::{
-        compaction::tests::build_version, record::Record, stream::level::LevelStream, tests::Test,
-        DbOption,
+        compaction::tests::build_version, fs::store_manager::StoreManager, record::Record,
+        stream::level::LevelStream, tests::Test, DbOption,
     };
 
     #[tokio::test]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = Arc::new(DbOption::build(&temp_dir.path(), table_root_url));
+        let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
-        let (_, version) = build_version(&option).await;
+        let (_, version) = build_version(&option, &store_manager).await;
+        let level_0_store = store_manager.get(&option.table_urls[0]).unwrap();
 
         {
             let mut level_stream_1 = LevelStream::new(
                 &version,
+                level_0_store.clone(),
                 0,
                 0,
                 1,
@@ -211,6 +223,7 @@ mod tests {
         {
             let mut level_stream_1 = LevelStream::new(
                 &version,
+                level_0_store.clone(),
                 0,
                 0,
                 1,
@@ -246,6 +259,7 @@ mod tests {
         {
             let mut level_stream_1 = LevelStream::new(
                 &version,
+                level_0_store.clone(),
                 0,
                 0,
                 1,

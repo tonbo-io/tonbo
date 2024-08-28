@@ -1,7 +1,8 @@
-use std::ops::Bound;
+use std::{ops::Bound, str::FromStr};
 
 use futures_util::stream::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
+use tonbo::{executor::tokio::TokioExecutor, tonbo_record, DbOption, Projection, DB};
+use url::Url;
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
@@ -15,10 +16,9 @@ pub struct User {
 
 #[tokio::main]
 async fn main() {
+    let option = DbOption::build("./db_path/users", Url::from_str("memory:").unwrap());
     // pluggable async runtime and I/O
-    let db = DB::new("./db_path/users".into(), TokioExecutor::default())
-        .await
-        .unwrap();
+    let db = DB::new(option, TokioExecutor::default()).await.unwrap();
 
     // insert with owned value
     db.insert(User {

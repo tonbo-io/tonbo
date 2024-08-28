@@ -53,10 +53,11 @@ pub struct User {
 
 #[tokio::main]
 async fn main() {
-    // pluggable async runtime and I/O
-    let db = DB::new("./db_path/users".into(), TokioExecutor::default())
-        .await
-        .unwrap();
+  let option = DbOption::build("./db_path/users", Url::from_str("memory:").unwrap());
+  // pluggable async runtime and I/O
+  let db = DB::new(option, TokioExecutor::default())
+          .await
+          .unwrap();
 
     // insert with owned value
     db.insert(User {

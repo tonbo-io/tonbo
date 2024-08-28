@@ -7,34 +7,31 @@ use futures_core::Stream;
 use pin_project_lite::pin_project;
 
 use crate::{
-    fs::FileProvider,
     inmem::immutable::{ArrowArrays, Builder},
     record::Record,
     stream::merge::MergeStream,
 };
 
 pin_project! {
-    pub struct PackageStream<'package, R, FP>
+    pub struct PackageStream<'package, R>
     where
         R: Record,
-        FP: FileProvider,
     {
         row_count: usize,
         batch_size: usize,
-        inner: MergeStream<'package, R, FP>,
+        inner: MergeStream<'package, R>,
         builder: <R::Columns as ArrowArrays>::Builder,
         projection_indices: Option<Vec<usize>>,
     }
 }
 
-impl<'package, R, FP> PackageStream<'package, R, FP>
+impl<'package, R> PackageStream<'package, R>
 where
     R: Record,
-    FP: FileProvider + 'package,
 {
     pub(crate) fn new(
         batch_size: usize,
-        merge: MergeStream<'package, R, FP>,
+        merge: MergeStream<'package, R>,
         projection_indices: Option<Vec<usize>>,
     ) -> Self {
         Self {
@@ -47,10 +44,9 @@ where
     }
 }
 
-impl<'package, R, FP> Stream for PackageStream<'package, R, FP>
+impl<'package, R> Stream for PackageStream<'package, R>
 where
     R: Record,
-    FP: FileProvider + 'package,
 {
     type Item = Result<R::Columns, parquet::errors::ParquetError>;
 
@@ -82,11 +78,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::Bound, sync::Arc};
+    use std::{collections::Bound, str::FromStr, sync::Arc};
 
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array};
     use futures_util::StreamExt;
     use tempfile::TempDir;
+    use url::Url;
 
     use crate::{
         executor::tokio::TokioExecutor,
@@ -106,7 +103,8 @@ mod tests {
     #[tokio::test]
     async fn iter() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from(temp_dir.path());
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = DbOption::build(&temp_dir.path(), table_root_url);
         TokioExecutor::create_dir_all(option.wal_dir_path())
             .await
             .unwrap();
@@ -183,7 +181,7 @@ mod tests {
         .await
         .unwrap();
 
-        let merge = MergeStream::<Test, TokioExecutor>::from_vec(
+        let merge = MergeStream::<Test>::from_vec(
             vec![m1
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into()],
