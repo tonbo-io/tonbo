@@ -23,6 +23,11 @@ rocksdb = ["dep:rocksdb"]
 sled = ["dep:sled"]
 tokio = ["tokio/fs"]
 
+store_aws = ["object_store/aws"]
+store_azure = ["object_store/azure"]
+store_http = ["object_store/http"]
+store_gcp = ["object_store/gcp"]
+
 [[example]]
 name = "declare"
 required-features = ["tokio"]
