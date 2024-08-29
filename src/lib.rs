@@ -208,18 +208,13 @@ where
         });
         executor.spawn(async move {
             while let Ok(task) = task_rx.recv_async().await {
-                match task {
-                    CompactTask::Freeze => {
-                        if let Err(err) = compactor.check_then_compaction(None).await {
-                            // todo!();
-                            error!("[Compaction Error]: {}", err)
-                        }
-                    }
+                if let Err(err) = match task {
+                    CompactTask::Freeze => compactor.check_then_compaction(None).await,
                     CompactTask::Flush(option_tx) => {
-                        if let Err(err) = compactor.check_then_compaction(option_tx).await {
-                            error!("[Compactor][compaction][error happen]: {:?}", err);
-                        }
+                        compactor.check_then_compaction(option_tx).await
                     }
+                } {
+                    error!("[Compaction Error]: {}", err)
                 }
             }
         });
@@ -268,7 +263,7 @@ where
             .await?)
     }
 
-    async fn flush(&self) -> Result<(), CommitError<R>> {
+    pub async fn flush(&self) -> Result<(), CommitError<R>> {
         let (tx, rx) = oneshot::channel();
         self.schema
             .read()
@@ -1079,17 +1074,13 @@ pub(crate) mod tests {
         });
         executor.spawn(async move {
             while let Ok(task) = compaction_rx.recv_async().await {
-                match task {
-                    CompactTask::Freeze => {
-                        if let Err(err) = compactor.check_then_compaction(None).await {
-                            error!("[Compaction Error]: {}", err)
-                        }
-                    }
+                if let Err(err) = match task {
+                    CompactTask::Freeze => compactor.check_then_compaction(None).await,
                     CompactTask::Flush(option_tx) => {
-                        if let Err(err) = compactor.check_then_compaction(option_tx).await {
-                            error!("[Compaction Error]: {}", err);
-                        }
+                        compactor.check_then_compaction(option_tx).await
                     }
+                } {
+                    error!("[Compaction Error]: {}", err)
                 }
             }
         });
@@ -1338,6 +1329,33 @@ pub(crate) mod tests {
         assert_eq!(option1.get().vstring, "20");
         assert_eq!(option1.get().vu32, Some(0));
         assert_eq!(option1.get().vbool, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_flush() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::from(temp_dir.path());
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.level_sst_magnification = 10;
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+
+        for item in &test_items()[0..10] {
+            db.write(item.clone(), 0.into()).await.unwrap();
+        }
+
+        dbg!(db.version_set.current().await);
+        db.flush().await.unwrap();
+        dbg!(db.version_set.current().await);
+
+        let version = db.version_set.current().await;
+        assert!(!version.level_slice[0].is_empty());
     }
 
     #[tokio::test]
