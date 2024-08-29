@@ -57,7 +57,6 @@ where
 
     pub(crate) async fn check_then_compaction(
         &mut self,
-        // TODO
         option_tx: Option<oneshot::Sender<()>>,
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
@@ -111,7 +110,6 @@ where
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
-        // TODO
         if let Some(tx) = option_tx {
             tx.send(()).map_err(|_| CommitError::ChannelClose)?
         }
