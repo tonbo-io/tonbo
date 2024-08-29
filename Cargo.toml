@@ -16,7 +16,7 @@ msrv = "1.79.0"
 [features]
 bench = ["redb", "rocksdb", "sled"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
-default = ["tokio"]
+default = ["tokio", "store_aws"]
 load_tbl = []
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]

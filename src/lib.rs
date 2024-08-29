@@ -51,7 +51,7 @@
 //! async fn main() {
 //!     let option = DbOption::try_from(PathBuf::from("./db_path/users"))
 //!         .unwrap()
-//!         .all_level_url(Url::from_str("memory:").unwrap());
+//!         .all_level_url(Url::from_str("memory:").unwrap(), None);
 //!     // pluggable async runtime and I/O
 //!     let db = DB::new(option, TokioExecutor::default()).await.unwrap();
 //!
@@ -1326,7 +1326,7 @@ pub(crate) mod tests {
         let table_root_url = Url::from_str("memory:").unwrap();
         let mut option = DbOption::try_from(temp_dir.into_path())
             .unwrap()
-            .all_level_url(table_root_url);
+            .all_level_url(table_root_url, None);
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1361,7 +1361,7 @@ pub(crate) mod tests {
         let table_root_url = Url::from_str("memory:").unwrap();
         let option = DbOption::try_from(temp_dir.into_path())
             .unwrap()
-            .all_level_url(table_root_url);
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

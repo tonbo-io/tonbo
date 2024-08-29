@@ -1,22 +1,26 @@
 use std::{collections::HashMap, sync::Arc};
 
-use object_store::{parse_url, path::Path, ObjectStore};
+use object_store::{parse_url, ObjectStore};
 use thiserror::Error;
 use url::Url;
 
 pub struct StoreManager {
-    stores: HashMap<Url, (Arc<dyn ObjectStore>, Path)>,
+    stores: HashMap<Url, Arc<dyn ObjectStore>>,
 }
 
 impl StoreManager {
-    pub fn new(urls: &[Url]) -> Result<Self, object_store::Error> {
+    pub fn new(urls: &[(Url, Option<Arc<dyn ObjectStore>>)]) -> Result<Self, object_store::Error> {
         let mut stores = HashMap::with_capacity(urls.len());
 
-        for url in urls {
+        for (url, default_store) in urls {
             if !stores.contains_key(url) {
-                let (store, path) = parse_url(url)?;
+                let store = if let Some(store) = default_store.clone() {
+                    store
+                } else {
+                    parse_url(url).map(|(store, _)| Arc::from(store))?
+                };
 
-                stores.insert(url.clone(), (Arc::from(store), path));
+                stores.insert(url.clone(), store);
             }
         }
 
@@ -24,7 +28,7 @@ impl StoreManager {
     }
 
     pub fn get(&self, url: &Url) -> Option<&Arc<dyn ObjectStore>> {
-        self.stores.get(url).map(|(store, _)| store)
+        self.stores.get(url)
     }
 }
 

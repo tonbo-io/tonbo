@@ -56,7 +56,7 @@ pub struct User {
 async fn main() {
   let option = DbOption::try_from(PathBuf::from("./db_path/users"))
           .unwrap()
-          .all_level_url(Url::from_str("memory:").unwrap());
+          .all_level_url(Url::from_str("memory:").unwrap(), None);
   
   // pluggable async runtime and I/O
   let db = DB::new(option, TokioExecutor::default())

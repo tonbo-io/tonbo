@@ -181,12 +181,12 @@ mod tests {
         let option = Arc::new(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
         );
         let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
         let (_, version) = build_version(&option, &store_manager).await;
-        let level_0_store = store_manager.get(&option.table_urls[0]).unwrap();
+        let level_0_store = store_manager.get(&option.table_urls[0].0).unwrap();
 
         {
             let mut level_stream_1 = LevelStream::new(

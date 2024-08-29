@@ -136,7 +136,7 @@ pub(crate) mod tests {
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
             TokioExecutor::new(),
         )
         .await;
@@ -170,7 +170,7 @@ pub(crate) mod tests {
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
             TokioExecutor::new(),
         )
         .await;
@@ -248,7 +248,7 @@ pub(crate) mod tests {
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
             TokioExecutor::new(),
         )
         .await;

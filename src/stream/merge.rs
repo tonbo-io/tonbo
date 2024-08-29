@@ -152,7 +152,7 @@ mod tests {
         let table_root_url = Url::from_str("memory:").unwrap();
         let option = DbOption::try_from(temp_dir.into_path())
             .unwrap()
-            .all_level_url(table_root_url);
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -255,7 +255,7 @@ mod tests {
         let table_root_url = Url::from_str("memory:").unwrap();
         let option = DbOption::try_from(temp_dir.into_path())
             .unwrap()
-            .all_level_url(table_root_url);
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

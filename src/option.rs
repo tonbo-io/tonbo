@@ -22,7 +22,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct DbOption<R> {
     pub(crate) wal_path: PathBuf,
-    pub(crate) table_urls: Vec<Url>,
+    pub(crate) table_urls: Vec<(Url, Option<Arc<dyn ObjectStore>>)>,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,
     pub(crate) major_threshold_with_sst_size: usize,
@@ -51,7 +51,7 @@ where
 
         Ok(DbOption {
             wal_path: base_path,
-            table_urls: vec![table_url; MAX_LEVEL],
+            table_urls: vec![(table_url, None); MAX_LEVEL],
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
@@ -87,17 +87,22 @@ where
         }
     }
 
-    pub fn level_url(mut self, level: usize, url: Url) -> Result<Self, DbError<R>> {
+    pub fn level_url(
+        mut self,
+        level: usize,
+        url: Url,
+        store: Option<Arc<dyn ObjectStore>>,
+    ) -> Result<Self, DbError<R>> {
         if level >= MAX_LEVEL {
             Err(StoreManagerError::ExceedsMaxLevel)?;
         }
-        self.table_urls[level] = url;
+        self.table_urls[level] = (url, store);
         Ok(self)
     }
 
-    pub fn all_level_url(mut self, url: Url) -> Self {
+    pub fn all_level_url(mut self, url: Url, store: Option<Arc<dyn ObjectStore>>) -> Self {
         for table_url in self.table_urls.iter_mut() {
-            *table_url = url.clone();
+            *table_url = (url.clone(), store.clone());
         }
         self
     }
@@ -182,8 +187,13 @@ where
         if level >= MAX_LEVEL {
             return Err(StoreManagerError::ExceedsMaxLevel);
         }
+        let (url, default_store) = &self.table_urls[level];
+
+        if let Some(store) = default_store {
+            return Ok(store);
+        }
         store_manager
-            .get(&self.table_urls[level])
+            .get(url)
             .ok_or(StoreManagerError::StoreNotFound(level))
     }
 

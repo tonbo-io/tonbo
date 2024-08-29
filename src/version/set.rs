@@ -211,7 +211,7 @@ pub(crate) mod tests {
         let option = Arc::new(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
         );
 
         let version_set: VersionSet<String, TokioExecutor> =

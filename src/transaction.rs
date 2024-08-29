@@ -265,7 +265,7 @@ mod tests {
         let db = DB::<String, TokioExecutor>::new(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
             TokioExecutor::new(),
         )
         .await
@@ -304,7 +304,7 @@ mod tests {
         let db = DB::<String, TokioExecutor>::new(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
             TokioExecutor::new(),
         )
         .await
@@ -342,7 +342,7 @@ mod tests {
         let db = DB::<Test, TokioExecutor>::new(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
             TokioExecutor::new(),
         )
         .await
@@ -374,7 +374,7 @@ mod tests {
         let option = Arc::new(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
         );
         let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
@@ -461,7 +461,7 @@ mod tests {
         let option = Arc::new(
             DbOption::try_from(temp_dir.into_path())
                 .unwrap()
-                .all_level_url(table_root_url),
+                .all_level_url(table_root_url, None),
         );
         let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
