@@ -39,7 +39,7 @@ impl From<u8> for LogType {
 
 impl<Re> Encode for Log<Re>
 where
-    Re: Encode,
+    Re: Encode + Sync,
 {
     type Error = Re::Error;
 

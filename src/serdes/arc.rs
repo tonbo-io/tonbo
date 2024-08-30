@@ -20,7 +20,7 @@ where
 
 impl<T> Encode for Arc<T>
 where
-    T: Encode,
+    T: Encode + Send + Sync,
 {
     type Error = T::Error;
 
