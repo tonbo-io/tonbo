@@ -4,6 +4,7 @@ use async_lock::RwLock;
 use futures_util::StreamExt;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use thiserror::Error;
+use tokio::sync::oneshot;
 use ulid::Ulid;
 
 use crate::{
@@ -16,13 +17,15 @@ use crate::{
     record::{KeyRef, Record},
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
+    transaction::CommitError,
     version::{edit::VersionEdit, set::VersionSet, Version, VersionError, MAX_LEVEL},
     DbOption, Schema,
 };
 
 #[derive(Debug)]
-pub(crate) enum CompactTask {
+pub enum CompactTask {
     Freeze,
+    Flush(Option<oneshot::Sender<()>>),
 }
 
 pub(crate) struct Compactor<R, FP>
@@ -54,8 +57,7 @@ where
 
     pub(crate) async fn check_then_compaction(
         &mut self,
-        // TODO
-        // option_tx: Option<oneshot::Sender<()>>,
+        option_tx: Option<oneshot::Sender<()>>,
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
@@ -108,10 +110,9 @@ where
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
-        // TODO
-        // if let Some(tx) = option_tx {
-        //     let _ = tx.send(());
-        // }
+        if let Some(tx) = option_tx {
+            tx.send(()).map_err(|_| CommitError::ChannelClose)?
+        }
         Ok(())
     }
 
@@ -437,6 +438,8 @@ where
     Parquet(#[from] parquet::errors::ParquetError),
     #[error("compaction version error: {0}")]
     Version(#[from] VersionError<R>),
+    #[error("database error: {0}")]
+    Commit(#[from] CommitError<R>),
     #[error("the level being compacted does not have a table")]
     EmptyLevel,
 }
