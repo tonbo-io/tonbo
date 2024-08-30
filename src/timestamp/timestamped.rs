@@ -144,7 +144,7 @@ where
 
 impl<V> Encode for Timestamped<V>
 where
-    V: Encode,
+    V: Encode + Sync,
 {
     type Error = V::Error;
 

@@ -19,7 +19,7 @@ pub trait Key:
     fn to_arrow_datum(&self) -> impl Datum;
 }
 
-pub trait KeyRef<'r>: Clone + Encode + Ord + std::fmt::Debug {
+pub trait KeyRef<'r>: Clone + Encode + Send + Sync + Ord + std::fmt::Debug {
     type Key: Key<Ref<'r> = Self>;
 
     fn to_key(self) -> Self::Key;

@@ -31,7 +31,7 @@ where
 
 impl<V> Encode for Option<V>
 where
-    V: Encode,
+    V: Encode + Sync,
 {
     type Error = EncodeError<V::Error>;
 

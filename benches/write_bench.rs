@@ -9,8 +9,8 @@ use std::{
 };
 
 use common::*;
-use futures_util::{future::join_all, StreamExt};
-use tempfile::{NamedTempFile, TempDir};
+use futures_util::future::join_all;
+use tempfile::TempDir;
 
 const WRITE_TIMES: usize = 500_000;
 const WRITE_BATCH_TIMES: usize = 5000;

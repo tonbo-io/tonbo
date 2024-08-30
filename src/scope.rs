@@ -47,7 +47,7 @@ where
 
 impl<K> Encode for Scope<K>
 where
-    K: Encode,
+    K: Encode + Sync,
 {
     type Error = <K as Encode>::Error;
 
