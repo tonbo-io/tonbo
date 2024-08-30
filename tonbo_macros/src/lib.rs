@@ -26,7 +26,7 @@ enum DataType {
 ///
 /// # Example
 ///
-/// ```
+/// ```no_run
 /// use tonbo::tonbo_record;
 ///
 /// #[tonbo_record(::serde::Serialize, ::serde::Deserialize)]
