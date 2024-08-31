@@ -22,6 +22,7 @@ pin_project! {
         peeked: BinaryHeap<CmpEntry<'merge, R>>,
         buf: Option<Entry<'merge, R>>,
         ts: Timestamp,
+        limit: Option<usize>,
     }
 }
 
@@ -47,10 +48,19 @@ where
             peeked,
             buf: None,
             ts,
+            limit: None,
         };
         merge_stream.next().await;
 
         Ok(merge_stream)
+    }
+
+    /// limit for the stream
+    pub(crate) fn limit(self, limit: usize) -> Self {
+        Self {
+            limit: Some(limit),
+            ..self
+        }
     }
 }
 
@@ -64,6 +74,11 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         let ts = this.ts;
+        if let Some(limit) = this.limit.as_ref() {
+            if *limit == 0 {
+                return Poll::Ready(None);
+            }
+        }
         while let Some(offset) = this.peeked.peek().map(|entry| entry.offset) {
             let next = ready!(Pin::new(&mut this.streams[offset]).poll_next(cx)).transpose()?;
             let peeked = match this.peeked.pop() {
@@ -73,10 +88,16 @@ where
             if let Some(next) = next {
                 this.peeked.push(CmpEntry::new(offset, next));
             }
+            if peeked.entry.key().ts > *ts {
+                continue;
+            }
             if let Some(buf) = this.buf {
-                if peeked.entry.key().ts > *ts || buf.key().value == peeked.entry.key().value {
+                if buf.key().value == peeked.entry.key().value {
                     continue;
                 }
+            }
+            if let Some(limit) = this.limit.as_ref() {
+                this.limit.replace(*limit - 1);
             }
 
             return Poll::Ready(this.buf.replace(peeked.entry).map(Ok));
@@ -338,5 +359,77 @@ mod tests {
         } else {
             unreachable!()
         };
+    }
+
+    #[tokio::test]
+    async fn merge_mutable_limit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let option = DbOption::from(temp_dir.path());
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let m1 = Mutable::<String, TokioExecutor>::new(&option, trigger)
+            .await
+            .unwrap();
+        m1.insert(LogType::Full, "1".into(), 0_u32.into())
+            .await
+            .unwrap();
+        m1.insert(LogType::Full, "2".into(), 1_u32.into())
+            .await
+            .unwrap();
+        m1.insert(LogType::Full, "3".into(), 1_u32.into())
+            .await
+            .unwrap();
+
+        let lower = "1".to_string();
+        let upper = "3".to_string();
+        {
+            let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
+                vec![m1
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
+                    .into()],
+                0.into(),
+            )
+            .await
+            .unwrap()
+            .limit(2);
+
+            if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+                assert_eq!(entry.key().value, "1");
+                assert_eq!(entry.key().ts, 0.into());
+            } else {
+                unreachable!()
+            };
+            // can not read data from future
+            assert!(merge.next().await.is_none());
+        }
+        {
+            let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
+                vec![m1
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
+                    .into()],
+                1.into(),
+            )
+            .await
+            .unwrap()
+            .limit(2);
+
+            if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+                assert_eq!(entry.key().value, "1");
+                assert_eq!(entry.key().ts, 0.into());
+            } else {
+                unreachable!()
+            };
+            if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
+                assert_eq!(entry.key().value, "2");
+                assert_eq!(entry.key().ts, 1.into());
+            } else {
+                unreachable!()
+            };
+            assert!(merge.next().await.is_none());
+        }
     }
 }
