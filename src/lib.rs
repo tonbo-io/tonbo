@@ -600,7 +600,11 @@ where
             )
             .await?;
 
-        Ok(MergeStream::from_vec(self.streams, self.ts).await?)
+        let mut merge_stream = MergeStream::from_vec(self.streams, self.ts).await?;
+        if let Some(limit) = self.limit {
+            merge_stream = merge_stream.limit(limit);
+        }
+        Ok(merge_stream)
     }
 
     /// Get a Stream that returns RecordBatch consisting of a `batch_size` number of records
