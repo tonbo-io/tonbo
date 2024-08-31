@@ -574,4 +574,46 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn test_transaction_scan_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::from(temp_dir.path()));
+
+        let (_, version) = build_version(&option).await;
+        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
+        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+            .await
+            .unwrap();
+
+        let txn = db.transaction().await;
+        txn.commit().await.unwrap();
+
+        {
+            let txn2 = db.transaction().await;
+            {
+                let mut stream = txn2
+                    .scan((Bound::Unbounded, Bound::Unbounded))
+                    .await
+                    .limit(1)
+                    .take()
+                    .await
+                    .unwrap();
+
+                assert!(stream.next().await.is_some());
+                assert!(stream.next().await.is_none());
+            }
+            {
+                let mut stream = txn2
+                    .scan((Bound::Unbounded, Bound::Unbounded))
+                    .await
+                    .limit(0)
+                    .take()
+                    .await
+                    .unwrap();
+
+                assert!(stream.next().await.is_none());
+            }
+        }
+    }
 }
