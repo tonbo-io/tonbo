@@ -515,6 +515,8 @@ where
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
+
+    reversed: Option<bool>
 }
 
 impl<'scan, R, FP> Scan<'scan, R, FP>
@@ -539,6 +541,7 @@ where
             limit: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
+            reversed: Some(false),
         }
     }
 
@@ -572,6 +575,14 @@ where
         }
     }
 
+    /// Reverse the order of the scan.
+    pub fn reverse(mut self) -> Self {
+        std::mem::swap(&mut self.lower, &mut self.upper);
+        self.streams.reverse();
+        self.reversed = Some(true);
+        self
+    }
+
     /// get a Stream that returns single row of Record
     pub async fn take(
         mut self,
@@ -582,10 +593,21 @@ where
                 .scan((self.lower, self.upper), self.ts)
                 .into(),
         );
-        for (_, immutable) in self.schema.immutables.iter().rev() {
+        for (_, immutable) in self.schema.immutables.iter() {
+            let mut lower = self.lower;
+            let mut upper = self.upper;
+            if self.reversed.is_some() {
+                match self.reversed {
+                    Some(true) => {
+                        lower = self.upper;
+                        upper = self.lower;
+                    }
+                    _ => {}
+                }
+            }
             self.streams.push(
                 immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .scan((lower, upper), self.ts, self.projection.clone())
                     .into(),
             );
         }
@@ -683,6 +705,7 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
+    use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
@@ -1413,6 +1436,86 @@ pub(crate) mod tests {
             assert_eq!(entry.value().as_ref().unwrap().vu32, test.vu32);
             assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
         }
+    }
+
+    #[tokio::test]
+    async fn test_reverse_scan_with_struct() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::from(temp_dir.path());
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.level_sst_magnification = 10;
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+
+        // Insert test records
+        let records = vec![
+            ("alpha", 10, Some(true)),
+            ("beta", 20, Some(false)),
+            ("gamma", 30, Some(true)),
+            ("delta", 40, Some(false)),
+            ("epsilon", 50, Some(true)),
+        ];
+
+        for (vstring, vu32, vbool) in records {
+            db.write(
+                Test {
+                    vstring: vstring.to_string(),
+                    vu32,
+                    vbool,
+                },
+                vu32.into(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let txn = db.transaction().await;
+
+        let lower_bound = "alpha".to_string();
+        let upper_bound = "epsilon".to_string();
+
+        let scan = txn
+            .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
+            .await
+            .projection(vec![0, 1, 2])
+            .take()
+            .await
+            .unwrap();
+
+        let scan_values: Vec<_> = scan
+            .filter_map(|entry| async { entry.ok() })
+            .collect()
+            .await;
+
+        let reversed_scan = txn
+            .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
+            .await
+            .reverse()
+            .projection(vec![0, 1, 2])
+            .take()
+            .await
+            .unwrap();
+
+        let reversed_scan_values: Vec<_> = reversed_scan
+            .filter_map(|entry| async { entry.ok() })
+            .collect()
+            .await;
+
+        // Ensure that the reversed scan values are the reverse of the initial scan values
+        assert_eq!(scan_values.len(), reversed_scan_values.len());
+        for (orig, rev) in scan_values.into_iter().rev().zip(reversed_scan_values) {
+            assert_eq!(orig.key(), rev.key());
+            assert_eq!(orig.value(), rev.value());
+        }
+
+        // commit trxns
+        txn.commit().await.unwrap();
     }
 
     #[test]
