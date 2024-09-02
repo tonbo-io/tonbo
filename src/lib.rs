@@ -517,7 +517,7 @@ where
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
 
-    reversed: Option<bool>
+    reversed: Option<bool>,
 }
 
 impl<'scan, R, FP> Scan<'scan, R, FP>
@@ -595,17 +595,12 @@ where
                 .into(),
         );
         for (_, immutable) in self.schema.immutables.iter() {
-            let mut lower = self.lower;
-            let mut upper = self.upper;
-            if self.reversed.is_some() {
-                match self.reversed {
-                    Some(true) => {
-                        lower = self.upper;
-                        upper = self.lower;
-                    }
-                    _ => {}
-                }
-            }
+            let (lower, upper) = if self.reversed == Some(true) {
+                (self.upper, self.lower)
+            } else {
+                (self.lower, self.upper)
+            };
+
             self.streams.push(
                 immutable
                     .scan((lower, upper), self.ts, self.projection.clone())
