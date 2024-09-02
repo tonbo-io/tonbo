@@ -179,8 +179,7 @@ impl ExecutionPlan for MusicExec {
                 let txn = db.transaction().await;
 
                 let mut scan = txn
-                    .scan((lower.as_ref(), upper.as_ref()))
-                    .await;
+                    .scan((lower.as_ref(), upper.as_ref()));
                 if let Some(limit) = limit {
                     scan = scan.limit(limit);
                 }

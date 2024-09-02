@@ -98,7 +98,7 @@ where
     }
 
     /// scan records with primary keys in the `range`
-    pub async fn scan<'scan>(
+    pub fn scan<'scan>(
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
     ) -> Scan<'scan, R, FP> {
@@ -368,7 +368,6 @@ mod tests {
 
         let mut stream = txn
             .scan((Bound::Unbounded, Bound::Unbounded))
-            .await
             .projection(vec![1])
             .take()
             .await
@@ -440,7 +439,6 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -458,7 +456,6 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Included(&lower), Bound::Excluded(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -473,7 +470,6 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Excluded(&lower), Bound::Included(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -487,7 +483,6 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Excluded(&lower), Bound::Excluded(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -505,7 +500,6 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -522,7 +516,6 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Included(&lower), Bound::Excluded(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -536,7 +529,6 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Excluded(&lower), Bound::Included(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -550,7 +542,6 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Excluded(&lower), Bound::Excluded(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -561,7 +552,6 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Unbounded, Bound::Excluded(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -594,7 +584,6 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Unbounded, Bound::Unbounded))
-                    .await
                     .limit(1)
                     .take()
                     .await
@@ -606,7 +595,6 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Unbounded, Bound::Unbounded))
-                    .await
                     .limit(0)
                     .take()
                     .await
