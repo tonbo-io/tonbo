@@ -576,6 +576,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_transaction_scan_reverse() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let (_, version) = build_version(&option).await;
+        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
+        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+            .await
+            .unwrap();
+
+        let txn = db.transaction().await;
+        txn.commit().await.unwrap();
+
+        // Test in-memory with reverse scanning
+        {
+            let txn2 = db.transaction().await;
+            let lower = "ben".into();
+            let upper = "dice".into();
+
+            {
+                let mut stream = txn2
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                    .await
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "ben");
+
+                let mut stream = txn2
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                    .await
+                    .reverse()
+                    .projection(vec![1])
+                    .take()
+                    .await
+                    .unwrap();
+                let entry_0 = stream.next().await.unwrap().unwrap();
+                assert_eq!(entry_0.key().value, "dice");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_transaction_scan_limit() {
         let temp_dir = TempDir::new().unwrap();
         let option = Arc::new(DbOption::from(temp_dir.path()));
