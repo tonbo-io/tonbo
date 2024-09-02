@@ -1500,6 +1500,9 @@ pub(crate) mod tests {
             .collect()
             .await;
 
+        assert_ne!(scan_values.len(), 0);
+        assert_ne!(reversed_scan_values.len(), 0);
+
         // Ensure that the reversed scan values are the reverse of the initial scan values
         assert_eq!(scan_values.len(), reversed_scan_values.len());
         for (orig, rev) in scan_values.into_iter().rev().zip(reversed_scan_values) {
