@@ -1477,7 +1477,6 @@ pub(crate) mod tests {
 
         let scan = txn
             .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
-            .await
             .projection(vec![0, 1, 2])
             .take()
             .await
@@ -1490,7 +1489,6 @@ pub(crate) mod tests {
 
         let reversed_scan = txn
             .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
-            .await
             .reverse()
             .projection(vec![0, 1, 2])
             .take()

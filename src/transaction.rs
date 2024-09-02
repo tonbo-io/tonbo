@@ -587,7 +587,6 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                    .await
                     .projection(vec![1])
                     .take()
                     .await
@@ -597,7 +596,6 @@ mod tests {
 
                 let mut stream = txn2
                     .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                    .await
                     .reverse()
                     .projection(vec![1])
                     .take()
