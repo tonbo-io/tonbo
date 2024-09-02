@@ -53,7 +53,6 @@ async fn main() {
             // range scan of user
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
-                .await
                 // tonbo supports pushing down projection
                 .projection(vec![1])
                 // push down limitation
