@@ -86,7 +86,6 @@
 //!             // range scan of
 //!             let mut scan = txn
 //!                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
-//!                 .await
 //!                 // tonbo supports pushing down projection
 //!                 .projection(vec![1])
 //!                 .take()
