@@ -1,9 +1,10 @@
 [package]
-description = "TonboRecord macro"
+description = "Helpers of Tonbo"
 documentation = "https://docs.rs/tonbo_macros"
-edition = "2021"
-license = "Apache-2.0"
+edition.workspace = true
+license.workspace = true
 name = "tonbo_macros"
+repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
@@ -12,5 +13,5 @@ quote = "1"
 syn = "2"
 
 [lib]
-path = "src/lib.rs"
+doctest = false
 proc-macro = true
