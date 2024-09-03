@@ -253,7 +253,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = BenchResult> + 'a {
         stream! {
-            let mut stream = self.txn.scan(range).await.take().await.unwrap();
+            let mut stream = self.txn.scan(range).take().await.unwrap();
 
             while let Some(result) = stream.next().await {
                 yield BenchResult::Ref(TransactionEntry::Stream(result.unwrap()));
@@ -266,7 +266,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = ProjectionResult> + 'a {
         stream! {
-            let mut stream = self.txn.scan(range).await.projection(vec![1]).take().await.unwrap();
+            let mut stream = self.txn.scan(range).projection(vec![1]).take().await.unwrap();
 
             while let Some(entry) = stream.next().await.map(|result| result.unwrap()) {
                 yield ProjectionResult::Ref(entry);

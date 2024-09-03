@@ -86,7 +86,6 @@
 //!             // range scan of
 //!             let mut scan = txn
 //!                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
-//!                 .await
 //!                 // tonbo supports pushing down projection
 //!                 .projection(vec![1])
 //!                 .take()
@@ -1478,7 +1477,6 @@ pub(crate) mod tests {
 
         let scan = txn
             .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
-            .await
             .projection(vec![0, 1, 2])
             .take()
             .await
@@ -1491,7 +1489,6 @@ pub(crate) mod tests {
 
         let reversed_scan = txn
             .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
-            .await
             .reverse()
             .projection(vec![0, 1, 2])
             .take()
@@ -1502,6 +1499,9 @@ pub(crate) mod tests {
             .filter_map(|entry| async { entry.ok() })
             .collect()
             .await;
+
+        assert_ne!(scan_values.len(), 0);
+        assert_ne!(reversed_scan_values.len(), 0);
 
         // Ensure that the reversed scan values are the reverse of the initial scan values
         assert_eq!(scan_values.len(), reversed_scan_values.len());
