@@ -179,8 +179,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Timestamped;
-    use super::TimestampedRef;
+    use super::{Timestamped, TimestampedRef};
 
     #[test]
     fn test_value_cmp() {
