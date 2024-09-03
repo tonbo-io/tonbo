@@ -73,6 +73,8 @@ impl<'r> RecordRef<'r> for &'r str {
         self
     }
 
+    fn projection(&mut self, _: &ProjectionMask) {}
+
     fn from_record_batch(
         record_batch: &'r RecordBatch,
         offset: usize,

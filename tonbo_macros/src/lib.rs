@@ -60,6 +60,7 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut to_ref_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut ref_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut ref_projection_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     let mut from_record_batch_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -326,6 +327,12 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
                                     .push(quote! { #field_name: Some(self.#field_name), });
                             }
                         }
+                        ref_projection_fields.push(quote! {
+                            if !projection_mask.leaf_included(#field_index) {
+                                self.#field_name = None;
+                            }
+                        });
+
                         if is_string {
                             ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
                         } else {
@@ -549,6 +556,10 @@ pub fn tonbo_record(args: TokenStream, input: TokenStream) -> TokenStream {
 
             fn key(self) -> <<Self::Record as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'r> {
                 self.#primary_key_name
+            }
+
+            fn projection(&mut self, projection_mask: &::tonbo::parquet::arrow::ProjectionMask) {
+                #(#ref_projection_fields)*
             }
 
             fn from_record_batch(

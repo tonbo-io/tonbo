@@ -155,7 +155,10 @@ use crate::{
     executor::Executor,
     fs::{FileId, FileType},
     serdes::Decode,
-    stream::{merge::MergeStream, package::PackageStream, Entry, ScanStream},
+    stream::{
+        mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
+        ScanStream,
+    },
     timestamp::Timestamped,
     trigger::{Trigger, TriggerFactory},
     version::{cleaner::Cleaner, set::VersionSet, TransactionTs, Version, VersionError},
@@ -308,7 +311,7 @@ where
                 range,
                 self.version_set.load_ts(),
                 &*current,
-                Vec::new(),
+                Box::new(|_| None),
             ).take().await?;
 
             while let Some(record) = scan.next().await {
@@ -527,7 +530,8 @@ where
     ts: Timestamp,
 
     version: &'scan Version<R, FP>,
-    streams: Vec<ScanStream<'scan, R, FP>>,
+    fn_pre_stream:
+        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, FP>> + 'scan>,
 
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
@@ -544,7 +548,9 @@ where
         (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
         version: &'scan Version<R, FP>,
-        streams: Vec<ScanStream<'scan, R, FP>>,
+        fn_pre_stream: Box<
+            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, FP>> + 'scan,
+        >,
     ) -> Self {
         Self {
             schema,
@@ -552,7 +558,7 @@ where
             upper,
             ts,
             version,
-            streams,
+            fn_pre_stream,
             limit: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
@@ -591,16 +597,32 @@ where
 
     /// get a Stream that returns single row of Record
     pub async fn take(
-        mut self,
+        self,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
-        self.streams.push(
-            self.schema
+        let mut streams = Vec::new();
+        let is_projection = self.projection_indices.is_some();
+
+        if let Some(pre_stream) =
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+        {
+            streams.push(pre_stream);
+        }
+
+        // Mutable
+        {
+            let mut mutable_scan = self
+                .schema
                 .mutable
                 .scan((self.lower, self.upper), self.ts)
-                .into(),
-        );
+                .into();
+            if is_projection {
+                mutable_scan =
+                    MemProjectionStream::new(mutable_scan, self.projection.clone()).into();
+            }
+            streams.push(mutable_scan);
+        }
         for (_, immutable) in self.schema.immutables.iter().rev() {
-            self.streams.push(
+            streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
                     .into(),
@@ -608,7 +630,7 @@ where
         }
         self.version
             .streams(
-                &mut self.streams,
+                &mut streams,
                 (self.lower, self.upper),
                 self.ts,
                 self.limit,
@@ -616,7 +638,7 @@ where
             )
             .await?;
 
-        let mut merge_stream = MergeStream::from_vec(self.streams, self.ts).await?;
+        let mut merge_stream = MergeStream::from_vec(streams, self.ts).await?;
         if let Some(limit) = self.limit {
             merge_stream = merge_stream.limit(limit);
         }
@@ -625,17 +647,33 @@ where
 
     /// Get a Stream that returns RecordBatch consisting of a `batch_size` number of records
     pub async fn package(
-        mut self,
+        self,
         batch_size: usize,
     ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, DbError<R>> {
-        self.streams.push(
-            self.schema
+        let mut streams = Vec::new();
+        let is_projection = self.projection_indices.is_some();
+
+        if let Some(pre_stream) =
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+        {
+            streams.push(pre_stream);
+        }
+
+        // Mutable
+        {
+            let mut mutable_scan = self
+                .schema
                 .mutable
                 .scan((self.lower, self.upper), self.ts)
-                .into(),
-        );
+                .into();
+            if is_projection {
+                mutable_scan =
+                    MemProjectionStream::new(mutable_scan, self.projection.clone()).into();
+            }
+            streams.push(mutable_scan);
+        }
         for (_, immutable) in self.schema.immutables.iter().rev() {
-            self.streams.push(
+            streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
                     .into(),
@@ -643,14 +681,14 @@ where
         }
         self.version
             .streams(
-                &mut self.streams,
+                &mut streams,
                 (self.lower, self.upper),
                 self.ts,
                 self.limit,
                 self.projection,
             )
             .await?;
-        let merge_stream = MergeStream::from_vec(self.streams, self.ts).await?;
+        let merge_stream = MergeStream::from_vec(streams, self.ts).await?;
 
         Ok(PackageStream::new(
             batch_size,
@@ -869,6 +907,15 @@ pub(crate) mod tests {
 
         fn key(self) -> <<Self::Record as Record>::Key as crate::record::Key>::Ref<'r> {
             self.vstring
+        }
+
+        fn projection(&mut self, projection_mask: &ProjectionMask) {
+            if !projection_mask.leaf_included(3) {
+                self.vu32 = None;
+            }
+            if !projection_mask.leaf_included(4) {
+                self.vbool = None;
+            }
         }
 
         fn from_record_batch(
