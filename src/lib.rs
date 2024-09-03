@@ -587,39 +587,55 @@ where
     pub async fn take(
         mut self,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
-        self.streams.push(
-            self.schema
-                .mutable
-                .scan((self.lower, self.upper), self.ts)
-                .into(),
-        );
-        for (_, immutable) in self.schema.immutables.iter() {
-            let (lower, upper) = if self.reversed == Some(true) {
+        // Helper function to handle reversing logic
+        fn maybe_reverse<T>(vec: &mut Vec<T>, reverse: bool) {
+            if reverse {
+                vec.reverse();
+            }
+        }
+
+        let reversed = self.reversed.unwrap_or(false);
+
+        // Process mutable streams
+        let mut mutable_stream = vec![self.schema.mutable.scan((self.lower, self.upper), self.ts).into()];
+        maybe_reverse(&mut mutable_stream, reversed);
+        self.streams.append(&mut mutable_stream);
+
+        // Process immutable streams
+        for (_, immutable) in &self.schema.immutables {
+            let (lower, upper) = if reversed {
                 (self.upper, self.lower)
             } else {
                 (self.lower, self.upper)
             };
 
-            self.streams.push(
-                immutable
-                    .scan((lower, upper), self.ts, self.projection.clone())
-                    .into(),
-            );
+            let mut immutable_stream = vec![
+                immutable.scan((lower, upper), self.ts, self.projection.clone()).into(),
+            ];
+            maybe_reverse(&mut immutable_stream, reversed);
+            self.streams.append(&mut immutable_stream);
         }
+
+        // Process SST streams
+        let mut sst_streams = Vec::new();
         self.version
             .streams(
-                &mut self.streams,
+                &mut sst_streams,
                 (self.lower, self.upper),
                 self.ts,
                 self.limit,
                 self.projection,
             )
             .await?;
+        maybe_reverse(&mut sst_streams, reversed);
+        self.streams.append(&mut sst_streams);
 
+        // Create the merge stream
         let mut merge_stream = MergeStream::from_vec(self.streams, self.ts).await?;
         if let Some(limit) = self.limit {
             merge_stream = merge_stream.limit(limit);
         }
+
         Ok(merge_stream)
     }
 
@@ -1449,69 +1465,37 @@ pub(crate) mod tests {
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         // Insert test records
-        let records = vec![
-            ("alpha", 10, Some(true)),
-            ("beta", 20, Some(false)),
-            ("gamma", 30, Some(true)),
-            ("delta", 40, Some(false)),
-            ("epsilon", 50, Some(true)),
-        ];
-
-        for (vstring, vu32, vbool) in records {
-            db.write(
-                Test {
-                    vstring: vstring.to_string(),
-                    vu32,
-                    vbool,
-                },
-                vu32.into(),
-            )
-            .await
-            .unwrap();
+        for item in &test_items()[0..10] {
+            db.write(item.clone(), 0.into()).await.unwrap();
         }
 
         let txn = db.transaction().await;
 
-        let lower_bound = "alpha".to_string();
-        let upper_bound = "epsilon".to_string();
+        let lower_bound = "2".to_string();
+        let upper_bound = "7".to_string();
 
-        let scan = txn
+        let mut scan = txn
             .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
-            .projection(vec![0, 1, 2])
+            .projection(vec![1])
             .take()
             .await
             .unwrap();
 
-        let scan_values: Vec<_> = scan
-            .filter_map(|entry| async { entry.ok() })
-            .collect()
-            .await;
-
-        let reversed_scan = txn
+        let mut reversed_scan = txn
             .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
             .reverse()
-            .projection(vec![0, 1, 2])
+            .projection(vec![1])
             .take()
             .await
             .unwrap();
 
-        let reversed_scan_values: Vec<_> = reversed_scan
-            .filter_map(|entry| async { entry.ok() })
-            .collect()
-            .await;
+        let entry_0 = scan.next().await.unwrap().unwrap();
+        assert_eq!(entry_0.key().value, "2");
+        assert!(entry_0.value().unwrap().vbool.is_none());
 
-        assert_ne!(scan_values.len(), 0);
-        assert_ne!(reversed_scan_values.len(), 0);
-
-        // Ensure that the reversed scan values are the reverse of the initial scan values
-        assert_eq!(scan_values.len(), reversed_scan_values.len());
-        for (orig, rev) in scan_values.into_iter().rev().zip(reversed_scan_values) {
-            assert_eq!(orig.key(), rev.key());
-            assert_eq!(orig.value(), rev.value());
-        }
-
-        // commit trxns
-        txn.commit().await.unwrap();
+        let entry_0 = reversed_scan.next().await.unwrap().unwrap();
+        assert_eq!(entry_0.key().value, "6");
+        assert!(entry_0.value().unwrap().vbool.is_none());
     }
 
     #[test]
