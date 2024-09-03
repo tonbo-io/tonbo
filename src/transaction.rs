@@ -19,7 +19,7 @@ use crate::{
     record::{Key, KeyRef},
     stream,
     timestamp::{Timestamp, Timestamped},
-    version::VersionRef,
+    version::{TransactionTs, VersionRef},
     wal::log::LogType,
     DbError, LockMap, Projection, Record, Scan, Schema,
 };
@@ -66,7 +66,7 @@ where
         lock_map: LockMap<R::Key>,
     ) -> Self {
         Self {
-            ts: version.transaction_ts(),
+            ts: version.load_ts(),
             local: BTreeMap::new(),
             share,
             version,
@@ -153,12 +153,12 @@ where
         let is_excess = match len {
             0 => false,
             1 => {
-                let new_ts = self.version.transaction_ts();
+                let new_ts = self.version.increase_ts();
                 let (key, record) = self.local.pop_first().unwrap();
                 Self::append(&self.share, LogType::Full, key, record, new_ts).await?
             }
             _ => {
-                let new_ts = self.version.transaction_ts();
+                let new_ts = self.version.increase_ts();
                 let mut iter = self.local.into_iter();
 
                 let (key, record) = iter.next().unwrap();
@@ -246,6 +246,7 @@ mod tests {
         executor::tokio::TokioExecutor,
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
+        version::TransactionTs,
         DbOption, Projection, DB,
     };
 
@@ -355,9 +356,8 @@ mod tests {
             .unwrap();
 
         {
-            // to increase timestamps to 1
-            let txn = db.transaction().await;
-            txn.commit().await.unwrap();
+            // to increase timestamps to 1 because the data ts built in advance is 1
+            db.version_set.increase_ts();
         }
         let mut txn = db.transaction().await;
         txn.insert(Test {
@@ -426,6 +426,10 @@ mod tests {
         let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
             .await
             .unwrap();
+        {
+            // to increase timestamps to 1 because the data ts built in advance is 1
+            db.version_set.increase_ts();
+        }
 
         // skip timestamp
         let txn = db.transaction().await;

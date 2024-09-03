@@ -10,7 +10,7 @@ use async_lock::RwLock;
 use flume::Sender;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-use super::MAX_LEVEL;
+use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{FileId, FileProvider},
     record::Record,
@@ -52,6 +52,20 @@ where
             timestamp: self.timestamp.clone(),
             option: self.option.clone(),
         }
+    }
+}
+
+impl<R, FP> TransactionTs for VersionSet<R, FP>
+where
+    R: Record,
+    FP: FileProvider,
+{
+    fn load_ts(&self) -> Timestamp {
+        self.timestamp.load(Ordering::Acquire).into()
+    }
+
+    fn increase_ts(&self) -> Timestamp {
+        (self.timestamp.fetch_add(1, Ordering::Release) + 1).into()
     }
 }
 
@@ -151,10 +165,6 @@ where
         guard.current = Arc::new(new_version);
         Ok(())
     }
-
-    pub(crate) fn transaction_ts(&self) -> Timestamp {
-        self.timestamp.fetch_add(1, Ordering::Release).into()
-    }
 }
 
 #[cfg(test)]
@@ -174,7 +184,7 @@ pub(crate) mod tests {
             cleaner::CleanTag,
             edit::VersionEdit,
             set::{VersionSet, VersionSetInner},
-            Version, VersionError,
+            TransactionTs, Version, VersionError,
         },
         DbOption,
     };
@@ -191,13 +201,14 @@ pub(crate) mod tests {
         let mut log = FP::open(option.version_path()).await?;
         log.seek(SeekFrom::End(0)).await?;
 
+        let timestamp = version.timestamp.clone();
         Ok(VersionSet::<R, FP> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
                 log,
             })),
             clean_sender,
-            timestamp: Arc::new(Default::default()),
+            timestamp,
             option,
         })
     }
@@ -228,6 +239,6 @@ pub(crate) mod tests {
             VersionSet::new(sender.clone(), option.clone())
                 .await
                 .unwrap();
-        assert_eq!(version_set.transaction_ts(), 20_u32.into());
+        assert_eq!(version_set.load_ts(), 20_u32.into());
     }
 }

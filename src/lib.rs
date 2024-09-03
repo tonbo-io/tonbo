@@ -158,7 +158,7 @@ use crate::{
     stream::{merge::MergeStream, package::PackageStream, Entry, ScanStream},
     timestamp::Timestamped,
     trigger::{Trigger, TriggerFactory},
-    version::{cleaner::Cleaner, set::VersionSet, Version, VersionError},
+    version::{cleaner::Cleaner, set::VersionSet, TransactionTs, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
 };
 
@@ -237,9 +237,7 @@ where
 
     /// insert a single tonbo record
     pub async fn insert(&self, record: R) -> Result<(), CommitError<R>> {
-        Ok(self
-            .write(record, self.version_set.transaction_ts())
-            .await?)
+        Ok(self.write(record, self.version_set.increase_ts()).await?)
     }
 
     /// insert a sequence of data as a single batch
@@ -248,7 +246,7 @@ where
         records: impl ExactSizeIterator<Item = R>,
     ) -> Result<(), CommitError<R>> {
         Ok(self
-            .write_batch(records, self.version_set.transaction_ts())
+            .write_batch(records, self.version_set.increase_ts())
             .await?)
     }
 
@@ -258,7 +256,7 @@ where
             .schema
             .read()
             .await
-            .remove(LogType::Full, key, self.version_set.transaction_ts())
+            .remove(LogType::Full, key, self.version_set.increase_ts())
             .await?)
     }
 
@@ -288,7 +286,7 @@ where
             .get(
                 &*self.version_set.current().await,
                 key,
-                self.version_set.transaction_ts(),
+                self.version_set.load_ts(),
                 Projection::All,
             )
             .await?
@@ -307,7 +305,7 @@ where
             let mut scan = Scan::new(
                 &schema,
                 range,
-                self.version_set.transaction_ts(),
+                self.version_set.load_ts(),
                 &*current,
                 Vec::new(),
             ).take().await?;
@@ -406,7 +404,7 @@ where
                 let is_excess = match log_type {
                     LogType::Full => {
                         schema
-                            .recover_append(key, version_set.transaction_ts(), value_option)
+                            .recover_append(key, version_set.increase_ts(), value_option)
                             .await?
                     }
                     LogType::First => {
@@ -425,7 +423,7 @@ where
                         let mut records = transaction_map.remove(&ts).unwrap();
                         records.push((key, value_option));
 
-                        let ts = version_set.transaction_ts();
+                        let ts = version_set.increase_ts();
                         for (key, value_option) in records {
                             is_excess = schema.recover_append(key, ts, value_option).await?;
                         }
