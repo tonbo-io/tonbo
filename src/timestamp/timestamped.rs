@@ -179,7 +179,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Timestamped, TimestampedRef};
 
     #[test]
     fn test_value_cmp() {
@@ -205,5 +205,28 @@ mod tests {
         let value1 = Timestamped::new(&1, 1_u32.into());
         let value2 = Timestamped::new(&1, 2_u32.into());
         assert_ne!(value1, value2);
+    }
+
+    #[test]
+    fn test_timestamped_ref() {
+        let value = Timestamped::new(1, 1_u32.into());
+        let value_ref = TimestampedRef::new(&value.value, value.ts);
+        assert_eq!(value_ref.value(), &1);
+        assert_eq!(value_ref.ts(), 1_u32.into());
+    }
+
+    #[test]
+    fn test_timestamped_ref_cmp() {
+        let value1 = Timestamped::new(1, 1_u32.into());
+        let value2 = Timestamped::new(2, 2_u32.into());
+        let value_ref1 = TimestampedRef::new(&value1.value, value1.ts);
+        let value_ref2 = TimestampedRef::new(&value2.value, value2.ts);
+        assert!(value_ref1 < value_ref2);
+
+        let value1 = Timestamped::new(1, 1_u32.into());
+        let value2 = Timestamped::new(1, 2_u32.into());
+        let value_ref1 = TimestampedRef::new(&value1.value, value1.ts);
+        let value_ref2 = TimestampedRef::new(&value2.value, value2.ts);
+        assert!(value_ref1 > value_ref2);
     }
 }
