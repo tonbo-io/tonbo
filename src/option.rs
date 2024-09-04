@@ -15,18 +15,19 @@ use crate::{
 /// configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Debug, Clone)]
 pub struct DbOption<R> {
-    pub(crate) path: PathBuf,
+    pub(crate) clean_channel_buffer: usize,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,
-    pub(crate) major_threshold_with_sst_size: usize,
     pub(crate) level_sst_magnification: usize,
-    pub(crate) max_sst_file_size: usize,
-    pub(crate) clean_channel_buffer: usize,
-    pub(crate) write_parquet_properties: WriterProperties,
-    pub(crate) use_wal: bool,
     pub(crate) major_default_oldest_table_num: usize,
     pub(crate) major_l_selection_table_max_num: usize,
+    pub(crate) major_threshold_with_sst_size: usize,
+    pub(crate) max_sst_file_size: usize,
+    pub(crate) path: PathBuf,
+    pub(crate) version_log_snapshot_threshold: u32,
     pub(crate) trigger_type: TriggerType,
+    pub(crate) use_wal: bool,
+    pub(crate) write_parquet_properties: WriterProperties,
     _p: PhantomData<R>,
 }
 
@@ -59,6 +60,7 @@ where
             major_l_selection_table_max_num: 4,
             trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
             _p: Default::default(),
+            version_log_snapshot_threshold: 200,
         }
     }
 }
@@ -141,6 +143,15 @@ where
             ..self
         }
     }
+
+    /// VersionLog will use version_log_snapshot_threshold as the cycle to SnapShot to reduce the
+    /// size.
+    pub fn version_log_snapshot_threshold(self, version_log_snapshot_threshold: u32) -> Self {
+        DbOption {
+            version_log_snapshot_threshold,
+            ..self
+        }
+    }
 }
 
 impl<R> DbOption<R>
@@ -160,8 +171,13 @@ where
             .join(format!("{}.{}", gen, FileType::Wal))
     }
 
-    pub(crate) fn version_path(&self) -> PathBuf {
-        self.path.join(format!("version.{}", FileType::Log))
+    pub(crate) fn version_log_dir_path(&self) -> PathBuf {
+        self.path.join("version")
+    }
+
+    pub(crate) fn version_log_path(&self, gen: &FileId) -> PathBuf {
+        self.version_log_dir_path()
+            .join(format!("{}.{}", gen, FileType::Log))
     }
 
     pub(crate) fn is_threshold_exceeded_major<E>(
