@@ -12,6 +12,7 @@ use crate::{
 pub enum CleanTag {
     Add { ts: Timestamp, gens: Vec<FileId> },
     Clean { ts: Timestamp },
+    RecoverClean { gen: FileId },
 }
 
 pub(crate) struct Cleaner<R, FP>
@@ -64,6 +65,9 @@ where
                         }
                     }
                 }
+                CleanTag::RecoverClean { gen } => {
+                    FP::remove(self.option.table_path(&gen)).await?;
+                }
             }
         }
 
@@ -71,4 +75,128 @@ where
     }
 }
 
-// TODO: TestCase
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use tempfile::TempDir;
+    use tokio::time::sleep;
+    use tracing::error;
+
+    use crate::{
+        executor::{tokio::TokioExecutor, Executor},
+        fs::{FileId, FileProvider},
+        tests::Test,
+        version::cleaner::{CleanTag, Cleaner},
+        DbOption,
+    };
+
+    #[tokio::test]
+    async fn test_cleaner() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::from(temp_dir.path()));
+
+        let gen_0 = FileId::new();
+        let gen_1 = FileId::new();
+        let gen_2 = FileId::new();
+        let gen_3 = FileId::new();
+        {
+            TokioExecutor::open(option.table_path(&gen_0))
+                .await
+                .unwrap();
+            TokioExecutor::open(option.table_path(&gen_1))
+                .await
+                .unwrap();
+            TokioExecutor::open(option.table_path(&gen_2))
+                .await
+                .unwrap();
+            TokioExecutor::open(option.table_path(&gen_3))
+                .await
+                .unwrap();
+        }
+
+        let (mut cleaner, tx) = Cleaner::<Test, TokioExecutor>::new(option.clone());
+
+        let executor = TokioExecutor::new();
+
+        executor.spawn(async move {
+            if let Err(err) = cleaner.listen().await {
+                error!("[Cleaner Error]: {}", err)
+            }
+        });
+
+        tx.send_async(CleanTag::Add {
+            ts: 1.into(),
+            gens: vec![gen_1],
+        })
+        .await
+        .unwrap();
+        tx.send_async(CleanTag::Add {
+            ts: 0.into(),
+            gens: vec![gen_0],
+        })
+        .await
+        .unwrap();
+        tx.send_async(CleanTag::Add {
+            ts: 2.into(),
+            gens: vec![gen_2],
+        })
+        .await
+        .unwrap();
+
+        tx.send_async(CleanTag::Clean { ts: 2.into() })
+            .await
+            .unwrap();
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_0))
+            .await
+            .unwrap());
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_1))
+            .await
+            .unwrap());
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_2))
+            .await
+            .unwrap());
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_3))
+            .await
+            .unwrap());
+
+        tx.send_async(CleanTag::Clean { ts: 0.into() })
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(1)).await;
+        assert!(!TokioExecutor::file_exist(option.table_path(&gen_0))
+            .await
+            .unwrap());
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_1))
+            .await
+            .unwrap());
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_2))
+            .await
+            .unwrap());
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_3))
+            .await
+            .unwrap());
+
+        tx.send_async(CleanTag::Clean { ts: 1.into() })
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(1)).await;
+        assert!(!TokioExecutor::file_exist(option.table_path(&gen_1))
+            .await
+            .unwrap());
+        assert!(!TokioExecutor::file_exist(option.table_path(&gen_2))
+            .await
+            .unwrap());
+        assert!(TokioExecutor::file_exist(option.table_path(&gen_3))
+            .await
+            .unwrap());
+
+        tx.send_async(CleanTag::RecoverClean { gen: gen_3 })
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(1)).await;
+        assert!(!TokioExecutor::file_exist(option.table_path(&gen_3))
+            .await
+            .unwrap());
+    }
+}

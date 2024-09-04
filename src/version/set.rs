@@ -128,6 +128,14 @@ where
                     {
                         new_version.level_slice[level as usize].remove(i);
                     }
+                    if is_recover {
+                        // issue: https://github.com/tonbo-io/tonbo/issues/123
+                        new_version
+                            .clean_sender
+                            .send_async(CleanTag::RecoverClean { gen })
+                            .await
+                            .map_err(VersionError::Send)?;
+                    }
                 }
                 VersionEdit::LatestTimeStamp { ts } => {
                     if is_recover {
