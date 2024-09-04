@@ -202,7 +202,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{ops::Bound, sync::Arc};
+    use std::{ops::Bound, str::FromStr, sync::Arc};
+
+    use url::Url;
 
     use super::Mutable;
     use crate::{
@@ -222,7 +224,10 @@ mod tests {
         let key_2 = "key_2".to_owned();
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -271,7 +276,10 @@ mod tests {
     #[tokio::test]
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

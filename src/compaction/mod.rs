@@ -2,13 +2,18 @@ use std::{cmp, collections::Bound, mem, pin::Pin, sync::Arc};
 
 use async_lock::RwLock;
 use futures_util::StreamExt;
+use object_store::{buffered::BufWriter, ObjectStore};
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use ulid::Ulid;
 
 use crate::{
-    fs::{FileId, FileProvider},
+    fs::{
+        build_reader,
+        store_manager::{StoreManager, StoreManagerError},
+        FileId, FileProvider,
+    },
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
         mutable::Mutable,
@@ -35,6 +40,7 @@ where
 {
     pub(crate) option: Arc<DbOption<R>>,
     pub(crate) schema: Arc<RwLock<Schema<R, FP>>>,
+    pub(crate) store_manager: Arc<StoreManager>,
     pub(crate) version_set: VersionSet<R, FP>,
 }
 
@@ -46,11 +52,13 @@ where
     pub(crate) fn new(
         schema: Arc<RwLock<Schema<R, FP>>>,
         option: Arc<DbOption<R>>,
+        store_manager: Arc<StoreManager>,
         version_set: VersionSet<R, FP>,
     ) -> Self {
         Compactor::<R, FP> {
             option,
             schema,
+            store_manager,
             version_set,
         }
     }
@@ -81,7 +89,8 @@ where
             let excess = &guard.immutables[0..chunk_num];
 
             if let Some(scope) =
-                Self::minor_compaction(&self.option, recover_wal_ids, excess).await?
+                Self::minor_compaction(&self.option, &self.store_manager, recover_wal_ids, excess)
+                    .await?
             {
                 let version_ref = self.version_set.current().await;
                 let mut version_edits = vec![];
@@ -91,6 +100,7 @@ where
                     Self::major_compaction(
                         &version_ref,
                         &self.option,
+                        &self.store_manager,
                         &scope.min,
                         &scope.max,
                         &mut version_edits,
@@ -118,6 +128,7 @@ where
 
     pub(crate) async fn minor_compaction(
         option: &DbOption<R>,
+        store_manager: &Arc<StoreManager>,
         recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(Option<FileId>, Immutable<R::Columns>)],
     ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
@@ -128,8 +139,9 @@ where
             let gen = FileId::new();
             let mut wal_ids = Vec::with_capacity(batches.len());
 
+            let level_0_store = option.level_store(0, store_manager)?.clone();
             let mut writer = AsyncArrowWriter::try_new(
-                FP::open(option.table_path(&gen)).await?,
+                BufWriter::new(level_0_store, option.table_path(&gen)),
                 R::arrow_schema().clone(),
                 Some(option.write_parquet_properties.clone()),
             )?;
@@ -165,10 +177,11 @@ where
     pub(crate) async fn major_compaction(
         version: &Version<R, FP>,
         option: &DbOption<R>,
+        store_manager: &Arc<StoreManager>,
         mut min: &R::Key,
         mut max: &R::Key,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
-        delete_gens: &mut Vec<FileId>,
+        delete_gens: &mut Vec<(FileId, usize)>,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
@@ -184,10 +197,11 @@ where
             // This Level
             if level == 0 {
                 for scope in meet_scopes_l.iter() {
-                    let file = FP::open(option.table_path(&scope.gen)).await?;
+                    let store = option.level_store(level, store_manager)?;
+                    let reader = build_reader(store.clone(), option.table_path(&scope.gen)).await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(file)
+                        inner: SsTable::open(reader)
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
                                 u32::MAX.into(),
@@ -199,8 +213,10 @@ where
                 }
             } else {
                 let (lower, upper) = Self::full_scope(&meet_scopes_l)?;
+                let store = option.level_store(level, store_manager)?;
                 let level_scan_l = LevelStream::new(
                     version,
+                    store.clone(),
                     level,
                     start_l,
                     end_l,
@@ -215,11 +231,14 @@ where
                     inner: level_scan_l,
                 });
             }
+            let store = option.level_store(level + 1, store_manager)?;
+
             if !meet_scopes_ll.is_empty() {
                 // Next Level
                 let (lower, upper) = Self::full_scope(&meet_scopes_ll)?;
                 let level_scan_ll = LevelStream::new(
                     version,
+                    store.clone(),
                     level + 1,
                     start_ll,
                     end_ll,
@@ -234,21 +253,21 @@ where
                     inner: level_scan_ll,
                 });
             }
-            Self::build_tables(option, version_edits, level, streams).await?;
+            Self::build_tables(option, store, version_edits, level, streams).await?;
 
             for scope in meet_scopes_l {
                 version_edits.push(VersionEdit::Remove {
                     level: level as u8,
                     gen: scope.gen,
                 });
-                delete_gens.push(scope.gen);
+                delete_gens.push((scope.gen, level));
             }
             for scope in meet_scopes_ll {
                 version_edits.push(VersionEdit::Remove {
                     level: (level + 1) as u8,
                     gen: scope.gen,
                 });
-                delete_gens.push(scope.gen);
+                delete_gens.push((scope.gen, level + 1));
             }
             level += 1;
         }
@@ -336,14 +355,12 @@ where
 
     async fn build_tables<'scan>(
         option: &DbOption<R>,
+        store: &Arc<dyn ObjectStore>,
         version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
         level: usize,
-        streams: Vec<ScanStream<'scan, R, FP>>,
-    ) -> Result<(), CompactionError<R>>
-    where
-        FP: 'scan,
-    {
-        let mut stream = MergeStream::<R, FP>::from_vec(streams, u32::MAX.into()).await?;
+        streams: Vec<ScanStream<'scan, R>>,
+    ) -> Result<(), CompactionError<R>> {
+        let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
         let mut builder = R::Columns::builder(8192);
@@ -363,6 +380,7 @@ where
             if builder.written_size() >= option.max_sst_file_size {
                 Self::build_table(
                     option,
+                    store.clone(),
                     version_edits,
                     level,
                     &mut builder,
@@ -375,6 +393,7 @@ where
         if builder.written_size() > 0 {
             Self::build_table(
                 option,
+                store.clone(),
                 version_edits,
                 level,
                 &mut builder,
@@ -396,6 +415,7 @@ where
 
     async fn build_table(
         option: &DbOption<R>,
+        store: Arc<dyn ObjectStore>,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
         level: usize,
         builder: &mut <R::Columns as ArrowArrays>::Builder,
@@ -408,7 +428,7 @@ where
         let gen = Ulid::new();
         let columns = builder.finish(None);
         let mut writer = AsyncArrowWriter::try_new(
-            FP::open(option.table_path(&gen)).await?,
+            BufWriter::new(store, option.table_path(&gen)),
             R::arrow_schema().clone(),
             Some(option.write_parquet_properties.clone()),
         )?;
@@ -436,6 +456,10 @@ where
     Io(#[from] std::io::Error),
     #[error("compaction parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
+    #[error("compaction object_store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
+    #[error("compaction store manager error: {0}")]
+    StoreManagerError(#[from] StoreManagerError),
     #[error("compaction version error: {0}")]
     Version(#[from] VersionError<R>),
     #[error("database error: {0}")]
@@ -446,16 +470,21 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::{atomic::AtomicU32, Arc};
+    use std::{
+        str::FromStr,
+        sync::{atomic::AtomicU32, Arc},
+    };
 
     use flume::bounded;
-    use parquet::{arrow::AsyncArrowWriter, errors::ParquetError};
+    use object_store::{buffered::BufWriter, ObjectStore};
+    use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;
+    use url::Url;
 
     use crate::{
         compaction::Compactor,
         executor::{tokio::TokioExecutor, Executor},
-        fs::{FileId, FileProvider},
+        fs::{store_manager::StoreManager, FileId, FileProvider},
         inmem::{immutable::Immutable, mutable::Mutable},
         record::Record,
         scope::Scope,
@@ -487,6 +516,7 @@ pub(crate) mod tests {
 
     pub(crate) async fn build_parquet_table<R, FP>(
         option: &DbOption<R>,
+        store: Arc<dyn ObjectStore>,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
     ) -> Result<(), DbError<R>>
@@ -496,9 +526,7 @@ pub(crate) mod tests {
     {
         let immutable = build_immutable::<R, FP>(option, records).await?;
         let mut writer = AsyncArrowWriter::try_new(
-            FP::open(option.table_path(&gen))
-                .await
-                .map_err(ParquetError::from)?,
+            BufWriter::new(store, option.table_path(&gen)),
             R::arrow_schema().clone(),
             None,
         )?;
@@ -511,10 +539,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
+        let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
         let batch_1 = build_immutable::<Test, TokioExecutor>(
             &option,
@@ -587,7 +619,8 @@ pub(crate) mod tests {
         .unwrap();
 
         let scope = Compactor::<Test, TokioExecutor>::minor_compaction(
-            &DbOption::from(temp_dir.path()),
+            &option,
+            &store_manager,
             None,
             &vec![
                 (Some(FileId::new()), batch_1),
@@ -604,13 +637,17 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn major_compaction() {
         let temp_dir = TempDir::new().unwrap();
+        let table_root_url = Url::from_str("memory:").unwrap();
 
-        let mut option = DbOption::from(temp_dir.path());
+        let mut option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
+        let store_manager = Arc::new(StoreManager::new(&option.table_urls).unwrap());
 
         let ((table_gen_1, table_gen_2, table_gen_3, table_gen_4, _), version) =
-            build_version(&option).await;
+            build_version(&option, &store_manager).await;
 
         let min = 2.to_string();
         let max = 5.to_string();
@@ -619,6 +656,7 @@ pub(crate) mod tests {
         Compactor::<Test, TokioExecutor>::major_compaction(
             &version,
             &option,
+            &store_manager,
             &min,
             &max,
             &mut version_edits,
@@ -656,6 +694,7 @@ pub(crate) mod tests {
 
     pub(crate) async fn build_version(
         option: &Arc<DbOption<Test>>,
+        store_manager: &Arc<StoreManager>,
     ) -> (
         (FileId, FileId, FileId, FileId, FileId),
         Version<Test, TokioExecutor>,
@@ -663,12 +702,14 @@ pub(crate) mod tests {
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
+        let level_0_store = option.level_store(0, store_manager).unwrap();
 
         // level 0
         let table_gen_1 = FileId::new();
         let table_gen_2 = FileId::new();
         build_parquet_table::<Test, TokioExecutor>(
             option,
+            level_0_store.clone(),
             table_gen_1,
             vec![
                 (
@@ -704,6 +745,7 @@ pub(crate) mod tests {
         .unwrap();
         build_parquet_table::<Test, TokioExecutor>(
             option,
+            level_0_store.clone(),
             table_gen_2,
             vec![
                 (
@@ -738,12 +780,15 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
+        let level_1_store = option.level_store(1, store_manager).unwrap();
+
         // level 1
         let table_gen_3 = FileId::new();
         let table_gen_4 = FileId::new();
         let table_gen_5 = FileId::new();
         build_parquet_table::<Test, TokioExecutor>(
             option,
+            level_1_store.clone(),
             table_gen_3,
             vec![
                 (
@@ -779,6 +824,7 @@ pub(crate) mod tests {
         .unwrap();
         build_parquet_table::<Test, TokioExecutor>(
             option,
+            level_1_store.clone(),
             table_gen_4,
             vec![
                 (
@@ -814,6 +860,7 @@ pub(crate) mod tests {
         .unwrap();
         build_parquet_table::<Test, TokioExecutor>(
             option,
+            level_1_store.clone(),
             table_gen_5,
             vec![
                 (

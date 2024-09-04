@@ -12,12 +12,17 @@ use std::{
 };
 
 use flume::{SendError, Sender};
+use object_store::ObjectStore;
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    fs::{FileId, FileProvider},
+    fs::{
+        build_reader,
+        store_manager::{StoreManager, StoreManagerError},
+        FileId, FileProvider,
+    },
     ondisk::sstable::SsTable,
     record::Record,
     scope::Scope,
@@ -107,6 +112,7 @@ where
     #[allow(unused)]
     pub(crate) async fn query(
         &self,
+        store: &Arc<dyn ObjectStore>,
         key: &TimestampedRef<R::Key>,
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
@@ -115,7 +121,7 @@ where
                 continue;
             }
             if let Some(entry) = self
-                .table_query(key, &scope.gen, projection_mask.clone())
+                .table_query(store, key, &scope.gen, projection_mask.clone())
                 .await?
             {
                 return Ok(Some(entry));
@@ -130,7 +136,7 @@ where
                 continue;
             }
             if let Some(entry) = self
-                .table_query(key, &level[index].gen, projection_mask.clone())
+                .table_query(store, key, &level[index].gen, projection_mask.clone())
                 .await?
             {
                 return Ok(Some(entry));
@@ -143,14 +149,14 @@ where
     #[allow(unused)]
     async fn table_query(
         &self,
+        store: &Arc<dyn ObjectStore>,
         key: &TimestampedRef<<R as Record>::Key>,
         gen: &FileId,
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
-        let file = FP::open(self.option.table_path(gen))
-            .await
-            .map_err(VersionError::Io)?;
-        SsTable::<R, FP>::open(file)
+        let reader = build_reader(store.clone(), self.option.table_path(gen)).await?;
+
+        SsTable::<R>::open(reader)
             .get(key, projection_mask)
             .await
             .map_err(VersionError::Parquet)
@@ -168,17 +174,18 @@ where
 
     pub(crate) async fn streams<'streams>(
         &self,
-        streams: &mut Vec<ScanStream<'streams, R, FP>>,
+        store_manager: &Arc<StoreManager>,
+        streams: &mut Vec<ScanStream<'streams, R>>,
         range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
     ) -> Result<(), VersionError<R>> {
+        let level_0_store = self.option.level_store(0, store_manager)?;
         for scope in self.level_slice[0].iter() {
-            let file = FP::open(self.option.table_path(&scope.gen))
-                .await
-                .map_err(VersionError::Io)?;
-            let table = SsTable::open(file);
+            let table = SsTable::open(
+                build_reader(level_0_store.clone(), self.option.table_path(&scope.gen)).await?,
+            );
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -191,10 +198,12 @@ where
             if scopes.is_empty() {
                 continue;
             }
+            let store = self.option.level_store(i + 1, store_manager)?;
             streams.push(ScanStream::Level {
                 // SAFETY: checked scopes no empty
                 inner: LevelStream::new(
                     self,
+                    store.clone(),
                     i + 1,
                     0,
                     scopes.len() - 1,
@@ -233,6 +242,10 @@ where
     Io(#[from] std::io::Error),
     #[error("version parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
+    #[error("version object_store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
+    #[error("version store manager error: {0}")]
+    StoreManagerError(#[from] StoreManagerError),
     #[error("version send error: {0}")]
     Send(#[from] SendError<CleanTag>),
 }

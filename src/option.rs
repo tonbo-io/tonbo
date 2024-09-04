@@ -1,21 +1,28 @@
-use std::{marker::PhantomData, path::PathBuf};
+use std::{marker::PhantomData, path::PathBuf, sync::Arc};
 
+use object_store::ObjectStore;
 use parquet::{
     basic::Compression,
     file::properties::{EnabledStatistics, WriterProperties},
 };
+use url::Url;
 
 use crate::{
-    fs::{FileId, FileProvider, FileType},
+    fs::{
+        store_manager::{StoreManager, StoreManagerError},
+        FileId, FileProvider, FileType,
+    },
     record::Record,
     trigger::TriggerType,
-    version::Version,
+    version::{Version, MAX_LEVEL},
+    DbError,
 };
 
 /// configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Debug, Clone)]
 pub struct DbOption<R> {
-    pub(crate) path: PathBuf,
+    pub(crate) wal_path: PathBuf,
+    pub(crate) table_urls: Vec<(Url, Option<Arc<dyn ObjectStore>>)>,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,
     pub(crate) major_threshold_with_sst_size: usize,
@@ -30,16 +37,21 @@ pub struct DbOption<R> {
     _p: PhantomData<R>,
 }
 
-impl<R, P> From<P> for DbOption<R>
+impl<R> TryFrom<PathBuf> for DbOption<R>
 where
-    P: Into<PathBuf>,
     R: Record,
 {
+    type Error = DbError<R>;
+
     /// build the default configured [`DbOption`] based on the passed path
-    fn from(path: P) -> Self {
+    fn try_from(base_path: PathBuf) -> Result<Self, Self::Error> {
         let (column_paths, sorting_columns) = R::primary_key_path();
-        DbOption {
-            path: path.into(),
+        let table_url = Url::from_directory_path(&base_path)
+            .map_err(|_| DbError::UrlParse(base_path.to_string_lossy().to_string()))?;
+
+        Ok(DbOption {
+            wal_path: base_path,
+            table_urls: vec![(table_url, None); MAX_LEVEL],
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
@@ -59,7 +71,7 @@ where
             major_l_selection_table_max_num: 4,
             trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
             _p: Default::default(),
-        }
+        })
     }
 }
 
@@ -70,9 +82,29 @@ where
     /// build the [`DB`](crate::DB) storage directory based on the passed path
     pub fn path(self, path: impl Into<PathBuf>) -> Self {
         DbOption {
-            path: path.into(),
+            wal_path: path.into(),
             ..self
         }
+    }
+
+    pub fn level_url(
+        mut self,
+        level: usize,
+        url: Url,
+        store: Option<Arc<dyn ObjectStore>>,
+    ) -> Result<Self, DbError<R>> {
+        if level >= MAX_LEVEL {
+            Err(StoreManagerError::ExceedsMaxLevel)?;
+        }
+        self.table_urls[level] = (url, store);
+        Ok(self)
+    }
+
+    pub fn all_level_url(mut self, url: Url, store: Option<Arc<dyn ObjectStore>>) -> Self {
+        for table_url in self.table_urls.iter_mut() {
+            *table_url = (url.clone(), store.clone());
+        }
+        self
     }
 
     /// len threshold of `immutables` when minor compaction is triggered
@@ -147,12 +179,30 @@ impl<R> DbOption<R>
 where
     R: Record,
 {
-    pub(crate) fn table_path(&self, gen: &FileId) -> PathBuf {
-        self.path.join(format!("{}.{}", gen, FileType::Parquet))
+    pub(crate) fn level_store<'a>(
+        &'a self,
+        level: usize,
+        store_manager: &'a StoreManager,
+    ) -> Result<&'a Arc<dyn ObjectStore>, StoreManagerError> {
+        if level >= MAX_LEVEL {
+            return Err(StoreManagerError::ExceedsMaxLevel);
+        }
+        let (url, default_store) = &self.table_urls[level];
+
+        if let Some(store) = default_store {
+            return Ok(store);
+        }
+        store_manager
+            .get(url)
+            .ok_or(StoreManagerError::StoreNotFound(level))
+    }
+
+    pub(crate) fn table_path(&self, gen: &FileId) -> object_store::path::Path {
+        object_store::path::Path::from(format!("{}.{}", gen, FileType::Parquet))
     }
 
     pub(crate) fn wal_dir_path(&self) -> PathBuf {
-        self.path.join("wal")
+        self.wal_path.join("wal")
     }
 
     pub(crate) fn wal_path(&self, gen: &FileId) -> PathBuf {
@@ -161,7 +211,7 @@ where
     }
 
     pub(crate) fn version_path(&self) -> PathBuf {
-        self.path.join(format!("version.{}", FileType::Log))
+        self.wal_path.join(format!("version.{}", FileType::Log))
     }
 
     pub(crate) fn is_threshold_exceeded_major<E>(

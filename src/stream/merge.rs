@@ -10,15 +10,14 @@ use futures_util::stream::StreamExt;
 use pin_project_lite::pin_project;
 
 use super::{Entry, ScanStream};
-use crate::{fs::FileProvider, record::Record, timestamp::Timestamp};
+use crate::{record::Record, timestamp::Timestamp};
 
 pin_project! {
-    pub struct MergeStream<'merge, R, FP>
+    pub struct MergeStream<'merge, R>
     where
         R: Record,
-        FP: FileProvider,
     {
-        streams: Vec<ScanStream<'merge, R, FP>>,
+        streams: Vec<ScanStream<'merge, R>>,
         peeked: BinaryHeap<CmpEntry<'merge, R>>,
         buf: Option<Entry<'merge, R>>,
         ts: Timestamp,
@@ -26,13 +25,12 @@ pin_project! {
     }
 }
 
-impl<'merge, R, FP> MergeStream<'merge, R, FP>
+impl<'merge, R> MergeStream<'merge, R>
 where
     R: Record,
-    FP: FileProvider + 'merge,
 {
     pub(crate) async fn from_vec(
-        mut streams: Vec<ScanStream<'merge, R, FP>>,
+        mut streams: Vec<ScanStream<'merge, R>>,
         ts: Timestamp,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
@@ -64,10 +62,9 @@ where
     }
 }
 
-impl<'merge, R, FP> Stream for MergeStream<'merge, R, FP>
+impl<'merge, R> Stream for MergeStream<'merge, R>
 where
     R: Record,
-    FP: FileProvider + 'merge,
 {
     type Item = Result<Entry<'merge, R>, parquet::errors::ParquetError>;
 
@@ -159,9 +156,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{ops::Bound, sync::Arc};
+    use std::{ops::Bound, str::FromStr, sync::Arc};
 
     use futures_util::StreamExt;
+    use url::Url;
 
     use super::MergeStream;
     use crate::{
@@ -172,7 +170,10 @@ mod tests {
     #[tokio::test]
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -220,7 +221,7 @@ mod tests {
         let lower = "a".to_string();
         let upper = "e".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
+        let mut merge = MergeStream::<String>::from_vec(
             vec![
                 m1.scan(bound, 6.into()).into(),
                 m2.scan(bound, 6.into()).into(),
@@ -272,7 +273,10 @@ mod tests {
     #[tokio::test]
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -301,12 +305,10 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
-            vec![m1.scan(bound, 0.into()).into()],
-            0.into(),
-        )
-        .await
-        .unwrap();
+        let mut merge =
+            MergeStream::<String>::from_vec(vec![m1.scan(bound, 0.into()).into()], 0.into())
+                .await
+                .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
             assert_eq!(entry.key().value, "1");
@@ -331,12 +333,10 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String, TokioExecutor>::from_vec(
-            vec![m1.scan(bound, 1.into()).into()],
-            1.into(),
-        )
-        .await
-        .unwrap();
+        let mut merge =
+            MergeStream::<String>::from_vec(vec![m1.scan(bound, 1.into()).into()], 1.into())
+                .await
+                .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
             assert_eq!(entry.key().value, "1");

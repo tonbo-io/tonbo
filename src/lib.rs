@@ -31,10 +31,11 @@
 //! # Examples
 //!
 //! ```no_run
-//! use std::ops::Bound;
+//! use std::{ops::Bound, path::PathBuf, str::FromStr};
 //!
 //! use futures_util::stream::StreamExt;
-//! use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
+//! use tonbo::{executor::tokio::TokioExecutor, tonbo_record, DbOption, Projection, DB};
+//! use url::Url;
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
@@ -48,10 +49,11 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
+//!     let option = DbOption::try_from(PathBuf::from("./db_path/users"))
+//!         .unwrap()
+//!         .all_level_url(Url::from_str("memory:").unwrap(), None);
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new("./db_path/users".into(), TokioExecutor::default())
-//!         .await
-//!         .unwrap();
+//!     let db = DB::new(option, TokioExecutor::default()).await.unwrap();
 //!
 //!     // insert with owned value
 //!     db.insert(User {
@@ -153,7 +155,10 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, Compactor},
     executor::Executor,
-    fs::{FileId, FileType},
+    fs::{
+        store_manager::{StoreManager, StoreManagerError},
+        FileId, FileType,
+    },
     serdes::Decode,
     stream::{merge::MergeStream, package::PackageStream, Entry, ScanStream},
     timestamp::Timestamped,
@@ -169,6 +174,7 @@ where
 {
     schema: Arc<RwLock<Schema<R, E>>>,
     version_set: VersionSet<R, E>,
+    store_manager: Arc<StoreManager>,
     lock_map: LockMap<R::Key>,
     _p: PhantomData<E>,
 }
@@ -186,19 +192,24 @@ where
     /// For more configurable options, please refer to [`DbOption`].
     pub async fn new(option: DbOption<R>, executor: E) -> Result<Self, DbError<R>> {
         let option = Arc::new(option);
-        E::create_dir_all(&option.path).await?;
         E::create_dir_all(&option.wal_dir_path()).await?;
 
         let (task_tx, task_rx) = bounded(1);
 
-        let (mut cleaner, clean_sender) = Cleaner::<R, E>::new(option.clone());
+        let store_manager = Arc::new(StoreManager::new(&option.table_urls)?);
+        let (mut cleaner, clean_sender) =
+            Cleaner::<R, E>::new(option.clone(), store_manager.clone());
 
         let version_set = VersionSet::new(clean_sender, option.clone()).await?;
         let schema = Arc::new(RwLock::new(
             Schema::new(option.clone(), task_tx, &version_set).await?,
         ));
-        let mut compactor =
-            Compactor::<R, E>::new(schema.clone(), option.clone(), version_set.clone());
+        let mut compactor = Compactor::<R, E>::new(
+            schema.clone(),
+            option.clone(),
+            store_manager.clone(),
+            version_set.clone(),
+        );
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -221,6 +232,7 @@ where
         Ok(Self {
             schema,
             version_set,
+            store_manager,
             lock_map: Arc::new(Default::default()),
             _p: Default::default(),
         })
@@ -230,6 +242,7 @@ where
     pub async fn transaction(&self) -> Transaction<'_, R, E> {
         Transaction::new(
             self.version_set.current().await,
+            self.store_manager.clone(),
             self.schema.read().await,
             self.lock_map.clone(),
         )
@@ -287,6 +300,7 @@ where
             .await
             .get(
                 &*self.version_set.current().await,
+                &self.store_manager,
                 key,
                 self.version_set.transaction_ts(),
                 Projection::All,
@@ -309,6 +323,7 @@ where
                 range,
                 self.version_set.transaction_ts(),
                 &*current,
+                &self.store_manager,
                 Vec::new(),
             ).take().await?;
 
@@ -467,6 +482,7 @@ where
     async fn get<'get>(
         &'get self,
         version: &'get Version<R, FP>,
+        store_manager: &'get Arc<StoreManager>,
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
@@ -479,6 +495,7 @@ where
             (Bound::Included(key), Bound::Included(key)),
             ts,
             version,
+            store_manager,
             vec![],
         );
 
@@ -510,7 +527,8 @@ where
     ts: Timestamp,
 
     version: &'scan Version<R, FP>,
-    streams: Vec<ScanStream<'scan, R, FP>>,
+    store_manager: &'scan Arc<StoreManager>,
+    streams: Vec<ScanStream<'scan, R>>,
 
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
@@ -527,7 +545,8 @@ where
         (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
         version: &'scan Version<R, FP>,
-        streams: Vec<ScanStream<'scan, R, FP>>,
+        store_manager: &'scan Arc<StoreManager>,
+        streams: Vec<ScanStream<'scan, R>>,
     ) -> Self {
         Self {
             schema,
@@ -535,6 +554,7 @@ where
             upper,
             ts,
             version,
+            store_manager,
             streams,
             limit: None,
             projection_indices: None,
@@ -591,6 +611,7 @@ where
         }
         self.version
             .streams(
+                self.store_manager,
                 &mut self.streams,
                 (self.lower, self.upper),
                 self.ts,
@@ -626,6 +647,7 @@ where
         }
         self.version
             .streams(
+                self.store_manager,
                 &mut self.streams,
                 (self.lower, self.upper),
                 self.ts,
@@ -654,12 +676,18 @@ where
     Version(#[from] VersionError<R>),
     #[error("write parquet error: {0}")]
     Parquet(#[from] ParquetError),
+    #[error("write object_store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
+    #[error("write store manager error: {0}")]
+    StoreManager(#[from] StoreManagerError),
     // #[error("write encode error: {0}")]
     // Encode(<<R as Record>::Ref as Encode>::Error),
     #[error("write recover error: {0}")]
     Recover(#[from] RecoverError<<R as Decode>::Error>),
     #[error("wal write error: {0}")]
     WalWrite(Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error("url: {0} parse fail")]
+    UrlParse(String),
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
@@ -674,6 +702,7 @@ pub(crate) mod tests {
     use std::{
         collections::{BTreeMap, Bound},
         mem,
+        str::FromStr,
         sync::Arc,
     };
 
@@ -688,11 +717,12 @@ pub(crate) mod tests {
     use tempfile::TempDir;
     use tokio::io;
     use tracing::error;
+    use url::Url;
 
     use crate::{
         compaction::{CompactTask, Compactor},
         executor::{tokio::TokioExecutor, Executor},
-        fs::{FileId, FileProvider},
+        fs::{store_manager::StoreManager, FileId, FileProvider},
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
         record::{internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordRef},
         serdes::{Decode, Encode},
@@ -1051,6 +1081,7 @@ pub(crate) mod tests {
 
     pub(crate) async fn build_db<R, E>(
         option: Arc<DbOption<R>>,
+        store_manager: Arc<StoreManager>,
         compaction_rx: Receiver<CompactTask>,
         executor: E,
         schema: crate::Schema<R, E>,
@@ -1061,14 +1092,19 @@ pub(crate) mod tests {
         R::Columns: Send + Sync,
         E: Executor + Send + Sync + 'static,
     {
-        E::create_dir_all(&option.path).await?;
+        E::create_dir_all(&option.wal_path).await?;
 
         let schema = Arc::new(RwLock::new(schema));
 
-        let (mut cleaner, clean_sender) = Cleaner::<R, E>::new(option.clone());
+        let (mut cleaner, clean_sender) =
+            Cleaner::<R, E>::new(option.clone(), store_manager.clone());
         let version_set = build_version_set(version, clean_sender, option.clone()).await?;
-        let mut compactor =
-            Compactor::<R, E>::new(schema.clone(), option.clone(), version_set.clone());
+        let mut compactor = Compactor::<R, E>::new(
+            schema.clone(),
+            option.clone(),
+            store_manager.clone(),
+            version_set.clone(),
+        );
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -1091,6 +1127,7 @@ pub(crate) mod tests {
         Ok(DB {
             schema,
             version_set,
+            store_manager,
             lock_map: Arc::new(Default::default()),
             _p: Default::default(),
         })
@@ -1304,8 +1341,10 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
-
-        let mut option = DbOption::from(temp_dir.path());
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let mut option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1364,7 +1403,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn schema_recover() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = DbOption::try_from(temp_dir.into_path())
+            .unwrap()
+            .all_level_url(table_root_url, None);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

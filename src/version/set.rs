@@ -97,7 +97,7 @@ where
     pub(crate) async fn apply_edits(
         &self,
         version_edits: Vec<VersionEdit<R::Key>>,
-        delete_gens: Option<Vec<FileId>>,
+        delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {
         let mut guard = self.inner.write().await;
@@ -159,12 +159,13 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{io::SeekFrom, sync::Arc};
+    use std::{io::SeekFrom, str::FromStr, sync::Arc};
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
     use tempfile::TempDir;
     use tokio::io::AsyncSeekExt;
+    use url::Url;
 
     use crate::{
         executor::tokio::TokioExecutor,
@@ -206,7 +207,12 @@ pub(crate) mod tests {
     async fn timestamp_persistence() {
         let temp_dir = TempDir::new().unwrap();
         let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let table_root_url = Url::from_str("memory:").unwrap();
+        let option = Arc::new(
+            DbOption::try_from(temp_dir.into_path())
+                .unwrap()
+                .all_level_url(table_root_url, None),
+        );
 
         let version_set: VersionSet<String, TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone())
