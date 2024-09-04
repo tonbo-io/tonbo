@@ -57,3 +57,19 @@ impl FileProvider for TokioExecutor {
         })
     }
 }
+
+#[cfg(test)]
+impl TokioExecutor {
+    pub(crate) async fn file_exist(path: impl AsRef<Path> + Send) -> io::Result<bool> {
+        match tokio::fs::metadata(path).await {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::NotFound {
+                    Ok(false)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+}
