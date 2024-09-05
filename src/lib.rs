@@ -143,7 +143,7 @@ use parquet::{
 };
 use record::Record;
 use thiserror::Error;
-use timestamp::Timestamp;
+use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
 pub use tonbo_macros::{tonbo_record, KeyAttributes};
 use tracing::error;
@@ -474,18 +474,36 @@ where
     where
         FP: FileProvider,
     {
-        let mut scan = Scan::new(
-            self,
-            (Bound::Included(key), Bound::Included(key)),
-            ts,
-            version,
-            vec![],
-        );
-
-        if let Projection::Parts(mask) = projection {
-            scan = scan.projection(mask);
+        if let Some(entry) = self.mutable.get(key, ts) {
+            return Ok(Some(Entry::Mutable(entry)));
         }
-        Ok(scan.limit(1).take().await?.next().await.transpose()?)
+
+        let projection = match projection {
+            Projection::All => ProjectionMask::all(),
+            Projection::Parts(projection) => {
+                let mut fixed_projection: Vec<usize> = [0, 1, R::primary_key_index()]
+                    .into_iter()
+                    .chain(projection.into_iter().map(|p| p + 2))
+                    .collect();
+                fixed_projection.dedup();
+
+                ProjectionMask::roots(
+                    &arrow_to_parquet_schema(R::arrow_schema()).unwrap(),
+                    fixed_projection,
+                )
+            }
+        };
+
+        for (_, immutable) in self.immutables.iter().rev() {
+            if let Some(entry) = immutable.get(key, ts, projection.clone()) {
+                return Ok(Some(Entry::RecordBatch(entry)));
+            }
+        }
+
+        Ok(version
+            .query(TimestampedRef::new(key, ts), projection)
+            .await?
+            .map(|entry| Entry::RecordBatch(entry)))
     }
 
     fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {

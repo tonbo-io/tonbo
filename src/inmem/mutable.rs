@@ -120,8 +120,7 @@ where
         Ok(is_exceeded)
     }
 
-    #[allow(unused)]
-    fn get(
+    pub(crate) fn get(
         &self,
         key: &R::Key,
         ts: Timestamp,
@@ -129,16 +128,9 @@ where
         self.data
             .range::<TimestampedRef<R::Key>, _>((
                 Bound::Included(TimestampedRef::new(key, ts)),
-                Bound::Unbounded,
+                Bound::Included(TimestampedRef::new(key, EPOCH)),
             ))
             .next()
-            .and_then(|entry| {
-                if &entry.key().value == key {
-                    Some(entry)
-                } else {
-                    None
-                }
-            })
     }
 
     pub(crate) fn scan<'scan>(
@@ -265,7 +257,9 @@ mod tests {
                 vu32: Some(1),
                 vbool: Some(true)
             }
-        )
+        );
+        assert!(mem_table.get(&key_2, 0_u32.into()).is_none());
+        assert!(mem_table.get(&key_2, 1_u32.into()).is_some());
     }
 
     #[tokio::test]
