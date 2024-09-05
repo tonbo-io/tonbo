@@ -32,12 +32,16 @@ impl FileProvider for TokioExecutor {
     fn list(
         dir_path: impl AsRef<Path> + Send,
         file_type: FileType,
+        is_reverse: bool,
     ) -> io::Result<impl Stream<Item = io::Result<(Self::File, FileId)>>> {
         let dir_path = dir_path.as_ref().to_path_buf();
         let mut entries: Vec<DirEntry> =
             fs::read_dir(&dir_path)?.collect::<Result<Vec<_>, io::Error>>()?;
         entries.sort_by_key(|entry| entry.file_name());
 
+        if is_reverse {
+            entries.reverse();
+        }
         Ok(stream! {
             for entry in entries {
                 let path = entry.path();

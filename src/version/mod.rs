@@ -24,7 +24,7 @@ use crate::{
     serdes::Encode,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TimestampedRef},
-    version::cleaner::CleanTag,
+    version::{cleaner::CleanTag, edit::VersionEdit},
     DbOption,
 };
 
@@ -49,6 +49,7 @@ where
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption<R>>,
     timestamp: Arc<AtomicU32>,
+    log_length: u32,
     _p: PhantomData<FP>,
 }
 
@@ -69,6 +70,7 @@ where
             clean_sender,
             option: option.clone(),
             timestamp,
+            log_length: 0,
             _p: Default::default(),
         }
     }
@@ -110,6 +112,7 @@ where
             clean_sender: self.clean_sender.clone(),
             option: self.option.clone(),
             timestamp: self.timestamp.clone(),
+            log_length: self.log_length,
             _p: Default::default(),
         }
     }
@@ -223,6 +226,24 @@ where
             });
         }
         Ok(())
+    }
+
+    pub(crate) fn to_edits(&self) -> Vec<VersionEdit<R::Key>> {
+        let mut edits = Vec::new();
+
+        for (level, scopes) in self.level_slice.iter().enumerate() {
+            for scope in scopes {
+                edits.push(VersionEdit::Add {
+                    level: level as u8,
+                    scope: scope.clone(),
+                })
+            }
+        }
+        edits.push(VersionEdit::LatestTimeStamp {
+            ts: self.transaction_ts(),
+        });
+        edits.push(VersionEdit::NewLogLength { len: 0 });
+        edits
     }
 }
 

@@ -36,6 +36,7 @@ pub trait FileProvider {
     fn list(
         dir_path: impl AsRef<Path> + Send,
         file_type: FileType,
+        is_reverse: bool,
     ) -> io::Result<impl Stream<Item = io::Result<(Self::File, FileId)>>>;
 }
 

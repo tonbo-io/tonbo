@@ -188,6 +188,7 @@ where
         let option = Arc::new(option);
         E::create_dir_all(&option.path).await?;
         E::create_dir_all(&option.wal_dir_path()).await?;
+        E::create_dir_all(&option.version_log_dir_path()).await?;
 
         let (task_tx, task_rx) = bounded(1);
 
@@ -389,7 +390,7 @@ where
         };
 
         let mut transaction_map = HashMap::new();
-        let mut wal_stream = pin!(FP::list(option.wal_dir_path(), FileType::Wal)?);
+        let mut wal_stream = pin!(FP::list(option.wal_dir_path(), FileType::Wal, false)?);
         let mut wal_ids = Vec::new();
 
         while let Some(wal) = wal_stream.next().await {
@@ -1078,6 +1079,9 @@ pub(crate) mod tests {
         E: Executor + Send + Sync + 'static,
     {
         E::create_dir_all(&option.path).await?;
+        E::create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
 
         let schema = Arc::new(RwLock::new(schema));
 

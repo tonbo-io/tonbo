@@ -1,5 +1,7 @@
 use std::{
     io::SeekFrom,
+    mem,
+    pin::pin,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -8,11 +10,12 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
+use futures_util::StreamExt;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{FileId, FileProvider},
+    fs::{FileId, FileProvider, FileType},
     record::Record,
     serdes::Encode,
     timestamp::Timestamp,
@@ -26,7 +29,7 @@ where
     FP: FileProvider,
 {
     current: VersionRef<R, FP>,
-    log: FP::File,
+    log_with_id: (FP::File, FileId),
 }
 
 pub(crate) struct VersionSet<R, FP>
@@ -78,7 +81,22 @@ where
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption<R>>,
     ) -> Result<Self, VersionError<R>> {
-        let mut log = FP::open(option.version_path()).await?;
+        let (mut log, log_id) = if let Some(file) = pin!(FP::list(
+            option.version_log_dir_path(),
+            FileType::Log,
+            true
+        )?)
+        .next()
+        .await
+        .transpose()?
+        {
+            file
+        } else {
+            let log_id = FileId::new();
+            let log = FP::open(option.version_log_path(&log_id)).await?;
+            (log, log_id)
+        };
+
         let edits = VersionEdit::recover(&mut log).await;
         log.seek(SeekFrom::End(0)).await?;
 
@@ -91,9 +109,10 @@ where
                     clean_sender: clean_sender.clone(),
                     option: option.clone(),
                     timestamp: timestamp.clone(),
+                    log_length: 0,
                     _p: Default::default(),
                 }),
-                log,
+                log_with_id: (log, log_id),
             })),
             clean_sender,
             timestamp,
@@ -110,18 +129,24 @@ where
 
     pub(crate) async fn apply_edits(
         &self,
-        version_edits: Vec<VersionEdit<R::Key>>,
+        mut version_edits: Vec<VersionEdit<R::Key>>,
         delete_gens: Option<Vec<FileId>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {
+        let timestamp = &self.timestamp;
+        let option = &self.option;
         let mut guard = self.inner.write().await;
-
         let mut new_version = Version::clone(&guard.current);
+        let (log, log_id) = &mut guard.log_with_id;
+        let edit_len = new_version.log_length + version_edits.len() as u32;
 
+        if !is_recover {
+            version_edits.push(VersionEdit::NewLogLength { len: edit_len });
+        }
         for version_edit in version_edits {
             if !is_recover {
                 version_edit
-                    .encode(&mut guard.log)
+                    .encode(log)
                     .await
                     .map_err(VersionError::Encode)?;
             }
@@ -130,7 +155,7 @@ where
                     if let Some(wal_ids) = scope.wal_ids.take() {
                         for wal_id in wal_ids {
                             // may have been removed after multiple starts
-                            let _ = FP::remove(self.option.wal_path(&wal_id)).await;
+                            let _ = FP::remove(option.wal_path(&wal_id)).await;
                         }
                     }
                     new_version.level_slice[level as usize].push(scope);
@@ -153,9 +178,12 @@ where
                 }
                 VersionEdit::LatestTimeStamp { ts } => {
                     if is_recover {
-                        self.timestamp.store(u32::from(ts), Ordering::Release);
+                        timestamp.store(u32::from(ts), Ordering::Release);
                     }
                     new_version.ts = ts;
+                }
+                VersionEdit::NewLogLength { len } => {
+                    new_version.log_length = len;
                 }
             }
         }
@@ -169,7 +197,16 @@ where
                 .await
                 .map_err(VersionError::Send)?;
         }
-        guard.log.flush().await?;
+        if edit_len >= option.version_log_snapshot_threshold {
+            *log_id = FileId::new();
+            let _ = mem::replace(log, FP::open(option.version_log_path(log_id)).await?);
+
+            new_version.log_length = 0;
+            for new_edit in new_version.to_edits() {
+                new_edit.encode(log).await.map_err(VersionError::Encode)?;
+            }
+        }
+        log.flush().await?;
         guard.current = Arc::new(new_version);
         Ok(())
     }
@@ -177,17 +214,19 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{io::SeekFrom, sync::Arc};
+    use std::{io::SeekFrom, pin::pin, sync::Arc};
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
+    use futures_util::StreamExt;
     use tempfile::TempDir;
     use tokio::io::AsyncSeekExt;
 
     use crate::{
         executor::tokio::TokioExecutor,
-        fs::FileProvider,
+        fs::{FileId, FileProvider, FileType},
         record::Record,
+        scope::Scope,
         version::{
             cleaner::CleanTag,
             edit::VersionEdit,
@@ -206,14 +245,15 @@ pub(crate) mod tests {
         R: Record,
         FP: FileProvider,
     {
-        let mut log = FP::open(option.version_path()).await?;
+        let log_id = FileId::new();
+        let mut log = FP::open(option.version_log_path(&log_id)).await?;
         log.seek(SeekFrom::End(0)).await?;
 
         let timestamp = version.timestamp.clone();
         Ok(VersionSet::<R, FP> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
-                log,
+                log_with_id: (log, log_id),
             })),
             clean_sender,
             timestamp,
@@ -226,6 +266,9 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let (sender, _) = bounded(1);
         let option = Arc::new(DbOption::from(temp_dir.path()));
+        TokioExecutor::create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
 
         let version_set: VersionSet<String, TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone())
@@ -248,5 +291,123 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         assert_eq!(version_set.load_ts(), 20_u32.into());
+    }
+
+    #[tokio::test]
+    async fn version_log_snap_shot() {
+        let temp_dir = TempDir::new().unwrap();
+        let (sender, _) = bounded(1);
+        let mut option = DbOption::from(temp_dir.path());
+        option.version_log_snapshot_threshold = 4;
+
+        let option = Arc::new(option);
+        TokioExecutor::create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+
+        let version_set: VersionSet<String, TokioExecutor> =
+            VersionSet::new(sender.clone(), option.clone())
+                .await
+                .unwrap();
+        let gen_0 = FileId::new();
+        let gen_1 = FileId::new();
+        let gen_2 = FileId::new();
+
+        version_set
+            .apply_edits(
+                vec![
+                    VersionEdit::Add {
+                        level: 0,
+                        scope: Scope {
+                            min: "0".to_string(),
+                            max: "1".to_string(),
+                            gen: gen_0,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 0,
+                        scope: Scope {
+                            min: "2".to_string(),
+                            max: "3".to_string(),
+                            gen: gen_1,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 0,
+                        scope: Scope {
+                            min: "4".to_string(),
+                            max: "5".to_string(),
+                            gen: gen_2,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::Remove {
+                        level: 0,
+                        gen: gen_0,
+                    },
+                    VersionEdit::Remove {
+                        level: 0,
+                        gen: gen_2,
+                    },
+                ],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mut guard = version_set.inner.write().await;
+        let log = &mut guard.log_with_id.0;
+
+        log.seek(SeekFrom::Start(0)).await.unwrap();
+        let edits = VersionEdit::<String>::recover(log).await;
+
+        assert_eq!(edits.len(), 3);
+        assert_eq!(
+            edits,
+            vec![
+                VersionEdit::Add {
+                    level: 0,
+                    scope: Scope {
+                        min: "2".to_string(),
+                        max: "3".to_string(),
+                        gen: gen_1,
+                        wal_ids: None,
+                    },
+                },
+                VersionEdit::LatestTimeStamp { ts: 0.into() },
+                VersionEdit::NewLogLength { len: 0 }
+            ]
+        );
+        drop(guard);
+        drop(version_set);
+
+        let (mut log, _) =
+            pin!(TokioExecutor::list(option.version_log_dir_path(), FileType::Log, true).unwrap())
+                .next()
+                .await
+                .unwrap()
+                .unwrap();
+        let edits = VersionEdit::<String>::recover(&mut log).await;
+
+        assert_eq!(edits.len(), 3);
+        assert_eq!(
+            edits,
+            vec![
+                VersionEdit::Add {
+                    level: 0,
+                    scope: Scope {
+                        min: "2".to_string(),
+                        max: "3".to_string(),
+                        gen: gen_1,
+                        wal_ids: None,
+                    },
+                },
+                VersionEdit::LatestTimeStamp { ts: 0.into() },
+                VersionEdit::NewLogLength { len: 0 }
+            ]
+        );
     }
 }
