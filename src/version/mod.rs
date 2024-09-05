@@ -239,9 +239,7 @@ where
                 })
             }
         }
-        edits.push(VersionEdit::LatestTimeStamp {
-            ts: self.transaction_ts(),
-        });
+        edits.push(VersionEdit::LatestTimeStamp { ts: self.load_ts() });
         edits.push(VersionEdit::NewLogLength { len: 0 });
         edits
     }
