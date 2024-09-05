@@ -532,6 +532,8 @@ where
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
+
+    reversed: Option<bool>,
 }
 
 impl<'scan, R, FP> Scan<'scan, R, FP>
@@ -556,6 +558,7 @@ where
             limit: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
+            reversed: Some(false),
         }
     }
 
@@ -589,37 +592,67 @@ where
         }
     }
 
+    /// Reverse the order of the scan.
+    pub fn reverse(mut self) -> Self {
+        std::mem::swap(&mut self.lower, &mut self.upper);
+        self.streams.reverse();
+        self.reversed = Some(true);
+        self
+    }
+
     /// get a Stream that returns single row of Record
     pub async fn take(
         mut self,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
-        self.streams.push(
-            self.schema
-                .mutable
-                .scan((self.lower, self.upper), self.ts)
-                .into(),
-        );
-        for (_, immutable) in self.schema.immutables.iter().rev() {
-            self.streams.push(
-                immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
-                    .into(),
-            );
+        // Helper function to handle reversing logic
+        fn maybe_reverse<T>(vec: &mut Vec<T>, reverse: bool) {
+            if reverse {
+                vec.reverse();
+            }
         }
+
+        let reversed = self.reversed.unwrap_or(false);
+
+        // Process mutable streams
+        let mut mutable_stream = vec![self.schema.mutable.scan((self.lower, self.upper), self.ts).into()];
+        maybe_reverse(&mut mutable_stream, reversed);
+        self.streams.append(&mut mutable_stream);
+
+        // Process immutable streams
+        for (_, immutable) in &self.schema.immutables {
+            let (lower, upper) = if reversed {
+                (self.upper, self.lower)
+            } else {
+                (self.lower, self.upper)
+            };
+
+            let mut immutable_stream = vec![
+                immutable.scan((lower, upper), self.ts, self.projection.clone()).into(),
+            ];
+            maybe_reverse(&mut immutable_stream, reversed);
+            self.streams.append(&mut immutable_stream);
+        }
+
+        // Process SST streams
+        let mut sst_streams = Vec::new();
         self.version
             .streams(
-                &mut self.streams,
+                &mut sst_streams,
                 (self.lower, self.upper),
                 self.ts,
                 self.limit,
                 self.projection,
             )
             .await?;
+        maybe_reverse(&mut sst_streams, reversed);
+        self.streams.append(&mut sst_streams);
 
+        // Create the merge stream
         let mut merge_stream = MergeStream::from_vec(self.streams, self.ts).await?;
         if let Some(limit) = self.limit {
             merge_stream = merge_stream.limit(limit);
         }
+
         Ok(merge_stream)
     }
 
@@ -700,6 +733,7 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
+    use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
@@ -1433,6 +1467,55 @@ pub(crate) mod tests {
             assert_eq!(entry.value().as_ref().unwrap().vu32, test.vu32);
             assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
         }
+    }
+
+    #[tokio::test]
+    async fn test_reverse_scan_with_struct() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::from(temp_dir.path());
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.level_sst_magnification = 10;
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+
+        // Insert test records
+        for item in &test_items()[0..10] {
+            db.write(item.clone(), 0.into()).await.unwrap();
+        }
+
+        let txn = db.transaction().await;
+
+        let lower_bound = "2".to_string();
+        let upper_bound = "7".to_string();
+
+        let mut scan = txn
+            .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
+            .projection(vec![1])
+            .take()
+            .await
+            .unwrap();
+
+        let mut reversed_scan = txn
+            .scan((Bound::Included(&lower_bound), Bound::Excluded(&upper_bound)))
+            .reverse()
+            .projection(vec![1])
+            .take()
+            .await
+            .unwrap();
+
+        let entry_0 = scan.next().await.unwrap().unwrap();
+        assert_eq!(entry_0.key().value, "2");
+        assert!(entry_0.value().unwrap().vbool.is_none());
+
+        let entry_0 = reversed_scan.next().await.unwrap().unwrap();
+        assert_eq!(entry_0.key().value, "6");
+        assert!(entry_0.value().unwrap().vbool.is_none());
     }
 
     #[test]
