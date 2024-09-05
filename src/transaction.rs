@@ -284,6 +284,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transaction_get() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = Arc::new(DbOption::from(temp_dir.path()));
+
+        let (_, version) = build_version(&option).await;
+        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
+        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+            .await
+            .unwrap();
+
+        let name = "erika".to_string();
+        {
+            let txn = db.transaction().await;
+            // can't read future data
+            assert!(txn.get(&name, Projection::All).await.unwrap().is_none());
+            txn.commit().await.unwrap();
+        }
+        {
+            let mut txn = db.transaction().await;
+            {
+                let entry = txn.get(&name, Projection::All).await.unwrap();
+                assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), 5);
+            }
+            txn.insert(Test {
+                vstring: name.clone(),
+                vu32: 50,
+                vbool: Some(false),
+            });
+
+            txn.commit().await.unwrap();
+        }
+        {
+            let mut txn = db.transaction().await;
+            // rewrite data in SSTable
+            for i in (1..6).step_by(2) {
+                txn.insert(Test {
+                    vstring: (i as usize).to_string(),
+                    vu32: i * 10 + i,
+                    vbool: Some(false),
+                });
+            }
+            {
+                // seek in mutable table before immutable
+                let entry = txn.get(&name, Projection::All).await.unwrap();
+                assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), 50);
+
+                for i in 1..6 {
+                    let key = i.to_string();
+                    let entry = txn.get(&key, Projection::All).await.unwrap();
+                    assert!(entry.is_some());
+                    if i % 2 == 1 {
+                        // seek in local buffer first
+                        assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), i * 10 + i);
+                        assert!(!entry.unwrap().get().vbool.unwrap());
+                    } else {
+                        // mem-table will miss, so seek in SSTable
+                        assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), 0);
+                        assert!(entry.unwrap().get().vbool.unwrap());
+                    }
+                }
+                // seek miss
+                assert!(txn
+                    .get(&"benn".to_owned(), Projection::All)
+                    .await
+                    .unwrap()
+                    .is_none())
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
 
