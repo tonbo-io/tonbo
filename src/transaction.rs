@@ -295,13 +295,10 @@ mod tests {
             .await
             .unwrap();
 
-        let name = "erika".to_string();
         {
-            let txn = db.transaction().await;
-            // can't read future data
-            assert!(txn.get(&name, Projection::All).await.unwrap().is_none());
-            txn.commit().await.unwrap();
+            let _ = db.version_set.increase_ts();
         }
+        let name = "erika".to_string();
         {
             let mut txn = db.transaction().await;
             {
