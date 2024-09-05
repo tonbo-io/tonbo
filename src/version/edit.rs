@@ -14,6 +14,7 @@ pub(crate) enum VersionEdit<K> {
     Add { level: u8, scope: Scope<K> },
     Remove { level: u8, gen: FileId },
     LatestTimeStamp { ts: Timestamp },
+    NewLogLength { len: u32 },
 }
 
 impl<K> VersionEdit<K>
@@ -55,6 +56,10 @@ where
                 writer.write_all(&2u8.to_le_bytes()).await?;
                 ts.encode(writer).await?;
             }
+            VersionEdit::NewLogLength { len } => {
+                writer.write_all(&3u8.to_le_bytes()).await?;
+                len.encode(writer).await?;
+            }
         }
 
         Ok(())
@@ -67,6 +72,7 @@ where
                 VersionEdit::Add { scope, .. } => scope.size(),
                 VersionEdit::Remove { .. } => 16,
                 VersionEdit::LatestTimeStamp { ts } => ts.size(),
+                VersionEdit::NewLogLength { .. } => size_of::<u32>(),
             }
     }
 }
@@ -112,6 +118,10 @@ where
                 let ts = Timestamp::decode(reader).await?;
                 VersionEdit::LatestTimeStamp { ts }
             }
+            3 => {
+                let len = u32::decode(reader).await?;
+                VersionEdit::NewLogLength { len }
+            }
             _ => todo!(),
         })
     }
@@ -139,6 +149,8 @@ mod tests {
                 level: 1,
                 gen: Default::default(),
             },
+            VersionEdit::LatestTimeStamp { ts: 10.into() },
+            VersionEdit::NewLogLength { len: 233 },
         ];
 
         let bytes = {
