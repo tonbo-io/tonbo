@@ -123,6 +123,20 @@ where
         ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
     }
 
+    pub(crate) fn get(
+        &self,
+        key: &<A::Record as Record>::Key,
+        ts: Timestamp,
+        projection_mask: ProjectionMask,
+    ) -> Option<RecordBatchEntry<A::Record>> {
+        self.scan(
+            (Bound::Included(key), Bound::Included(key)),
+            ts,
+            projection_mask,
+        )
+        .next()
+    }
+
     pub(crate) fn check_conflict(&self, key: &<A::Record as Record>::Key, ts: Timestamp) -> bool {
         self.index
             .range::<TimestampedRef<<A::Record as Record>::Key>, _>((
