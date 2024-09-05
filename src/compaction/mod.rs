@@ -18,7 +18,9 @@ use crate::{
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
     transaction::CommitError,
-    version::{edit::VersionEdit, set::VersionSet, Version, VersionError, MAX_LEVEL},
+    version::{
+        edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError, MAX_LEVEL,
+    },
     DbOption, Schema,
 };
 
@@ -100,7 +102,7 @@ where
                 }
                 version_edits.insert(0, VersionEdit::Add { level: 0, scope });
                 version_edits.push(VersionEdit::LatestTimeStamp {
-                    ts: version_ref.transaction_ts(),
+                    ts: version_ref.increase_ts(),
                 });
 
                 self.version_set

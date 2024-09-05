@@ -32,6 +32,12 @@ pub(crate) const MAX_LEVEL: usize = 7;
 
 pub(crate) type VersionRef<R, FP> = Arc<Version<R, FP>>;
 
+pub(crate) trait TransactionTs {
+    fn load_ts(&self) -> Timestamp;
+
+    fn increase_ts(&self) -> Timestamp;
+}
+
 #[derive(Debug)]
 pub(crate) struct Version<R, FP>
 where
@@ -70,9 +76,19 @@ where
     pub(crate) fn option(&self) -> &Arc<DbOption<R>> {
         &self.option
     }
+}
 
-    pub(crate) fn transaction_ts(&self) -> Timestamp {
-        self.timestamp.fetch_add(1, Ordering::Release).into()
+impl<R, FP> TransactionTs for Version<R, FP>
+where
+    R: Record,
+    FP: FileProvider,
+{
+    fn load_ts(&self) -> Timestamp {
+        self.timestamp.load(Ordering::Acquire).into()
+    }
+
+    fn increase_ts(&self) -> Timestamp {
+        (self.timestamp.fetch_add(1, Ordering::Release) + 1).into()
     }
 }
 
