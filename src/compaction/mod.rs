@@ -287,7 +287,7 @@ where
 
             let next_level_len = version.level_slice[level + 1].len();
             for scope in version.level_slice[level + 1]
-                [start_ll..cmp::min(end_ll + 1, next_level_len - 1)]
+                [start_ll..cmp::min(end_ll + 1, next_level_len)]
                 .iter()
             {
                 if scope.contains(min) || scope.contains(max) {
@@ -323,7 +323,7 @@ where
             start_l = 0;
             end_l = cmp::min(
                 option.major_default_oldest_table_num,
-                version.level_slice.len(),
+                version.level_slice[level].len(),
             );
 
             for scope in version.level_slice[level][..end_l].iter() {
@@ -333,7 +333,7 @@ where
                 meet_scopes_l.push(scope);
             }
         }
-        (meet_scopes_l, start_l, end_l)
+        (meet_scopes_l, start_l, end_l - 1)
     }
 
     async fn build_tables<'scan>(
