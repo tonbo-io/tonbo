@@ -897,4 +897,79 @@ pub(crate) mod tests {
             version,
         )
     }
+
+    // https://github.com/tonbo-io/tonbo/pull/139
+    #[tokio::test]
+    pub(crate) async fn major_panic() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::from(temp_dir.path());
+        option.major_threshold_with_sst_size = 1;
+        option.level_sst_magnification = 1;
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let table_gen0 = FileId::new();
+        let table_gen1 = FileId::new();
+        let mut records0 = vec![];
+        let mut records1 = vec![];
+        for i in 0..10 {
+            let record = (
+                LogType::Full,
+                Test {
+                    vstring: i.to_string(),
+                    vu32: i,
+                    vbool: Some(true),
+                },
+                0.into(),
+            );
+            if i < 5 {
+                records0.push(record);
+            } else {
+                records1.push(record);
+            }
+        }
+        build_parquet_table::<Test, TokioExecutor>(&option, table_gen0, records0)
+            .await
+            .unwrap();
+        build_parquet_table::<Test, TokioExecutor>(&option, table_gen1, records1)
+            .await
+            .unwrap();
+
+        let option = Arc::new(option);
+        let (sender, _) = bounded(1);
+        let mut version = Version::<Test, TokioExecutor>::new(
+            option.clone(),
+            sender,
+            Arc::new(AtomicU32::default()),
+        );
+        version.level_slice[0].push(Scope {
+            min: 0.to_string(),
+            max: 4.to_string(),
+            gen: table_gen0,
+            wal_ids: None,
+        });
+        version.level_slice[1].push(Scope {
+            min: 5.to_string(),
+            max: 9.to_string(),
+            gen: table_gen1,
+            wal_ids: None,
+        });
+
+        let mut version_edits = Vec::new();
+        let min = 6.to_string();
+        let max = 9.to_string();
+
+        Compactor::<Test, TokioExecutor>::major_compaction(
+            &version,
+            &option,
+            &min,
+            &max,
+            &mut version_edits,
+            &mut vec![],
+        )
+        .await
+        .unwrap();
+    }
 }
