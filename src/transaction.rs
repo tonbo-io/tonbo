@@ -10,7 +10,7 @@ use std::{
 use async_lock::RwLockReadGuard;
 use flume::SendError;
 use lockable::AsyncLimit;
-use parquet::errors::ParquetError;
+use parquet::{arrow::ProjectionMask, errors::ParquetError};
 use thiserror::Error;
 
 use crate::{
@@ -18,6 +18,7 @@ use crate::{
     fs::FileProvider,
     record::{Key, KeyRef},
     stream,
+    stream::mem_projection::MemProjectionStream,
     timestamp::{Timestamp, Timestamped},
     version::{TransactionTs, VersionRef},
     wal::log::LogType,
@@ -102,12 +103,23 @@ where
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
     ) -> Scan<'scan, R, FP> {
-        let streams = vec![TransactionScan {
-            inner: self.local.range(range),
-            ts: self.ts,
-        }
-        .into()];
-        Scan::new(&self.share, range, self.ts, &self.version, streams)
+        Scan::new(
+            &self.share,
+            range,
+            self.ts,
+            &self.version,
+            Box::new(move |projection_mask: Option<ProjectionMask>| {
+                let mut transaction_scan = TransactionScan {
+                    inner: self.local.range(range),
+                    ts: self.ts,
+                }
+                .into();
+                if let Some(mask) = projection_mask {
+                    transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();
+                }
+                Some(transaction_scan)
+            }),
+        )
     }
 
     /// insert a sequence of data as a single batch on this transaction

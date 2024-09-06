@@ -45,6 +45,8 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
 
     fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;
 
+    fn projection(&mut self, projection_mask: &ProjectionMask);
+
     fn from_record_batch(
         record_batch: &'r RecordBatch,
         offset: usize,
