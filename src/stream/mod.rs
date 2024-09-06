@@ -1,4 +1,5 @@
 pub(crate) mod level;
+pub(crate) mod mem_projection;
 pub(crate) mod merge;
 pub(crate) mod package;
 pub(crate) mod record_batch;
@@ -7,11 +8,13 @@ use std::{
     fmt::{self, Debug, Formatter},
     mem::transmute,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use futures_core::Stream;
 use futures_util::{ready, stream};
+use parquet::arrow::ProjectionMask;
 use pin_project_lite::pin_project;
 use record_batch::RecordBatchEntry;
 
@@ -19,8 +22,8 @@ use crate::{
     fs::FileProvider,
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
-    record::{Key, Record},
-    stream::level::LevelStream,
+    record::{Key, Record, RecordRef},
+    stream::{level::LevelStream, mem_projection::MemProjectionStream},
     timestamp::Timestamped,
     transaction::TransactionScan,
 };
@@ -31,6 +34,7 @@ where
 {
     Transaction((Timestamped<<R::Key as Key>::Ref<'entry>>, &'entry Option<R>)),
     Mutable(crossbeam_skiplist::map::Entry<'entry, Timestamped<R::Key>, Option<R>>),
+    Projection((Box<Entry<'entry, R>>, Arc<ProjectionMask>)),
     RecordBatch(RecordBatchEntry<R>),
 }
 
@@ -54,6 +58,7 @@ where
                 unsafe { transmute(key.as_key_ref()) }
             }),
             Entry::RecordBatch(entry) => entry.internal_key(),
+            Entry::Projection((entry, _)) => entry.key(),
         }
     }
 
@@ -62,6 +67,10 @@ where
             Entry::Transaction((_, value)) => value.as_ref().map(R::as_record_ref),
             Entry::Mutable(entry) => entry.value().as_ref().map(R::as_record_ref),
             Entry::RecordBatch(entry) => entry.get(),
+            Entry::Projection((entry, projection_mask)) => entry.value().map(|mut val_ref| {
+                val_ref.projection(projection_mask);
+                val_ref
+            }),
         }
     }
 }
@@ -83,6 +92,9 @@ where
                 mutable.value()
             ),
             Entry::RecordBatch(sstable) => write!(f, "Entry::SsTable({:?})", sstable),
+            Entry::Projection((entry, projection_mask)) => {
+                write!(f, "Entry::Projection({:?} -> {:?})", entry, projection_mask)
+            }
         }
     }
 }
@@ -113,6 +125,10 @@ pin_project! {
         Level {
             #[pin]
             inner: LevelStream<'scan, R, FP>,
+        },
+        MemProjection {
+            #[pin]
+            inner: MemProjectionStream<'scan, R, FP>,
         }
     }
 }
@@ -163,6 +179,16 @@ where
     }
 }
 
+impl<'scan, R, FP> From<MemProjectionStream<'scan, R, FP>> for ScanStream<'scan, R, FP>
+where
+    R: Record,
+    FP: FileProvider,
+{
+    fn from(inner: MemProjectionStream<'scan, R, FP>) -> Self {
+        ScanStream::MemProjection { inner }
+    }
+}
+
 impl<R, FP> fmt::Debug for ScanStream<'_, R, FP>
 where
     R: Record,
@@ -175,6 +201,7 @@ where
             ScanStream::SsTable { .. } => write!(f, "ScanStream::SsTable"),
             ScanStream::Immutable { .. } => write!(f, "ScanStream::Immutable"),
             ScanStream::Level { .. } => write!(f, "ScanStream::Level"),
+            ScanStream::MemProjection { .. } => write!(f, "ScanStream::MemProjection"),
         }
     }
 }
@@ -203,6 +230,7 @@ where
             ScanStreamProject::Level { inner } => {
                 Poll::Ready(ready!(inner.poll_next(cx)).map(|entry| entry.map(Entry::RecordBatch)))
             }
+            ScanStreamProject::MemProjection { inner } => Poll::Ready(ready!(inner.poll_next(cx))),
         }
     }
 }
