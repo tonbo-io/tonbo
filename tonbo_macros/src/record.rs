@@ -3,7 +3,7 @@ use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{parse2, parse_macro_input, DeriveInput, Error, Fields, GenericArgument, Type};
 
-use crate::{keys::PrimaryKey, path_to_type, schema_model::ModelAttributes, DataType};
+use crate::{keys::PrimaryKey, schema_model::ModelAttributes, DataType};
 
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(record))]
@@ -45,7 +45,7 @@ impl RecordStructFieldOpt {
                             return if let GenericArgument::Type(Type::Path(type_path)) =
                                 &generic_args.args[0]
                             {
-                                Some((path_to_type(&type_path.path), true))
+                                Some((DataType::from_path(&type_path.path), true))
                             } else {
                                 None
                             };
@@ -53,7 +53,7 @@ impl RecordStructFieldOpt {
                     }
                 }
             }
-            return Some((path_to_type(&type_path.path), false));
+            return Some((DataType::from_path(&type_path.path), false));
         }
         None
     }
