@@ -1485,6 +1485,11 @@ pub(crate) mod tests {
     #[test]
     fn build_test() {
         let t = trybuild::TestCases::new();
-        t.pass("tests/*.rs");
+        t.pass("tests/success/*.rs");
+    }
+    #[test]
+    fn fail_build_test() {
+        let t = trybuild::TestCases::new();
+        t.compile_fail("tests/fail/*.rs");
     }
 }
