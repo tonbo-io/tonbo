@@ -4,15 +4,14 @@ mod tests {
 
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
-    use tonbo_macros::tonbo_record;
+    use tonbo::{executor::tokio::TokioExecutor, DbOption, DB, Record};
 
     const WRITE_TIMES: usize = 500_000;
     const STRING_SIZE: usize = 50;
 
-    #[tonbo_record]
+    #[derive(Record, Debug)]
     pub struct Customer {
-        #[primary_key]
+        #[record(primary_key)]
         pub c_custkey: i32,
         pub c_name: String,
         pub c_address: String,
