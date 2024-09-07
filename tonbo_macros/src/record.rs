@@ -4,19 +4,12 @@ use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{DeriveInput, Error, GenericArgument, Type};
 
-use crate::{keys::PrimaryKey, DataType};
-
+use crate::{keys::PrimaryKey, utils::ident_generator::IdentGenerator, DataType};
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(record))]
 struct RecordOpts {
-    ident: syn::Ident,
+    ident: Ident,
     data: Data<Ignored, RecordStructFieldOpt>,
-}
-
-impl RecordOpts {
-    fn to_struct_builder_ident(&self) -> syn::Ident {
-        Ident::new(&format!("{}Builder", self.ident), self.ident.span())
-    }
 }
 
 #[derive(Debug, FromField)]
@@ -31,7 +24,7 @@ struct RecordStructFieldOpt {
 impl RecordStructFieldOpt {
     fn to_array_ident(&self) -> Ident {
         let field_name = self.ident.as_ref().expect("expect named struct field");
-        Ident::new(&format!("{}_array", field_name), field_name.span())
+        field_name.to_array_ident()
     }
 
     /// convert the ty into data type, and return whether it is nullable
@@ -64,7 +57,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
     let record_opts: RecordOpts = RecordOpts::from_derive_input(&ast)?;
 
     let struct_name = &record_opts.ident;
-    let struct_builder_name = record_opts.to_struct_builder_ident();
     let Data::Struct(data_struct) = record_opts.data else {
         return Err(syn::Error::new_spanned(
             struct_name,
@@ -115,12 +107,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
 
     let builder_append_primary_key = &primary_key_definitions.builder_append_value;
 
-    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
-    let struct_arrays_name = Ident::new(
-        &format!("{}ImmutableArrays", struct_name),
-        struct_name.span(),
-    );
-
     let record_codegen = trait_record_codegen(
         &data_struct.fields,
         struct_name,
@@ -129,24 +115,19 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
 
     let decode_codegen = trait_decode_codegen(struct_name, &data_struct.fields);
 
-    let struct_ref_codegen = struct_ref_codegen(&struct_ref_name, &data_struct.fields);
+    let struct_ref_codegen = struct_ref_codegen(&struct_name, &data_struct.fields);
 
     let decode_ref_codegen =
         trait_decode_ref_codegen(&struct_name, &primary_key_ident, &data_struct.fields);
 
     let encode_codegen = trait_encode_codegen(&struct_name, &data_struct.fields);
 
-    let struct_array_codegen = struct_array_codegen(&struct_arrays_name, &data_struct.fields);
+    let struct_array_codegen = struct_array_codegen(&struct_name, &data_struct.fields);
 
-    let arrow_array_codegen = trait_arrow_array_codegen(
-        struct_name,
-        &struct_builder_name,
-        primary_key_ident,
-        &data_struct.fields,
-    );
+    let arrow_array_codegen =
+        trait_arrow_array_codegen(struct_name, primary_key_ident, &data_struct.fields);
 
     let builder_codegen = struct_builder_codegen(
-        &struct_builder_name,
         &struct_name,
         builder_append_primary_key,
         &data_struct.fields,
@@ -226,11 +207,8 @@ fn trait_record_codegen(
         }
     }
 
-    let struct_arrays_name = Ident::new(
-        &format!("{}ImmutableArrays", struct_name),
-        struct_name.span(),
-    );
-    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
+    let struct_arrays_name = struct_name.to_immutable_array_ident();
+    let struct_ref_name = struct_name.to_ref_ident();
 
     let PrimaryKey {
         name: primary_key_name,
@@ -352,10 +330,11 @@ fn trait_decode_codegen(
 }
 
 fn struct_ref_codegen(
-    struct_ref_name: &Ident,
+    struct_name: &Ident,
     fields: &[RecordStructFieldOpt],
     // ref_fields: &Vec<proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
+    let struct_ref_name = struct_name.to_ref_ident();
     let mut ref_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for field in fields.iter() {
@@ -460,7 +439,7 @@ fn trait_decode_ref_codegen(
         }
     }
 
-    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
+    let struct_ref_name = struct_name.to_ref_ident();
 
     quote! {
         impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_name<'r> {
@@ -522,7 +501,7 @@ fn trait_encode_codegen(
         });
     }
 
-    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
+    let struct_ref_name = struct_name.to_ref_ident();
 
     quote! {
         impl<'r> ::tonbo::serdes::Encode for #struct_ref_name<'r> {
@@ -545,9 +524,10 @@ fn trait_encode_codegen(
 }
 
 fn struct_array_codegen(
-    struct_arrays_name: &Ident,
+    struct_name: &Ident,
     fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let struct_arrays_name = struct_name.to_immutable_array_ident();
     let mut arrays_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for field in fields.iter() {
@@ -576,11 +556,11 @@ fn struct_array_codegen(
 
 fn trait_arrow_array_codegen(
     struct_name: &Ident,
-    struct_builder_name: &Ident,
     primary_key_name: &Ident,
 
     fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let struct_builder_name = struct_name.to_builder_ident();
     let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
 
     let mut builder_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -621,11 +601,8 @@ fn trait_arrow_array_codegen(
         }
     }
 
-    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
-    let struct_arrays_name = Ident::new(
-        &format!("{}ImmutableArrays", struct_name),
-        struct_name.span(),
-    );
+    let struct_ref_name = struct_name.to_ref_ident();
+    let struct_arrays_name = struct_name.to_immutable_array_ident();
 
     quote! {
         impl ::tonbo::inmem::immutable::ArrowArrays for #struct_arrays_name {
@@ -671,12 +648,12 @@ fn trait_arrow_array_codegen(
 }
 
 fn struct_builder_codegen(
-    struct_builder_name: &Ident,
-    struct_name: &&Ident,
+    struct_name: &Ident,
     builder_append_primary_key: &TokenStream,
 
     fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let struct_builder_name = struct_name.to_builder_ident();
     let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
 
     let mut builder_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -738,11 +715,8 @@ fn struct_builder_codegen(
         }
     }
 
-    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
-    let struct_arrays_name = Ident::new(
-        &format!("{}ImmutableArrays", struct_name),
-        struct_name.span(),
-    );
+    let struct_ref_name = struct_name.to_ref_ident();
+    let struct_arrays_name = struct_name.to_immutable_array_ident();
 
     quote! {
         pub struct #struct_builder_name {

@@ -5,6 +5,8 @@ mod record;
 
 pub(crate) mod data_type;
 
+pub(crate) mod utils;
+
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput};
 
