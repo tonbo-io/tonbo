@@ -42,40 +42,80 @@ impl DataType {
     }
 
     pub(crate) fn to_field_ty(&self) -> proc_macro2::TokenStream {
-
         match self {
-            DataType::UInt8 => {quote!(u8)}
-            DataType::UInt16 => {quote!(u16)}
-            DataType::UInt32 => {quote!(u32)}
-            DataType::UInt64 => {quote!(u64)}
-            DataType::Int8 => {quote!(i8)}
-            DataType::Int16 => {quote!(i16)}
-            DataType::Int32 => {quote!(i32)}
-            DataType::Int64 => {quote!(i64)}
-            DataType::String => {quote!(String)}
-            DataType::Boolean => {quote!(bool)}
+            DataType::UInt8 => {
+                quote!(u8)
+            }
+            DataType::UInt16 => {
+                quote!(u16)
+            }
+            DataType::UInt32 => {
+                quote!(u32)
+            }
+            DataType::UInt64 => {
+                quote!(u64)
+            }
+            DataType::Int8 => {
+                quote!(i8)
+            }
+            DataType::Int16 => {
+                quote!(i16)
+            }
+            DataType::Int32 => {
+                quote!(i32)
+            }
+            DataType::Int64 => {
+                quote!(i64)
+            }
+            DataType::String => {
+                quote!(String)
+            }
+            DataType::Boolean => {
+                quote!(bool)
+            }
         }
     }
 
     pub(crate) fn to_mapped_type(&self) -> proc_macro2::TokenStream {
         match self {
-            DataType::UInt8 => {quote!(::tonbo::arrow::datatypes::DataType::UInt8)}
-            DataType::UInt16 => {quote!(::tonbo::arrow::datatypes::DataType::UInt16)}
-            DataType::UInt32 => {quote!(::tonbo::arrow::datatypes::DataType::UInt32)}
-            DataType::UInt64 => {quote!(::tonbo::arrow::datatypes::DataType::UInt64)}
-            DataType::Int8 => {quote!(::tonbo::arrow::datatypes::DataType::Int8)}
-            DataType::Int16 => {quote!(::tonbo::arrow::datatypes::DataType::Int16)}
-            DataType::Int32 => {quote!(::tonbo::arrow::datatypes::DataType::Int32)}
-            DataType::Int64 => {quote!(::tonbo::arrow::datatypes::DataType::Int64)}
-            DataType::String => {quote!(::tonbo::arrow::datatypes::DataType::Utf8)}
-            DataType::Boolean => {quote!(::tonbo::arrow::datatypes::DataType::Boolean)}
+            DataType::UInt8 => {
+                quote!(::tonbo::arrow::datatypes::DataType::UInt8)
+            }
+            DataType::UInt16 => {
+                quote!(::tonbo::arrow::datatypes::DataType::UInt16)
+            }
+            DataType::UInt32 => {
+                quote!(::tonbo::arrow::datatypes::DataType::UInt32)
+            }
+            DataType::UInt64 => {
+                quote!(::tonbo::arrow::datatypes::DataType::UInt64)
+            }
+            DataType::Int8 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Int8)
+            }
+            DataType::Int16 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Int16)
+            }
+            DataType::Int32 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Int32)
+            }
+            DataType::Int64 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Int64)
+            }
+            DataType::String => {
+                quote!(::tonbo::arrow::datatypes::DataType::Utf8)
+            }
+            DataType::Boolean => {
+                quote!(::tonbo::arrow::datatypes::DataType::Boolean)
+            }
         }
-
     }
 
     pub(crate) fn to_array_ty(&self) -> proc_macro2::TokenStream {
         match self {
-            DataType::UInt8 => {quote!(::tonbo::arrow::array::UInt8Array)}
+            DataType::UInt8 => {
+                quote!(::tonbo::arrow::array::UInt8Array)
+            }
             DataType::UInt16 => {
                 quote!(::tonbo::arrow::array::UInt16Array)
             }
@@ -108,7 +148,9 @@ impl DataType {
 
     pub(crate) fn to_as_method(&self) -> proc_macro2::TokenStream {
         match self {
-            DataType::UInt8 => {quote!(as_primitive::<::tonbo::arrow::datatypes::UInt8Type>())}
+            DataType::UInt8 => {
+                quote!(as_primitive::<::tonbo::arrow::datatypes::UInt8Type>())
+            }
             DataType::UInt16 => {
                 quote!(as_primitive::<::tonbo::arrow::datatypes::UInt16Type>())
             }
@@ -139,10 +181,10 @@ impl DataType {
         }
     }
 
-    pub(crate) fn to_builder_with_capacity_method(&self)-> proc_macro2::TokenStream {
+    pub(crate) fn to_builder_with_capacity_method(&self) -> proc_macro2::TokenStream {
         match self {
-            DataType::UInt8 => {quote!(
-                ::tonbo::arrow::array::PrimitiveBuilder::<
+            DataType::UInt8 => {
+                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                     ::tonbo::arrow::datatypes::UInt8Type,
                 >::with_capacity(capacity))
             }
@@ -183,8 +225,8 @@ impl DataType {
             }
             DataType::String => {
                 quote!(::tonbo::arrow::array::StringBuilder::with_capacity(
-                        capacity, 0
-                    ))
+                    capacity, 0
+                ))
             }
             DataType::Boolean => {
                 quote!(::tonbo::arrow::array::BooleanBuilder::with_capacity(
@@ -194,7 +236,7 @@ impl DataType {
         }
     }
 
-    pub(crate) fn to_builder(&self)-> proc_macro2::TokenStream {
+    pub(crate) fn to_builder(&self) -> proc_macro2::TokenStream {
         match self {
             DataType::UInt8 => {
                 quote!(
@@ -278,7 +320,8 @@ impl DataType {
                 quote!(std::mem::size_of_val(self.#field_name.values_slice()))
             }
             DataType::Int16 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))            }
+                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
+            }
             DataType::Int32 => {
                 quote!(std::mem::size_of_val(self.#field_name.values_slice()))
             }
@@ -293,7 +336,11 @@ impl DataType {
             }
         }
     }
-    pub(crate) fn to_size_field(&self, field_name: &Ident, is_nullable:bool ) -> proc_macro2::TokenStream {
+    pub(crate) fn to_size_field(
+        &self,
+        field_name: &Ident,
+        is_nullable: bool,
+    ) -> proc_macro2::TokenStream {
         match self {
             DataType::UInt8 => {
                 quote!(std::mem::size_of::<u8>())
@@ -311,7 +358,8 @@ impl DataType {
                 quote! {std::mem::size_of::<i8>()}
             }
             DataType::Int16 => {
-                quote! {std::mem::size_of::<i16>()}            }
+                quote! {std::mem::size_of::<i16>()}
+            }
             DataType::Int32 => {
                 quote! {std::mem::size_of::<i32>()}
             }
