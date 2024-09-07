@@ -71,7 +71,37 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
         ))
     };
 
-    let mut primary_key_definitions = None;
+
+    // todo: deny multiple primary_key definition
+    let Some((primary_key_field_index, primary_key_field)) = data_struct.fields.iter().enumerate().find(|field| { field.1.primary_key == Some(true) }) else {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "missing primary key field, use #[record(primary_key)] to define one",
+        ))
+    };
+
+    // check if primary key is nullable
+    let primary_key_data_type = primary_key_field.to_data_type().expect("only Path ty is supported");
+    if primary_key_data_type.1 {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "primary key cannot be nullable",
+        ))
+    }
+    let primary_key_ident = primary_key_field.ident.as_ref();
+    let mut primary_key_definitions  = PrimaryKey {
+        name: primary_key_field.ident.clone().expect("cannot find primary key ident"),
+        builder_append_value: quote! {
+                        self.#primary_key_ident .append_value(key.value);
+                    },
+        base_ty: primary_key_field.ty.clone(),
+        index: primary_key_field_index+2,
+        fn_key: if matches!(primary_key_data_type.0, DataType::String) {
+            quote!(&self.#primary_key_ident)
+        } else {
+            quote!(self.#primary_key_ident)
+        },
+    };
 
     let mut encode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut encode_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -153,26 +183,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
         });
 
         if field.primary_key.unwrap_or_default() {
-            primary_key_definitions = Some(PrimaryKey {
-                name: field_name.clone(),
-                builder_append_value: quote! {
-                        self.#field_name.append_value(key.value);
-                    },
-                base_ty: field.ty.clone(),
-                index: field_index,
-                fn_key: if is_string {
-                    quote!(&self.#field_name)
-                } else {
-                    quote!(self.#field_name)
-                },
-            });
 
-            if is_nullable {
-                return Err(syn::Error::new_spanned(
-                    ast.ident,
-                    "primary key cannot be nullable",
-                ));
-            }
             if is_string {
                 to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
                 ref_fields.push(quote! { pub #field_name: &'r str, });
@@ -296,15 +307,14 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
         }
     }
 
-    // todo: handle primary_key empty error
-    let primary_key = primary_key_definitions.unwrap();
+
     let PrimaryKey {
         name: primary_key_name,
         base_ty: primary_key_ty,
         fn_key: fn_primary_key,
         builder_append_value: builder_append_primary_key,
         index: primary_key_index,
-    } = primary_key.clone();
+    } = primary_key_definitions.clone();
 
     let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
     let struct_arrays_name = Ident::new(
@@ -314,7 +324,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
 
     let record_codegen = trait_record_codegen(
         &struct_name,
-        primary_key,
+        primary_key_definitions,
         &to_ref_init_fields,
         &schema_fields,
         &size_fields,
