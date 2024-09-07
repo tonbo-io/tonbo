@@ -266,10 +266,7 @@ fn trait_record_codegen(
     }
 }
 
-fn trait_decode_codegen(
-    struct_name: &Ident,
-    fields: &[RecordStructFieldOpt],
-) -> TokenStream {
+fn trait_decode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> TokenStream {
     let mut decode_method_fields: Vec<TokenStream> = Vec::new();
     let mut field_names: Vec<TokenStream> = Vec::new();
 
@@ -324,10 +321,7 @@ fn trait_decode_codegen(
     }
 }
 
-fn struct_ref_codegen(
-    struct_name: &Ident,
-    fields: &[RecordStructFieldOpt],
-) -> TokenStream {
+fn struct_ref_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> TokenStream {
     let struct_ref_name = struct_name.to_ref_ident();
     let mut ref_fields: Vec<TokenStream> = Vec::new();
 
@@ -472,10 +466,7 @@ fn trait_decode_ref_codegen(
     }
 }
 
-fn trait_encode_codegen(
-    struct_name: &Ident,
-    fields: &[RecordStructFieldOpt],
-) -> TokenStream {
+fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> TokenStream {
     let mut encode_method_fields: Vec<TokenStream> = Vec::new();
     let mut encode_size_fields: Vec<TokenStream> = Vec::new();
 
@@ -515,10 +506,7 @@ fn trait_encode_codegen(
     }
 }
 
-fn struct_array_codegen(
-    struct_name: &Ident,
-    fields: &[RecordStructFieldOpt],
-) -> TokenStream {
+fn struct_array_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> TokenStream {
     let struct_arrays_name = struct_name.to_immutable_array_ident();
     let mut arrays_init_fields: Vec<TokenStream> = Vec::new();
 

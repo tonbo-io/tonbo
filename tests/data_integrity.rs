@@ -4,7 +4,7 @@ mod tests {
 
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo::{executor::tokio::TokioExecutor, DbOption, DB, Record};
+    use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
 
     const WRITE_TIMES: usize = 500_000;
     const STRING_SIZE: usize = 50;

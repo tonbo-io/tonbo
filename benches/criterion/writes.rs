@@ -2,7 +2,7 @@ use std::{iter::repeat_with, sync::Arc};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use mimalloc::MiMalloc;
-use tonbo::{executor::tokio::TokioExecutor, Record, DbOption, DB};
+use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
