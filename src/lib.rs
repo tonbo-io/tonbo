@@ -34,7 +34,7 @@
 //! use std::ops::Bound;
 //!
 //! use futures_util::stream::StreamExt;
-//! use tonbo::{executor::tokio::TokioExecutor, Record, Projection, DB};
+//! use tonbo::{executor::tokio::TokioExecutor, Projection, Record, DB};
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
@@ -145,7 +145,7 @@ use record::Record;
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
-pub use tonbo_macros::{Record, KeyAttributes};
+pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
 

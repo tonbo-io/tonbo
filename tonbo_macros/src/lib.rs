@@ -46,11 +46,10 @@ pub fn tonbo_record(input: TokenStream) -> TokenStream {
 
     let result = record::handle(ast);
     match result {
-        Ok(codegen) => { codegen.into() }
-        Err(e) => { e.to_compile_error().into() }
+        Ok(codegen) => codegen.into(),
+        Err(e) => e.to_compile_error().into(),
     }
 }
-
 
 fn path_to_type(path: &Path) -> DataType {
     if path.is_ident("u8") {
