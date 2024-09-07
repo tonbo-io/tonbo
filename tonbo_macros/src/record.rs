@@ -157,36 +157,79 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
             + #size_field
         });
 
-        match field.primary_key.unwrap_or_default() {
-            false => {
-                match (is_nullable, is_string) {
-                    (true, true) => {
-                        to_ref_init_fields
-                            .push(quote! { #field_name: self.#field_name.as_deref(), });
-                    }
-                    (true, false) => {
-                        to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
-                    }
-                    (false, true) => {
-                        to_ref_init_fields.push(quote! { #field_name: Some(&self.#field_name), });
-                    }
-                    (false, false) => {
-                        to_ref_init_fields.push(quote! { #field_name: Some(self.#field_name), });
-                    }
+        if field.primary_key.unwrap_or_default() {
+            primary_key_definitions = Some(PrimaryKey {
+                name: field_name.clone(),
+                builder_append_value: quote! {
+                        self.#field_name.append_value(key.value);
+                    },
+                base_ty: field.ty.clone(),
+                index: field_index,
+                fn_key: if is_string {
+                    quote!(&self.#field_name)
+                } else {
+                    quote!(self.#field_name)
+                },
+            });
+
+            if is_nullable {
+                return Err(syn::Error::new_spanned(
+                    ast.ident,
+                    "primary key cannot be nullable",
+                ));
+            }
+            if is_string {
+                to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
+                ref_fields.push(quote! { pub #field_name: &'r str, });
+            } else {
+                to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
+                ref_fields.push(quote! { pub #field_name: #field_ty, });
+            }
+            from_record_batch_fields.push(quote! {
+                    let #field_name = record_batch
+                        .column(column_i)
+                        .#as_method
+                        .value(offset);
+                    column_i += 1;
+                });
+            arrays_get_fields.push(quote! {
+                   let #field_name = self.#field_name.value(offset);
+                });
+            decode_method_fields.push(quote! {
+                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
+                                field_name: stringify!(#field_name).to_string(),
+                                error: Box::new(err),
+                            })?;
+                        });
+        } else {
+            match (is_nullable, is_string) {
+                (true, true) => {
+                    to_ref_init_fields
+                        .push(quote! { #field_name: self.#field_name.as_deref(), });
                 }
-                ref_projection_fields.push(quote! {
+                (true, false) => {
+                    to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
+                }
+                (false, true) => {
+                    to_ref_init_fields.push(quote! { #field_name: Some(&self.#field_name), });
+                }
+                (false, false) => {
+                    to_ref_init_fields.push(quote! { #field_name: Some(self.#field_name), });
+                }
+            }
+            ref_projection_fields.push(quote! {
                     if !projection_mask.leaf_included(#field_index) {
                         self.#field_name = None;
                     }
                 });
 
-                if is_string {
-                    ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
-                } else {
-                    ref_fields.push(quote! { pub #field_name: Option<#field_ty>, });
-                }
-                if is_nullable {
-                    from_record_batch_fields.push(quote! {
+            if is_string {
+                ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
+            } else {
+                ref_fields.push(quote! { pub #field_name: Option<#field_ty>, });
+            }
+            if is_nullable {
+                from_record_batch_fields.push(quote! {
                         let mut #field_name = None;
 
                         if projection_mask.leaf_included(#field_index) {
@@ -201,28 +244,28 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
                             column_i += 1;
                         }
                     });
-                    arrays_get_fields.push(quote! {
+                arrays_get_fields.push(quote! {
                                 use ::tonbo::arrow::array::Array;
                                 let #field_name = (!self.#field_name.is_null(offset) && projection_mask.leaf_included(#field_index))
                                     .then(|| self.#field_name.value(offset));
                             });
-                    builder_push_some_fields.push(quote! {
+                builder_push_some_fields.push(quote! {
                         match row.#field_name {
                             Some(#field_name) => self.#field_name.append_value(#field_name),
                             None => self.#field_name.append_null(),
                         }
                     });
-                    builder_push_none_fields.push(quote! {
+                builder_push_none_fields.push(quote! {
                         self.#field_name.append_null();
                     });
-                    decode_method_fields.push(quote! {
+                decode_method_fields.push(quote! {
                                 let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
                                     field_name: stringify!(#field_name).to_string(),
                                     error: Box::new(err),
                                 })?;
                             });
-                } else {
-                    from_record_batch_fields.push(quote! {
+            } else {
+                from_record_batch_fields.push(quote! {
                         let mut #field_name = None;
 
                         if projection_mask.leaf_included(#field_index) {
@@ -235,71 +278,25 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
                             column_i += 1;
                         }
                     });
-                    arrays_get_fields.push(quote! {
+                arrays_get_fields.push(quote! {
                         let #field_name = projection_mask
                             .leaf_included(#field_index)
                             .then(|| self.#field_name.value(offset));
                     });
-                    builder_push_some_fields.push(quote! {
+                builder_push_some_fields.push(quote! {
                         self.#field_name.append_value(row.#field_name.unwrap());
                     });
-                    builder_push_none_fields.push(if is_string {
-                        quote!(self.#field_name.append_value("");)
-                    } else {
-                        quote!(self.#field_name.append_value(Default::default());)
-                    });
-                    decode_method_fields.push(quote! {
+                builder_push_none_fields.push(if is_string {
+                    quote!(self.#field_name.append_value("");)
+                } else {
+                    quote!(self.#field_name.append_value(Default::default());)
+                });
+                decode_method_fields.push(quote! {
                                 let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
                                     field_name: stringify!(#field_name).to_string(),
                                     error: Box::new(err),
                                 })?.unwrap();
                             });
-                }
-            }
-            true => {
-                primary_key_definitions = Some(PrimaryKey {
-                    name: field_name.clone(),
-                    builder_append_value: quote! {
-                        self.#field_name.append_value(key.value);
-                    },
-                    base_ty: field.ty.clone(),
-                    index: field_index,
-                    fn_key: if is_string {
-                        quote!(&self.#field_name)
-                    } else {
-                        quote!(self.#field_name)
-                    },
-                });
-
-                if is_nullable {
-                    return Err(syn::Error::new_spanned(
-                        ast.ident,
-                        "primary key cannot be nullable",
-                    ));
-                }
-                if is_string {
-                    to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
-                    ref_fields.push(quote! { pub #field_name: &'r str, });
-                } else {
-                    to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
-                    ref_fields.push(quote! { pub #field_name: #field_ty, });
-                }
-                from_record_batch_fields.push(quote! {
-                    let #field_name = record_batch
-                        .column(column_i)
-                        .#as_method
-                        .value(offset);
-                    column_i += 1;
-                });
-                arrays_get_fields.push(quote! {
-                   let #field_name = self.#field_name.value(offset);
-                });
-                decode_method_fields.push(quote! {
-                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
-                                field_name: stringify!(#field_name).to_string(),
-                                error: Box::new(err),
-                            })?;
-                        });
             }
         }
     }
