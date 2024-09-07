@@ -2,7 +2,7 @@ use darling::{ast::Data, util::Ignored, FromDeriveInput, FromField};
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{parse2, parse_macro_input, DeriveInput, Error, Fields, GenericArgument, Type};
-
+use syn::token::Struct;
 use crate::{keys::PrimaryKey, schema_model::ModelAttributes, DataType};
 
 #[derive(Debug, FromDeriveInput)]
@@ -64,14 +64,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
 
     let struct_name = &record_opts.ident;
     let struct_builder_name = record_opts.to_struct_builder_ident();
-    let data_struct = match record_opts.data {
-        Data::Enum(_) => {
-            return Err(syn::Error::new_spanned(
-                struct_name,
-                "enum is not supported",
-            ))
-        }
-        Data::Struct(s) => s,
+    let Data::Struct(data_struct) = record_opts.data  else {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "enum is not supported",
+        ))
     };
 
     let mut primary_key_definitions = None;
@@ -108,8 +105,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
         let field_index = i + 2;
 
 
-
-
         let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
 
         let mut is_string = matches!(data_type, DataType::String);
@@ -120,7 +115,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
         let builder_with_capacity_method = data_type.to_builder_with_capacity_method();
         let builder = data_type.to_builder();
         let size_method = data_type.to_size_method(&field_name);
-        let size_field  = data_type.to_size_field(&field_name, is_nullable);
+        let size_field = data_type.to_size_field(&field_name, is_nullable);
 
         schema_fields.push(quote! {
                     ::tonbo::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
