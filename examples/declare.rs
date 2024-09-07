@@ -1,7 +1,7 @@
 use std::ops::Bound;
 
 use futures_util::stream::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, Record, Projection, DB};
+use tonbo::{executor::tokio::TokioExecutor, Projection, Record, DB};
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
