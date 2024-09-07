@@ -107,192 +107,20 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
         let field_array_name = field.to_array_ident();
         let field_index = i + 2;
 
-        let mut is_string = false;
-        let (
-            is_nullable,
-            field_ty,
-            mapped_type,
-            array_ty,
-            as_method,
-            builder_with_capacity_method,
-            builder,
-            size_method,
-            size_field,
-        ) = match field.to_data_type() {
-            Some((DataType::UInt8, is_nullable)) => (
-                is_nullable,
-                quote!(u8),
-                quote!(::tonbo::arrow::datatypes::DataType::UInt8),
-                quote!(::tonbo::arrow::array::UInt8Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::UInt8Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt8Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt8Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote!(std::mem::size_of::<u8>()),
-            ),
-            Some((DataType::UInt16, is_nullable)) => (
-                is_nullable,
-                quote!(u16),
-                quote!(::tonbo::arrow::datatypes::DataType::UInt16),
-                quote!(::tonbo::arrow::array::UInt16Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::UInt16Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt16Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt16Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote!(std::mem::size_of::<u16>()),
-            ),
-            Some((DataType::UInt32, is_nullable)) => (
-                is_nullable,
-                quote!(u32),
-                quote!(::tonbo::arrow::datatypes::DataType::UInt32),
-                quote!(::tonbo::arrow::array::UInt32Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::UInt32Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt32Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt32Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote! {std::mem::size_of::<u32>()},
-            ),
-            Some((DataType::UInt64, is_nullable)) => (
-                is_nullable,
-                quote!(u64),
-                quote!(::tonbo::arrow::datatypes::DataType::UInt64),
-                quote!(::tonbo::arrow::array::UInt64Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::UInt64Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt64Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt64Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote! {std::mem::size_of::<u64>()},
-            ),
 
-            Some((DataType::Int8, is_nullable)) => (
-                is_nullable,
-                quote!(i8),
-                quote!(::tonbo::arrow::datatypes::DataType::Int8),
-                quote!(::tonbo::arrow::array::Int8Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::Int8Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int8Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int8Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote! {std::mem::size_of::<i8>()},
-            ),
-            Some((DataType::Int16, is_nullable)) => (
-                is_nullable,
-                quote!(i16),
-                quote!(::tonbo::arrow::datatypes::DataType::Int16),
-                quote!(::tonbo::arrow::array::Int16Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::Int16Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int16Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int16Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote! {std::mem::size_of::<i16>()},
-            ),
-            Some((DataType::Int32, is_nullable)) => (
-                is_nullable,
-                quote!(i32),
-                quote!(::tonbo::arrow::datatypes::DataType::Int32),
-                quote!(::tonbo::arrow::array::Int32Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::Int32Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int32Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int32Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote! {std::mem::size_of::<i32>()},
-            ),
-            Some((DataType::Int64, is_nullable)) => (
-                is_nullable,
-                quote!(i64),
-                quote!(::tonbo::arrow::datatypes::DataType::Int64),
-                quote!(::tonbo::arrow::array::Int64Array),
-                quote!(as_primitive::<::tonbo::arrow::datatypes::Int64Type>()),
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int64Type,
-                >::with_capacity(capacity)),
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int64Type,
-                    >
-                ),
-                quote!(std::mem::size_of_val(self.#field_name.values_slice())),
-                quote! {std::mem::size_of::<i64>()},
-            ),
 
-            Some((DataType::String, is_nullable)) => {
-                is_string = true;
-                (
-                    is_nullable,
-                    quote!(String),
-                    quote!(::tonbo::arrow::datatypes::DataType::Utf8),
-                    quote!(::tonbo::arrow::array::StringArray),
-                    quote!(as_string::<i32>()),
-                    quote!(::tonbo::arrow::array::StringBuilder::with_capacity(
-                        capacity, 0
-                    )),
-                    quote!(::tonbo::arrow::array::StringBuilder),
-                    quote!(self.#field_name.values_slice().len()),
-                    if is_nullable {
-                        quote!(0)
-                    } else {
-                        quote!(self.#field_name.len())
-                    },
-                )
-            }
-            Some((DataType::Boolean, is_nullable)) => (
-                is_nullable,
-                quote!(bool),
-                quote!(::tonbo::arrow::datatypes::DataType::Boolean),
-                quote!(::tonbo::arrow::array::BooleanArray),
-                quote!(as_boolean()),
-                quote!(::tonbo::arrow::array::BooleanBuilder::with_capacity(
-                    capacity
-                )),
-                quote!(::tonbo::arrow::array::BooleanBuilder),
-                quote!(self.#field_name.values_slice().len()),
-                quote! {std::mem::size_of::<bool>()},
-            ),
 
-            None => unreachable!(),
-        };
+        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let mut is_string = matches!(data_type, DataType::String);
+        let field_ty = data_type.to_field_ty();
+        let mapped_type = data_type.to_mapped_type();
+        let array_ty = data_type.to_array_ty();
+        let as_method = data_type.to_as_method();
+        let builder_with_capacity_method = data_type.to_builder_with_capacity_method();
+        let builder = data_type.to_builder();
+        let size_method = data_type.to_size_method(&field_name);
+        let size_field  = data_type.to_size_field(&field_name, is_nullable);
 
         schema_fields.push(quote! {
                     ::tonbo::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
