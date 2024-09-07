@@ -1,9 +1,10 @@
+#![allow(clippy::too_many_arguments)]
 use darling::{ast::Data, util::Ignored, FromDeriveInput, FromField};
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
-use syn::{parse2, parse_macro_input, DeriveInput, Error, Fields, GenericArgument, Type};
-use syn::token::Struct;
-use crate::{keys::PrimaryKey, schema_model::ModelAttributes, DataType};
+use syn::{DeriveInput, Error, GenericArgument, Type};
+
+use crate::{keys::PrimaryKey, DataType};
 
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(record))]
@@ -64,38 +65,47 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
 
     let struct_name = &record_opts.ident;
     let struct_builder_name = record_opts.to_struct_builder_ident();
-    let Data::Struct(data_struct) = record_opts.data  else {
+    let Data::Struct(data_struct) = record_opts.data else {
         return Err(syn::Error::new_spanned(
             struct_name,
             "enum is not supported",
-        ))
+        ));
     };
 
-
     // todo: deny multiple primary_key definition
-    let Some((primary_key_field_index, primary_key_field)) = data_struct.fields.iter().enumerate().find(|field| { field.1.primary_key == Some(true) }) else {
+    let Some((primary_key_field_index, primary_key_field)) = data_struct
+        .fields
+        .iter()
+        .enumerate()
+        .find(|field| field.1.primary_key == Some(true))
+    else {
         return Err(syn::Error::new_spanned(
             struct_name,
             "missing primary key field, use #[record(primary_key)] to define one",
-        ))
+        ));
     };
 
     // check if primary key is nullable
-    let primary_key_data_type = primary_key_field.to_data_type().expect("only Path ty is supported");
+    let primary_key_data_type = primary_key_field
+        .to_data_type()
+        .expect("only Path ty is supported");
     if primary_key_data_type.1 {
         return Err(syn::Error::new_spanned(
             struct_name,
             "primary key cannot be nullable",
-        ))
+        ));
     }
-    let primary_key_ident = primary_key_field.ident.as_ref();
-    let mut primary_key_definitions  = PrimaryKey {
-        name: primary_key_field.ident.clone().expect("cannot find primary key ident"),
+    let primary_key_ident = primary_key_field
+        .ident
+        .as_ref()
+        .expect("cannot find primary key ident");
+    let primary_key_definitions = PrimaryKey {
+        name: primary_key_ident.clone(),
         builder_append_value: quote! {
-                        self.#primary_key_ident .append_value(key.value);
-                    },
+            self.#primary_key_ident .append_value(key.value);
+        },
         base_ty: primary_key_field.ty.clone(),
-        index: primary_key_field_index+2,
+        index: primary_key_field_index + 2,
         fn_key: if matches!(primary_key_data_type.0, DataType::String) {
             quote!(&self.#primary_key_ident)
         } else {
@@ -103,218 +113,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
         },
     };
 
-    let mut encode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut encode_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut decode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    let mut to_ref_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut ref_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut ref_projection_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    let mut from_record_batch_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    let mut arrays_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut builder_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut arrays_get_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    let mut builder_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut builder_finish_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut builder_as_any_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    // only normal fields
-    let mut builder_push_some_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    // only normal fields
-    let mut builder_push_none_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut builder_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-
-    for (i, field) in data_struct.fields.iter().enumerate() {
-        let field_name = field.ident.as_ref().unwrap();
-        let field_array_name = field.to_array_ident();
-        let field_index = i + 2;
-
-
-        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
-
-        let mut is_string = matches!(data_type, DataType::String);
-        let field_ty = data_type.to_field_ty();
-        let mapped_type = data_type.to_mapped_type();
-        let array_ty = data_type.to_array_ty();
-        let as_method = data_type.to_as_method();
-        let builder_with_capacity_method = data_type.to_builder_with_capacity_method();
-        let builder = data_type.to_builder();
-        let size_method = data_type.to_size_method(&field_name);
-        let size_field = data_type.to_size_field(&field_name, is_nullable);
-
-        schema_fields.push(quote! {
-                    ::tonbo::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
-                });
-        field_names.push(quote!(#field_name,));
-        arrays_init_fields.push(quote! {
-            #field_name: ::std::sync::Arc<#array_ty>,
-        });
-        builder_init_fields.push(quote! {
-            #field_name: #builder_with_capacity_method,
-        });
-        builder_fields.push(quote! {
-            #field_name: #builder,
-        });
-        builder_finish_fields.push(quote! {
-            let #field_name = ::std::sync::Arc::new(self.#field_name.finish());
-        });
-        builder_as_any_fields.push(quote! {
-                    ::std::sync::Arc::clone(&#field_name) as ::std::sync::Arc<dyn ::tonbo::arrow::array::Array>,
-                });
-        encode_method_fields.push(quote! {
-                    ::tonbo::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
-                        field_name: stringify!(#field_name).to_string(),
-                        error: Box::new(err),
-                    })?;
-                });
-        encode_size_fields.push(quote! {
-            + self.#field_name.size()
-        });
-        builder_size_fields.push(quote! {
-            + #size_method
-        });
-        size_fields.push(quote! {
-            + #size_field
-        });
-
-        if field.primary_key.unwrap_or_default() {
-
-            if is_string {
-                to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
-                ref_fields.push(quote! { pub #field_name: &'r str, });
-            } else {
-                to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
-                ref_fields.push(quote! { pub #field_name: #field_ty, });
-            }
-            from_record_batch_fields.push(quote! {
-                    let #field_name = record_batch
-                        .column(column_i)
-                        .#as_method
-                        .value(offset);
-                    column_i += 1;
-                });
-            arrays_get_fields.push(quote! {
-                   let #field_name = self.#field_name.value(offset);
-                });
-            decode_method_fields.push(quote! {
-                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
-                                field_name: stringify!(#field_name).to_string(),
-                                error: Box::new(err),
-                            })?;
-                        });
-        } else {
-            match (is_nullable, is_string) {
-                (true, true) => {
-                    to_ref_init_fields
-                        .push(quote! { #field_name: self.#field_name.as_deref(), });
-                }
-                (true, false) => {
-                    to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
-                }
-                (false, true) => {
-                    to_ref_init_fields.push(quote! { #field_name: Some(&self.#field_name), });
-                }
-                (false, false) => {
-                    to_ref_init_fields.push(quote! { #field_name: Some(self.#field_name), });
-                }
-            }
-            ref_projection_fields.push(quote! {
-                    if !projection_mask.leaf_included(#field_index) {
-                        self.#field_name = None;
-                    }
-                });
-
-            if is_string {
-                ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
-            } else {
-                ref_fields.push(quote! { pub #field_name: Option<#field_ty>, });
-            }
-            if is_nullable {
-                from_record_batch_fields.push(quote! {
-                        let mut #field_name = None;
-
-                        if projection_mask.leaf_included(#field_index) {
-                            let #field_array_name = record_batch
-                                .column(column_i)
-                                .#as_method;
-
-                            use ::tonbo::arrow::array::Array;
-                            if !#field_array_name.is_null(offset) {
-                                #field_name = Some(#field_array_name.value(offset));
-                            }
-                            column_i += 1;
-                        }
-                    });
-                arrays_get_fields.push(quote! {
-                                use ::tonbo::arrow::array::Array;
-                                let #field_name = (!self.#field_name.is_null(offset) && projection_mask.leaf_included(#field_index))
-                                    .then(|| self.#field_name.value(offset));
-                            });
-                builder_push_some_fields.push(quote! {
-                        match row.#field_name {
-                            Some(#field_name) => self.#field_name.append_value(#field_name),
-                            None => self.#field_name.append_null(),
-                        }
-                    });
-                builder_push_none_fields.push(quote! {
-                        self.#field_name.append_null();
-                    });
-                decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
-                                    field_name: stringify!(#field_name).to_string(),
-                                    error: Box::new(err),
-                                })?;
-                            });
-            } else {
-                from_record_batch_fields.push(quote! {
-                        let mut #field_name = None;
-
-                        if projection_mask.leaf_included(#field_index) {
-                            #field_name = Some(
-                                record_batch
-                                    .column(column_i)
-                                    .#as_method
-                                    .value(offset),
-                            );
-                            column_i += 1;
-                        }
-                    });
-                arrays_get_fields.push(quote! {
-                        let #field_name = projection_mask
-                            .leaf_included(#field_index)
-                            .then(|| self.#field_name.value(offset));
-                    });
-                builder_push_some_fields.push(quote! {
-                        self.#field_name.append_value(row.#field_name.unwrap());
-                    });
-                builder_push_none_fields.push(if is_string {
-                    quote!(self.#field_name.append_value("");)
-                } else {
-                    quote!(self.#field_name.append_value(Default::default());)
-                });
-                decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
-                                    field_name: stringify!(#field_name).to_string(),
-                                    error: Box::new(err),
-                                })?.unwrap();
-                            });
-            }
-        }
-    }
-
-
-    let PrimaryKey {
-        name: primary_key_name,
-        base_ty: primary_key_ty,
-        fn_key: fn_primary_key,
-        builder_append_value: builder_append_primary_key,
-        index: primary_key_index,
-    } = primary_key_definitions.clone();
+    let builder_append_primary_key = &primary_key_definitions.builder_append_value;
 
     let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
     let struct_arrays_name = Ident::new(
@@ -323,55 +122,34 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
     );
 
     let record_codegen = trait_record_codegen(
-        &struct_name,
-        primary_key_definitions,
-        &to_ref_init_fields,
-        &schema_fields,
-        &size_fields,
+        &data_struct.fields,
+        struct_name,
+        primary_key_definitions.clone(),
     );
 
-    let decode_codegen = trait_decode_codegen(&struct_name, &decode_method_fields, &field_names);
+    let decode_codegen = trait_decode_codegen(struct_name, &data_struct.fields);
 
-    let struct_ref_codegen = struct_ref_codegen(&struct_ref_name, &ref_fields);
+    let struct_ref_codegen = struct_ref_codegen(&struct_ref_name, &data_struct.fields);
 
-    let decode_ref_codegen = trait_decode_ref_codegen(
-        &struct_name,
-        &struct_ref_name,
-        &primary_key_name,
-        &ref_projection_fields,
-        &from_record_batch_fields,
-        &field_names,
-    );
+    let decode_ref_codegen =
+        trait_decode_ref_codegen(&struct_name, &primary_key_ident, &data_struct.fields);
 
-    let encode_codegen =
-        trait_encode_codegen(&struct_ref_name, &encode_method_fields, &encode_size_fields);
+    let encode_codegen = trait_encode_codegen(&struct_name, &data_struct.fields);
 
-    let struct_array_codegen = struct_array_codegen(&struct_arrays_name, &arrays_init_fields);
+    let struct_array_codegen = struct_array_codegen(&struct_arrays_name, &data_struct.fields);
 
     let arrow_array_codegen = trait_arrow_array_codegen(
-        &struct_name,
-        &struct_arrays_name,
+        struct_name,
         &struct_builder_name,
-        &builder_init_fields,
-        &primary_key_name,
-        &arrays_get_fields,
-        &struct_ref_name,
-        &field_names,
+        primary_key_ident,
+        &data_struct.fields,
     );
 
     let builder_codegen = struct_builder_codegen(
         &struct_builder_name,
-        &builder_fields,
-        &struct_arrays_name,
         &struct_name,
-        &builder_append_primary_key,
-        &builder_push_some_fields,
-        &builder_push_none_fields,
-        &builder_finish_fields,
-        &builder_as_any_fields,
-        &field_names,
-        &builder_size_fields,
-        &struct_ref_name,
+        builder_append_primary_key,
+        &data_struct.fields,
     );
 
     let gen = quote! {
@@ -398,12 +176,56 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
 }
 
 fn trait_record_codegen(
+    fields: &[RecordStructFieldOpt],
     struct_name: &Ident,
     primary_key: PrimaryKey,
-    to_ref_init_fields: &Vec<proc_macro2::TokenStream>,
-    schema_fields: &Vec<proc_macro2::TokenStream>,
-    size_fields: &Vec<proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
+    let mut size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    let mut to_ref_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let is_string = matches!(data_type, DataType::String);
+        let mapped_type = data_type.to_mapped_type();
+        let size_field = data_type.to_size_field(field_name, is_nullable);
+
+        schema_fields.push(quote! {
+                    ::tonbo::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
+                });
+
+        size_fields.push(quote! {
+            + #size_field
+        });
+
+        if field.primary_key.unwrap_or_default() {
+            if is_string {
+                to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
+            } else {
+                to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
+            }
+        } else {
+            match (is_nullable, is_string) {
+                (true, true) => {
+                    to_ref_init_fields.push(quote! { #field_name: self.#field_name.as_deref(), });
+                }
+                (true, false) => {
+                    to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
+                }
+                (false, true) => {
+                    to_ref_init_fields.push(quote! { #field_name: Some(&self.#field_name), });
+                }
+                (false, false) => {
+                    to_ref_init_fields.push(quote! { #field_name: Some(self.#field_name), });
+                }
+            }
+        }
+    }
+
     let struct_arrays_name = Ident::new(
         &format!("{}ImmutableArrays", struct_name),
         struct_name.span(),
@@ -414,7 +236,7 @@ fn trait_record_codegen(
         name: primary_key_name,
         base_ty: primary_key_ty,
         fn_key: fn_primary_key,
-        builder_append_value: builder_append_primary_key,
+        builder_append_value: _builder_append_primary_key,
         index: primary_key_index,
     } = primary_key;
 
@@ -471,9 +293,45 @@ fn trait_record_codegen(
 
 fn trait_decode_codegen(
     struct_name: &Ident,
-    decode_method_fields: &Vec<proc_macro2::TokenStream>,
-    field_names: &Vec<proc_macro2::TokenStream>,
+    fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let mut decode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let field_ty = data_type.to_field_ty();
+
+        field_names.push(quote!(#field_name,));
+
+        if field.primary_key.unwrap_or_default() {
+            decode_method_fields.push(quote! {
+                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
+                                field_name: stringify!(#field_name).to_string(),
+                                error: Box::new(err),
+                            })?;
+                        });
+        } else {
+            if is_nullable {
+                decode_method_fields.push(quote! {
+                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
+                                    field_name: stringify!(#field_name).to_string(),
+                                    error: Box::new(err),
+                                })?;
+                            });
+            } else {
+                decode_method_fields.push(quote! {
+                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
+                                    field_name: stringify!(#field_name).to_string(),
+                                    error: Box::new(err),
+                                })?.unwrap();
+                            });
+            }
+        }
+    }
     quote! {
 
         impl ::tonbo::serdes::Decode for #struct_name {
@@ -495,8 +353,34 @@ fn trait_decode_codegen(
 
 fn struct_ref_codegen(
     struct_ref_name: &Ident,
-    ref_fields: &Vec<proc_macro2::TokenStream>,
+    fields: &[RecordStructFieldOpt],
+    // ref_fields: &Vec<proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
+    let mut ref_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, _is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let is_string = matches!(data_type, DataType::String);
+        let field_ty = data_type.to_field_ty();
+
+        if field.primary_key.unwrap_or_default() {
+            if is_string {
+                ref_fields.push(quote! { pub #field_name: &'r str, });
+            } else {
+                ref_fields.push(quote! { pub #field_name: #field_ty, });
+            }
+        } else {
+            if is_string {
+                ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
+            } else {
+                ref_fields.push(quote! { pub #field_name: Option<#field_ty>, });
+            }
+        }
+    }
+
     quote! {
 
         #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -508,12 +392,76 @@ fn struct_ref_codegen(
 
 fn trait_decode_ref_codegen(
     struct_name: &&Ident,
-    struct_ref_name: &Ident,
     primary_key_name: &Ident,
-    ref_projection_fields: &Vec<proc_macro2::TokenStream>,
-    from_record_batch_fields: &Vec<TokenStream>,
-    field_names: &Vec<TokenStream>,
+    fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let mut ref_projection_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    let mut from_record_batch_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for (i, field) in fields.iter().enumerate() {
+        let field_name = field.ident.as_ref().unwrap();
+        let field_array_name = field.to_array_ident();
+        let field_index = i + 2;
+
+        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let as_method = data_type.to_as_method();
+
+        field_names.push(quote!(#field_name,));
+
+        if field.primary_key.unwrap_or_default() {
+            from_record_batch_fields.push(quote! {
+                let #field_name = record_batch
+                    .column(column_i)
+                    .#as_method
+                    .value(offset);
+                column_i += 1;
+            });
+        } else {
+            ref_projection_fields.push(quote! {
+                if !projection_mask.leaf_included(#field_index) {
+                    self.#field_name = None;
+                }
+            });
+
+            if is_nullable {
+                from_record_batch_fields.push(quote! {
+                    let mut #field_name = None;
+
+                    if projection_mask.leaf_included(#field_index) {
+                        let #field_array_name = record_batch
+                            .column(column_i)
+                            .#as_method;
+
+                        use ::tonbo::arrow::array::Array;
+                        if !#field_array_name.is_null(offset) {
+                            #field_name = Some(#field_array_name.value(offset));
+                        }
+                        column_i += 1;
+                    }
+                });
+            } else {
+                from_record_batch_fields.push(quote! {
+                    let mut #field_name = None;
+
+                    if projection_mask.leaf_included(#field_index) {
+                        #field_name = Some(
+                            record_batch
+                                .column(column_i)
+                                .#as_method
+                                .value(offset),
+                        );
+                        column_i += 1;
+                    }
+                });
+            }
+        }
+    }
+
+    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
+
     quote! {
         impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_name<'r> {
             type Record = #struct_name;
@@ -554,10 +502,28 @@ fn trait_decode_ref_codegen(
 }
 
 fn trait_encode_codegen(
-    struct_ref_name: &Ident,
-    encode_method_fields: &Vec<TokenStream>,
-    encode_size_fields: &Vec<TokenStream>,
+    struct_name: &Ident,
+    fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let mut encode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut encode_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        encode_method_fields.push(quote! {
+                    ::tonbo::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
+                        field_name: stringify!(#field_name).to_string(),
+                        error: Box::new(err),
+                    })?;
+                });
+        encode_size_fields.push(quote! {
+            + self.#field_name.size()
+        });
+    }
+
+    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
+
     quote! {
         impl<'r> ::tonbo::serdes::Encode for #struct_ref_name<'r> {
             type Error = ::tonbo::record::RecordEncodeError;
@@ -580,8 +546,21 @@ fn trait_encode_codegen(
 
 fn struct_array_codegen(
     struct_arrays_name: &Ident,
-    arrays_init_fields: &Vec<TokenStream>,
+    fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let mut arrays_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, _is_nullable) = field.to_data_type().expect("unreachable code");
+        let array_ty = data_type.to_array_ty();
+
+        arrays_init_fields.push(quote! {
+            #field_name: ::std::sync::Arc<#array_ty>,
+        });
+    }
+
     quote! {
         #[derive(Debug)]
         pub struct #struct_arrays_name {
@@ -597,14 +576,57 @@ fn struct_array_codegen(
 
 fn trait_arrow_array_codegen(
     struct_name: &Ident,
-    struct_arrays_name: &Ident,
     struct_builder_name: &Ident,
-    builder_init_fields: &Vec<TokenStream>,
     primary_key_name: &Ident,
-    arrays_get_fields: &Vec<TokenStream>,
-    struct_ref_name: &Ident,
-    field_names: &Vec<TokenStream>,
+
+    fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    let mut builder_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut arrays_get_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for (i, field) in fields.iter().enumerate() {
+        let field_name = field.ident.as_ref().unwrap();
+        let field_index = i + 2;
+
+        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let builder_with_capacity_method = data_type.to_builder_with_capacity_method();
+
+        field_names.push(quote!(#field_name,));
+
+        builder_init_fields.push(quote! {
+            #field_name: #builder_with_capacity_method,
+        });
+
+        if field.primary_key.unwrap_or_default() {
+            arrays_get_fields.push(quote! {
+               let #field_name = self.#field_name.value(offset);
+            });
+        } else {
+            if is_nullable {
+                arrays_get_fields.push(quote! {
+                                use ::tonbo::arrow::array::Array;
+                                let #field_name = (!self.#field_name.is_null(offset) && projection_mask.leaf_included(#field_index))
+                                    .then(|| self.#field_name.value(offset));
+                            });
+            } else {
+                arrays_get_fields.push(quote! {
+                    let #field_name = projection_mask
+                        .leaf_included(#field_index)
+                        .then(|| self.#field_name.value(offset));
+                });
+            }
+        }
+    }
+
+    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
+    let struct_arrays_name = Ident::new(
+        &format!("{}ImmutableArrays", struct_name),
+        struct_name.span(),
+    );
+
     quote! {
         impl ::tonbo::inmem::immutable::ArrowArrays for #struct_arrays_name {
             type Record = #struct_name;
@@ -650,18 +672,78 @@ fn trait_arrow_array_codegen(
 
 fn struct_builder_codegen(
     struct_builder_name: &Ident,
-    builder_fields: &Vec<TokenStream>,
-    struct_arrays_name: &Ident,
     struct_name: &&Ident,
     builder_append_primary_key: &TokenStream,
-    builder_push_some_fields: &Vec<TokenStream>,
-    builder_push_none_fields: &Vec<TokenStream>,
-    builder_finish_fields: &Vec<TokenStream>,
-    builder_as_any_fields: &Vec<TokenStream>,
-    field_names: &Vec<TokenStream>,
-    builder_size_fields: &Vec<TokenStream>,
-    struct_ref_name: &Ident,
+
+    fields: &[RecordStructFieldOpt],
 ) -> proc_macro2::TokenStream {
+    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    let mut builder_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_finish_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_as_any_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    // only normal fields
+    let mut builder_push_some_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    // only normal fields
+    let mut builder_push_none_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let is_string = matches!(data_type, DataType::String);
+        let builder = data_type.to_builder();
+        let size_method = data_type.to_size_method(field_name);
+
+        field_names.push(quote!(#field_name,));
+
+        builder_fields.push(quote! {
+            #field_name: #builder,
+        });
+        builder_finish_fields.push(quote! {
+            let #field_name = ::std::sync::Arc::new(self.#field_name.finish());
+        });
+        builder_as_any_fields.push(quote! {
+                    ::std::sync::Arc::clone(&#field_name) as ::std::sync::Arc<dyn ::tonbo::arrow::array::Array>,
+                });
+
+        builder_size_fields.push(quote! {
+            + #size_method
+        });
+
+        if field.primary_key.unwrap_or_default() {
+        } else {
+            if is_nullable {
+                builder_push_some_fields.push(quote! {
+                    match row.#field_name {
+                        Some(#field_name) => self.#field_name.append_value(#field_name),
+                        None => self.#field_name.append_null(),
+                    }
+                });
+                builder_push_none_fields.push(quote! {
+                    self.#field_name.append_null();
+                });
+            } else {
+                builder_push_some_fields.push(quote! {
+                    self.#field_name.append_value(row.#field_name.unwrap());
+                });
+                builder_push_none_fields.push(if is_string {
+                    quote!(self.#field_name.append_value("");)
+                } else {
+                    quote!(self.#field_name.append_value(Default::default());)
+                });
+            }
+        }
+    }
+
+    let struct_ref_name = Ident::new(&format!("{}Ref", struct_name), struct_name.span());
+    let struct_arrays_name = Ident::new(
+        &format!("{}ImmutableArrays", struct_name),
+        struct_name.span(),
+    );
+
     quote! {
         pub struct #struct_builder_name {
             #(#builder_fields)*

@@ -6,11 +6,8 @@ mod record;
 pub(crate) mod data_type;
 
 use proc_macro::TokenStream;
-use proc_macro2::Ident;
-use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Error, Fields, GenericArgument, Path, Type};
+use syn::{parse_macro_input, DeriveInput};
 
-use crate::{keys::PrimaryKey, schema_model::ModelAttributes};
 use crate::data_type::DataType;
 
 /// used to define the structure of Record,
