@@ -53,7 +53,7 @@ impl RecordStructFieldOpt {
     }
 }
 
-pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error> {
+pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
     let record_opts: RecordOpts = RecordOpts::from_derive_input(&ast)?;
 
     let struct_name = &record_opts.ident;
@@ -157,11 +157,11 @@ fn trait_record_codegen(
     fields: &[RecordStructFieldOpt],
     struct_name: &Ident,
     primary_key: PrimaryKey,
-) -> proc_macro2::TokenStream {
-    let mut size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+) -> TokenStream {
+    let mut size_fields: Vec<TokenStream> = Vec::new();
 
-    let mut to_ref_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut to_ref_init_fields: Vec<TokenStream> = Vec::new();
+    let mut schema_fields: Vec<TokenStream> = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -269,9 +269,9 @@ fn trait_record_codegen(
 fn trait_decode_codegen(
     struct_name: &Ident,
     fields: &[RecordStructFieldOpt],
-) -> proc_macro2::TokenStream {
-    let mut decode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+) -> TokenStream {
+    let mut decode_method_fields: Vec<TokenStream> = Vec::new();
+    let mut field_names: Vec<TokenStream> = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -327,10 +327,9 @@ fn trait_decode_codegen(
 fn struct_ref_codegen(
     struct_name: &Ident,
     fields: &[RecordStructFieldOpt],
-    // ref_fields: &Vec<proc_macro2::TokenStream>,
-) -> proc_macro2::TokenStream {
+) -> TokenStream {
     let struct_ref_name = struct_name.to_ref_ident();
-    let mut ref_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut ref_fields: Vec<TokenStream> = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -366,11 +365,11 @@ fn trait_decode_ref_codegen(
     struct_name: &&Ident,
     primary_key_name: &Ident,
     fields: &[RecordStructFieldOpt],
-) -> proc_macro2::TokenStream {
-    let mut ref_projection_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+) -> TokenStream {
+    let mut ref_projection_fields: Vec<TokenStream> = Vec::new();
 
-    let mut from_record_batch_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut from_record_batch_fields: Vec<TokenStream> = Vec::new();
+    let mut field_names: Vec<TokenStream> = Vec::new();
 
     for (i, field) in fields.iter().enumerate() {
         let field_name = field.ident.as_ref().unwrap();
@@ -476,9 +475,9 @@ fn trait_decode_ref_codegen(
 fn trait_encode_codegen(
     struct_name: &Ident,
     fields: &[RecordStructFieldOpt],
-) -> proc_macro2::TokenStream {
-    let mut encode_method_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut encode_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+) -> TokenStream {
+    let mut encode_method_fields: Vec<TokenStream> = Vec::new();
+    let mut encode_size_fields: Vec<TokenStream> = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -519,9 +518,9 @@ fn trait_encode_codegen(
 fn struct_array_codegen(
     struct_name: &Ident,
     fields: &[RecordStructFieldOpt],
-) -> proc_macro2::TokenStream {
+) -> TokenStream {
     let struct_arrays_name = struct_name.to_immutable_array_ident();
-    let mut arrays_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut arrays_init_fields: Vec<TokenStream> = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -552,12 +551,12 @@ fn trait_arrow_array_codegen(
     primary_key_name: &Ident,
 
     fields: &[RecordStructFieldOpt],
-) -> proc_macro2::TokenStream {
+) -> TokenStream {
     let struct_builder_name = struct_name.to_builder_ident();
-    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut field_names: Vec<TokenStream> = Vec::new();
 
-    let mut builder_init_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut arrays_get_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_init_fields: Vec<TokenStream> = Vec::new();
+    let mut arrays_get_fields: Vec<TokenStream> = Vec::new();
 
     for (i, field) in fields.iter().enumerate() {
         let field_name = field.ident.as_ref().unwrap();
@@ -643,18 +642,18 @@ fn struct_builder_codegen(
     builder_append_primary_key: &TokenStream,
 
     fields: &[RecordStructFieldOpt],
-) -> proc_macro2::TokenStream {
+) -> TokenStream {
     let struct_builder_name = struct_name.to_builder_ident();
-    let mut field_names: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut field_names: Vec<TokenStream> = Vec::new();
 
-    let mut builder_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut builder_finish_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut builder_as_any_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_fields: Vec<TokenStream> = Vec::new();
+    let mut builder_finish_fields: Vec<TokenStream> = Vec::new();
+    let mut builder_as_any_fields: Vec<TokenStream> = Vec::new();
     // only normal fields
-    let mut builder_push_some_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_push_some_fields: Vec<TokenStream> = Vec::new();
     // only normal fields
-    let mut builder_push_none_fields: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut builder_size_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builder_push_none_fields: Vec<TokenStream> = Vec::new();
+    let mut builder_size_fields: Vec<TokenStream> = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
