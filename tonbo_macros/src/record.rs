@@ -115,23 +115,20 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<proc_macro2::TokenStream, Error
 
     let decode_codegen = trait_decode_codegen(struct_name, &data_struct.fields);
 
-    let struct_ref_codegen = struct_ref_codegen(&struct_name, &data_struct.fields);
+    let struct_ref_codegen = struct_ref_codegen(struct_name, &data_struct.fields);
 
     let decode_ref_codegen =
-        trait_decode_ref_codegen(&struct_name, &primary_key_ident, &data_struct.fields);
+        trait_decode_ref_codegen(&struct_name, primary_key_ident, &data_struct.fields);
 
-    let encode_codegen = trait_encode_codegen(&struct_name, &data_struct.fields);
+    let encode_codegen = trait_encode_codegen(struct_name, &data_struct.fields);
 
-    let struct_array_codegen = struct_array_codegen(&struct_name, &data_struct.fields);
+    let struct_array_codegen = struct_array_codegen(struct_name, &data_struct.fields);
 
     let arrow_array_codegen =
         trait_arrow_array_codegen(struct_name, primary_key_ident, &data_struct.fields);
 
-    let builder_codegen = struct_builder_codegen(
-        &struct_name,
-        builder_append_primary_key,
-        &data_struct.fields,
-    );
+    let builder_codegen =
+        struct_builder_codegen(struct_name, builder_append_primary_key, &data_struct.fields);
 
     let gen = quote! {
 
@@ -292,22 +289,20 @@ fn trait_decode_codegen(
                                 error: Box::new(err),
                             })?;
                         });
-        } else {
-            if is_nullable {
-                decode_method_fields.push(quote! {
+        } else if is_nullable {
+            decode_method_fields.push(quote! {
                                 let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
                                     field_name: stringify!(#field_name).to_string(),
                                     error: Box::new(err),
                                 })?;
                             });
-            } else {
-                decode_method_fields.push(quote! {
+        } else {
+            decode_method_fields.push(quote! {
                                 let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
                                     field_name: stringify!(#field_name).to_string(),
                                     error: Box::new(err),
                                 })?.unwrap();
                             });
-            }
         }
     }
     quote! {
@@ -351,12 +346,10 @@ fn struct_ref_codegen(
             } else {
                 ref_fields.push(quote! { pub #field_name: #field_ty, });
             }
+        } else if is_string {
+            ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
         } else {
-            if is_string {
-                ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
-            } else {
-                ref_fields.push(quote! { pub #field_name: Option<#field_ty>, });
-            }
+            ref_fields.push(quote! { pub #field_name: Option<#field_ty>, });
         }
     }
 
@@ -584,20 +577,18 @@ fn trait_arrow_array_codegen(
             arrays_get_fields.push(quote! {
                let #field_name = self.#field_name.value(offset);
             });
-        } else {
-            if is_nullable {
-                arrays_get_fields.push(quote! {
+        } else if is_nullable {
+            arrays_get_fields.push(quote! {
                                 use ::tonbo::arrow::array::Array;
                                 let #field_name = (!self.#field_name.is_null(offset) && projection_mask.leaf_included(#field_index))
                                     .then(|| self.#field_name.value(offset));
                             });
-            } else {
-                arrays_get_fields.push(quote! {
-                    let #field_name = projection_mask
-                        .leaf_included(#field_index)
-                        .then(|| self.#field_name.value(offset));
-                });
-            }
+        } else {
+            arrays_get_fields.push(quote! {
+                let #field_name = projection_mask
+                    .leaf_included(#field_index)
+                    .then(|| self.#field_name.value(offset));
+            });
         }
     }
 
@@ -691,27 +682,25 @@ fn struct_builder_codegen(
         });
 
         if field.primary_key.unwrap_or_default() {
+        } else if is_nullable {
+            builder_push_some_fields.push(quote! {
+                match row.#field_name {
+                    Some(#field_name) => self.#field_name.append_value(#field_name),
+                    None => self.#field_name.append_null(),
+                }
+            });
+            builder_push_none_fields.push(quote! {
+                self.#field_name.append_null();
+            });
         } else {
-            if is_nullable {
-                builder_push_some_fields.push(quote! {
-                    match row.#field_name {
-                        Some(#field_name) => self.#field_name.append_value(#field_name),
-                        None => self.#field_name.append_null(),
-                    }
-                });
-                builder_push_none_fields.push(quote! {
-                    self.#field_name.append_null();
-                });
+            builder_push_some_fields.push(quote! {
+                self.#field_name.append_value(row.#field_name.unwrap());
+            });
+            builder_push_none_fields.push(if is_string {
+                quote!(self.#field_name.append_value("");)
             } else {
-                builder_push_some_fields.push(quote! {
-                    self.#field_name.append_value(row.#field_name.unwrap());
-                });
-                builder_push_none_fields.push(if is_string {
-                    quote!(self.#field_name.append_value("");)
-                } else {
-                    quote!(self.#field_name.append_value(Default::default());)
-                });
-            }
+                quote!(self.#field_name.append_value(Default::default());)
+            });
         }
     }
 
