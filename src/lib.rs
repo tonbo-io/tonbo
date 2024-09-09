@@ -852,8 +852,8 @@ pub(crate) mod tests {
 
         fn size(&self) -> usize {
             let string_size = self.vstring.len();
-            let u32_size = std::mem::size_of::<u32>();
-            let bool_size = self.vbool.map_or(0, |_| std::mem::size_of::<bool>());
+            let u32_size = mem::size_of::<u32>();
+            let bool_size = self.vbool.map_or(0, |_| mem::size_of::<bool>());
             string_size + u32_size + bool_size
         }
     }

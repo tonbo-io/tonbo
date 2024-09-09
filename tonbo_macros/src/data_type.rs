@@ -368,7 +368,7 @@ impl DataType {
             }
             DataType::String => {
                 if is_nullable {
-                    quote!(0)
+                    quote!(self.#field_name.as_ref().map(String::len).unwrap_or(0))
                 } else {
                     quote!(self.#field_name.len())
                 }
