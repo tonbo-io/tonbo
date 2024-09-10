@@ -122,7 +122,7 @@ where
                 let len = u32::decode(reader).await?;
                 VersionEdit::NewLogLength { len }
             }
-            _ => todo!(),
+            i => todo!("{i}"),
         })
     }
 }
