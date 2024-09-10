@@ -66,6 +66,9 @@ where
         guard.trigger.reset();
 
         if guard.mutable.is_empty() {
+            if let Some(tx) = option_tx {
+                tx.send(()).map_err(|_| CommitError::ChannelClose)?
+            }
             return Ok(());
         }
 
