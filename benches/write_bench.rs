@@ -11,6 +11,8 @@ use std::{
 use common::*;
 use futures_util::future::join_all;
 use tempfile::TempDir;
+use tokio::io::AsyncWriteExt;
+use tonbo::{executor::tokio::TokioExecutor, fs::FileProvider};
 
 const WRITE_TIMES: usize = 500_000;
 const WRITE_BATCH_TIMES: usize = 5000;
@@ -224,4 +226,13 @@ async fn main() {
 
     println!();
     println!("{table}");
+
+    let mut file = TokioExecutor::open("write_benchmark.md").await.unwrap();
+    file.write_all(b"Write: \n```shell\n").await.unwrap();
+    for line in table.lines() {
+        file.write_all(line.as_bytes()).await.unwrap();
+        file.write_all(b"\n").await.unwrap();
+    }
+    file.write_all(b"```").await.unwrap();
+    file.flush().await.unwrap();
 }
