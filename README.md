@@ -39,13 +39,13 @@ Tonbo is designed to integrate seamlessly with other Arrow analytical tools, suc
 use std::ops::Bound;
 
 use futures_util::stream::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
+use tonbo::{executor::tokio::TokioExecutor, Record, Projection, DB};
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
-#[tonbo_record]
+#[derive(Record, Debug)]
 pub struct User {
-    #[primary_key]
+    #[record(primary_key)]
     name: String,
     email: Option<String>,
     age: u8,
