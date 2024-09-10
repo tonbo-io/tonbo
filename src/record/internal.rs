@@ -32,12 +32,12 @@ impl<'r, R> InternalRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
-    pub(crate) fn value(&self) -> Timestamped<<<R::Record as Record>::Key as Key>::Ref<'_>> {
+    pub fn value(&self) -> Timestamped<<<R::Record as Record>::Key as Key>::Ref<'_>> {
         // Safety: shorter lifetime of the value must be safe
         unsafe { transmute(Timestamped::new(self.record.clone().key(), self.ts)) }
     }
 
-    pub(crate) fn get(&self) -> Option<R> {
+    pub fn get(&self) -> Option<R> {
         if self.null {
             return None;
         }

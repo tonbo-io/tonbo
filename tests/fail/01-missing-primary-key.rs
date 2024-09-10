@@ -1,8 +1,7 @@
-use tonbo_macros::tonbo_record;
+use tonbo_macros::Record;
 
-#[tonbo_record]
+#[derive(Record, Debug)]
 pub struct User {
-    #[primary_key]
     name: String,
     email: Option<String>,
     age: u8,

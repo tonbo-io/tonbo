@@ -34,13 +34,13 @@
 //! use std::ops::Bound;
 //!
 //! use futures_util::stream::StreamExt;
-//! use tonbo::{executor::tokio::TokioExecutor, tonbo_record, Projection, DB};
+//! use tonbo::{executor::tokio::TokioExecutor, Projection, Record, DB};
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
-//! #[tonbo_record]
+//! #[derive(Record, Debug)]
 //! pub struct User {
-//!     #[primary_key]
+//!     #[record(primary_key)]
 //!     name: String,
 //!     email: Option<String>,
 //!     age: u8,
@@ -145,7 +145,7 @@ use record::Record;
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
-pub use tonbo_macros::{tonbo_record, KeyAttributes};
+pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
 
@@ -852,8 +852,8 @@ pub(crate) mod tests {
 
         fn size(&self) -> usize {
             let string_size = self.vstring.len();
-            let u32_size = std::mem::size_of::<u32>();
-            let bool_size = self.vbool.map_or(0, |_| std::mem::size_of::<bool>());
+            let u32_size = mem::size_of::<u32>();
+            let bool_size = self.vbool.map_or(0, |_| mem::size_of::<bool>());
             string_size + u32_size + bool_size
         }
     }
@@ -1485,6 +1485,11 @@ pub(crate) mod tests {
     #[test]
     fn build_test() {
         let t = trybuild::TestCases::new();
-        t.pass("tests/*.rs");
+        t.pass("tests/success/*.rs");
+    }
+    #[test]
+    fn fail_build_test() {
+        let t = trybuild::TestCases::new();
+        t.compile_fail("tests/fail/*.rs");
     }
 }

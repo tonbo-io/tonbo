@@ -23,11 +23,11 @@ use datafusion::{
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tonbo::{executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DB};
-use tonbo_macros::tonbo_record;
+use tonbo_macros::Record;
 
-#[tonbo_record]
+#[derive(Record, Debug)]
 pub struct Music {
-    #[primary_key]
+    #[record(primary_key)]
     id: u64,
     name: String,
     like: i64,

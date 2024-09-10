@@ -16,7 +16,7 @@ use rocksdb::{Direction, IteratorMode, TransactionDB};
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
-use tonbo_macros::tonbo_record;
+use tonbo_macros::Record;
 
 const RNG_SEED: u64 = 3;
 pub(crate) const ITERATIONS: usize = 2;
@@ -44,9 +44,9 @@ pub enum ProjectionResult<'a> {
     Owned(ProjectionField),
 }
 
-#[tonbo_record(::serde::Serialize, ::serde::Deserialize)]
+#[derive(Record, Debug, ::serde::Serialize, ::serde::Deserialize)]
 pub struct Customer {
-    #[primary_key]
+    #[record(primary_key)]
     pub c_custkey: i32,
     pub c_name: String,
     pub c_address: String,
