@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -66,3 +67,31 @@ jobs:
         with:
           command: fmt
           args: -- --check
+
+  benchmark:
+    name: Rust benchmark
+    runs-on: self-hosted
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install latest nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      # `cargo check` command here will use installed `nightly`
+      # as it is set as an "override" for current directory
+
+      - name: Run cargo bench
+        uses: actions-rs/cargo@v1
+        with:
+          command: bench
+          args: --all-features
+
+      - name: Comment on PR using GitHub CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body-file "read_benchmark.md"
+          gh pr comment ${{ github.event.pull_request.number }} --body-file "write_benchmark.md"

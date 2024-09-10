@@ -3,12 +3,14 @@ mod common;
 use std::{
     collections::Bound,
     env::current_dir,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use futures_util::{future::join_all, StreamExt};
+use tokio::io::AsyncWriteExt;
+use tonbo::{executor::tokio::TokioExecutor, fs::FileProvider};
 
 use crate::common::{
     read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
@@ -124,15 +126,19 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
 
 #[tokio::main]
 async fn main() {
-    let data_dir = current_dir().unwrap().join("benchmark_data");
+    let data_dir = PathBuf::from("/home/kkould/benchmark");
 
     #[cfg(feature = "load_tbl")]
     {
         use crate::common::{BenchInserter, BenchWriteTransaction};
 
-        let tbl_path = current_dir().unwrap().join("./benchmark/customer.tbl");
+        let tbl_path = data_dir.join("customer.tbl");
 
         async fn load<T: BenchDatabase>(tbl_path: impl AsRef<Path>, path: impl AsRef<Path>) {
+            if path.as_ref().exists() {
+                return;
+            }
+
             println!("{}: start loading", T::db_type_name());
             let database = T::build(path).await;
 
@@ -148,14 +154,10 @@ async fn main() {
 
         load::<TonboBenchDataBase>(&tbl_path, data_dir.join("tonbo")).await;
         load::<RocksdbBenchDatabase>(&tbl_path, data_dir.join("rocksdb")).await;
-        load::<RedbBenchDatabase>(&tbl_path, data_dir.join("redb")).await;
-        load::<SledBenchDatabase>(&tbl_path, data_dir.join("sled")).await;
     }
 
     let tonbo_latency_results = { benchmark::<TonboBenchDataBase>(data_dir.join("tonbo")).await };
-    let redb_latency_results = { benchmark::<RedbBenchDatabase>(data_dir.join("redb")).await };
     let rocksdb_results = { benchmark::<RocksdbBenchDatabase>(data_dir.join("rocksdb")).await };
-    let sled_results = { benchmark::<SledBenchDatabase>(data_dir.join("sled")).await };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
 
@@ -163,12 +165,7 @@ async fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [
-        tonbo_latency_results,
-        redb_latency_results,
-        rocksdb_results,
-        sled_results,
-    ] {
+    for results in [tonbo_latency_results, rocksdb_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -176,11 +173,20 @@ async fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "tonbo", "redb", "rocksdb", "sled"]);
+    table.set_header(["", "tonbo", "rocksdb"]);
     for row in rows {
         table.add_row(row);
     }
 
     println!();
     println!("{table}");
+
+    let mut file = TokioExecutor::open("read_benchmark.md").await.unwrap();
+    file.write_all(b"Read: \n```shell\n").await.unwrap();
+    for line in table.lines() {
+        file.write_all(line.as_bytes()).await.unwrap();
+        file.write_all(b"\n").await.unwrap();
+    }
+    file.write_all(b"```").await.unwrap();
+    file.flush().await.unwrap();
 }
