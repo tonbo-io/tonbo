@@ -12,6 +12,7 @@ pub(crate) enum DataType {
     Int64,
     String,
     Boolean,
+    Bytes,
 }
 
 impl DataType {
@@ -36,6 +37,8 @@ impl DataType {
             DataType::String
         } else if path.is_ident("bool") {
             DataType::Boolean
+        } else if path.is_ident("Bytes") {
+            DataType::Bytes
         } else {
             todo!()
         }
@@ -73,6 +76,9 @@ impl DataType {
             DataType::Boolean => {
                 quote!(bool)
             }
+            DataType::Bytes => {
+                quote!(bytes::Bytes)
+            }
         }
     }
 
@@ -107,6 +113,9 @@ impl DataType {
             }
             DataType::Boolean => {
                 quote!(::tonbo::arrow::datatypes::DataType::Boolean)
+            }
+            DataType::Bytes => {
+                quote!(::tonbo::arrow::datatypes::DataType::Binary)
             }
         }
     }
@@ -143,6 +152,13 @@ impl DataType {
             DataType::Boolean => {
                 quote!(::tonbo::arrow::array::BooleanArray)
             }
+            DataType::Bytes => {
+                quote!(
+                    ::tonbo::arrow::array::GenericByteArray::<
+                        ::tonbo::arrow::datatypes::GenericBinaryType<i32>,
+                    >
+                )
+            }
         }
     }
 
@@ -177,6 +193,9 @@ impl DataType {
             }
             DataType::Boolean => {
                 quote!(as_boolean())
+            }
+            DataType::Bytes => {
+                quote!(as_bytes::<::tonbo::arrow::datatypes::GenericBinaryType<i32>>())
             }
         }
     }
@@ -232,6 +251,11 @@ impl DataType {
                 quote!(::tonbo::arrow::array::BooleanBuilder::with_capacity(
                     capacity
                 ))
+            }
+            DataType::Bytes => {
+                quote!(::tonbo::arrow::array::GenericByteBuilder::<
+                    ::tonbo::arrow::datatypes::GenericBinaryType<i32>,
+                >::with_capacity(capacity, 0))
             }
         }
     }
@@ -300,6 +324,13 @@ impl DataType {
             DataType::Boolean => {
                 quote!(::tonbo::arrow::array::BooleanBuilder)
             }
+            DataType::Bytes => {
+                quote!(
+                    ::tonbo::arrow::array::GenericByteBuilder::<
+                        ::tonbo::arrow::datatypes::GenericBinaryType<i32>,
+                    >
+                )
+            }
         }
     }
     pub(crate) fn to_size_method(&self, field_name: &Ident) -> proc_macro2::TokenStream {
@@ -332,6 +363,9 @@ impl DataType {
                 quote!(self.#field_name.values_slice().len())
             }
             DataType::Boolean => {
+                quote!(self.#field_name.values_slice().len())
+            }
+            DataType::Bytes => {
                 quote!(self.#field_name.values_slice().len())
             }
         }
@@ -375,6 +409,13 @@ impl DataType {
             }
             DataType::Boolean => {
                 quote! {std::mem::size_of::<bool>()}
+            }
+            DataType::Bytes => {
+                if is_nullable {
+                    quote!(self.#field_name.as_ref().map(Vec::len).unwrap_or(0))
+                } else {
+                    quote!(self.#field_name.len())
+                }
             }
         }
     }

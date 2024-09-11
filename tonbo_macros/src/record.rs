@@ -169,6 +169,7 @@ fn trait_record_codegen(
         let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
 
         let is_string = matches!(data_type, DataType::String);
+        let is_bytes = matches!(data_type, DataType::Bytes);
         let mapped_type = data_type.to_mapped_type();
         let size_field = data_type.to_size_field(field_name, is_nullable);
 
@@ -181,13 +182,13 @@ fn trait_record_codegen(
         });
 
         if field.primary_key.unwrap_or_default() {
-            if is_string {
+            if is_string || is_bytes {
                 to_ref_init_fields.push(quote! { #field_name: &self.#field_name, });
             } else {
                 to_ref_init_fields.push(quote! { #field_name: self.#field_name, });
             }
         } else {
-            match (is_nullable, is_string) {
+            match (is_nullable, is_string || is_bytes) {
                 (true, true) => {
                     to_ref_init_fields.push(quote! { #field_name: self.#field_name.as_deref(), });
                 }
@@ -331,16 +332,21 @@ fn struct_ref_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> T
         let (data_type, _is_nullable) = field.to_data_type().expect("unreachable code");
 
         let is_string = matches!(data_type, DataType::String);
+        let is_bytes = matches!(data_type, DataType::Bytes);
         let field_ty = data_type.to_field_ty();
 
         if field.primary_key.unwrap_or_default() {
             if is_string {
                 ref_fields.push(quote! { pub #field_name: &'r str, });
+            } else if is_bytes {
+                ref_fields.push(quote! { pub #field_name: &'r [u8], });
             } else {
                 ref_fields.push(quote! { pub #field_name: #field_ty, });
             }
         } else if is_string {
             ref_fields.push(quote! { pub #field_name: Option<&'r str>, });
+        } else if is_bytes {
+            ref_fields.push(quote! { pub #field_name: Option<&'r [u8]>, });
         } else {
             ref_fields.push(quote! { pub #field_name: Option<#field_ty>, });
         }
@@ -649,6 +655,7 @@ fn struct_builder_codegen(
         let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
 
         let is_string = matches!(data_type, DataType::String);
+        let is_bytes = matches!(data_type, DataType::Bytes);
         let builder = data_type.to_builder();
         let size_method = data_type.to_size_method(field_name);
 
@@ -685,6 +692,8 @@ fn struct_builder_codegen(
             });
             builder_push_none_fields.push(if is_string {
                 quote!(self.#field_name.append_value("");)
+            } else if is_bytes {
+                quote!(self.#field_name.append_value(&[]);)
             } else {
                 quote!(self.#field_name.append_value(Default::default());)
             });
