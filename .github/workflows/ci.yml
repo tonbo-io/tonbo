@@ -72,7 +72,7 @@ jobs:
   benchmark:
     name: Rust benchmark
     runs-on: self-hosted
-    if: github.event_name == 'push'
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
