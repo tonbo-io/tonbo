@@ -1,5 +1,6 @@
 use std::ops::Bound;
 
+use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use tonbo::{executor::tokio::TokioExecutor, Projection, Record, DB};
 
@@ -11,6 +12,7 @@ pub struct User {
     name: String,
     email: Option<String>,
     age: u8,
+    bytes: Bytes,
 }
 
 #[tokio::main]
@@ -25,6 +27,7 @@ async fn main() {
         name: "Alice".into(),
         email: Some("alice@gmail.com".into()),
         age: 22,
+        bytes: Bytes::from(vec![0, 1, 2]),
     })
     .await
     .unwrap();
@@ -54,7 +57,7 @@ async fn main() {
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 // tonbo supports pushing down projection
-                .projection(vec![1])
+                .projection(vec![1, 3])
                 // push down limitation
                 .limit(1)
                 .take()
@@ -66,7 +69,8 @@ async fn main() {
                     Some(UserRef {
                         name: "Alice",
                         email: Some("alice@gmail.com"),
-                        age: Some(22),
+                        age: None,
+                        bytes: Some(&[0, 1, 2]),
                     })
                 );
             }
