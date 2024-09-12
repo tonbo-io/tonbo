@@ -81,16 +81,39 @@ where
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption<R>>,
     ) -> Result<Self, VersionError<R>> {
-        let (mut log, log_id) = if let Some(file) = pin!(FP::list(
+        let mut log_stream = pin!(FP::list(
             option.version_log_dir_path(),
             FileType::Log,
             true
-        )?)
-        .next()
-        .await
-        .transpose()?
-        {
-            file
+        )?);
+        let mut first_log_id = None;
+        let mut version_log_id = None;
+        let mut version_log = None;
+
+        // when there are multiple logs, this means that a downtime occurred during the
+        // `version_log_snap_shot` process, the second newest file has the highest data
+        // integrity, so it is used as the version log, and the older log is deleted first
+        // to avoid midway downtime, which will cause the second newest file to become the
+        // first newest after restart.
+        let mut i = 0;
+        while let Some(result) = log_stream.next().await {
+            let (log, log_id) = result?;
+
+            if i <= 1 {
+                version_log = Some(log);
+                first_log_id = mem::replace(&mut version_log_id, Some(log_id));
+            } else {
+                FP::remove(option.version_log_path(&log_id)).await?;
+            }
+
+            i += 1;
+        }
+        if let Some(log_id) = first_log_id {
+            FP::remove(option.version_log_path(&log_id)).await?;
+        }
+
+        let (mut log, log_id) = if let (Some(log), Some(log_id)) = (version_log, version_log_id) {
+            (log, log_id)
         } else {
             let log_id = FileId::new();
             let log = FP::open(option.version_log_path(&log_id)).await?;
@@ -197,16 +220,18 @@ where
                 .await
                 .map_err(VersionError::Send)?;
         }
+        log.flush().await?;
         if edit_len >= option.version_log_snapshot_threshold {
-            *log_id = FileId::new();
+            let old_log_id = mem::replace(log_id, FileId::new());
             let _ = mem::replace(log, FP::open(option.version_log_path(log_id)).await?);
 
             new_version.log_length = 0;
             for new_edit in new_version.to_edits() {
                 new_edit.encode(log).await.map_err(VersionError::Encode)?;
             }
+            log.flush().await?;
+            FP::remove(option.version_log_path(&old_log_id)).await?;
         }
-        log.flush().await?;
         guard.current = Arc::new(new_version);
         Ok(())
     }
