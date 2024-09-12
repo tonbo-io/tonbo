@@ -181,7 +181,16 @@ where
                             let _ = FP::remove(option.wal_path(&wal_id)).await;
                         }
                     }
-                    new_version.level_slice[level as usize].push(scope);
+                    if level == 0 {
+                        new_version.level_slice[level as usize].push(scope);
+                    } else {
+                        // TODO: Add is often consecutive, so repeated queries can be avoided
+                        let sort_runs = &mut new_version.level_slice[level as usize];
+                        let pos = sort_runs
+                            .binary_search_by(|s| s.min.cmp(&scope.min))
+                            .unwrap_or_else(|index| index.saturating_sub(1));
+                        sort_runs.insert(pos, scope);
+                    }
                 }
                 VersionEdit::Remove { gen, level } => {
                     if let Some(i) = new_version.level_slice[level as usize]
