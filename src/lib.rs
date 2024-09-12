@@ -730,6 +730,7 @@ pub(crate) mod tests {
         collections::{BTreeMap, Bound},
         mem,
         sync::Arc,
+        time::Duration,
     };
 
     use arrow::{
@@ -741,7 +742,7 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
-    use tokio::io;
+    use tokio::{io, time::sleep};
     use tracing::error;
 
     use crate::{
@@ -1386,6 +1387,8 @@ pub(crate) mod tests {
         for item in test_items() {
             db.write(item, 0.into()).await.unwrap();
         }
+        // wait compaction completed
+        sleep(Duration::from_millis(400)).await;
 
         let tx = db.transaction().await;
         let key = 20.to_string();

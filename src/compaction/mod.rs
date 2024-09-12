@@ -1,6 +1,6 @@
 use std::{cmp, collections::Bound, mem, pin::Pin, sync::Arc};
 
-use async_lock::RwLock;
+use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use futures_util::StreamExt;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use thiserror::Error;
@@ -82,6 +82,9 @@ where
         guard.immutables.push((file_id, immutable));
         if guard.immutables.len() > self.option.immutable_chunk_max_num {
             let recover_wal_ids = guard.recover_wal_ids.take();
+            drop(guard);
+
+            let guard = self.schema.upgradable_read().await;
             let chunk_num = self.option.immutable_chunk_num;
             let excess = &guard.immutables[0..chunk_num];
 
@@ -112,6 +115,7 @@ where
                     .apply_edits(version_edits, Some(delete_gens), false)
                     .await?;
             }
+            let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
