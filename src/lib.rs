@@ -266,11 +266,8 @@ where
 
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
         let (tx, rx) = oneshot::channel();
-        self.schema
-            .read()
-            .await
-            .compaction_tx
-            .send(CompactTask::Flush(Some(tx)))?;
+        let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
+        compaction_tx.send(CompactTask::Flush(Some(tx)))?;
 
         rx.await.map_err(|_| CommitError::ChannelClose)?;
 
@@ -730,7 +727,6 @@ pub(crate) mod tests {
         collections::{BTreeMap, Bound},
         mem,
         sync::Arc,
-        time::Duration,
     };
 
     use arrow::{
@@ -742,7 +738,7 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
-    use tokio::{io, time::sleep};
+    use tokio::io;
     use tracing::error;
 
     use crate::{
@@ -1387,8 +1383,7 @@ pub(crate) mod tests {
         for item in test_items() {
             db.write(item, 0.into()).await.unwrap();
         }
-        // wait compaction completed
-        sleep(Duration::from_millis(400)).await;
+        let _ = db.flush().await;
 
         let tx = db.transaction().await;
         let key = 20.to_string();
