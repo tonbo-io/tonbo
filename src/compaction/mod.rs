@@ -470,10 +470,10 @@ pub(crate) mod tests {
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
-        trigger::TriggerFactory,
-        version::{edit::VersionEdit, Version},
+        trigger::{TriggerFactory, TriggerType},
+        version::{edit::VersionEdit, Version, MAX_LEVEL},
         wal::log::LogType,
-        DbError, DbOption,
+        DbError, DbOption, DB,
     };
 
     async fn build_immutable<R, FP>(
@@ -978,5 +978,114 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // issue: https://github.com/tonbo-io/tonbo/issues/152
+    #[tokio::test]
+    async fn test_flush_major_level_sort() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::from(temp_dir.path());
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 0;
+        option.major_threshold_with_sst_size = 2;
+        option.level_sst_magnification = 1;
+
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+
+        for i in 5..9 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+        for i in 0..4 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        db.insert(Test {
+            vstring: "6".to_owned(),
+            vu32: 22,
+            vbool: Some(false),
+        })
+        .await
+        .unwrap();
+        db.insert(Test {
+            vstring: "8".to_owned(),
+            vu32: 77,
+            vbool: Some(false),
+        })
+        .await
+        .unwrap();
+        db.flush().await.unwrap();
+        db.insert(Test {
+            vstring: "1".to_owned(),
+            vu32: 22,
+            vbool: Some(false),
+        })
+        .await
+        .unwrap();
+        db.insert(Test {
+            vstring: "5".to_owned(),
+            vu32: 77,
+            vbool: Some(false),
+        })
+        .await
+        .unwrap();
+        db.flush().await.unwrap();
+
+        db.insert(Test {
+            vstring: "2".to_owned(),
+            vu32: 22,
+            vbool: Some(false),
+        })
+        .await
+        .unwrap();
+        db.insert(Test {
+            vstring: "7".to_owned(),
+            vu32: 77,
+            vbool: Some(false),
+        })
+        .await
+        .unwrap();
+        db.flush().await.unwrap();
+
+        let version = db.version_set.current().await;
+
+        for level in 0..MAX_LEVEL {
+            let sort_runs = &version.level_slice[level];
+
+            if sort_runs.is_empty() {
+                continue;
+            }
+            for pos in 0..sort_runs.len() - 1 {
+                let current = &sort_runs[pos];
+                let next = &sort_runs[pos + 1];
+
+                assert!(current.min < current.max);
+                assert!(next.min < next.max);
+
+                if level == 0 {
+                    continue;
+                }
+                assert!(current.max < next.min);
+            }
+        }
+        dbg!(version);
     }
 }
