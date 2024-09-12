@@ -123,7 +123,6 @@ where
     R: Record,
     FP: FileProvider,
 {
-    #[allow(unused)]
     pub(crate) async fn query(
         &self,
         key: &TimestampedRef<R::Key>,
@@ -159,7 +158,6 @@ where
         Ok(None)
     }
 
-    #[allow(unused)]
     async fn table_query(
         &self,
         key: &TimestampedRef<<R as Record>::Key>,
@@ -194,6 +192,9 @@ where
         projection_mask: ProjectionMask,
     ) -> Result<(), VersionError<R>> {
         for scope in self.level_slice[0].iter() {
+            if !scope.meets_range(range) {
+                continue;
+            }
             let file = FP::open(self.option.table_path(&scope.gen))
                 .await
                 .map_err(VersionError::Io)?;
@@ -210,13 +211,28 @@ where
             if scopes.is_empty() {
                 continue;
             }
+
+            let (mut start, mut end) = (None, None);
+
+            for (idx, scope) in scopes.iter().enumerate() {
+                if scope.meets_range(range) {
+                    if start.is_none() {
+                        start = Some(idx);
+                    }
+                    end = Some(idx);
+                }
+            }
+            if start.is_none() {
+                continue;
+            }
+
             streams.push(ScanStream::Level {
                 // SAFETY: checked scopes no empty
                 inner: LevelStream::new(
                     self,
                     i + 1,
-                    0,
-                    scopes.len() - 1,
+                    start.unwrap(),
+                    end.unwrap(),
                     range,
                     ts,
                     limit,
