@@ -1,3 +1,5 @@
+use std::ops::Bound;
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
@@ -38,6 +40,30 @@ where
     #[allow(unused)]
     pub(crate) fn meets(&self, target: &Self) -> bool {
         self.contains(&target.min) || self.contains(&target.max)
+    }
+
+    pub(crate) fn meets_range(&self, range: (Bound<&K>, Bound<&K>)) -> bool {
+        let excluded_contains = |key| -> bool { &self.min < key && key < &self.max };
+
+        match (range.0, range.1) {
+            (Bound::Included(start), Bound::Included(end)) => {
+                self.contains(start) || self.contains(end)
+            }
+            (Bound::Included(start), Bound::Excluded(end)) => {
+                start != end && (self.contains(start) || excluded_contains(end))
+            }
+            (Bound::Excluded(start), Bound::Included(end)) => {
+                start != end && (excluded_contains(start) || self.contains(end))
+            }
+            (Bound::Excluded(start), Bound::Excluded(end)) => {
+                start != end && (excluded_contains(start) || excluded_contains(end))
+            }
+            (Bound::Included(start), Bound::Unbounded) => start <= &self.max,
+            (Bound::Excluded(start), Bound::Unbounded) => start < &self.max,
+            (Bound::Unbounded, Bound::Included(end)) => end >= &self.min,
+            (Bound::Unbounded, Bound::Excluded(end)) => end > &self.min,
+            (Bound::Unbounded, Bound::Unbounded) => true,
+        }
     }
 
     pub(crate) fn gen(&self) -> FileId {
@@ -118,5 +144,73 @@ where
             gen,
             wal_ids,
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::ops::Bound;
+
+    use ulid::Ulid;
+
+    use super::Scope;
+
+    #[tokio::test]
+    async fn test_meets_range() {
+        let scope = Scope {
+            min: 100,
+            max: 200,
+            gen: Ulid::new(),
+            wal_ids: None,
+        };
+
+        // test out of range
+        {
+            assert!(!scope.meets_range((Bound::Unbounded, Bound::Excluded(&100))));
+            assert!(!scope.meets_range((Bound::Unbounded, Bound::Included(&99))));
+            assert!(!scope.meets_range((Bound::Unbounded, Bound::Excluded(&99))));
+
+            assert!(!scope.meets_range((Bound::Included(&100), Bound::Excluded(&100))));
+            assert!(!scope.meets_range((Bound::Excluded(&100), Bound::Included(&100))));
+            assert!(!scope.meets_range((Bound::Excluded(&100), Bound::Excluded(&100))));
+
+            assert!(!scope.meets_range((Bound::Excluded(&150), Bound::Excluded(&150))));
+            assert!(!scope.meets_range((Bound::Included(&150), Bound::Excluded(&150))));
+            assert!(!scope.meets_range((Bound::Excluded(&150), Bound::Included(&150))));
+
+            assert!(!scope.meets_range((Bound::Excluded(&200), Bound::Excluded(&200))));
+            assert!(!scope.meets_range((Bound::Included(&200), Bound::Excluded(&200))));
+            assert!(!scope.meets_range((Bound::Excluded(&200), Bound::Included(&200))));
+
+            assert!(!scope.meets_range((Bound::Excluded(&200), Bound::Unbounded)));
+            assert!(!scope.meets_range((Bound::Included(&201), Bound::Unbounded)));
+            assert!(!scope.meets_range((Bound::Excluded(&201), Bound::Unbounded)));
+
+            assert!(!scope.meets_range((Bound::Included(&99), Bound::Excluded(&100))));
+            assert!(!scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&100))));
+            assert!(!scope.meets_range((Bound::Included(&99), Bound::Excluded(&201))));
+            assert!(!scope.meets_range((Bound::Excluded(&99), Bound::Included(&201))));
+        }
+        // test in range
+        {
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&100))));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&200))));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Excluded(&200))));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&201))));
+            assert!(scope.meets_range((Bound::Included(&200), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Included(&100), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Excluded(&100), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Included(&99), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Unbounded)));
+
+            assert!(scope.meets_range((Bound::Included(&100), Bound::Included(&100))));
+            assert!(scope.meets_range((Bound::Included(&200), Bound::Included(&200))));
+            assert!(scope.meets_range((Bound::Included(&99), Bound::Included(&100))));
+            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Included(&100))));
+            assert!(scope.meets_range((Bound::Included(&150), Bound::Included(&150))));
+            assert!(scope.meets_range((Bound::Included(&100), Bound::Included(&200))));
+            assert!(!scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&201))));
+        }
     }
 }
