@@ -1,4 +1,10 @@
-use std::{cmp, collections::Bound, mem, pin::Pin, sync::Arc};
+use std::{
+    cmp,
+    collections::{Bound, HashSet},
+    mem,
+    pin::Pin,
+    sync::Arc,
+};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use futures_util::StreamExt;
@@ -180,14 +186,16 @@ where
         delete_gens: &mut Vec<FileId>,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
-
+        let mut compact_status = HashSet::new();
         while level < MAX_LEVEL - 2 {
             if !option.is_threshold_exceeded_major(version, level) {
                 break;
             }
-            let (meet_scopes_l, start_l, end_l) = Self::this_level_scopes(version, min, max, level);
-            let (meet_scopes_ll, start_ll, end_ll) =
+            let meet_scopes_l = Self::this_level_scopes(version, min, max, level);
+            let mut meet_scopes_ll =
                 Self::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
+
+            meet_scopes_ll.retain(|scope| compact_status.insert(scope.gen));
 
             let mut streams = Vec::with_capacity(meet_scopes_l.len() + meet_scopes_ll.len());
             // This Level
@@ -208,11 +216,11 @@ where
                 }
             } else {
                 let (lower, upper) = Self::full_scope(&meet_scopes_l)?;
+                let gens = meet_scopes_l.iter().map(|scope| scope.gen).collect();
+
                 let level_scan_l = LevelStream::new(
                     version,
-                    level,
-                    start_l,
-                    end_l,
+                    gens,
                     (Bound::Included(lower), Bound::Included(upper)),
                     u32::MAX.into(),
                     None,
@@ -227,11 +235,10 @@ where
             if !meet_scopes_ll.is_empty() {
                 // Next Level
                 let (lower, upper) = Self::full_scope(&meet_scopes_ll)?;
+                let gens = meet_scopes_ll.iter().map(|scope| scope.gen).collect();
                 let level_scan_ll = LevelStream::new(
                     version,
-                    level + 1,
-                    start_ll,
-                    end_ll,
+                    gens,
                     (Bound::Included(lower), Bound::Included(upper)),
                     u32::MAX.into(),
                     None,
@@ -271,10 +278,8 @@ where
         max: &mut &'a <R as Record>::Key,
         level: usize,
         meet_scopes_l: &[&'a Scope<<R as Record>::Key>],
-    ) -> Result<(Vec<&'a Scope<<R as Record>::Key>>, usize, usize), CompactionError<R>> {
+    ) -> Result<Vec<&'a Scope<<R as Record>::Key>>, CompactionError<R>> {
         let mut meet_scopes_ll = Vec::new();
-        let mut start_ll = 0;
-        let mut end_ll = 0;
 
         if !version.level_slice[level + 1].is_empty() {
             *min = meet_scopes_l
@@ -289,8 +294,8 @@ where
                 .max()
                 .ok_or(CompactionError::EmptyLevel)?;
 
-            start_ll = Version::<R, FP>::scope_search(min, &version.level_slice[level + 1]);
-            end_ll = Version::<R, FP>::scope_search(max, &version.level_slice[level + 1]);
+            let start_ll = Version::<R, FP>::scope_search(min, &version.level_slice[level + 1]);
+            let end_ll = Version::<R, FP>::scope_search(max, &version.level_slice[level + 1]);
 
             let next_level_len = version.level_slice[level + 1].len();
             for scope in version.level_slice[level + 1]
@@ -302,7 +307,7 @@ where
                 }
             }
         }
-        Ok((meet_scopes_ll, start_ll, end_ll))
+        Ok(meet_scopes_ll)
     }
 
     fn this_level_scopes<'a>(
@@ -310,10 +315,9 @@ where
         min: &<R as Record>::Key,
         max: &<R as Record>::Key,
         level: usize,
-    ) -> (Vec<&'a Scope<<R as Record>::Key>>, usize, usize) {
+    ) -> Vec<&'a Scope<<R as Record>::Key>> {
         let mut meet_scopes_l = Vec::new();
-        let mut start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
-        let mut end_l = start_l;
+        let start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
         let option = version.option();
 
         for scope in version.level_slice[level][start_l..].iter() {
@@ -321,26 +325,24 @@ where
                 && meet_scopes_l.len() <= option.major_l_selection_table_max_num
             {
                 meet_scopes_l.push(scope);
-                end_l += 1;
             } else {
                 break;
             }
         }
         if meet_scopes_l.is_empty() {
-            start_l = 0;
-            end_l = cmp::min(
+            let end = cmp::min(
                 option.major_default_oldest_table_num,
                 version.level_slice[level].len(),
             );
 
-            for scope in version.level_slice[level][..end_l].iter() {
+            for scope in version.level_slice[level][..end].iter() {
                 if meet_scopes_l.len() > option.major_l_selection_table_max_num {
                     break;
                 }
                 meet_scopes_l.push(scope);
             }
         }
-        (meet_scopes_l, start_l, end_l - 1)
+        meet_scopes_l
     }
 
     async fn build_tables<'scan>(
