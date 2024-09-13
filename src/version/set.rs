@@ -188,7 +188,7 @@ where
                         let sort_runs = &mut new_version.level_slice[level as usize];
                         let pos = sort_runs
                             .binary_search_by(|s| s.min.cmp(&scope.min))
-                            .unwrap_or_else(|index| index.saturating_sub(1));
+                            .unwrap_or_else(|index| index);
                         sort_runs.insert(pos, scope);
                     }
                 }
@@ -441,6 +441,94 @@ pub(crate) mod tests {
                 },
                 VersionEdit::LatestTimeStamp { ts: 0.into() },
                 VersionEdit::NewLogLength { len: 0 }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn version_level_sort() {
+        let temp_dir = TempDir::new().unwrap();
+        let option = DbOption::from(temp_dir.path());
+        let option = Arc::new(option);
+
+        let (sender, _) = bounded(1);
+        TokioExecutor::create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+
+        let version_set: VersionSet<String, TokioExecutor> =
+            VersionSet::new(sender.clone(), option.clone())
+                .await
+                .unwrap();
+        let gen_0 = FileId::new();
+        let gen_1 = FileId::new();
+        let gen_2 = FileId::new();
+        let gen_3 = FileId::new();
+        version_set
+            .apply_edits(
+                vec![VersionEdit::Add {
+                    level: 1,
+                    scope: Scope {
+                        min: "4".to_string(),
+                        max: "6".to_string(),
+                        gen: gen_0,
+                        wal_ids: None,
+                    },
+                }],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        version_set
+            .apply_edits(
+                vec![
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "1".to_string(),
+                            max: "3".to_string(),
+                            gen: gen_1,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "7".to_string(),
+                            max: "9".to_string(),
+                            gen: gen_2,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "0".to_string(),
+                            max: "0".to_string(),
+                            gen: gen_3,
+                            wal_ids: None,
+                        },
+                    },
+                ],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let guard = version_set.inner.read().await;
+        dbg!(guard.current.level_slice.clone());
+        let slice: Vec<String> = guard.current.level_slice[1]
+            .iter()
+            .map(|scope| scope.min.clone())
+            .collect();
+        assert_eq!(
+            slice,
+            vec![
+                "0".to_string(),
+                "1".to_string(),
+                "4".to_string(),
+                "7".to_string()
             ]
         );
     }
