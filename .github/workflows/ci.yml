@@ -72,6 +72,10 @@ jobs:
   benchmark:
     name: Rust benchmark
     runs-on: self-hosted
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
