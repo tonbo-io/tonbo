@@ -1,8 +1,10 @@
-use std::{cmp, collections::Bound, mem, pin::Pin, sync::Arc};
+use std::{cmp, mem, pin::Pin, sync::Arc};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use futures_util::StreamExt;
-use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
+use parquet::arrow::AsyncArrowWriter;
+use states::CompactionStates;
+use task::CompactionTask;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use ulid::Ulid;
@@ -13,16 +15,16 @@ use crate::{
         immutable::{ArrowArrays, Builder, Immutable},
         mutable::Mutable,
     },
-    ondisk::sstable::SsTable,
     record::{KeyRef, Record},
     scope::Scope,
-    stream::{level::LevelStream, merge::MergeStream, ScanStream},
+    stream::{merge::MergeStream, ScanStream},
     transaction::CommitError,
-    version::{
-        edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError, MAX_LEVEL,
-    },
+    version::{edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError},
     DbOption, Schema,
 };
+
+mod states;
+mod task;
 
 #[derive(Debug)]
 pub enum CompactTask {
@@ -38,6 +40,7 @@ where
     pub(crate) option: Arc<DbOption<R>>,
     pub(crate) schema: Arc<RwLock<Schema<R, FP>>>,
     pub(crate) version_set: VersionSet<R, FP>,
+    pub(crate) states: Arc<CompactionStates<R>>,
 }
 
 impl<R, FP> Compactor<R, FP>
@@ -51,6 +54,7 @@ where
         version_set: VersionSet<R, FP>,
     ) -> Self {
         Compactor::<R, FP> {
+            states: Arc::new(CompactionStates::new(option.clone())),
             option,
             schema,
             version_set,
@@ -64,26 +68,26 @@ where
         let mut guard = self.schema.write().await;
 
         guard.trigger.reset();
+        let mut immutables_len = guard.immutables.len();
+        let mut recover_wal_ids = None;
 
-        if guard.mutable.is_empty() {
-            if let Some(tx) = option_tx {
-                tx.send(()).map_err(|_| CommitError::ChannelClose)?
+        if !guard.mutable.is_empty() {
+            let trigger_clone = guard.trigger.clone();
+            let mutable = mem::replace(
+                &mut guard.mutable,
+                Mutable::new(&self.option, trigger_clone).await?,
+            );
+            let (file_id, immutable) = mutable.into_immutable().await?;
+            guard.immutables.push((file_id, immutable));
+            immutables_len += 1;
+            if immutables_len > self.option.immutable_chunk_max_num {
+                recover_wal_ids = guard.recover_wal_ids.take();
             }
-            return Ok(());
         }
 
-        let trigger_clone = guard.trigger.clone();
-        let mutable = mem::replace(
-            &mut guard.mutable,
-            Mutable::new(&self.option, trigger_clone).await?,
-        );
-        let (file_id, immutable) = mutable.into_immutable().await?;
+        drop(guard);
 
-        guard.immutables.push((file_id, immutable));
-        if guard.immutables.len() > self.option.immutable_chunk_max_num {
-            let recover_wal_ids = guard.recover_wal_ids.take();
-            drop(guard);
-
+        if immutables_len > self.option.immutable_chunk_max_num {
             let guard = self.schema.upgradable_read().await;
             let chunk_num = self.option.immutable_chunk_num;
             let excess = &guard.immutables[0..chunk_num];
@@ -93,18 +97,16 @@ where
             {
                 let version_ref = self.version_set.current().await;
                 let mut version_edits = vec![];
-                let mut delete_gens = vec![];
 
                 if self.option.is_threshold_exceeded_major(&version_ref, 0) {
-                    Self::major_compaction(
+                    let tasks = CompactionTask::generate_major_tasks(
                         &version_ref,
                         &self.option,
                         &scope.min,
                         &scope.max,
-                        &mut version_edits,
-                        &mut delete_gens,
                     )
                     .await?;
+                    self.states.add_task_batch(tasks).await;
                 }
                 version_edits.insert(0, VersionEdit::Add { level: 0, scope });
                 version_edits.push(VersionEdit::LatestTimeStamp {
@@ -112,13 +114,32 @@ where
                 });
 
                 self.version_set
-                    .apply_edits(version_edits, Some(delete_gens), false)
+                    .apply_edits(version_edits, None, false)
                     .await?;
             }
             let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
+
+        if let Some(task) = self.states.consume_task().await {
+            let mut compaction_status = task.compact::<R, FP>(&self.states).await?;
+            let version_ref = self.version_set.current().await;
+            compaction_status
+                .version_edits
+                .push(VersionEdit::LatestTimeStamp {
+                    ts: version_ref.increase_ts(),
+                });
+            self.version_set
+                .apply_edits(
+                    compaction_status.version_edits,
+                    compaction_status.delete_gens,
+                    false,
+                )
+                .await?;
+            task.finish(&self.states).await;
+        }
+
         if let Some(tx) = option_tx {
             tx.send(()).map_err(|_| CommitError::ChannelClose)?
         }
@@ -171,97 +192,25 @@ where
         Ok(None)
     }
 
+    /// for test
+    #[allow(unused)]
     pub(crate) async fn major_compaction(
+        states: Arc<CompactionStates<R>>,
         version: &Version<R, FP>,
         option: &DbOption<R>,
-        mut min: &R::Key,
-        mut max: &R::Key,
+        min: &R::Key,
+        max: &R::Key,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
         delete_gens: &mut Vec<FileId>,
     ) -> Result<(), CompactionError<R>> {
-        let mut level = 0;
-
-        while level < MAX_LEVEL - 2 {
-            if !option.is_threshold_exceeded_major(version, level) {
-                break;
+        let tasks = CompactionTask::generate_major_tasks(version, option, min, max).await?;
+        for task in tasks {
+            let mut status = task.compact::<R, FP>(&states).await?;
+            version_edits.append(&mut status.version_edits);
+            if let Some(mut gens) = status.delete_gens {
+                delete_gens.append(&mut gens);
             }
-            let (meet_scopes_l, start_l, end_l) = Self::this_level_scopes(version, min, max, level);
-            let (meet_scopes_ll, start_ll, end_ll) =
-                Self::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
-
-            let mut streams = Vec::with_capacity(meet_scopes_l.len() + meet_scopes_ll.len());
-            // This Level
-            if level == 0 {
-                for scope in meet_scopes_l.iter() {
-                    let file = FP::open(option.table_path(&scope.gen)).await?;
-
-                    streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(file)
-                            .scan(
-                                (Bound::Unbounded, Bound::Unbounded),
-                                u32::MAX.into(),
-                                None,
-                                ProjectionMask::all(),
-                            )
-                            .await?,
-                    });
-                }
-            } else {
-                let (lower, upper) = Self::full_scope(&meet_scopes_l)?;
-                let level_scan_l = LevelStream::new(
-                    version,
-                    level,
-                    start_l,
-                    end_l,
-                    (Bound::Included(lower), Bound::Included(upper)),
-                    u32::MAX.into(),
-                    None,
-                    ProjectionMask::all(),
-                )
-                .ok_or(CompactionError::EmptyLevel)?;
-
-                streams.push(ScanStream::Level {
-                    inner: level_scan_l,
-                });
-            }
-            if !meet_scopes_ll.is_empty() {
-                // Next Level
-                let (lower, upper) = Self::full_scope(&meet_scopes_ll)?;
-                let level_scan_ll = LevelStream::new(
-                    version,
-                    level + 1,
-                    start_ll,
-                    end_ll,
-                    (Bound::Included(lower), Bound::Included(upper)),
-                    u32::MAX.into(),
-                    None,
-                    ProjectionMask::all(),
-                )
-                .ok_or(CompactionError::EmptyLevel)?;
-
-                streams.push(ScanStream::Level {
-                    inner: level_scan_ll,
-                });
-            }
-            Self::build_tables(option, version_edits, level, streams).await?;
-
-            for scope in meet_scopes_l {
-                version_edits.push(VersionEdit::Remove {
-                    level: level as u8,
-                    gen: scope.gen,
-                });
-                delete_gens.push(scope.gen);
-            }
-            for scope in meet_scopes_ll {
-                version_edits.push(VersionEdit::Remove {
-                    level: (level + 1) as u8,
-                    gen: scope.gen,
-                });
-                delete_gens.push(scope.gen);
-            }
-            level += 1;
         }
-
         Ok(())
     }
 
@@ -271,10 +220,8 @@ where
         max: &mut &'a <R as Record>::Key,
         level: usize,
         meet_scopes_l: &[&'a Scope<<R as Record>::Key>],
-    ) -> Result<(Vec<&'a Scope<<R as Record>::Key>>, usize, usize), CompactionError<R>> {
+    ) -> Result<Vec<&'a Scope<<R as Record>::Key>>, CompactionError<R>> {
         let mut meet_scopes_ll = Vec::new();
-        let mut start_ll = 0;
-        let mut end_ll = 0;
 
         if !version.level_slice[level + 1].is_empty() {
             *min = meet_scopes_l
@@ -289,8 +236,8 @@ where
                 .max()
                 .ok_or(CompactionError::EmptyLevel)?;
 
-            start_ll = Version::<R, FP>::scope_search(min, &version.level_slice[level + 1]);
-            end_ll = Version::<R, FP>::scope_search(max, &version.level_slice[level + 1]);
+            let start_ll = Version::<R, FP>::scope_search(min, &version.level_slice[level + 1]);
+            let end_ll = Version::<R, FP>::scope_search(max, &version.level_slice[level + 1]);
 
             let next_level_len = version.level_slice[level + 1].len();
             for scope in version.level_slice[level + 1]
@@ -302,7 +249,7 @@ where
                 }
             }
         }
-        Ok((meet_scopes_ll, start_ll, end_ll))
+        Ok(meet_scopes_ll)
     }
 
     fn this_level_scopes<'a>(
@@ -310,25 +257,25 @@ where
         min: &<R as Record>::Key,
         max: &<R as Record>::Key,
         level: usize,
-    ) -> (Vec<&'a Scope<<R as Record>::Key>>, usize, usize) {
+    ) -> Vec<&'a Scope<<R as Record>::Key>> {
         let mut meet_scopes_l = Vec::new();
-        let mut start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
-        let mut end_l = start_l;
+        let mut start_l = 0;
         let option = version.option();
+        if level > 0 {
+            start_l = Version::<R, FP>::scope_search(min, &version.level_slice[level]);
+        }
 
         for scope in version.level_slice[level][start_l..].iter() {
             if (scope.contains(min) || scope.contains(max))
                 && meet_scopes_l.len() <= option.major_l_selection_table_max_num
             {
                 meet_scopes_l.push(scope);
-                end_l += 1;
             } else {
                 break;
             }
         }
         if meet_scopes_l.is_empty() {
-            start_l = 0;
-            end_l = cmp::min(
+            let end_l = cmp::min(
                 option.major_default_oldest_table_num,
                 version.level_slice[level].len(),
             );
@@ -340,7 +287,7 @@ where
                 meet_scopes_l.push(scope);
             }
         }
-        (meet_scopes_l, start_l, end_l - 1)
+        meet_scopes_l
     }
 
     async fn build_tables<'scan>(
@@ -395,6 +342,7 @@ where
         Ok(())
     }
 
+    #[allow(unused)]
     fn full_scope<'a>(
         meet_scopes: &[&'a Scope<<R as Record>::Key>],
     ) -> Result<(&'a <R as Record>::Key, &'a <R as Record>::Key), CompactionError<R>> {
@@ -462,7 +410,7 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::Compactor,
+        compaction::{states::CompactionStates, Compactor},
         executor::{tokio::TokioExecutor, Executor},
         fs::{FileId, FileProvider},
         inmem::{immutable::Immutable, mutable::Mutable},
@@ -626,6 +574,7 @@ pub(crate) mod tests {
         let mut version_edits = Vec::new();
 
         Compactor::<Test, TokioExecutor>::major_compaction(
+            Arc::new(CompactionStates::new(option.clone())),
             &version,
             &option,
             &min,
@@ -635,6 +584,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        dbg!(version_edits.clone());
         if let VersionEdit::Add { level, scope } = &version_edits[0] {
             assert_eq!(*level, 1);
             assert_eq!(scope.min, 1.to_string());
@@ -969,6 +919,7 @@ pub(crate) mod tests {
         let max = 9.to_string();
 
         Compactor::<Test, TokioExecutor>::major_compaction(
+            Arc::new(CompactionStates::new(option.clone())),
             &version,
             &option,
             &min,
@@ -1007,6 +958,9 @@ pub(crate) mod tests {
         }
 
         db.flush().await.unwrap();
+        let version = db.version_set.current().await;
+
+        dbg!(version.clone());
         for i in 0..4 {
             let item = Test {
                 vstring: i.to_string(),
@@ -1017,6 +971,9 @@ pub(crate) mod tests {
         }
 
         db.flush().await.unwrap();
+        let version = db.version_set.current().await;
+
+        dbg!(version.clone());
 
         db.insert(Test {
             vstring: "6".to_owned(),
@@ -1033,6 +990,9 @@ pub(crate) mod tests {
         .await
         .unwrap();
         db.flush().await.unwrap();
+        let version = db.version_set.current().await;
+
+        dbg!(version.clone());
         db.insert(Test {
             vstring: "1".to_owned(),
             vu32: 22,
@@ -1048,6 +1008,9 @@ pub(crate) mod tests {
         .await
         .unwrap();
         db.flush().await.unwrap();
+        let version = db.version_set.current().await;
+
+        dbg!(version.clone());
 
         db.insert(Test {
             vstring: "2".to_owned(),
@@ -1067,6 +1030,7 @@ pub(crate) mod tests {
 
         let version = db.version_set.current().await;
 
+        dbg!(version.clone());
         for level in 0..MAX_LEVEL {
             let sort_runs = &version.level_slice[level];
 
@@ -1083,6 +1047,7 @@ pub(crate) mod tests {
                 if level == 0 {
                     continue;
                 }
+                dbg!(current.max.clone(), next.min.clone());
                 assert!(current.max < next.min);
             }
         }
