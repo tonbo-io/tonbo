@@ -958,9 +958,6 @@ pub(crate) mod tests {
         }
 
         db.flush().await.unwrap();
-        let version = db.version_set.current().await;
-
-        dbg!(version.clone());
         for i in 0..4 {
             let item = Test {
                 vstring: i.to_string(),
@@ -971,9 +968,6 @@ pub(crate) mod tests {
         }
 
         db.flush().await.unwrap();
-        let version = db.version_set.current().await;
-
-        dbg!(version.clone());
 
         db.insert(Test {
             vstring: "6".to_owned(),
@@ -990,9 +984,6 @@ pub(crate) mod tests {
         .await
         .unwrap();
         db.flush().await.unwrap();
-        let version = db.version_set.current().await;
-
-        dbg!(version.clone());
         db.insert(Test {
             vstring: "1".to_owned(),
             vu32: 22,
@@ -1008,9 +999,6 @@ pub(crate) mod tests {
         .await
         .unwrap();
         db.flush().await.unwrap();
-        let version = db.version_set.current().await;
-
-        dbg!(version.clone());
 
         db.insert(Test {
             vstring: "2".to_owned(),
@@ -1030,7 +1018,6 @@ pub(crate) mod tests {
 
         let version = db.version_set.current().await;
 
-        dbg!(version.clone());
         for level in 0..MAX_LEVEL {
             let sort_runs = &version.level_slice[level];
 
