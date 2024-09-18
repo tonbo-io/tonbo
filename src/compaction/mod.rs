@@ -19,7 +19,9 @@ use crate::{
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     transaction::CommitError,
-    version::{edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError},
+    version::{
+        edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError, MAX_LEVEL,
+    },
     DbOption, Schema,
 };
 
@@ -99,7 +101,7 @@ where
                 let mut version_edits = vec![];
 
                 if self.option.is_threshold_exceeded_major(&version_ref, 0) {
-                    let tasks = CompactionTask::generate_major_tasks(
+                    let tasks = Self::generate_major_tasks(
                         &version_ref,
                         &self.option,
                         &scope.min,
@@ -192,8 +194,30 @@ where
         Ok(None)
     }
 
-    /// for test
-    #[allow(unused)]
+    async fn generate_major_tasks(
+        version: &Version<R, FP>,
+        option: &DbOption<R>,
+        min: &R::Key,
+        max: &R::Key,
+    ) -> Result<Vec<CompactionTask>, CompactionError<R>> {
+        let mut level = 0;
+        let mut tasks = vec![];
+
+        while level < MAX_LEVEL - 2 {
+            if !option.is_threshold_exceeded_major(version, level) {
+                break;
+            }
+            if let Some(task) =
+                CompactionTask::generate_major_task(version, option, 0, min, max).await?
+            {
+                tasks.push(task);
+            }
+            level += 1;
+        }
+        Ok(tasks)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn major_compaction(
         states: Arc<CompactionStates<R>>,
         version: &Version<R, FP>,
@@ -203,12 +227,17 @@ where
         version_edits: &mut Vec<VersionEdit<R::Key>>,
         delete_gens: &mut Vec<FileId>,
     ) -> Result<(), CompactionError<R>> {
-        let tasks = CompactionTask::generate_major_tasks(version, option, min, max).await?;
-        for task in tasks {
-            let mut status = task.compact::<R, FP>(&states).await?;
-            version_edits.append(&mut status.version_edits);
-            if let Some(mut gens) = status.delete_gens {
-                delete_gens.append(&mut gens);
+        use crate::version::MAX_LEVEL;
+
+        for level in 0..MAX_LEVEL {
+            let task =
+                CompactionTask::generate_major_task(version, option, level, min, max).await?;
+            if let Some(task) = task {
+                let mut status = task.compact::<R, FP>(&states).await?;
+                version_edits.append(&mut status.version_edits);
+                if let Some(mut gens) = status.delete_gens {
+                    delete_gens.append(&mut gens);
+                }
             }
         }
         Ok(())

@@ -8,7 +8,7 @@ use crate::{
     ondisk::sstable::SsTable,
     record::Record,
     stream::{level::LevelStream, ScanStream},
-    version::{edit::VersionEdit, Version, MAX_LEVEL},
+    version::{edit::VersionEdit, Version},
     DbOption,
 };
 
@@ -50,9 +50,8 @@ impl MajorTask {
         &self.target
     }
 
-    #[allow(unused)]
-    pub(crate) fn level(&self) -> u8 {
-        self.base_level as u8
+    pub(crate) fn level(&self) -> usize {
+        self.base_level
     }
 
     pub(crate) async fn compact<R, FP>(
@@ -133,35 +132,38 @@ impl MajorTask {
 }
 
 impl CompactionTask {
-    pub(crate) async fn generate_major_tasks<R, FP>(
+    /// Generate a major compaction task for a level
+    pub(crate) async fn generate_major_task<R, FP>(
         version: &Version<R, FP>,
         option: &DbOption<R>,
+        level: usize,
         mut min: &R::Key,
         mut max: &R::Key,
-    ) -> Result<Vec<CompactionTask>, CompactionError<R>>
+    ) -> Result<Option<CompactionTask>, CompactionError<R>>
     where
         R: Record,
         FP: FileProvider,
     {
-        let mut level = 0;
-        let mut tasks = vec![];
-
-        while level < MAX_LEVEL - 2 {
-            if !option.is_threshold_exceeded_major(version, level) {
-                break;
-            }
-            let meet_scopes_l = Compactor::this_level_scopes(version, min, max, level);
-            let meet_scopes_ll =
-                Compactor::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
-
-            let base = meet_scopes_l.iter().map(|scope| scope.gen).collect();
-            let target = meet_scopes_ll.iter().map(|scope| scope.gen).collect();
-
-            tasks.push(CompactionTask::Major(MajorTask::new(level, base, target)));
-            level += 1;
+        if !option.is_threshold_exceeded_major(version, level) {
+            return Ok(None);
         }
+        let meet_scopes_l = Compactor::this_level_scopes(version, min, max, level);
+        let meet_scopes_ll =
+            Compactor::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
 
-        Ok(tasks)
+        let base = meet_scopes_l.iter().map(|scope| scope.gen).collect();
+        let target = meet_scopes_ll.iter().map(|scope| scope.gen).collect();
+        Ok(Some(CompactionTask::Major(MajorTask::new(
+            level, base, target,
+        ))))
+    }
+
+    #[allow(unused)]
+    pub(crate) fn level(&self) -> usize {
+        match self {
+            CompactionTask::Minor => 0,
+            CompactionTask::Major(task) => task.level(),
+        }
     }
 
     pub(crate) async fn compact<R, FP>(
