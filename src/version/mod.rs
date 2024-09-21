@@ -3,6 +3,7 @@ pub(crate) mod edit;
 pub(crate) mod set;
 
 use std::{
+    collections::VecDeque,
     marker::PhantomData,
     ops::Bound,
     sync::{
@@ -207,38 +208,24 @@ where
                     .map_err(VersionError::Parquet)?,
             })
         }
-        for (i, scopes) in self.level_slice[1..].iter().enumerate() {
+        for scopes in self.level_slice[1..].iter() {
             if scopes.is_empty() {
                 continue;
             }
 
-            let (mut start, mut end) = (None, None);
-
-            for (idx, scope) in scopes.iter().enumerate() {
-                if scope.meets_range(range) {
-                    if start.is_none() {
-                        start = Some(idx);
-                    }
-                    end = Some(idx);
-                }
-            }
-            if start.is_none() {
+            let gens: VecDeque<FileId> = scopes
+                .iter()
+                .filter(|scope| scope.meets_range(range))
+                .map(Scope::gen)
+                .collect();
+            if gens.is_empty() {
                 continue;
             }
 
             streams.push(ScanStream::Level {
                 // SAFETY: checked scopes no empty
-                inner: LevelStream::new(
-                    self,
-                    i + 1,
-                    start.unwrap(),
-                    end.unwrap(),
-                    range,
-                    ts,
-                    limit,
-                    projection_mask.clone(),
-                )
-                .unwrap(),
+                inner: LevelStream::new(self, gens, range, ts, limit, projection_mask.clone())
+                    .unwrap(),
             });
         }
         Ok(())
