@@ -572,10 +572,14 @@ fn trait_arrow_array_codegen(
             });
         } else if is_nullable {
             arrays_get_fields.push(quote! {
-                                use ::tonbo::arrow::array::Array;
-                                let #field_name = (!self.#field_name.is_null(offset) && projection_mask.leaf_included(#field_index))
-                                    .then(|| self.#field_name.value(offset));
-                            });
+                let mut #field_name = None;
+                if projection_mask.leaf_included(#field_index) {
+                    use ::tonbo::arrow::array::Array;
+                    if !self.#field_name.is_null(offset) {
+                        #field_name = Some(self.#field_name.value(offset));
+                    }
+                }
+            });
         } else {
             arrays_get_fields.push(quote! {
                 let #field_name = projection_mask
