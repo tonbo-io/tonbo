@@ -1,6 +1,4 @@
-use std::io;
-
-use tokio::io::{AsyncRead, AsyncWrite};
+use fusio::{Read, Write};
 
 use crate::{
     record::{Key, Record},
@@ -20,11 +18,11 @@ impl<R> Encode for RecordEntry<'_, R>
 where
     R: Record,
 {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         if let RecordEntry::Encode((key, recode_ref)) = self {
             key.encode(writer).await.unwrap();
@@ -47,11 +45,11 @@ impl<Re> Decode for RecordEntry<'_, Re>
 where
     Re: Record,
 {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: AsyncRead + Unpin,
+        R: Read + Unpin,
     {
         let key = Timestamped::<Re::Key>::decode(reader).await.unwrap();
         let record = Option::<Re>::decode(reader).await.unwrap();
@@ -64,6 +62,8 @@ where
 mod tests {
     use std::io::Cursor;
 
+    use fusio::Seek;
+
     use crate::{
         serdes::{Decode, Encode},
         timestamp::Timestamped,
@@ -74,15 +74,12 @@ mod tests {
     async fn encode_and_decode() {
         let entry: RecordEntry<'static, String> =
             RecordEntry::Encode((Timestamped::new("hello", 0.into()), Some("hello")));
-        let bytes = {
-            let mut cursor = Cursor::new(vec![]);
-
-            entry.encode(&mut cursor).await.unwrap();
-            cursor.into_inner()
-        };
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+        entry.encode(&mut cursor).await.unwrap();
 
         let decode_entry = {
-            let mut cursor = Cursor::new(bytes);
+            cursor.seek(0).await.unwrap();
 
             RecordEntry::<'static, String>::decode(&mut cursor)
                 .await

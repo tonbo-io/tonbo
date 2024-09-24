@@ -1,16 +1,14 @@
-use std::{io, mem::size_of};
+use std::mem::size_of;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fusio::{Read, Write};
 
 use crate::serdes::{Decode, Encode};
 
 impl Encode for bool {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
-    async fn encode<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
-        writer
-            .write_all(&if *self { 1u8 } else { 0u8 }.to_le_bytes())
-            .await
+    async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+        if *self { 1u8 } else { 0u8 }.encode(writer).await
     }
 
     fn size(&self) -> usize {
@@ -19,15 +17,9 @@ impl Encode for bool {
 }
 
 impl Decode for bool {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
-    async fn decode<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-        let buf = {
-            let mut buf = [0; size_of::<u8>()];
-            reader.read_exact(&mut buf).await?;
-            buf
-        };
-
-        Ok(u8::from_le_bytes(buf) == 1u8)
+    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+        Ok(u8::decode(reader).await? == 1u8)
     }
 }

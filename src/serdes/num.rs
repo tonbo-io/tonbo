@@ -1,6 +1,6 @@
-use std::{io, mem::size_of};
+use std::mem::size_of;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fusio::{IoBuf, Read, Write};
 
 use super::{Decode, Encode};
 
@@ -8,13 +8,13 @@ use super::{Decode, Encode};
 macro_rules! implement_encode_decode {
     ($struct_name:ident) => {
         impl Encode for $struct_name {
-            type Error = io::Error;
+            type Error = fusio::Error;
 
-            async fn encode<W: AsyncWrite + Unpin>(
-                &self,
-                writer: &mut W,
-            ) -> Result<(), Self::Error> {
-                writer.write_all(&self.to_le_bytes()).await
+            async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+                let (result, _) = writer.write(&self.to_le_bytes()[..]).await;
+                result?;
+
+                Ok(())
             }
 
             fn size(&self) -> usize {
@@ -23,16 +23,13 @@ macro_rules! implement_encode_decode {
         }
 
         impl Decode for $struct_name {
-            type Error = io::Error;
+            type Error = fusio::Error;
 
-            async fn decode<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-                let buf = {
-                    let mut buf = [0; size_of::<Self>()];
-                    reader.read_exact(&mut buf).await?;
-                    buf
-                };
+            async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+                let bytes = reader.read(Some(size_of::<Self>() as u64)).await?;
 
-                Ok(Self::from_le_bytes(buf))
+                // SAFETY
+                Ok(Self::from_le_bytes(bytes.as_slice().try_into().unwrap()))
             }
         }
     };

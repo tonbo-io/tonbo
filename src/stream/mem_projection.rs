@@ -9,31 +9,25 @@ use parquet::{arrow::ProjectionMask, errors::ParquetError};
 use pin_project_lite::pin_project;
 
 use crate::{
-    fs::FileProvider,
     record::Record,
     stream::{Entry, ScanStream},
 };
 
 pin_project! {
-    pub struct MemProjectionStream<'projection, R, FP>
+    pub struct MemProjectionStream<'projection, R>
     where
         R: Record,
-        FP: FileProvider,
     {
-        stream: Box<ScanStream<'projection, R, FP>>,
+        stream: Box<ScanStream<'projection, R>>,
         projection_mask: Arc<ProjectionMask>,
     }
 }
 
-impl<'projection, R, FP> MemProjectionStream<'projection, R, FP>
+impl<'projection, R> MemProjectionStream<'projection, R>
 where
     R: Record,
-    FP: FileProvider + 'projection,
 {
-    pub(crate) fn new(
-        stream: ScanStream<'projection, R, FP>,
-        projection_mask: ProjectionMask,
-    ) -> Self {
+    pub(crate) fn new(stream: ScanStream<'projection, R>, projection_mask: ProjectionMask) -> Self {
         Self {
             stream: Box::new(stream),
             projection_mask: Arc::new(projection_mask),
@@ -41,10 +35,9 @@ where
     }
 }
 
-impl<'projection, R, FP> Stream for MemProjectionStream<'projection, R, FP>
+impl<'projection, R> Stream for MemProjectionStream<'projection, R>
 where
     R: Record,
-    FP: FileProvider + 'projection,
 {
     type Item = Result<Entry<'projection, R>, ParquetError>;
 
@@ -65,28 +58,26 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
+    use fusio::{local::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
 
     use crate::{
-        executor::tokio::TokioExecutor, fs::FileProvider, inmem::mutable::Mutable, record::Record,
-        stream::mem_projection::MemProjectionStream, tests::Test, trigger::TriggerFactory,
-        wal::log::LogType, DbOption,
+        inmem::mutable::Mutable, record::Record, stream::mem_projection::MemProjectionStream,
+        tests::Test, trigger::TriggerFactory, wal::log::LogType, DbOption,
     };
 
     #[tokio::test]
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
-        TokioExecutor::create_dir_all(&option.wal_dir_path())
-            .await
-            .unwrap();
+        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+
+        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let mutable = Mutable::<Test, TokioExecutor>::new(&option, trigger)
-            .await
-            .unwrap();
+        let mutable = Mutable::<Test>::new(&option, trigger, &fs).await.unwrap();
 
         mutable
             .insert(
@@ -130,7 +121,7 @@ mod tests {
             vec![0, 1, 2, 4],
         );
 
-        let mut stream = MemProjectionStream::<Test, TokioExecutor>::new(
+        let mut stream = MemProjectionStream::<Test>::new(
             mutable
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into(),

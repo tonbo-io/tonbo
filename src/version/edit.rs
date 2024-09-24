@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fusio::{IoBuf, Read, Write};
 
 use crate::{
     fs::FileId,
@@ -21,7 +21,7 @@ impl<K> VersionEdit<K>
 where
     K: Decode,
 {
-    pub(crate) async fn recover<R: AsyncRead + Unpin>(reader: &mut R) -> Vec<VersionEdit<K>> {
+    pub(crate) async fn recover<R: Read + Unpin>(reader: &mut R) -> Vec<VersionEdit<K>> {
         let mut edits = Vec::new();
 
         while let Ok(edit) = VersionEdit::decode(reader).await {
@@ -39,25 +39,26 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         match self {
             VersionEdit::Add { scope, level } => {
-                writer.write_all(&0u8.to_le_bytes()).await?;
-                writer.write_all(&level.to_le_bytes()).await?;
+                0u8.encode(writer).await?;
+                level.encode(writer).await?;
                 scope.encode(writer).await?;
             }
             VersionEdit::Remove { gen, level } => {
-                writer.write_all(&1u8.to_le_bytes()).await?;
-                writer.write_all(&level.to_le_bytes()).await?;
-                writer.write_all(&gen.to_bytes()).await?;
+                1u8.encode(writer).await?;
+                level.encode(writer).await?;
+                let (result, _) = writer.write(&gen.to_bytes()[..]).await;
+                result?;
             }
             VersionEdit::LatestTimeStamp { ts } => {
-                writer.write_all(&2u8.to_le_bytes()).await?;
+                2u8.encode(writer).await?;
                 ts.encode(writer).await?;
             }
             VersionEdit::NewLogLength { len } => {
-                writer.write_all(&3u8.to_le_bytes()).await?;
+                3u8.encode(writer).await?;
                 len.encode(writer).await?;
             }
         }
@@ -83,34 +84,22 @@ where
 {
     type Error = <K as Decode>::Error;
 
-    async fn decode<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-        let edit_type = {
-            let mut len = [0; size_of::<u8>()];
-            reader.read_exact(&mut len).await?;
-            u8::from_le_bytes(len) as usize
-        };
+    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+        let edit_type = u8::decode(reader).await?;
 
         Ok(match edit_type {
             0 => {
-                let level = {
-                    let mut level = [0; size_of::<u8>()];
-                    reader.read_exact(&mut level).await?;
-                    u8::from_le_bytes(level)
-                };
+                let level = u8::decode(reader).await?;
                 let scope = Scope::<K>::decode(reader).await?;
 
                 VersionEdit::Add { level, scope }
             }
             1 => {
-                let level = {
-                    let mut level = [0; size_of::<u8>()];
-                    reader.read_exact(&mut level).await?;
-                    u8::from_le_bytes(level)
-                };
+                let level = u8::decode(reader).await?;
                 let gen = {
-                    let mut slice = [0; 16];
-                    reader.read_exact(&mut slice).await?;
-                    FileId::from_bytes(slice)
+                    let buf = reader.read(Some(16)).await?;
+                    // SAFETY
+                    FileId::from_bytes(buf.as_slice().try_into().unwrap())
                 };
                 VersionEdit::Remove { level, gen }
             }
@@ -130,6 +119,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+
+    use fusio::Seek;
 
     use crate::{fs::FileId, scope::Scope, serdes::Encode, version::edit::VersionEdit};
 
@@ -153,17 +144,15 @@ mod tests {
             VersionEdit::NewLogLength { len: 233 },
         ];
 
-        let bytes = {
-            let mut cursor = Cursor::new(vec![]);
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
 
-            for edit in edits.clone() {
-                edit.encode(&mut cursor).await.unwrap();
-            }
-            cursor.into_inner()
-        };
+        for edit in edits.clone() {
+            edit.encode(&mut cursor).await.unwrap();
+        }
 
         let decode_edits = {
-            let mut cursor = Cursor::new(bytes);
+            cursor.seek(0).await.unwrap();
 
             VersionEdit::<String>::recover(&mut cursor).await
         };

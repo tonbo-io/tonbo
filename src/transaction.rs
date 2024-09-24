@@ -5,6 +5,7 @@ use std::{
     },
     io,
     mem::transmute,
+    sync::Arc,
 };
 
 use async_lock::RwLockReadGuard;
@@ -15,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
-    fs::FileProvider,
+    fs::manager::StoreManager,
     record::{Key, KeyRef},
     stream,
     stream::mem_projection::MemProjectionStream,
@@ -44,27 +45,27 @@ where
 }
 /// optimistic ACID transaction, open with
 /// [`DB::transaction`](crate::DB::transaction) method
-pub struct Transaction<'txn, R, FP>
+pub struct Transaction<'txn, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     ts: Timestamp,
     local: BTreeMap<R::Key, Option<R>>,
-    share: RwLockReadGuard<'txn, Schema<R, FP>>,
-    version: VersionRef<R, FP>,
+    share: RwLockReadGuard<'txn, Schema<R>>,
+    version: VersionRef<R>,
     lock_map: LockMap<R::Key>,
+    manager: Arc<StoreManager>,
 }
 
-impl<'txn, R, FP> Transaction<'txn, R, FP>
+impl<'txn, R> Transaction<'txn, R>
 where
     R: Record + Send,
-    FP: FileProvider,
 {
     pub(crate) fn new(
-        version: VersionRef<R, FP>,
-        share: RwLockReadGuard<'txn, Schema<R, FP>>,
+        version: VersionRef<R>,
+        share: RwLockReadGuard<'txn, Schema<R>>,
         lock_map: LockMap<R::Key>,
+        manager: Arc<StoreManager>,
     ) -> Self {
         Self {
             ts: version.load_ts(),
@@ -72,6 +73,7 @@ where
             share,
             version,
             lock_map,
+            manager,
         }
     }
 
@@ -86,7 +88,7 @@ where
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
                 .share
-                .get(&self.version, key, self.ts, projection)
+                .get(&self.version, &self.manager, key, self.ts, projection)
                 .await?
                 .and_then(|entry| {
                     if entry.value().is_none() {
@@ -102,9 +104,10 @@ where
     pub fn scan<'scan>(
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R, FP> {
+    ) -> Scan<'scan, R> {
         Scan::new(
             &self.share,
+            &self.manager,
             range,
             self.ts,
             &self.version,
@@ -191,7 +194,7 @@ where
     }
 
     async fn append(
-        schema: &Schema<R, FP>,
+        schema: &Schema<R>,
         log_ty: LogType,
         key: <R as Record>::Key,
         record: Option<R>,
@@ -250,12 +253,14 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
+    use fusio::{local::TokioFs, path::Path};
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
     use crate::{
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
+        fs::manager::StoreManager,
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
         version::TransactionTs,
@@ -265,11 +270,15 @@ mod tests {
     #[tokio::test]
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
-        let db =
-            DB::<String, TokioExecutor>::new(DbOption::from(temp_dir.path()), TokioExecutor::new())
-                .await
-                .unwrap();
+        let db = DB::<String, TokioExecutor>::new(
+            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            TokioExecutor::new(),
+            manager,
+        )
+        .await
+        .unwrap();
         {
             let mut txn1 = db.transaction().await;
             txn1.insert("foo".to_string());
@@ -299,13 +308,34 @@ mod tests {
     #[tokio::test]
     async fn transaction_get() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
-        let (_, version) = build_version(&option).await;
-        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
-        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+        manager
+            .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (_, version) = build_version(&option, &manager).await;
+        let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
+            .await
+            .unwrap();
+        let db = build_db(
+            option,
+            compaction_rx,
+            TokioExecutor::new(),
+            schema,
+            version,
+            manager,
+        )
+        .await
+        .unwrap();
 
         {
             let _ = db.version_set.increase_ts();
@@ -367,11 +397,12 @@ mod tests {
     #[tokio::test]
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db =
-            DB::<String, TokioExecutor>::new(DbOption::from(temp_dir.path()), TokioExecutor::new())
-                .await
-                .unwrap();
+        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::new(), manager)
+            .await
+            .unwrap();
 
         let mut txn = db.transaction().await;
         txn.insert(0.to_string());
@@ -400,11 +431,12 @@ mod tests {
     #[tokio::test]
     async fn transaction_projection() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db =
-            DB::<Test, TokioExecutor>::new(DbOption::from(temp_dir.path()), TokioExecutor::new())
-                .await
-                .unwrap();
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::new(), manager)
+            .await
+            .unwrap();
 
         let mut txn1 = db.transaction().await;
         txn1.insert(Test {
@@ -427,13 +459,34 @@ mod tests {
     #[tokio::test]
     async fn transaction_scan() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
-        let (_, version) = build_version(&option).await;
-        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
-        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+        manager
+            .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (_, version) = build_version(&option, &manager).await;
+        let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
+            .await
+            .unwrap();
+        let db = build_db(
+            option,
+            compaction_rx,
+            TokioExecutor::new(),
+            schema,
+            version,
+            manager,
+        )
+        .await
+        .unwrap();
 
         {
             // to increase timestamps to 1 because the data ts built in advance is 1
@@ -499,13 +552,34 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_scan_bound() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
-        let (_, version) = build_version(&option).await;
-        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
-        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+        manager
+            .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (_, version) = build_version(&option, &manager).await;
+        let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
+            .await
+            .unwrap();
+        let db = build_db(
+            option,
+            compaction_rx,
+            TokioExecutor::new(),
+            schema,
+            version,
+            manager,
+        )
+        .await
+        .unwrap();
         {
             // to increase timestamps to 1 because the data ts built in advance is 1
             db.version_set.increase_ts();
@@ -652,13 +726,34 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_scan_limit() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
-        let (_, version) = build_version(&option).await;
-        let (schema, compaction_rx) = build_schema(option.clone()).await.unwrap();
-        let db = build_db(option, compaction_rx, TokioExecutor::new(), schema, version)
+        manager
+            .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (_, version) = build_version(&option, &manager).await;
+        let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
+            .await
+            .unwrap();
+        let db = build_db(
+            option,
+            compaction_rx,
+            TokioExecutor::new(),
+            schema,
+            version,
+            manager,
+        )
+        .await
+        .unwrap();
 
         let txn = db.transaction().await;
         txn.commit().await.unwrap();

@@ -1,18 +1,22 @@
-use std::{io, mem::size_of};
+use std::mem::size_of;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fusio::{IoBuf, Read, Write};
+use tokio_util::bytes::Bytes;
 
 use super::{Decode, Encode};
 
 impl<'r> Encode for &'r str {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin,
+        W: Write + Unpin,
     {
-        writer.write_all(&(self.len() as u16).to_le_bytes()).await?;
-        writer.write_all(self.as_bytes()).await
+        (self.len() as u16).encode(writer).await?;
+        let (result, _) = writer.write(Bytes::from(self.as_bytes().to_vec())).await;
+        result?;
+
+        Ok(())
     }
 
     fn size(&self) -> usize {
@@ -21,11 +25,11 @@ impl<'r> Encode for &'r str {
 }
 
 impl Encode for String {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         self.as_str().encode(writer).await
     }
@@ -36,21 +40,12 @@ impl Encode for String {
 }
 
 impl Decode for String {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
-    async fn decode<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-        let len = {
-            let mut len = [0; size_of::<u16>()];
-            reader.read_exact(&mut len).await?;
-            u16::from_le_bytes(len) as usize
-        };
+    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+        let len = u16::decode(reader).await?;
+        let buf = reader.read(Some(len as u64)).await?;
 
-        let vec = {
-            let mut vec = vec![0; len];
-            reader.read_exact(&mut vec).await?;
-            vec
-        };
-
-        Ok(unsafe { String::from_utf8_unchecked(vec) })
+        Ok(unsafe { String::from_utf8_unchecked(buf.as_slice().to_vec()) })
     }
 }

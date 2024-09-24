@@ -63,6 +63,8 @@ pub enum RecordEncodeError {
     },
     #[error("record io error: {0}")]
     Io(#[from] io::Error),
+    #[error("record fusio error: {0}")]
+    Fusio(#[from] fusio::Error),
 }
 
 #[derive(Debug, Error)]
@@ -74,4 +76,6 @@ pub enum RecordDecodeError {
     },
     #[error("record io error: {0}")]
     Io(#[from] io::Error),
+    #[error("record fusio error: {0}")]
+    Fusio(#[from] fusio::Error),
 }

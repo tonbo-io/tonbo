@@ -5,11 +5,11 @@ use crossbeam_skiplist::{
     map::{Entry, Range},
     SkipMap,
 };
-use futures_util::io;
+use fusio::{dynamic::DynFile, DynFs};
 use ulid::Ulid;
 
 use crate::{
-    fs::{FileId, FileProvider},
+    fs::{default_open_options, FileId},
     inmem::immutable::Immutable,
     record::{Key, KeyRef, Record},
     timestamp::{
@@ -32,30 +32,30 @@ pub(crate) type MutableScan<'scan, R> = Range<
     Option<R>,
 >;
 
-#[derive(Debug)]
-pub struct Mutable<R, FP>
+pub struct Mutable<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
-    wal: Option<Mutex<WalFile<FP::File, R>>>,
+    wal: Option<Mutex<WalFile<Box<dyn DynFile>, R>>>,
     pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
-impl<R, FP> Mutable<R, FP>
+impl<R> Mutable<R>
 where
-    FP: FileProvider,
     R: Record,
 {
     pub async fn new(
         option: &DbOption<R>,
         trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
-    ) -> io::Result<Self> {
+        fs: &Arc<dyn DynFs>,
+    ) -> Result<Self, fusio::Error> {
         let mut wal = None;
         if option.use_wal {
             let file_id = Ulid::new();
-            let file = FP::open(option.wal_path(&file_id)).await?;
+            let file = fs
+                .open_options(&option.wal_path(&file_id), default_open_options())
+                .await?;
 
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
@@ -68,10 +68,9 @@ where
     }
 }
 
-impl<R, FP> Mutable<R, FP>
+impl<R> Mutable<R>
 where
     R: Record + Send,
-    FP: FileProvider,
 {
     pub(crate) async fn insert(
         &self,
@@ -168,7 +167,7 @@ where
 
     pub(crate) async fn into_immutable(
         self,
-    ) -> io::Result<(Option<FileId>, Immutable<R::Columns>)> {
+    ) -> Result<(Option<FileId>, Immutable<R::Columns>), fusio::Error> {
         let mut file_id = None;
 
         if let Some(wal) = self.wal {
@@ -181,10 +180,9 @@ where
     }
 }
 
-impl<R, FP> Mutable<R, FP>
+impl<R> Mutable<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     #[allow(unused)]
     pub(crate) fn len(&self) -> usize {
@@ -196,10 +194,10 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
+    use fusio::{local::TokioFs, path::Path, DynFs};
+
     use super::Mutable;
     use crate::{
-        executor::tokio::TokioExecutor,
-        fs::FileProvider,
         record::Record,
         tests::{Test, TestRef},
         timestamp::Timestamped,
@@ -214,15 +212,12 @@ mod tests {
         let key_2 = "key_2".to_owned();
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
-        TokioExecutor::create_dir_all(&option.wal_dir_path())
-            .await
-            .unwrap();
+        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
-        let mem_table = Mutable::<Test, TokioExecutor>::new(&option, trigger)
-            .await
-            .unwrap();
+        let mem_table = Mutable::<Test>::new(&option, trigger, &fs).await.unwrap();
 
         mem_table
             .insert(
@@ -265,16 +260,13 @@ mod tests {
     #[tokio::test]
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(temp_dir.path());
-        TokioExecutor::create_dir_all(&option.wal_dir_path())
-            .await
-            .unwrap();
+        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let mutable = Mutable::<String, TokioExecutor>::new(&option, trigger)
-            .await
-            .unwrap();
+        let mutable = Mutable::<String>::new(&option, trigger, &fs).await.unwrap();
 
         mutable
             .insert(LogType::Full, "1".into(), 0_u32.into())

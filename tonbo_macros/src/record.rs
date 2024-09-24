@@ -310,7 +310,7 @@ fn trait_decode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
-                R: ::tokio::io::AsyncRead + Unpin,
+                R: ::fusio::Read + Unpin,
             {
                 #(#decode_method_fields)*
 
@@ -498,7 +498,7 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: ::tokio::io::AsyncWrite + Unpin + Send,
+                W: ::fusio::Write + Unpin + Send,
             {
                 #(#encode_method_fields)*
 

@@ -1,8 +1,12 @@
-use std::ops::Bound;
+use std::{ops::Bound, sync::Arc};
 
 use bytes::Bytes;
+use fusio::{local::TokioFs, path::Path};
 use futures_util::stream::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, Projection, Record, DB};
+use tokio::fs;
+use tonbo::{
+    executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Projection, Record, DB,
+};
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
@@ -17,8 +21,13 @@ pub struct User {
 
 #[tokio::main]
 async fn main() {
+    // make sure the path exists
+    let _ = fs::create_dir_all("./db_path/users").await;
+
+    let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+    let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
     // pluggable async runtime and I/O
-    let db = DB::new("./db_path/users".into(), TokioExecutor::default())
+    let db = DB::new(options, TokioExecutor::default(), manager)
         .await
         .unwrap();
 

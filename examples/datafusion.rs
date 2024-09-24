@@ -20,9 +20,14 @@ use datafusion::{
     physical_plan::{DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties},
     prelude::*,
 };
+use fusio::{local::TokioFs, path::Path};
 use futures_core::Stream;
 use futures_util::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DB};
+use tokio::fs;
+use tonbo::{
+    executor::tokio::TokioExecutor, fs::manager::StoreManager, inmem::immutable::ArrowArrays,
+    record::Record, DbOption, DB,
+};
 use tonbo_macros::Record;
 
 #[derive(Record, Debug)]
@@ -198,7 +203,13 @@ impl ExecutionPlan for MusicExec {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let db = DB::new("./db_path/music".into(), TokioExecutor::default())
+    // make sure the path exists
+    let _ = fs::create_dir_all("./db_path/music").await;
+
+    let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+    let options = DbOption::from(Path::from_filesystem_path("./db_path/music").unwrap());
+
+    let db = DB::new(options, TokioExecutor::default(), manager)
         .await
         .unwrap();
     for (id, name, like) in [

@@ -35,7 +35,10 @@ pub fn tonbo_record(input: TokenStream) -> TokenStream {
 
     let result = record::handle(ast);
     match result {
-        Ok(codegen) => codegen.into(),
+        Ok(codegen) => {
+            println!("{}", codegen);
+            codegen.into()
+        }
         Err(e) => e.to_compile_error().into(),
     }
 }

@@ -49,21 +49,23 @@ path = "benches/criterion/writes.rs"
 required-features = ["sled"]
 
 [dependencies]
-arrow = "52"
+arrow = "53"
 async-lock = "3"
 async-stream = "0.3"
 async-trait = { version = "0.1", optional = true }
 bytes = { version = "1.7", optional = true }
 crc32fast = "1"
 crossbeam-skiplist = "0.1"
-datafusion = { version = "41", optional = true }
+datafusion = { version = "42", optional = true }
 flume = { version = "0.11", features = ["async"] }
+fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", rev = "80efdad85d29ba532eb82d4070119fa21af6c5cf", features = ["tokio", "dyn"] }
+fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet", rev = "80efdad85d29ba532eb82d4070119fa21af6c5cf" }
 futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"
 lockable = "0.0.8"
 once_cell = "1"
-parquet = { version = "52", features = ["async"] }
+parquet = { version = "53", features = ["async"] }
 pin-project-lite = "0.2"
 regex = "1"
 thiserror = "1"
@@ -74,6 +76,7 @@ tracing = "0.1"
 ulid = "1"
 
 # Only used for benchmarks
+log = "0.4.22"
 redb = { version = "2", optional = true }
 rocksdb = { version = "0.22", optional = true }
 sled = { version = "0.34", optional = true }

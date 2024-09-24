@@ -19,7 +19,6 @@ use pin_project_lite::pin_project;
 use record_batch::RecordBatchEntry;
 
 use crate::{
-    fs::FileProvider,
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
     record::{Key, Record, RecordRef},
@@ -101,10 +100,9 @@ where
 
 pin_project! {
     #[project = ScanStreamProject]
-    pub enum ScanStream<'scan, R, FP>
+    pub enum ScanStream<'scan, R>
     where
         R: Record,
-        FP: FileProvider,
     {
         Transaction {
             #[pin]
@@ -120,23 +118,22 @@ pin_project! {
         },
         SsTable {
             #[pin]
-            inner: SsTableScan<'scan, R, FP>,
+            inner: SsTableScan<'scan, R>,
         },
         Level {
             #[pin]
-            inner: LevelStream<'scan, R, FP>,
+            inner: LevelStream<'scan, R>,
         },
         MemProjection {
             #[pin]
-            inner: MemProjectionStream<'scan, R, FP>,
+            inner: MemProjectionStream<'scan, R>,
         }
     }
 }
 
-impl<'scan, R, FP> From<TransactionScan<'scan, R>> for ScanStream<'scan, R, FP>
+impl<'scan, R> From<TransactionScan<'scan, R>> for ScanStream<'scan, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn from(inner: TransactionScan<'scan, R>) -> Self {
         ScanStream::Transaction {
@@ -145,10 +142,9 @@ where
     }
 }
 
-impl<'scan, R, FP> From<MutableScan<'scan, R>> for ScanStream<'scan, R, FP>
+impl<'scan, R> From<MutableScan<'scan, R>> for ScanStream<'scan, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn from(inner: MutableScan<'scan, R>) -> Self {
         ScanStream::Mutable {
@@ -157,10 +153,9 @@ where
     }
 }
 
-impl<'scan, R, FP> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R, FP>
+impl<'scan, R> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn from(inner: ImmutableScan<'scan, R>) -> Self {
         ScanStream::Immutable {
@@ -169,30 +164,27 @@ where
     }
 }
 
-impl<'scan, R, FP> From<SsTableScan<'scan, R, FP>> for ScanStream<'scan, R, FP>
+impl<'scan, R> From<SsTableScan<'scan, R>> for ScanStream<'scan, R>
 where
     R: Record,
-    FP: FileProvider,
 {
-    fn from(inner: SsTableScan<'scan, R, FP>) -> Self {
+    fn from(inner: SsTableScan<'scan, R>) -> Self {
         ScanStream::SsTable { inner }
     }
 }
 
-impl<'scan, R, FP> From<MemProjectionStream<'scan, R, FP>> for ScanStream<'scan, R, FP>
+impl<'scan, R> From<MemProjectionStream<'scan, R>> for ScanStream<'scan, R>
 where
     R: Record,
-    FP: FileProvider,
 {
-    fn from(inner: MemProjectionStream<'scan, R, FP>) -> Self {
+    fn from(inner: MemProjectionStream<'scan, R>) -> Self {
         ScanStream::MemProjection { inner }
     }
 }
 
-impl<R, FP> fmt::Debug for ScanStream<'_, R, FP>
+impl<R> fmt::Debug for ScanStream<'_, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -206,10 +198,9 @@ where
     }
 }
 
-impl<'scan, R, FP> Stream for ScanStream<'scan, R, FP>
+impl<'scan, R> Stream for ScanStream<'scan, R>
 where
     R: Record,
-    FP: FileProvider + 'scan,
 {
     type Item = Result<Entry<'scan, R>, parquet::errors::ParquetError>;
 

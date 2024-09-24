@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use fusio::{Read, Write};
 
 use super::{Decode, Encode};
 
@@ -12,7 +12,7 @@ where
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: AsyncRead + Unpin,
+        R: Read + Unpin,
     {
         Ok(Arc::from(T::decode(reader).await?))
     }
@@ -26,7 +26,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         self.as_ref().encode(writer).await
     }
