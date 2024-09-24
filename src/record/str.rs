@@ -106,7 +106,7 @@ impl ArrowArrays for StringColumns {
 
     type Builder = StringColumnsBuilder;
 
-    fn builder(capacity: usize) -> Self::Builder {
+    fn builder(_schema: &Arc<Schema>, capacity: usize) -> Self::Builder {
         StringColumnsBuilder {
             _null: BooleanBufferBuilder::new(capacity),
             _ts: UInt32Builder::with_capacity(capacity),

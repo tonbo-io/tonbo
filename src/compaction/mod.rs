@@ -14,7 +14,7 @@ use crate::{
         mutable::Mutable,
     },
     ondisk::sstable::SsTable,
-    record::{KeyRef, Record},
+    record::{KeyRef, Record, RecordInstance},
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
     transaction::CommitError,
@@ -77,7 +77,7 @@ where
             &mut guard.mutable,
             Mutable::new(&self.option, trigger_clone).await?,
         );
-        let (file_id, immutable) = mutable.into_immutable().await?;
+        let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
 
         guard.immutables.push((file_id, immutable));
         if guard.immutables.len() > self.option.immutable_chunk_max_num {
@@ -103,6 +103,7 @@ where
                         &scope.max,
                         &mut version_edits,
                         &mut delete_gens,
+                        &guard.record_instance,
                     )
                     .await?;
                 }
@@ -178,6 +179,7 @@ where
         mut max: &R::Key,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
         delete_gens: &mut Vec<FileId>,
+        instance: &RecordInstance,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
@@ -243,7 +245,7 @@ where
                     inner: level_scan_ll,
                 });
             }
-            Self::build_tables(option, version_edits, level, streams).await?;
+            Self::build_tables(option, version_edits, level, streams, instance).await?;
 
             for scope in meet_scopes_l {
                 version_edits.push(VersionEdit::Remove {
@@ -348,6 +350,7 @@ where
         version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'scan, R, FP>>,
+        instance: &RecordInstance,
     ) -> Result<(), CompactionError<R>>
     where
         FP: 'scan,
@@ -355,7 +358,7 @@ where
         let mut stream = MergeStream::<R, FP>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
-        let mut builder = R::Columns::builder(8192);
+        let mut builder = R::Columns::builder(instance.arrow_schema::<R>(), 8192);
         let mut min = None;
         let mut max = None;
 
@@ -466,7 +469,7 @@ pub(crate) mod tests {
         executor::{tokio::TokioExecutor, Executor},
         fs::{FileId, FileProvider},
         inmem::{immutable::Immutable, mutable::Mutable},
-        record::Record,
+        record::{Record, RecordInstance},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -479,6 +482,7 @@ pub(crate) mod tests {
     async fn build_immutable<R, FP>(
         option: &DbOption<R>,
         records: Vec<(LogType, R, Timestamp)>,
+        instance: &RecordInstance,
     ) -> Result<Immutable<R::Columns>, DbError<R>>
     where
         R: Record + Send,
@@ -491,19 +495,20 @@ pub(crate) mod tests {
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
         }
-        Ok(Immutable::from(mutable.data))
+        Ok(Immutable::from((mutable.data, instance)))
     }
 
     pub(crate) async fn build_parquet_table<R, FP>(
         option: &DbOption<R>,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
+        instance: &RecordInstance,
     ) -> Result<(), DbError<R>>
     where
         R: Record + Send,
         FP: Executor,
     {
-        let immutable = build_immutable::<R, FP>(option, records).await?;
+        let immutable = build_immutable::<R, FP>(option, records, instance).await?;
         let mut writer = AsyncArrowWriter::try_new(
             FP::open(option.table_path(&gen))
                 .await
@@ -556,6 +561,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -591,6 +597,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -632,6 +639,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -708,6 +716,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -743,6 +752,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -783,6 +793,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -818,6 +829,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -853,6 +865,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();
@@ -937,12 +950,22 @@ pub(crate) mod tests {
                 records1.push(record);
             }
         }
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen0, records0)
-            .await
-            .unwrap();
-        build_parquet_table::<Test, TokioExecutor>(&option, table_gen1, records1)
-            .await
-            .unwrap();
+        build_parquet_table::<Test, TokioExecutor>(
+            &option,
+            table_gen0,
+            records0,
+            &RecordInstance::Normal,
+        )
+        .await
+        .unwrap();
+        build_parquet_table::<Test, TokioExecutor>(
+            &option,
+            table_gen1,
+            records1,
+            &RecordInstance::Normal,
+        )
+        .await
+        .unwrap();
 
         let option = Arc::new(option);
         let (sender, _) = bounded(1);
@@ -975,6 +998,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
+            &RecordInstance::Normal,
         )
         .await
         .unwrap();

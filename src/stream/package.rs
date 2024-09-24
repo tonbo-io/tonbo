@@ -9,7 +9,7 @@ use pin_project_lite::pin_project;
 use crate::{
     fs::FileProvider,
     inmem::immutable::{ArrowArrays, Builder},
-    record::Record,
+    record::{Record, RecordInstance},
     stream::merge::MergeStream,
 };
 
@@ -36,12 +36,13 @@ where
         batch_size: usize,
         merge: MergeStream<'package, R, FP>,
         projection_indices: Option<Vec<usize>>,
+        instance: &RecordInstance,
     ) -> Self {
         Self {
             row_count: 0,
             batch_size,
             inner: merge,
-            builder: R::Columns::builder(batch_size),
+            builder: R::Columns::builder(instance.arrow_schema::<R>(), batch_size),
             projection_indices,
         }
     }
@@ -197,7 +198,7 @@ mod tests {
             row_count: 0,
             batch_size: 8192,
             inner: merge,
-            builder: TestImmutableArrays::builder(8192),
+            builder: TestImmutableArrays::builder(Test::arrow_schema(), 8192),
             projection_indices: Some(projection_indices.clone()),
         };
 
