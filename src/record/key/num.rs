@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use arrow::array::{
     Datum, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array, UInt32Array, UInt64Array,
     UInt8Array,
@@ -15,8 +17,8 @@ macro_rules! implement_key {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> impl Datum {
-                $array_name::new_scalar(*self)
+            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+                Arc::new($array_name::new_scalar(*self))
             }
         }
 
