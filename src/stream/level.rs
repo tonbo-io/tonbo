@@ -14,10 +14,8 @@ use crate::{
     fs::{FileId, FileProvider},
     ondisk::{scan::SsTableScan, sstable::SsTable},
     record::Record,
-    scope::Scope,
     stream::record_batch::RecordBatchEntry,
     timestamp::Timestamp,
-    version::Version,
     DbOption,
 };
 
@@ -63,20 +61,14 @@ where
     // Kould: only used by Compaction now, and the start and end of the sstables range are known
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        version: &Version<R, FP>,
-        level: usize,
-        start: usize,
-        end: usize,
+        option: Arc<DbOption<R>>,
+        mut gens: VecDeque<FileId>,
         range: (Bound<&'level R::Key>, Bound<&'level R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
     ) -> Option<Self> {
         let (lower, upper) = range;
-        let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
-            .iter()
-            .map(Scope::gen)
-            .collect();
         let first_gen = gens.pop_front()?;
         let status = FutureStatus::Init(first_gen);
 
@@ -84,7 +76,7 @@ where
             lower,
             upper,
             ts,
-            option: version.option().clone(),
+            option,
             gens,
             limit,
             projection_mask,
@@ -155,15 +147,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::Bound, sync::Arc};
+    use std::{
+        collections::{Bound, VecDeque},
+        sync::Arc,
+    };
 
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version, record::Record, stream::level::LevelStream, tests::Test,
-        DbOption,
+        compaction::tests::build_version, executor::tokio::TokioExecutor, fs::FileId,
+        record::Record, stream::level::LevelStream, tests::Test, DbOption,
     };
 
     #[tokio::test]
@@ -171,14 +166,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = Arc::new(DbOption::from(temp_dir.path()));
 
-        let (_, version) = build_version(&option).await;
+        let ((gen1, gen2, _, _, _), version) = build_version(&option).await;
+        let gens: VecDeque<FileId> = [gen1, gen2].into_iter().collect();
 
         {
-            let mut level_stream_1 = LevelStream::new(
-                &version,
-                0,
-                0,
-                1,
+            let mut level_stream_1 = LevelStream::<Test, TokioExecutor>::new(
+                option.clone(),
+                gens.clone(),
                 (Bound::Unbounded, Bound::Unbounded),
                 1_u32.into(),
                 None,
@@ -209,11 +203,9 @@ mod tests {
             assert!(entry_5.get().unwrap().vbool.is_none());
         }
         {
-            let mut level_stream_1 = LevelStream::new(
-                &version,
-                0,
-                0,
-                1,
+            let mut level_stream_1 = LevelStream::<Test, TokioExecutor>::new(
+                version.option().clone(),
+                gens.clone(),
                 (Bound::Unbounded, Bound::Unbounded),
                 1_u32.into(),
                 None,
@@ -244,11 +236,9 @@ mod tests {
             assert!(entry_5.get().unwrap().vbool.is_some());
         }
         {
-            let mut level_stream_1 = LevelStream::new(
-                &version,
-                0,
-                0,
-                1,
+            let mut level_stream_1 = LevelStream::<Test, TokioExecutor>::new(
+                version.option().clone(),
+                gens,
                 (Bound::Unbounded, Bound::Unbounded),
                 1_u32.into(),
                 None,
