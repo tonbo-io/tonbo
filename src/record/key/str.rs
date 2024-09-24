@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use arrow::array::{Datum, StringArray};
 
 use super::{Key, KeyRef};
@@ -9,8 +11,8 @@ impl Key for String {
         self
     }
 
-    fn to_arrow_datum(&self) -> impl Datum {
-        StringArray::new_scalar(self)
+    fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+        Arc::new(StringArray::new_scalar(self))
     }
 }
 
