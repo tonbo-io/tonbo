@@ -1,5 +1,6 @@
 pub mod internal;
 mod key;
+pub mod runtime;
 #[cfg(test)]
 mod str;
 
@@ -9,12 +10,56 @@ use arrow::{array::RecordBatch, datatypes::Schema};
 use internal::InternalRecordRef;
 pub use key::{Key, KeyRef};
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+pub use runtime::*;
 use thiserror::Error;
 
 use crate::{
     inmem::immutable::ArrowArrays,
     serdes::{Decode, Encode},
 };
+
+#[allow(unused)]
+pub(crate) enum RecordInstance {
+    Normal,
+    Runtime(DynRecord),
+}
+
+#[allow(unused)]
+impl RecordInstance {
+    pub(crate) fn primary_key_index<R>(&self) -> usize
+    where
+        R: Record,
+    {
+        match self {
+            RecordInstance::Normal => R::primary_key_index(),
+            RecordInstance::Runtime(record) => record.primary_key_index(),
+        }
+    }
+
+    pub(crate) fn primary_key_path<R>(&self) -> (ColumnPath, Vec<SortingColumn>)
+    where
+        R: Record,
+    {
+        match self {
+            RecordInstance::Normal => R::primary_key_path(),
+            RecordInstance::Runtime(_) => todo!(),
+        }
+    }
+
+    pub(crate) fn arrow_schema<R>(&self) -> &'static Arc<Schema>
+    where
+        R: Record,
+    {
+        match self {
+            RecordInstance::Normal => R::arrow_schema(),
+            RecordInstance::Runtime(record) => record.arrow_schema(),
+        }
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        todo!()
+    }
+}
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     type Columns: ArrowArrays<Record = Self>;

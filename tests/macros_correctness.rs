@@ -197,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_arrays() {
-        let mut builder = UserImmutableArrays::builder(10);
+        let mut builder = UserImmutableArrays::builder(User::arrow_schema(), 10);
 
         let cat = User {
             email: Some("cat@example.com".to_string()),
@@ -258,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_arrays_projection() {
-        let mut builder = UserImmutableArrays::builder(10);
+        let mut builder = UserImmutableArrays::builder(User::arrow_schema(), 10);
 
         let cat = User {
             email: Some("cat@example.com".to_string()),

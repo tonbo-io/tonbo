@@ -594,7 +594,7 @@ fn trait_arrow_array_codegen(
 
             type Builder = #struct_builder_name;
 
-            fn builder(capacity: usize) -> Self::Builder {
+            fn builder(schema: &::std::sync::Arc<::tonbo::arrow::datatypes::Schema>, capacity: usize) -> Self::Builder {
                 #struct_builder_name {
                     #(#builder_init_fields)*
 

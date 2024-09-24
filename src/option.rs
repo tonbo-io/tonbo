@@ -3,6 +3,8 @@ use std::{marker::PhantomData, path::PathBuf};
 use parquet::{
     basic::Compression,
     file::properties::{EnabledStatistics, WriterProperties},
+    format::SortingColumn,
+    schema::types::ColumnPath,
 };
 
 use crate::{
@@ -29,6 +31,57 @@ pub struct DbOption<R> {
     pub(crate) use_wal: bool,
     pub(crate) write_parquet_properties: WriterProperties,
     _p: PhantomData<R>,
+}
+
+// #[cfg(feature = "runtime_schema")]
+impl<R> DbOption<R>
+where
+    R: Record,
+{
+    pub fn with_path<P>(path: P, primary_key_name: String, primary_key_index: usize) -> Self
+    where
+        P: Into<PathBuf>,
+    {
+        let (column_paths, sorting_columns) =
+            Self::primary_key_path(primary_key_name, primary_key_index);
+
+        DbOption {
+            path: path.into(),
+            immutable_chunk_num: 3,
+            immutable_chunk_max_num: 5,
+            major_threshold_with_sst_size: 4,
+            level_sst_magnification: 10,
+            max_sst_file_size: 256 * 1024 * 1024,
+            clean_channel_buffer: 10,
+            write_parquet_properties: WriterProperties::builder()
+                .set_compression(Compression::LZ4)
+                .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
+                .set_column_bloom_filter_enabled(column_paths.clone(), true)
+                .set_sorting_columns(Some(sorting_columns))
+                .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
+                .build(),
+
+            use_wal: true,
+            major_default_oldest_table_num: 3,
+            major_l_selection_table_max_num: 4,
+            trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
+            _p: Default::default(),
+            version_log_snapshot_threshold: 200,
+        }
+    }
+
+    fn primary_key_path(
+        primary_key_name: String,
+        primary_key_index: usize,
+    ) -> (ColumnPath, Vec<SortingColumn>) {
+        (
+            ColumnPath::new(vec!["_ts".to_string(), primary_key_name]),
+            vec![
+                SortingColumn::new(1_i32, true, true),
+                SortingColumn::new(primary_key_index as i32, false, true),
+            ],
+        )
+    }
 }
 
 impl<R, P> From<P> for DbOption<R>

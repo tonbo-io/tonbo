@@ -11,7 +11,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, FileProvider},
     inmem::immutable::Immutable,
-    record::{Key, KeyRef, Record},
+    record::{Key, KeyRef, Record, RecordInstance},
     timestamp::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
@@ -168,6 +168,7 @@ where
 
     pub(crate) async fn into_immutable(
         self,
+        instance: &RecordInstance,
     ) -> io::Result<(Option<FileId>, Immutable<R::Columns>)> {
         let mut file_id = None;
 
@@ -177,7 +178,7 @@ where
             file_id = Some(wal_guard.file_id());
         }
 
-        Ok((file_id, Immutable::from(self.data)))
+        Ok((file_id, Immutable::from((self.data, instance))))
     }
 }
 
@@ -200,7 +201,7 @@ mod tests {
     use crate::{
         executor::tokio::TokioExecutor,
         fs::FileProvider,
-        record::Record,
+        record::{Column, Datatype, DynRecord, Record},
         tests::{Test, TestRef},
         timestamp::Timestamped,
         trigger::TriggerFactory,
@@ -347,5 +348,44 @@ mod tests {
             scan.next().unwrap().key(),
             &Timestamped::new("4".into(), 0_u32.into())
         );
+    }
+    #[tokio::test]
+    async fn range_dyn() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let option = DbOption::with_path(temp_dir.path(), "age".to_string(), 0);
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let mutable = Mutable::<DynRecord, TokioExecutor>::new(&option, trigger)
+            .await
+            .unwrap();
+
+        mutable
+            .insert(
+                LogType::Full,
+                DynRecord::new(
+                    vec![
+                        Column::new(Datatype::INT8, Arc::new(1_i8), false),
+                        Column::new(Datatype::INT16, Arc::new(1236_i16), true),
+                    ],
+                    0,
+                ),
+                0_u32.into(),
+            )
+            .await
+            .unwrap();
+
+        {
+            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+            let entry = scan.next().unwrap();
+            dbg!(entry.clone().value().as_ref().unwrap());
+        }
+        // assert_eq!(
+        //     scan.next().unwrap().key(),
+        //     &Timestamped::new("4".into(), 0_u32.into())
+        // );
     }
 }
