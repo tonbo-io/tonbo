@@ -133,7 +133,10 @@ mod trigger;
 mod version;
 mod wal;
 
-use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
+use std::{
+    any::TypeId, collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin,
+    sync::Arc,
+};
 
 pub use arrow;
 use async_lock::RwLock;
@@ -150,7 +153,7 @@ use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,
 };
-use record::Record;
+use record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance};
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
@@ -213,6 +216,68 @@ where
             let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
         }
 
+        Self::build(option, executor, RecordInstance::Normal).await
+    }
+
+    pub async fn with_schema(
+        option: DbOption<R>,
+        executor: E,
+        column_descs: Vec<ColumnDesc>,
+        primary_index: usize,
+    ) -> Result<Self, DbError<R>> {
+        let option = Arc::new(option);
+        E::create_dir_all(&option.path).await?;
+        E::create_dir_all(&option.wal_dir_path()).await?;
+        E::create_dir_all(&option.version_log_dir_path()).await?;
+
+        let instance = if TypeId::of::<DynRecord>() == TypeId::of::<R>() {
+            RecordInstance::Runtime(Self::empty_record(column_descs, primary_index))
+        } else {
+            RecordInstance::Normal
+        };
+
+        let db = Self::build(option, executor, instance).await?;
+
+        Ok(db)
+    }
+
+    pub(crate) fn empty_record(column_descs: Vec<ColumnDesc>, primary_index: usize) -> DynRecord {
+        let mut columns = vec![];
+        for desc in column_descs.iter() {
+            match desc.datatype {
+                Datatype::INT8 => match desc.is_nullable {
+                    true => columns.push(Column::new(
+                        desc.datatype,
+                        Arc::<Option<i8>>::new(None),
+                        desc.is_nullable,
+                    )),
+                    false => {
+                        columns.push(Column::new(desc.datatype, Arc::new(0_i8), desc.is_nullable))
+                    }
+                },
+                Datatype::INT16 => match desc.is_nullable {
+                    true => columns.push(Column::new(
+                        desc.datatype,
+                        Arc::<Option<i16>>::new(None),
+                        desc.is_nullable,
+                    )),
+                    false => columns.push(Column::new(
+                        desc.datatype,
+                        Arc::new(0_i16),
+                        desc.is_nullable,
+                    )),
+                },
+            }
+        }
+
+        DynRecord::new(columns, primary_index)
+    }
+
+    async fn build(
+        option: Arc<DbOption<R>>,
+        executor: E,
+        instance: RecordInstance,
+    ) -> Result<Self, DbError<R>> {
         let (task_tx, task_rx) = bounded(1);
 
         let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
@@ -220,6 +285,7 @@ where
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let schema = Arc::new(RwLock::new(
             Schema::new(option.clone(), task_tx, &version_set, &manager).await?,
+            Schema::new(option.clone(), task_tx, &version_set, instance).await?,
         ));
         let mut compactor = Compactor::<R>::new(
             schema.clone(),
@@ -245,7 +311,6 @@ where
                 }
             }
         });
-
         Ok(Self {
             schema,
             version_set,
@@ -396,6 +461,7 @@ where
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+    record_instance: RecordInstance,
 }
 
 impl<R> Schema<R>
@@ -407,6 +473,7 @@ where
         compaction_tx: Sender<CompactTask>,
         version_set: &VersionSet<R>,
         manager: &StoreManager,
+        record_instance: RecordInstance,
     ) -> Result<Self, DbError<R>> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
         let mut schema = Schema {
@@ -415,6 +482,7 @@ where
             compaction_tx,
             recover_wal_ids: None,
             trigger,
+            record_instance,
         };
 
         let base_fs = manager.base_fs();
@@ -520,11 +588,13 @@ where
         if let Some(entry) = self.mutable.get(key, ts) {
             return Ok(Some(Entry::Mutable(entry)));
         }
+        let primary_key_index = self.record_instance.primary_key_index::<R>();
 
         let projection = match projection {
             Projection::All => ProjectionMask::all(),
             Projection::Parts(projection) => {
-                let mut fixed_projection: Vec<usize> = [0, 1, R::primary_key_index()]
+                // let mut fixed_projection: Vec<usize> = [0, 1, R::primary_key_index()]
+                let mut fixed_projection: Vec<usize> = [0, 1, primary_key_index]
                     .into_iter()
                     .chain(projection.into_iter().map(|p| p + 2))
                     .collect();
@@ -621,12 +691,13 @@ where
         for p in &mut projection {
             *p += 2;
         }
-        let mut fixed_projection = vec![0, 1, R::primary_key_index()];
+        let primary_key_index = self.schema.record_instance.primary_key_index::<R>();
+        let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
 
         let mask = ProjectionMask::roots(
-            &arrow_to_parquet_schema(R::arrow_schema()).unwrap(),
+            &arrow_to_parquet_schema(self.schema.record_instance.arrow_schema::<R>()).unwrap(),
             fixed_projection.clone(),
         );
 
@@ -738,6 +809,7 @@ where
             batch_size,
             merge_stream,
             self.projection_indices,
+            &self.schema.record_instance,
         ))
     }
 }
@@ -799,7 +871,10 @@ pub(crate) mod tests {
         executor::{tokio::TokioExecutor, Executor},
         fs::{manager::StoreManager, FileId},
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
-        record::{internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordRef},
+        record::{
+            internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordInstance,
+            RecordRef,
+        },
         serdes::{Decode, Encode},
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
@@ -1057,7 +1132,7 @@ pub(crate) mod tests {
             Mutable::new(&option, trigger, &base_fs).await.unwrap(),
         );
 
-        Immutable::<<Test as Record>::Columns>::from(mutable.data)
+        Immutable::<<Test as Record>::Columns>::from((mutable.data, &RecordInstance::Normal))
             .as_record_batch()
             .clone()
     }
@@ -1149,7 +1224,10 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            vec![(Some(FileId::new()), Immutable::from(mutable.data))]
+            vec![(
+                Some(FileId::new()),
+                Immutable::from((mutable.data, &RecordInstance::Normal)),
+            )]
         };
 
         let (compaction_tx, compaction_rx) = bounded(1);
@@ -1161,6 +1239,7 @@ pub(crate) mod tests {
                 compaction_tx,
                 recover_wal_ids: None,
                 trigger,
+                record_instance: RecordInstance::Normal,
             },
             compaction_rx,
         ))
@@ -1518,6 +1597,7 @@ pub(crate) mod tests {
             compaction_tx: task_tx.clone(),
             recover_wal_ids: None,
             trigger,
+            record_instance: RecordInstance::Normal,
         };
 
         for (i, item) in test_items().into_iter().enumerate() {
@@ -1536,6 +1616,7 @@ pub(crate) mod tests {
             compaction_tx: task_tx,
             recover_wal_ids: None,
             trigger,
+            record_instance: RecordInstance::Normal,
         };
         let range = schema
             .mutable
