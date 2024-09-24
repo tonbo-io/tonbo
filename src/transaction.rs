@@ -260,6 +260,10 @@ mod tests {
     use crate::{
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
+        record::{
+            runtime::{Column, Datatype, DynRecord},
+            ColumnDesc,
+        },
         fs::manager::StoreManager,
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
@@ -780,6 +784,96 @@ mod tests {
                     .unwrap();
 
                 assert!(stream.next().await.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dyn_record() {
+        let descs = vec![
+            ColumnDesc::new("age".to_string(), Datatype::INT8, false),
+            ColumnDesc::new("height".to_string(), Datatype::INT16, true),
+            ColumnDesc::new("weight".to_string(), Datatype::INT8, false),
+        ];
+
+        let temp_dir = TempDir::new().unwrap();
+        // let option = DbOption::from(temp_dir.path());
+        let option = DbOption::with_path(temp_dir.path(), "age".to_string(), 0);
+        let db = DB::with_schema(option, TokioExecutor::default(), descs, 0)
+            .await
+            .unwrap();
+
+        db.insert(DynRecord::new(
+            vec![
+                Column::new(Datatype::INT8, Arc::new(1_i8), false),
+                // Where to handle
+                Column::new(Datatype::INT16, Arc::new(Some(180_i16)), true),
+                // Column::new(Datatype::INT16, Arc::new(None), true),
+                Column::new(Datatype::INT8, Arc::new(56_i8), false),
+            ],
+            0,
+        ))
+        .await
+        .unwrap();
+
+        let txn = db.transaction().await;
+        {
+            let key = Column::new(Datatype::INT8, Arc::new(1_i8), false);
+
+            let record_ref = txn.get(&key, Projection::All).await.unwrap();
+            assert!(record_ref.is_some());
+            let res = record_ref.unwrap();
+            let record_ref = res.get();
+
+            assert_eq!(record_ref.columns.len(), 3);
+            let col = record_ref.columns.first().unwrap();
+            assert_eq!(col.datatype, Datatype::INT8);
+            let name = col.value.as_ref().downcast_ref::<i8>();
+            assert!(name.is_some());
+            assert_eq!(*name.unwrap(), 1);
+
+            let col = record_ref.columns.get(1).unwrap();
+            let height = col.value.as_ref().downcast_ref::<Option<i16>>();
+            assert!(height.is_some());
+            assert_eq!(*height.unwrap(), Some(180_i16));
+
+            let col = record_ref.columns.get(2).unwrap();
+            let weight = col.value.as_ref().downcast_ref::<Option<i8>>();
+            assert!(weight.is_some());
+            assert_eq!(*weight.unwrap(), Some(56_i8));
+        }
+        {
+            let mut scan = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(vec![0, 1, 2])
+                .take()
+                .await
+                .unwrap();
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                assert_eq!(entry.value().unwrap().primary_index, 0);
+                assert_eq!(entry.value().unwrap().columns.len(), 3);
+                let columns = entry.value().unwrap().columns;
+                dbg!(columns.clone());
+
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.datatype, Datatype::INT8);
+                assert_eq!(
+                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    1
+                );
+
+                let col = columns.get(1).unwrap();
+                assert_eq!(col.datatype, Datatype::INT16);
+                assert_eq!(
+                    *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
+                    Some(180)
+                );
+
+                let col = columns.get(2).unwrap();
+                assert_eq!(col.datatype, Datatype::INT8);
+                let weight = col.value.as_ref().downcast_ref::<Option<i8>>();
+                assert!(weight.is_some());
+                assert_eq!(*weight.unwrap(), Some(56_i8));
             }
         }
     }
