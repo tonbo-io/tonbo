@@ -1,6 +1,9 @@
 use std::{marker::PhantomData, sync::Arc};
 
-use arrow::array::AsArray;
+use arrow::{
+    array::{Array, AsArray},
+    datatypes::{DataType, Schema},
+};
 
 use super::{Column, Datatype, DynRecord};
 use crate::{
@@ -68,8 +71,16 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         record_batch: &'r arrow::array::RecordBatch,
         offset: usize,
         projection_mask: &'r parquet::arrow::ProjectionMask,
+        full_schema: &'r Arc<Schema>,
     ) -> InternalRecordRef<'r, Self> {
         let null = record_batch.column(0).as_boolean().value(offset);
+        let metadata = full_schema.metadata();
+
+        let primary_index = metadata
+            .get("primary_key_index")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
         let ts = record_batch
             .column(1)
             .as_primitive::<arrow::datatypes::UInt32Type>()
@@ -77,33 +88,66 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             .into();
 
         let mut columns = vec![];
-        for (idx, col) in record_batch.columns().iter().enumerate().skip(2) {
-            let datatype = col.data_type();
-            let is_null = col.is_null(idx);
-            match datatype {
-                arrow::datatypes::DataType::Int8 => {
-                    let v = col
-                        .as_primitive::<arrow::datatypes::Int8Type>()
-                        .value(offset);
 
-                    let value = (!is_null && projection_mask.leaf_included(idx)).then_some(v);
-                    columns.push(Column {
-                        datatype: Datatype::INT8,
-                        value: Arc::new(value),
-                        is_nullable: true,
-                    });
+        for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
+            let datatype = field.data_type();
+            let schema = record_batch.schema();
+            let flattened_fields = schema.flattened_fields();
+            let batch_field = flattened_fields
+                .iter()
+                .enumerate()
+                .find(|(_idx, f)| field.contains(f));
+            if batch_field.is_none() {
+                columns.push(Column::with_none_value(
+                    Datatype::from(datatype),
+                    field.name().to_owned(),
+                    field.is_nullable(),
+                ));
+                continue;
+            }
+            let col = record_batch.column(batch_field.unwrap().0);
+            let is_nullable = field.is_nullable();
+            match datatype {
+                DataType::Int8 => {
+                    let v = col.as_primitive::<arrow::datatypes::Int8Type>();
+                    if primary_index == idx - 2 {
+                        columns.push(Column {
+                            datatype: Datatype::INT8,
+                            name: field.name().to_owned(),
+                            value: Arc::new(v.value(offset)),
+                            is_nullable,
+                        });
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset));
+                        columns.push(Column {
+                            datatype: Datatype::INT8,
+                            name: field.name().to_owned(),
+                            value: Arc::new(value),
+                            is_nullable,
+                        });
+                    }
                 }
                 arrow::datatypes::DataType::Int16 => {
-                    let v = col
-                        .as_primitive::<arrow::datatypes::Int16Type>()
-                        .value(offset);
+                    let v = col.as_primitive::<arrow::datatypes::Int16Type>();
 
-                    let value = (!is_null && projection_mask.leaf_included(idx)).then_some(v);
-                    columns.push(Column {
-                        datatype: Datatype::INT8,
-                        value: Arc::new(value),
-                        is_nullable: true,
-                    });
+                    if primary_index == idx - 2 {
+                        columns.push(Column {
+                            datatype: Datatype::INT16,
+                            name: field.name().to_owned(),
+                            value: Arc::new(v.value(offset)),
+                            is_nullable,
+                        });
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset));
+                        columns.push(Column::new(
+                            Datatype::INT16,
+                            field.name().to_owned(),
+                            Arc::new(value),
+                            is_nullable,
+                        ));
+                    }
                 }
                 _ => todo!(),
             }
@@ -111,7 +155,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
 
         let record = DynRecordRef {
             columns,
-            primary_index: 1,
+            primary_index,
             _marker: PhantomData,
         };
         InternalRecordRef::new(ts, record, null)

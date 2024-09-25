@@ -80,6 +80,7 @@ impl<'r> RecordRef<'r> for &'r str {
         record_batch: &'r RecordBatch,
         offset: usize,
         _: &'r ProjectionMask,
+        _: &'r Arc<Schema>,
     ) -> InternalRecordRef<'r, Self> {
         let ts = record_batch
             .column(1)

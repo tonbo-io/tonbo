@@ -2,9 +2,10 @@ use std::{
     fmt::{self, Debug, Formatter},
     marker::PhantomData,
     mem::transmute,
+    sync::Arc,
 };
 
-use arrow::array::RecordBatch;
+use arrow::{array::RecordBatch, datatypes::Schema};
 use parquet::arrow::ProjectionMask;
 
 use crate::{
@@ -62,6 +63,7 @@ pub struct RecordBatchIterator<R> {
     record_batch: RecordBatch,
     offset: usize,
     projection_mask: ProjectionMask,
+    full_schema: Arc<Schema>,
     _marker: PhantomData<R>,
 }
 
@@ -69,11 +71,16 @@ impl<R> RecordBatchIterator<R>
 where
     R: Record,
 {
-    pub(crate) fn new(record_batch: RecordBatch, projection_mask: ProjectionMask) -> Self {
+    pub(crate) fn new(
+        record_batch: RecordBatch,
+        projection_mask: ProjectionMask,
+        full_schema: Arc<Schema>,
+    ) -> Self {
         Self {
             record_batch,
             offset: 0,
             projection_mask,
+            full_schema,
             _marker: PhantomData,
         }
     }
@@ -91,8 +98,12 @@ where
         }
 
         let record_batch = self.record_batch.clone();
-        let record =
-            R::Ref::from_record_batch(&self.record_batch, self.offset, &self.projection_mask);
+        let record = R::Ref::from_record_batch(
+            &self.record_batch,
+            self.offset,
+            &self.projection_mask,
+            &self.full_schema,
+        );
         let entry = RecordBatchEntry::new(record_batch, unsafe {
             // Safety: self-referring lifetime is safe
             transmute::<
