@@ -7,6 +7,7 @@ impl Encode for &[u8] {
     type Error = fusio::Error;
 
     async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+        (self.len() as u32).encode(writer).await?;
         let (result, _) = writer.write(Bytes::copy_from_slice(self)).await;
         result?;
 
@@ -22,6 +23,7 @@ impl Encode for Bytes {
     type Error = fusio::Error;
 
     async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+        (self.len() as u32).encode(writer).await?;
         let (result, _) = writer.write(self.clone()).await;
         result?;
 
@@ -37,8 +39,34 @@ impl Decode for Bytes {
     type Error = fusio::Error;
 
     async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-        let buf = reader.read(None).await?;
+        let len = u32::decode(reader).await?;
+        let buf = reader.read(Some(len as u64)).await?;
 
         Ok(buf.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use bytes::Bytes;
+    use fusio::Seek;
+
+    use crate::serdes::{Decode, Encode};
+
+    #[tokio::test]
+    async fn test_encode_decode() {
+        let source = Bytes::from_static(b"hello! Tonbo");
+
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+
+        source.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(0).await.unwrap();
+        let decoded = Bytes::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(source, decoded);
     }
 }

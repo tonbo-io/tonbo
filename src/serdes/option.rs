@@ -75,3 +75,35 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use fusio::Seek;
+
+    use crate::serdes::{Decode, Encode};
+
+    #[tokio::test]
+    async fn test_encode_decode() {
+        let source_0 = Some(1u64);
+        let source_1 = None;
+        let source_2 = Some("Hello! Tonbo".to_string());
+
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+
+        source_0.encode(&mut cursor).await.unwrap();
+        source_1.encode(&mut cursor).await.unwrap();
+        source_2.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(0).await.unwrap();
+        let decoded_0 = Option::<u64>::decode(&mut cursor).await.unwrap();
+        let decoded_1 = Option::<u64>::decode(&mut cursor).await.unwrap();
+        let decoded_2 = Option::<String>::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(source_0, decoded_0);
+        assert_eq!(source_1, decoded_1);
+        assert_eq!(source_2, decoded_2);
+    }
+}

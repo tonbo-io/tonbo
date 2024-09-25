@@ -49,3 +49,31 @@ impl Decode for String {
         Ok(unsafe { String::from_utf8_unchecked(buf.as_slice().to_vec()) })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use fusio::Seek;
+
+    use crate::serdes::{Decode, Encode};
+
+    #[tokio::test]
+    async fn test_encode_decode() {
+        let source_0 = "Hello! World";
+        let source_1 = "Hello! Tonbo".to_string();
+
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+
+        source_0.encode(&mut cursor).await.unwrap();
+        source_1.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(0).await.unwrap();
+        let decoded_0 = String::decode(&mut cursor).await.unwrap();
+        let decoded_1 = String::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(source_0, decoded_0);
+        assert_eq!(source_1, decoded_1);
+    }
+}

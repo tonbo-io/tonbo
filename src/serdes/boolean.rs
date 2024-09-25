@@ -23,3 +23,35 @@ impl Decode for bool {
         Ok(u8::decode(reader).await? == 1u8)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use fusio::Seek;
+
+    use crate::serdes::{Decode, Encode};
+
+    #[tokio::test]
+    async fn test_encode_decode() {
+        let source_0 = true;
+        let source_1 = false;
+        let source_2 = true;
+
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+
+        source_0.encode(&mut cursor).await.unwrap();
+        source_1.encode(&mut cursor).await.unwrap();
+        source_2.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(0).await.unwrap();
+        let decoded_0 = bool::decode(&mut cursor).await.unwrap();
+        let decoded_1 = bool::decode(&mut cursor).await.unwrap();
+        let decoded_2 = bool::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(source_0, decoded_0);
+        assert_eq!(source_1, decoded_1);
+        assert_eq!(source_2, decoded_2);
+    }
+}
