@@ -44,19 +44,25 @@ where
 
     pub(crate) fn meets_range(&self, range: (Bound<&K>, Bound<&K>)) -> bool {
         let excluded_contains = |key| -> bool { &self.min < key && key < &self.max };
+        let included_by = |min, max| -> bool { min <= &self.min && &self.max <= max };
 
         match (range.0, range.1) {
             (Bound::Included(start), Bound::Included(end)) => {
-                self.contains(start) || self.contains(end)
+                self.contains(start) || self.contains(end) || included_by(start, end)
             }
             (Bound::Included(start), Bound::Excluded(end)) => {
-                start != end && (self.contains(start) || excluded_contains(end))
+                start != end
+                    && (self.contains(start) || excluded_contains(end) || included_by(start, end))
             }
             (Bound::Excluded(start), Bound::Included(end)) => {
-                start != end && (excluded_contains(start) || self.contains(end))
+                start != end
+                    && (excluded_contains(start) || self.contains(end) || included_by(start, end))
             }
             (Bound::Excluded(start), Bound::Excluded(end)) => {
-                start != end && (excluded_contains(start) || excluded_contains(end))
+                start != end
+                    && (excluded_contains(start)
+                        || excluded_contains(end)
+                        || included_by(start, end))
             }
             (Bound::Included(start), Bound::Unbounded) => start <= &self.max,
             (Bound::Excluded(start), Bound::Unbounded) => start < &self.max,
@@ -188,8 +194,6 @@ mod test {
 
             assert!(!scope.meets_range((Bound::Included(&99), Bound::Excluded(&100))));
             assert!(!scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&100))));
-            assert!(!scope.meets_range((Bound::Included(&99), Bound::Excluded(&201))));
-            assert!(!scope.meets_range((Bound::Excluded(&99), Bound::Included(&201))));
         }
         // test in range
         {
@@ -210,7 +214,12 @@ mod test {
             assert!(scope.meets_range((Bound::Excluded(&99), Bound::Included(&100))));
             assert!(scope.meets_range((Bound::Included(&150), Bound::Included(&150))));
             assert!(scope.meets_range((Bound::Included(&100), Bound::Included(&200))));
-            assert!(!scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&201))));
+            assert!(scope.meets_range((Bound::Included(&99), Bound::Included(&150))));
+            assert!(scope.meets_range((Bound::Included(&99), Bound::Included(&201))));
+            assert!(scope.meets_range((Bound::Included(&99), Bound::Excluded(&201))));
+            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Included(&201))));
+            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&201))));
+            assert!(scope.meets_range((Bound::Excluded(&100), Bound::Excluded(&200))));
         }
     }
 }
