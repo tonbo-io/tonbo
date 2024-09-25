@@ -1,8 +1,9 @@
 use std::{iter::repeat_with, sync::Arc};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use fusio::local::TokioFs;
 use mimalloc::MiMalloc;
-use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
+use tonbo::{executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Record, DB};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -56,9 +57,11 @@ fn single_write(c: &mut Criterion) {
 
     let _ = std::fs::remove_dir_all("/tmp/tonbo");
     for batch in batches {
-        let option = DbOption::from("/tmp/tonbo").disable_wal();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option = DbOption::from(fusio::path::Path::from_filesystem_path("/tmp/tonbo").unwrap())
+            .disable_wal();
         let db = runtime
-            .block_on(async { DB::new(option, TokioExecutor::default()).await })
+            .block_on(async { DB::new(option, TokioExecutor::default(), manager).await })
             .unwrap();
 
         group.bench_with_input(BenchmarkId::new("Tonbo", batch), &batch, |b, batch| {
