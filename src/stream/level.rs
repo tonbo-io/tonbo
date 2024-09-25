@@ -8,6 +8,7 @@ use std::{
 
 use fusio::{
     dynamic::{BoxedFuture, DynFile},
+    path::Path,
     DynFs, Error,
 };
 use futures_core::Stream;
@@ -50,6 +51,7 @@ where
     projection_mask: ProjectionMask,
     status: FutureStatus<'level, R>,
     fs: Arc<dyn DynFs>,
+    path: Option<Path>,
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -87,6 +89,7 @@ where
             projection_mask,
             status,
             fs,
+            path: None,
         })
     }
 }
@@ -102,10 +105,11 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    let reader = self.fs.open_options(
-                        unsafe { &*(&self.option.table_path(&gen) as *const _) },
-                        default_open_options(),
-                    );
+                    self.path = Some(self.option.table_path(&gen));
+
+                    let reader = self
+                        .fs
+                        .open_options(self.path.as_ref().unwrap(), default_open_options());
                     #[allow(clippy::missing_transmute_annotations)]
                     let reader =
                         unsafe { std::mem::transmute::<_, BoxedFuture<'static, _>>(reader) };
@@ -116,10 +120,11 @@ where
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            let reader = self.fs.open_options(
-                                unsafe { &*(&self.option.table_path(&gen) as *const _) },
-                                default_open_options(),
-                            );
+                            self.path = Some(self.option.table_path(&gen));
+
+                            let reader = self
+                                .fs
+                                .open_options(self.path.as_ref().unwrap(), default_open_options());
                             #[allow(clippy::missing_transmute_annotations)]
                             let reader = unsafe {
                                 std::mem::transmute::<_, BoxedFuture<'static, _>>(reader)
