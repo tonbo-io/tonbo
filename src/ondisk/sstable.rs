@@ -119,6 +119,7 @@ where
             .await?;
 
         let schema_descriptor = builder.metadata().file_metadata().schema_descr();
+        let full_schema = builder.schema().clone();
 
         // Safety: filter's lifetime relies on range's lifetime, sstable must not live longer than
         // it
@@ -127,6 +128,7 @@ where
         Ok(SsTableScan::new(
             builder.with_row_filter(filter).build()?,
             projection_mask,
+            full_schema,
         ))
     }
 }

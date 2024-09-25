@@ -1,11 +1,11 @@
-use std::{any::Any, io, sync::Arc};
+use std::{any::Any, collections::HashMap, io, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
 use once_cell::sync::OnceCell;
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
 use tokio::io::AsyncRead;
 
-use super::{array::DynRecordImmutableArrays, Column, DynRecordRef};
+use super::{array::DynRecordImmutableArrays, Column, ColumnDesc, Datatype, DynRecordRef};
 use crate::{
     record::{Record, RecordDecodeError},
     serdes::Decode,
@@ -30,7 +30,6 @@ impl DynRecord {
         self.primary_index + 2
     }
 
-    // fn arrow_schema(&self) -> &'static std::sync::Arc<Schema> {
     pub(crate) fn arrow_schema(&self) -> &'static std::sync::Arc<Schema> {
         static DYN_SCHEMA: OnceCell<Arc<Schema>> = OnceCell::new();
         DYN_SCHEMA.get_or_init(|| {
@@ -43,17 +42,61 @@ impl DynRecord {
                 if idx == self.primary_index && col.is_nullable {
                     panic!("Primary key must not be nullable")
                 }
-                match col.datatype {
-                    super::Datatype::INT8 => {
-                        fields.push(Field::new("&col.name", DataType::Int8, col.is_nullable));
-                    }
-                    super::Datatype::INT16 => {
-                        fields.push(Field::new("&col.name", DataType::Int16, col.is_nullable));
-                    }
-                };
+                let mut field = Field::from(col);
+                if idx == self.primary_index {
+                    let mut metadata = HashMap::new();
+                    metadata.insert("primary_key".to_owned(), "".to_owned());
+                    field.set_metadata(metadata);
+                }
+                fields.push(field);
             }
-            Arc::new(Schema::new(fields))
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "primary_key_index".to_string(),
+                self.primary_index.to_string(),
+            );
+            Arc::new(Schema::new_with_metadata(fields, metadata))
         })
+    }
+}
+
+impl DynRecord {
+    pub(crate) fn empty_record(column_descs: Vec<ColumnDesc>, primary_index: usize) -> DynRecord {
+        let mut columns = vec![];
+        for desc in column_descs.iter() {
+            match desc.datatype {
+                Datatype::INT8 => match desc.is_nullable {
+                    true => columns.push(Column::new(
+                        desc.datatype,
+                        desc.name.to_owned(),
+                        Arc::<Option<i8>>::new(None),
+                        desc.is_nullable,
+                    )),
+                    false => columns.push(Column::new(
+                        desc.datatype,
+                        desc.name.to_owned(),
+                        Arc::new(0_i8),
+                        desc.is_nullable,
+                    )),
+                },
+                Datatype::INT16 => match desc.is_nullable {
+                    true => columns.push(Column::new(
+                        desc.datatype,
+                        desc.name.to_owned(),
+                        Arc::<Option<i16>>::new(None),
+                        desc.is_nullable,
+                    )),
+                    false => columns.push(Column::new(
+                        desc.datatype,
+                        desc.name.to_owned(),
+                        Arc::new(0_i16),
+                        desc.is_nullable,
+                    )),
+                },
+            }
+        }
+
+        DynRecord::new(columns, primary_index)
     }
 }
 
@@ -71,12 +114,7 @@ impl Decode for DynRecord {
                 Ok(col) => columns.push(col),
                 Err(err) => match err.kind() {
                     io::ErrorKind::UnexpectedEof => break,
-                    _ => {
-                        return Err(RecordDecodeError::Decode {
-                            field_name: "col".to_string(),
-                            error: Box::new(err),
-                        })
-                    }
+                    _ => return Err(RecordDecodeError::Io(err)),
                 },
             }
         }
@@ -96,12 +134,11 @@ impl Record for DynRecord {
     type Ref<'r> = DynRecordRef<'r>;
 
     fn primary_key_index() -> usize {
-        todo!("This method is not used.")
-        // dyn_schema_primary_index()
+        unreachable!("This method is not used.")
     }
 
     fn primary_key_path() -> (ColumnPath, Vec<SortingColumn>) {
-        todo!("This method is not used.")
+        unreachable!("This method is not used.")
     }
 
     fn as_record_ref(&self) -> Self::Ref<'_> {
@@ -124,13 +161,18 @@ impl Record for DynRecord {
                 };
             }
 
-            columns.push(Column::new(datatype, value, is_nullable));
+            columns.push(Column::new(
+                datatype,
+                col.name.to_owned(),
+                value,
+                is_nullable,
+            ));
         }
         DynRecordRef::new(columns, self.primary_index)
     }
 
     fn arrow_schema() -> &'static std::sync::Arc<Schema> {
-        todo!("This method is not used.")
+        unreachable!("This method is not used.")
     }
 
     fn size(&self) -> usize {
@@ -142,3 +184,48 @@ impl Record for DynRecord {
 
 unsafe impl Send for DynRecord {}
 unsafe impl Sync for DynRecord {}
+
+#[cfg(test)]
+pub(crate) mod test {
+    use std::sync::Arc;
+
+    use super::DynRecord;
+    use crate::record::{Column, ColumnDesc, Datatype};
+
+    pub(crate) fn test_dyn_item_schema() -> (Vec<ColumnDesc>, usize) {
+        let descs = vec![
+            ColumnDesc::new("age".to_string(), Datatype::INT8, false),
+            ColumnDesc::new("height".to_string(), Datatype::INT16, true),
+            ColumnDesc::new("weight".to_string(), Datatype::INT8, false),
+        ];
+        (descs, 0)
+    }
+
+    pub(crate) fn test_dyn_items() -> Vec<DynRecord> {
+        let mut items = vec![];
+        for i in 0..50 {
+            let mut columns = vec![
+                Column::new(Datatype::INT8, "age".to_string(), Arc::new(i as i8), false),
+                Column::new(
+                    Datatype::INT16,
+                    "height".to_string(),
+                    Arc::new(Some(i as i16 * 20)),
+                    true,
+                ),
+                Column::new(
+                    Datatype::INT8,
+                    "weight".to_string(),
+                    Arc::new(i as i8 * 2),
+                    false,
+                ),
+            ];
+            if i >= 45 {
+                columns[1].value = Arc::<Option<i16>>::new(None);
+            }
+
+            let record = DynRecord::new(columns, 0);
+            items.push(record);
+        }
+        items
+    }
+}

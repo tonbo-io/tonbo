@@ -1,6 +1,9 @@
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
-use arrow::array::{Int16Array, Int8Array};
+use arrow::{
+    array::{Int16Array, Int8Array},
+    datatypes::{DataType, Field},
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::Datatype;
@@ -31,16 +34,17 @@ pub struct Column {
     pub datatype: Datatype,
     pub value: Arc<dyn Any>,
     pub is_nullable: bool,
-    // pub name: String,
+    pub name: String,
 }
 
 unsafe impl Send for Column {}
 unsafe impl Sync for Column {}
 
 impl Column {
-    pub fn new(datatype: Datatype, value: Arc<dyn Any>, is_nullable: bool) -> Self {
+    pub fn new(datatype: Datatype, name: String, value: Arc<dyn Any>, is_nullable: bool) -> Self {
         Self {
             datatype,
+            name,
             value,
             is_nullable,
         }
@@ -56,6 +60,15 @@ impl Column {
             }
             Datatype::INT8 => Arc::new(*self.value.downcast_ref::<i8>().unwrap()),
             Datatype::INT16 => Arc::new(*self.value.downcast_ref::<i8>().unwrap()),
+        }
+    }
+
+    pub fn with_none_value(datatype: Datatype, name: String, is_nullable: bool) -> Self {
+        match datatype {
+            Datatype::INT8 => Self::new(datatype, name, Arc::<Option<i8>>::new(None), is_nullable),
+            Datatype::INT16 => {
+                Self::new(datatype, name, Arc::<Option<i16>>::new(None), is_nullable)
+            }
         }
     }
 }
@@ -150,12 +163,14 @@ impl Key for Column {
             Datatype::INT8 => Arc::new(Int8Array::new_scalar(
                 *self
                     .value
+                    .as_ref()
                     .downcast_ref::<i8>()
-                    .expect("unexpcted datatype, expected: i8"),
+                    .expect("unexpected datatype, expected: i8"),
             )),
             Datatype::INT16 => Arc::new(Int16Array::new_scalar(
                 *self
                     .value
+                    .as_ref()
                     .downcast_ref::<i16>()
                     .expect("unexpected datatype, expected: i16"),
             )),
@@ -188,6 +203,7 @@ impl Decode for Column {
                 Ok(Column {
                     datatype,
                     is_nullable,
+                    name: "".to_owned(),
                     value: Arc::new(v),
                 })
             }
@@ -196,6 +212,7 @@ impl Decode for Column {
                 Ok(Column {
                     datatype,
                     is_nullable,
+                    name: "".to_owned(),
                     value: Arc::new(v),
                 })
             }
@@ -263,6 +280,15 @@ impl Column {
             0 => Datatype::INT8,
             1 => Datatype::INT16,
             _ => panic!("invalid datatype tag"),
+        }
+    }
+}
+
+impl From<&Column> for Field {
+    fn from(col: &Column) -> Self {
+        match col.datatype {
+            Datatype::INT8 => Field::new(&col.name, DataType::Int8, col.is_nullable),
+            Datatype::INT16 => Field::new(&col.name, DataType::Int16, col.is_nullable),
         }
     }
 }

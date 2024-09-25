@@ -126,7 +126,8 @@ mod tests {
                 &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
                 vec![0, 1, 2, 3, 4],
             );
-            let record_ref = UserRef::from_record_batch(&record_batch, 0, &project_mask);
+            let record_ref =
+                UserRef::from_record_batch(&record_batch, 0, &project_mask, User::arrow_schema());
             assert_eq!(
                 record_ref.value(),
                 Timestamped {
@@ -158,7 +159,8 @@ mod tests {
                 &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
                 vec![0, 1, 3, 4],
             );
-            let record_ref = UserRef::from_record_batch(&record_batch, 0, &project_mask);
+            let record_ref =
+                UserRef::from_record_batch(&record_batch, 0, &project_mask, User::arrow_schema());
             assert_eq!(
                 record_ref.value(),
                 Timestamped {

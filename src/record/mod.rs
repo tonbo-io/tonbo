@@ -96,6 +96,7 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
         record_batch: &'r RecordBatch,
         offset: usize,
         projection_mask: &'r ProjectionMask,
+        full_schema: &'r Arc<Schema>,
     ) -> InternalRecordRef<'r, Self>;
 }
 

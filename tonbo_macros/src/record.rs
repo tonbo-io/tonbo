@@ -449,6 +449,7 @@ fn trait_decode_ref_codegen(
                 record_batch: &'r ::tonbo::arrow::record_batch::RecordBatch,
                 offset: usize,
                 projection_mask: &'r ::tonbo::parquet::arrow::ProjectionMask,
+                _: &::std::sync::Arc<::tonbo::arrow::datatypes::Schema>,
             ) -> ::tonbo::record::internal::InternalRecordRef<'r, Self> {
                 use ::tonbo::arrow::array::AsArray;
 
