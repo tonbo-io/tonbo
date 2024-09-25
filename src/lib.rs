@@ -124,10 +124,7 @@ mod trigger;
 mod version;
 mod wal;
 
-use std::{
-    any::TypeId, collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin,
-    sync::Arc,
-};
+use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
 
 pub use arrow;
 use async_lock::RwLock;
@@ -179,6 +176,30 @@ where
     _p: PhantomData<E>,
 }
 
+impl<E: Executor> DB<DynRecord, E>
+where
+    E: Executor + Send + Sync + 'static,
+{
+    pub async fn with_schema(
+        option: DbOption<DynRecord>,
+        executor: E,
+        column_descs: Vec<ColumnDesc>,
+        primary_index: usize,
+    ) -> Result<Self, DbError<DynRecord>> {
+        let option = Arc::new(option);
+        E::create_dir_all(&option.path).await?;
+        E::create_dir_all(&option.wal_dir_path()).await?;
+        E::create_dir_all(&option.version_log_dir_path()).await?;
+
+        let instance =
+            RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index));
+
+        let db = Self::build(option, executor, instance).await?;
+
+        Ok(db)
+    }
+}
+
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
@@ -197,28 +218,6 @@ where
         E::create_dir_all(&option.version_log_dir_path()).await?;
 
         Self::build(option, executor, RecordInstance::Normal).await
-    }
-
-    pub async fn with_schema(
-        option: DbOption<R>,
-        executor: E,
-        column_descs: Vec<ColumnDesc>,
-        primary_index: usize,
-    ) -> Result<Self, DbError<R>> {
-        let option = Arc::new(option);
-        E::create_dir_all(&option.path).await?;
-        E::create_dir_all(&option.wal_dir_path()).await?;
-        E::create_dir_all(&option.version_log_dir_path()).await?;
-
-        let instance = if TypeId::of::<DynRecord>() == TypeId::of::<R>() {
-            RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index))
-        } else {
-            RecordInstance::Normal
-        };
-
-        let db = Self::build(option, executor, instance).await?;
-
-        Ok(db)
     }
 
     async fn build(
