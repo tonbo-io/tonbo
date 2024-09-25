@@ -1,9 +1,11 @@
 use std::{
     marker::PhantomData,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
+use arrow::datatypes::Schema;
 use futures_core::{ready, Stream};
 use parquet::arrow::{async_reader::ParquetRecordBatchStream, ProjectionMask};
 use pin_project_lite::pin_project;
@@ -24,6 +26,7 @@ pin_project! {
         stream: ParquetRecordBatchStream<FP::File>,
         iter: Option<RecordBatchIterator<R>>,
         projection_mask: ProjectionMask,
+        full_schema: Arc<Schema>,
         _marker: PhantomData<&'scan ()>
     }
 }
@@ -35,11 +38,13 @@ where
     pub fn new(
         stream: ParquetRecordBatchStream<FP::File>,
         projection_mask: ProjectionMask,
+        full_schema: Arc<Schema>,
     ) -> Self {
         SsTableScan {
             stream,
             iter: None,
             projection_mask,
+            full_schema,
             _marker: PhantomData,
         }
     }
@@ -71,6 +76,7 @@ where
                     *this.iter = Some(RecordBatchIterator::new(
                         record_batch,
                         this.projection_mask.clone(),
+                        this.full_schema.clone(),
                     ));
                 }
             }

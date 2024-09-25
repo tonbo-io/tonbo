@@ -192,10 +192,12 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|(_, &offset)| {
+            let schema = self.record_batch.schema();
             let record_ref = R::Ref::from_record_batch(
                 self.record_batch,
                 offset as usize,
                 &self.projection_mask,
+                &schema,
             );
             // TODO: remove cloning record batch
             RecordBatchEntry::new(self.record_batch.clone(), {

@@ -702,7 +702,6 @@ mod tests {
         ];
 
         let temp_dir = TempDir::new().unwrap();
-        // let option = DbOption::from(temp_dir.path());
         let option = DbOption::with_path(temp_dir.path(), "age".to_string(), 0);
         let db = DB::with_schema(option, TokioExecutor::default(), descs, 0)
             .await
@@ -710,11 +709,14 @@ mod tests {
 
         db.insert(DynRecord::new(
             vec![
-                Column::new(Datatype::INT8, Arc::new(1_i8), false),
-                // Where to handle
-                Column::new(Datatype::INT16, Arc::new(Some(180_i16)), true),
-                // Column::new(Datatype::INT16, Arc::new(None), true),
-                Column::new(Datatype::INT8, Arc::new(56_i8), false),
+                Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false),
+                Column::new(
+                    Datatype::INT16,
+                    "height".to_string(),
+                    Arc::new(Some(180_i16)),
+                    true,
+                ),
+                Column::new(Datatype::INT8, "weight".to_string(), Arc::new(56_i8), false),
             ],
             0,
         ))
@@ -723,7 +725,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Column::new(Datatype::INT8, Arc::new(1_i8), false);
+            let key = Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());
