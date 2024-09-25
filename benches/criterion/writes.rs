@@ -56,6 +56,8 @@ fn single_write(c: &mut Criterion) {
     let batches = [1, 16, 128];
 
     let _ = std::fs::remove_dir_all("/tmp/tonbo");
+    let _ = std::fs::create_dir_all("/tmp/tonbo");
+
     for batch in batches {
         let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
         let option = DbOption::from(fusio::path::Path::from_filesystem_path("/tmp/tonbo").unwrap())
@@ -70,9 +72,12 @@ fn single_write(c: &mut Criterion) {
                 .iter(|| async { tonbo_write(&db, *batch).await });
         });
         let _ = std::fs::remove_dir_all("/tmp/tonbo");
+        let _ = std::fs::create_dir_all("/tmp/tonbo");
     }
 
     let _ = std::fs::remove_dir_all("/tmp/sled");
+    let _ = std::fs::create_dir_all("/tmp/sled");
+
     for batch in batches {
         let sled = sled::open("/tmp/sled").unwrap();
         group.bench_with_input(BenchmarkId::new("Sled", batch), &batch, |b, batch| {
@@ -81,6 +86,7 @@ fn single_write(c: &mut Criterion) {
                 .iter(|| async { sled_write(&sled, *batch).await });
         });
         let _ = std::fs::remove_dir_all("/tmp/sled");
+        let _ = std::fs::create_dir_all("/tmp/sled");
     }
 
     group.finish();
