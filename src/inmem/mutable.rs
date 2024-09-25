@@ -343,8 +343,9 @@ mod tests {
             &Timestamped::new("4".into(), 0_u32.into())
         );
     }
+
     #[tokio::test]
-    async fn range_dyn() {
+    async fn test_dyn_read() {
         let temp_dir = tempfile::tempdir().unwrap();
         let option = DbOption::with_path(temp_dir.path(), "age".to_string(), 0);
         TokioExecutor::create_dir_all(&option.wal_dir_path())
@@ -362,8 +363,13 @@ mod tests {
                 LogType::Full,
                 DynRecord::new(
                     vec![
-                        Column::new(Datatype::INT8, Arc::new(1_i8), false),
-                        Column::new(Datatype::INT16, Arc::new(1236_i16), true),
+                        Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false),
+                        Column::new(
+                            Datatype::INT16,
+                            "height".to_string(),
+                            Arc::new(1236_i16),
+                            true,
+                        ),
                     ],
                     0,
                 ),
@@ -375,11 +381,14 @@ mod tests {
         {
             let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
             let entry = scan.next().unwrap();
+            assert_eq!(
+                entry.key(),
+                &Timestamped::new(
+                    Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false),
+                    0_u32.into()
+                )
+            );
             dbg!(entry.clone().value().as_ref().unwrap());
         }
-        // assert_eq!(
-        //     scan.next().unwrap().key(),
-        //     &Timestamped::new("4".into(), 0_u32.into())
-        // );
     }
 }

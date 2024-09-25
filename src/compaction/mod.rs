@@ -91,8 +91,14 @@ where
             let chunk_num = self.option.immutable_chunk_num;
             let excess = &guard.immutables[0..chunk_num];
 
-            if let Some(scope) =
-                Self::minor_compaction(&self.option, recover_wal_ids, excess, &self.manager).await?
+            if let Some(scope) = Self::minor_compaction(
+                &self.option,
+                recover_wal_ids,
+                excess,
+                &guard.record_instance,
+                &self.manager,
+            )
+            .await?
             {
                 let version_ref = self.version_set.current().await;
                 let mut version_edits = vec![];
@@ -134,6 +140,7 @@ where
         option: &DbOption<R>,
         recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(Option<FileId>, Immutable<R::Columns>)],
+        instance: &RecordInstance,
         manager: &StoreManager,
     ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
         if !batches.is_empty() {
@@ -152,7 +159,7 @@ where
                         .open_options(&option.table_path(&gen), default_open_options())
                         .await?,
                 ),
-                R::arrow_schema().clone(),
+                instance.arrow_schema::<R>().clone(),
                 Some(option.write_parquet_properties.clone()),
             )?;
 
@@ -398,6 +405,7 @@ where
                     &mut builder,
                     &mut min,
                     &mut max,
+                    instance,
                     fs,
                 )
                 .await?;
@@ -411,6 +419,7 @@ where
                 &mut builder,
                 &mut min,
                 &mut max,
+                instance,
                 fs,
             )
             .await?;
@@ -433,6 +442,7 @@ where
         builder: &mut <R::Columns as ArrowArrays>::Builder,
         min: &mut Option<R::Key>,
         max: &mut Option<R::Key>,
+        instance: &RecordInstance,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         debug_assert!(min.is_some());
@@ -445,7 +455,7 @@ where
                 fs.open_options(&option.table_path(&gen), default_open_options())
                     .await?,
             ),
-            R::arrow_schema().clone(),
+            instance.arrow_schema::<R>().clone(),
             Some(option.write_parquet_properties.clone()),
         )?;
         writer.write(columns.as_record_batch()).await?;
@@ -643,6 +653,7 @@ pub(crate) mod tests {
                 (Some(FileId::new()), batch_1),
                 (Some(FileId::new()), batch_2),
             ],
+            &RecordInstance::Normal,
             &manager,
         )
         .await

@@ -153,7 +153,7 @@ use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,
 };
-use record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance};
+use record::{ColumnDesc, DynRecord, Record, RecordInstance};
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
@@ -231,7 +231,7 @@ where
         E::create_dir_all(&option.version_log_dir_path()).await?;
 
         let instance = if TypeId::of::<DynRecord>() == TypeId::of::<R>() {
-            RecordInstance::Runtime(Self::empty_record(column_descs, primary_index))
+            RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index))
         } else {
             RecordInstance::Normal
         };
@@ -239,38 +239,6 @@ where
         let db = Self::build(option, executor, instance).await?;
 
         Ok(db)
-    }
-
-    pub(crate) fn empty_record(column_descs: Vec<ColumnDesc>, primary_index: usize) -> DynRecord {
-        let mut columns = vec![];
-        for desc in column_descs.iter() {
-            match desc.datatype {
-                Datatype::INT8 => match desc.is_nullable {
-                    true => columns.push(Column::new(
-                        desc.datatype,
-                        Arc::<Option<i8>>::new(None),
-                        desc.is_nullable,
-                    )),
-                    false => {
-                        columns.push(Column::new(desc.datatype, Arc::new(0_i8), desc.is_nullable))
-                    }
-                },
-                Datatype::INT16 => match desc.is_nullable {
-                    true => columns.push(Column::new(
-                        desc.datatype,
-                        Arc::<Option<i16>>::new(None),
-                        desc.is_nullable,
-                    )),
-                    false => columns.push(Column::new(
-                        desc.datatype,
-                        Arc::new(0_i16),
-                        desc.is_nullable,
-                    )),
-                },
-            }
-        }
-
-        DynRecord::new(columns, primary_index)
     }
 
     async fn build(
@@ -284,8 +252,7 @@ where
 
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let schema = Arc::new(RwLock::new(
-            Schema::new(option.clone(), task_tx, &version_set, &manager).await?,
-            Schema::new(option.clone(), task_tx, &version_set, instance).await?,
+            Schema::new(option.clone(), task_tx, &version_set, instance, &manager).await?,
         ));
         let mut compactor = Compactor::<R>::new(
             schema.clone(),
@@ -472,8 +439,8 @@ where
         option: Arc<DbOption<R>>,
         compaction_tx: Sender<CompactTask>,
         version_set: &VersionSet<R>,
-        manager: &StoreManager,
         record_instance: RecordInstance,
+        manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
         let mut schema = Schema {
@@ -601,7 +568,7 @@ where
                 fixed_projection.dedup();
 
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(R::arrow_schema()).unwrap(),
+                    &arrow_to_parquet_schema(self.record_instance.arrow_schema::<R>()).unwrap(),
                     fixed_projection,
                 )
             }
@@ -861,6 +828,7 @@ pub(crate) mod tests {
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
     use fusio::{local::TokioFs, path::Path, DynFs, Read, Write};
+    use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
@@ -872,7 +840,9 @@ pub(crate) mod tests {
         fs::{manager::StoreManager, FileId},
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
         record::{
-            internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordInstance,
+            internal::InternalRecordRef,
+            test::{test_dyn_item_schema, test_dyn_items},
+            Column, Datatype, DynRecord, RecordDecodeError, RecordEncodeError, RecordInstance,
             RecordRef,
         },
         serdes::{Decode, Encode},
@@ -1048,6 +1018,7 @@ pub(crate) mod tests {
             record_batch: &'r RecordBatch,
             offset: usize,
             projection_mask: &'r ProjectionMask,
+            _: &Arc<Schema>,
         ) -> InternalRecordRef<'r, Self> {
             let mut column_i = 2;
             let null = record_batch.column(0).as_boolean().value(offset);
@@ -1633,6 +1604,126 @@ pub(crate) mod tests {
             assert_eq!(entry.value().as_ref().unwrap().vstring, test.vstring);
             assert_eq!(entry.value().as_ref().unwrap().vu32, test.vu32);
             assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_write_dyn() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+        let mut option = DbOption::with_path(temp_dir.path(), "age".to_string(), primary_key_index);
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.level_sst_magnification = 10;
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
+                .await
+                .unwrap();
+
+        for item in test_dyn_items().into_iter() {
+            db.write(item, 0.into()).await.unwrap();
+        }
+
+        // test get
+        {
+            let tx = db.transaction().await;
+
+            for i in 0..50 {
+                let key = Column::new(Datatype::INT8, "age".to_string(), Arc::new(i as i8), false);
+                let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
+                let record_ref = option1.get();
+
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .first()
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i8>()
+                        .unwrap(),
+                    i as i8
+                );
+                let height = record_ref
+                    .columns
+                    .get(1)
+                    .unwrap()
+                    .value
+                    .as_ref()
+                    .downcast_ref::<Option<i16>>()
+                    .unwrap();
+                if i < 45 {
+                    assert_eq!(*height, Some(20 * i as i16),);
+                } else {
+                    assert!(height.is_none());
+                }
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(2)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<i8>>()
+                        .unwrap(),
+                    Some(2 * i as i8),
+                );
+            }
+            tx.commit().await.unwrap();
+        }
+        // test scan
+        {
+            let tx = db.transaction().await;
+            let lower = Column::new(Datatype::INT8, "age".to_owned(), Arc::new(8_i8), false);
+            let upper = Column::new(Datatype::INT8, "age".to_owned(), Arc::new(46_i8), false);
+            let mut scan = tx
+                .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                .projection(vec![0, 1])
+                .take()
+                .await
+                .unwrap();
+
+            let mut i = 8_i8;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
+
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.datatype, Datatype::INT8);
+                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(
+                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    i
+                );
+
+                let col = columns.get(1).unwrap();
+                assert_eq!(col.datatype, Datatype::INT16);
+                assert_eq!(col.name, "height".to_string());
+                let height = *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
+                if i < 45 {
+                    assert_eq!(height, Some(i as i16 * 20));
+                } else {
+                    assert!(col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<i16>>()
+                        .unwrap()
+                        .is_none(),);
+                }
+
+                let col = columns.get(2).unwrap();
+                assert_eq!(col.datatype, Datatype::INT8);
+                assert_eq!(col.name, "weight".to_string());
+                let weight = col.value.as_ref().downcast_ref::<Option<i8>>();
+                assert!(weight.is_some());
+                assert_eq!(*weight.unwrap(), None);
+                i += 1
+            }
         }
     }
 
