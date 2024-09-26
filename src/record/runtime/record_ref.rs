@@ -38,9 +38,7 @@ impl<'r> Encode for DynRecordRef<'r> {
     {
         (self.primary_index as u32).encode(writer).await?;
         for col in self.columns.iter() {
-            col.encode(writer)
-                .await
-                .map_err(|err| RecordEncodeError::Io (err))?;
+            col.encode(writer).await.map_err(RecordEncodeError::Io)?;
         }
         Ok(())
     }
@@ -167,7 +165,6 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         }
     }
 }
-
 
 unsafe impl<'r> Send for DynRecordRef<'r> {}
 unsafe impl<'r> Sync for DynRecordRef<'r> {}
