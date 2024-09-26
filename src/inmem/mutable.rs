@@ -363,9 +363,9 @@ mod tests {
                 LogType::Full,
                 DynRecord::new(
                     vec![
-                        Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false),
+                        Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
                         Column::new(
-                            Datatype::INT16,
+                            Datatype::Int16,
                             "height".to_string(),
                             Arc::new(1236_i16),
                             true,
@@ -384,7 +384,7 @@ mod tests {
             assert_eq!(
                 entry.key(),
                 &Timestamped::new(
-                    Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false),
+                    Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
                     0_u32.into()
                 )
             );

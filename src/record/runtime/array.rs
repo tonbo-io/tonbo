@@ -5,7 +5,7 @@ use arrow::{
         Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, PrimitiveBuilder,
         UInt32Builder,
     },
-    datatypes::{DataType, Int16Type, Int8Type, Schema},
+    datatypes::{Int16Type, Int32Type, Int8Type, Schema},
 };
 
 use super::{column::Column, record::DynRecord, record_ref::DynRecordRef, Datatype};
@@ -32,21 +32,25 @@ impl ArrowArrays for DynRecordImmutableArrays {
         let mut builders: Vec<Box<dyn ArrayBuilder>> = vec![];
         let mut datatypes = vec![];
         for field in schema.fields().iter().skip(2) {
-            let datatype = field.data_type();
-            datatypes.push(Datatype::from(datatype));
+            let datatype = Datatype::from(field.data_type());
             match datatype {
-                DataType::Int8 => {
+                Datatype::Int8 => {
                     builders.push(Box::new(PrimitiveBuilder::<Int8Type>::with_capacity(
                         capacity,
                     )));
                 }
-                DataType::Int16 => {
+                Datatype::Int16 => {
                     builders.push(Box::new(PrimitiveBuilder::<Int16Type>::with_capacity(
                         capacity,
                     )));
                 }
-                _ => todo!(),
+                Datatype::Int32 => {
+                    builders.push(Box::new(PrimitiveBuilder::<Int32Type>::with_capacity(
+                        capacity,
+                    )));
+                }
             }
+            datatypes.push(datatype);
         }
         DynRecordBuilder {
             builders,
@@ -77,11 +81,14 @@ impl ArrowArrays for DynRecordImmutableArrays {
                 let datatype = col.datatype;
                 let name = col.name.to_string();
                 let value = match datatype {
-                    Datatype::INT8 => {
+                    Datatype::Int8 => {
                         Arc::new(col.value.as_ref().downcast_ref::<i8>().copied()) as Arc<dyn Any>
                     }
-                    Datatype::INT16 => {
+                    Datatype::Int16 => {
                         Arc::new(col.value.as_ref().downcast_ref::<i16>().copied()) as Arc<dyn Any>
+                    }
+                    Datatype::Int32 => {
+                        Arc::new(col.value.as_ref().downcast_ref::<i32>().copied()) as Arc<dyn Any>
                     }
                 };
                 columns.push(Column {
@@ -124,6 +131,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             .unwrap()
             .parse::<usize>()
             .unwrap();
+        self.push_primary_key(key, primary_key_index);
         match row {
             Some(record_ref) => {
                 for (idx, (builder, col)) in self
@@ -132,60 +140,79 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     .zip(record_ref.columns.iter())
                     .enumerate()
                 {
+                    if idx == primary_key_index {
+                        continue;
+                    }
                     let datatype = col.datatype;
                     match datatype {
-                        Datatype::INT8 => {
+                        Datatype::Int8 => {
                             let bd = builder
                                 .as_any_mut()
                                 .downcast_mut::<PrimitiveBuilder<Int8Type>>()
                                 .unwrap();
 
-                            if idx == primary_key_index {
-                                bd.append_value(*col.value.as_ref().downcast_ref::<i8>().unwrap());
-                            } else {
-                                let value =
-                                    col.value.as_ref().downcast_ref::<Option<i8>>().unwrap();
-                                match value {
-                                    Some(value) => bd.append_value(*value),
-                                    None => bd.append_null(),
-                                }
+                            let value = col.value.as_ref().downcast_ref::<Option<i8>>().unwrap();
+                            match value {
+                                Some(value) => bd.append_value(*value),
+                                None => bd.append_null(),
                             }
                         }
-                        Datatype::INT16 => {
+                        Datatype::Int16 => {
                             let bd = builder
                                 .as_any_mut()
                                 .downcast_mut::<PrimitiveBuilder<Int16Type>>()
                                 .unwrap();
-                            if idx == primary_key_index {
-                                bd.append_value(*col.value.as_ref().downcast_ref::<i16>().unwrap());
-                            } else {
-                                let value =
-                                    col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
-                                match value {
-                                    Some(value) => bd.append_value(*value),
-                                    None => bd.append_null(),
-                                }
+                            let value = col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
+                            match value {
+                                Some(value) => bd.append_value(*value),
+                                None => bd.append_null(),
+                            }
+                        }
+                        Datatype::Int32 => {
+                            let bd = builder
+                                .as_any_mut()
+                                .downcast_mut::<PrimitiveBuilder<Int32Type>>()
+                                .unwrap();
+                            let value = col.value.as_ref().downcast_ref::<Option<i32>>().unwrap();
+                            match value {
+                                Some(value) => bd.append_value(*value),
+                                None => bd.append_null(),
                             }
                         }
                     }
                 }
             }
             None => {
-                for (builder, datatype) in self.builders.iter_mut().zip(self.datatypes.iter_mut()) {
+                for (idx, (builder, datatype)) in self
+                    .builders
+                    .iter_mut()
+                    .zip(self.datatypes.iter_mut())
+                    .enumerate()
+                {
+                    if idx == primary_key_index {
+                        continue;
+                    }
                     match datatype {
-                        Datatype::INT8 => {
+                        Datatype::Int8 => {
                             builder
                                 .as_any_mut()
                                 .downcast_mut::<PrimitiveBuilder<Int8Type>>()
                                 .unwrap()
-                                .append_null();
+                                .append_value(i8::default());
                         }
-                        Datatype::INT16 => {
+                        Datatype::Int16 => {
                             builder
                                 .as_any_mut()
                                 .downcast_mut::<PrimitiveBuilder<Int16Type>>()
                                 .unwrap()
-                                .append_null();
+                                .append_value(i16::default());
+                        }
+                        Datatype::Int32 => {
+                            builder
+                                .as_any_mut()
+                                .downcast_mut::<PrimitiveBuilder<Int32Type>>()
+                                .unwrap()
+                                .append_value(i32::default());
                         }
                     }
                 }
@@ -200,17 +227,24 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             .zip(self.datatypes.iter())
             .fold(size, |acc, (builder, datatype)| {
                 acc + match datatype {
-                    Datatype::INT8 => std::mem::size_of_val(
+                    Datatype::Int8 => std::mem::size_of_val(
                         builder
                             .as_any()
                             .downcast_ref::<PrimitiveBuilder<Int8Type>>()
                             .unwrap()
                             .values_slice(),
                     ),
-                    Datatype::INT16 => std::mem::size_of_val(
+                    Datatype::Int16 => std::mem::size_of_val(
                         builder
                             .as_any()
                             .downcast_ref::<PrimitiveBuilder<Int16Type>>()
+                            .unwrap()
+                            .values_slice(),
+                    ),
+                    Datatype::Int32 => std::mem::size_of_val(
+                        builder
+                            .as_any()
+                            .downcast_ref::<PrimitiveBuilder<Int32Type>>()
                             .unwrap()
                             .values_slice(),
                     ),
@@ -231,8 +265,9 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             .enumerate()
         {
             let field = self.schema.field(idx + 2);
+            let is_nullable = field.is_nullable();
             match datatype {
-                Datatype::INT8 => {
+                Datatype::Int8 => {
                     let value = Arc::new(
                         builder
                             .as_any_mut()
@@ -241,14 +276,14 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             .finish(),
                     );
                     columns.push(Column {
-                        datatype: Datatype::INT16,
+                        datatype: Datatype::Int8,
                         name: field.name().to_owned(),
                         value: value.clone(),
-                        is_nullable: true,
+                        is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::INT16 => {
+                Datatype::Int16 => {
                     let value = Arc::new(
                         builder
                             .as_any_mut()
@@ -257,10 +292,26 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             .finish(),
                     );
                     columns.push(Column {
-                        datatype: Datatype::INT16,
+                        datatype: Datatype::Int16,
                         name: field.name().to_owned(),
                         value: value.clone(),
-                        is_nullable: true,
+                        is_nullable,
+                    });
+                    array_refs.push(value);
+                }
+                Datatype::Int32 => {
+                    let value = Arc::new(
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<PrimitiveBuilder<Int32Type>>()
+                            .unwrap()
+                            .finish(),
+                    );
+                    columns.push(Column {
+                        datatype: Datatype::Int32,
+                        name: field.name().to_owned(),
+                        value: value.clone(),
+                        is_nullable,
                     });
                     array_refs.push(value);
                 }
@@ -282,6 +333,36 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             columns,
             record_batch,
         }
+    }
+}
+
+impl DynRecordBuilder {
+    fn push_primary_key(
+        &mut self,
+        key: Timestamped<<<DynRecord as Record>::Key as Key>::Ref<'_>>,
+        primary_key_index: usize,
+    ) {
+        let builder = self.builders.get_mut(primary_key_index).unwrap();
+        let datatype = self.datatypes.get_mut(primary_key_index).unwrap();
+        let col = key.value;
+        // *col.value.as_ref().downcast_ref::<i32>().unwrap()
+        match datatype {
+            Datatype::Int8 => builder
+                .as_any_mut()
+                .downcast_mut::<PrimitiveBuilder<Int8Type>>()
+                .unwrap()
+                .append_value(*col.value.as_ref().downcast_ref::<i8>().unwrap()),
+            Datatype::Int16 => builder
+                .as_any_mut()
+                .downcast_mut::<PrimitiveBuilder<Int16Type>>()
+                .unwrap()
+                .append_value(*col.value.as_ref().downcast_ref::<i16>().unwrap()),
+            Datatype::Int32 => builder
+                .as_any_mut()
+                .downcast_mut::<PrimitiveBuilder<Int32Type>>()
+                .unwrap()
+                .append_value(*col.value.as_ref().downcast_ref::<i32>().unwrap()),
+        };
     }
 }
 
