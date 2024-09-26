@@ -1,6 +1,6 @@
 use std::{future::Future, hash::Hasher};
 
-use fusio::{IoBuf, MaybeSend, Read, Write};
+use fusio::{Error, IoBuf, IoBufMut, MaybeSend, Read, Write};
 
 use crate::serdes::{Decode, Encode};
 
@@ -24,8 +24,8 @@ impl<W: Write + Unpin> HashWriter<W> {
 }
 
 impl<W: Write> Write for HashWriter<W> {
-    async fn write<B: IoBuf>(&mut self, buf: B) -> (Result<usize, fusio::Error>, B) {
-        let (result, buf) = self.writer.write(buf).await;
+    async fn write_all<B: IoBuf>(&mut self, buf: B) -> (Result<(), Error>, B) {
+        let (result, buf) = self.writer.write_all(buf).await;
         self.hasher.write(buf.as_slice());
 
         (result, buf)
@@ -65,8 +65,8 @@ impl<R: Read + Unpin> HashReader<R> {
 }
 
 impl<R: Read> Read for HashReader<R> {
-    async fn read(&mut self, len: Option<u64>) -> Result<impl IoBuf, fusio::Error> {
-        let bytes = self.reader.read(len).await?;
+    async fn read_exact<B: IoBufMut>(&mut self, buf: B) -> Result<B, Error> {
+        let bytes = self.reader.read_exact(buf).await?;
         self.hasher.write(bytes.as_slice());
 
         Ok(bytes)

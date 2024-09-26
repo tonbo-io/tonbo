@@ -1,7 +1,6 @@
 use std::ops::Bound;
 
-use fusio::{IoBuf, Read, Write};
-use tokio_util::bytes::Bytes;
+use fusio::{Read, Write};
 
 use crate::{
     fs::FileId,
@@ -85,9 +84,7 @@ where
         self.min.encode(writer).await?;
         self.max.encode(writer).await?;
 
-        let (result, _) = writer
-            .write(Bytes::from(self.gen.to_bytes().to_vec()))
-            .await;
+        let (result, _) = writer.write_all(&self.gen.to_bytes()[..]).await;
         result?;
 
         match &self.wal_ids {
@@ -98,7 +95,7 @@ where
                 1u8.encode(writer).await?;
                 (ids.len() as u32).encode(writer).await?;
                 for id in ids {
-                    let (result, _) = writer.write(Bytes::from(id.to_bytes().to_vec())).await;
+                    let (result, _) = writer.write_all(&id.to_bytes()[..]).await;
                     result?;
                 }
             }
@@ -119,11 +116,12 @@ where
     type Error = <K as Decode>::Error;
 
     async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+        let mut buf = vec![0u8; 16];
         let min = K::decode(reader).await?;
         let max = K::decode(reader).await?;
 
         let gen = {
-            let buf = reader.read(Some(16)).await?;
+            buf = reader.read_exact(buf).await?;
             // SAFETY
             FileId::from_bytes(buf.as_slice().try_into().unwrap())
         };
@@ -134,7 +132,7 @@ where
                 let mut ids = Vec::with_capacity(len);
 
                 for _ in 0..len {
-                    let buf = reader.read(Some(16)).await?;
+                    buf = reader.read_exact(buf).await?;
                     // SAFETY
                     ids.push(FileId::from_bytes(buf.as_slice().try_into().unwrap()));
                 }

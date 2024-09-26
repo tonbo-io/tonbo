@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use fusio::{IoBuf, Read, Write};
+use fusio::{Read, Write};
 
 use crate::{
     fs::FileId,
@@ -50,7 +50,7 @@ where
             VersionEdit::Remove { gen, level } => {
                 1u8.encode(writer).await?;
                 level.encode(writer).await?;
-                let (result, _) = writer.write(&gen.to_bytes()[..]).await;
+                let (result, _) = writer.write_all(&gen.to_bytes()[..]).await;
                 result?;
             }
             VersionEdit::LatestTimeStamp { ts } => {
@@ -97,7 +97,7 @@ where
             1 => {
                 let level = u8::decode(reader).await?;
                 let gen = {
-                    let buf = reader.read(Some(16)).await?;
+                    let buf = reader.read_exact(vec![0u8; 16]).await?;
                     // SAFETY
                     FileId::from_bytes(buf.as_slice().try_into().unwrap())
                 };

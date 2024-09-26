@@ -8,7 +8,7 @@ impl Encode for &[u8] {
 
     async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
         (self.len() as u32).encode(writer).await?;
-        let (result, _) = writer.write(Bytes::copy_from_slice(self)).await;
+        let (result, _) = writer.write_all(*self).await;
         result?;
 
         Ok(())
@@ -24,7 +24,7 @@ impl Encode for Bytes {
 
     async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
         (self.len() as u32).encode(writer).await?;
-        let (result, _) = writer.write(self.clone()).await;
+        let (result, _) = writer.write_all(self.as_slice()).await;
         result?;
 
         Ok(())
@@ -40,7 +40,7 @@ impl Decode for Bytes {
 
     async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
         let len = u32::decode(reader).await?;
-        let buf = reader.read(Some(len as u64)).await?;
+        let buf = reader.read_exact(vec![0u8; len as usize]).await?;
 
         Ok(buf.as_bytes())
     }

@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use fusio::{IoBuf, Read, Write};
+use fusio::{Read, Write};
 
 use super::{Decode, Encode};
 
@@ -11,7 +11,7 @@ macro_rules! implement_encode_decode {
             type Error = fusio::Error;
 
             async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
-                let (result, _) = writer.write(&self.to_le_bytes()[..]).await;
+                let (result, _) = writer.write_all(&self.to_le_bytes()[..]).await;
                 result?;
 
                 Ok(())
@@ -26,7 +26,7 @@ macro_rules! implement_encode_decode {
             type Error = fusio::Error;
 
             async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-                let bytes = reader.read(Some(size_of::<Self>() as u64)).await?;
+                let bytes = reader.read_exact(vec![0u8; size_of::<Self>()]).await?;
 
                 // SAFETY
                 Ok(Self::from_le_bytes(bytes.as_slice().try_into().unwrap()))

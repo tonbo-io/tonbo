@@ -1,7 +1,6 @@
 use std::mem::size_of;
 
-use fusio::{IoBuf, Read, Write};
-use tokio_util::bytes::Bytes;
+use fusio::{Read, Write};
 
 use super::{Decode, Encode};
 
@@ -13,7 +12,7 @@ impl<'r> Encode for &'r str {
         W: Write + Unpin,
     {
         (self.len() as u16).encode(writer).await?;
-        let (result, _) = writer.write(Bytes::from(self.as_bytes().to_vec())).await;
+        let (result, _) = writer.write_all(self.as_bytes()).await;
         result?;
 
         Ok(())
@@ -44,7 +43,7 @@ impl Decode for String {
 
     async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
         let len = u16::decode(reader).await?;
-        let buf = reader.read(Some(len as u64)).await?;
+        let buf = reader.read_exact(vec![0u8; len as usize]).await?;
 
         Ok(unsafe { String::from_utf8_unchecked(buf.as_slice().to_vec()) })
     }

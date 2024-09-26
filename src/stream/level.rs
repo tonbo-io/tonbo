@@ -7,7 +7,7 @@ use std::{
 };
 
 use fusio::{
-    dynamic::{BoxedFuture, DynFile},
+    dynamic::{DynFile, MaybeSendFuture},
     path::Path,
     DynFs, Error,
 };
@@ -31,7 +31,7 @@ where
 {
     Init(FileId),
     Ready(SsTableScan<'level, R>),
-    OpenFile(BoxedFuture<'static, Result<Box<dyn DynFile>, Error>>),
+    OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
     OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, Error>> + Send + 'level>>),
     LoadStream(
         Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
@@ -111,8 +111,17 @@ where
                         .fs
                         .open_options(self.path.as_ref().unwrap(), default_open_options());
                     #[allow(clippy::missing_transmute_annotations)]
-                    let reader =
-                        unsafe { std::mem::transmute::<_, BoxedFuture<'static, _>>(reader) };
+                    let reader = unsafe {
+                        std::mem::transmute::<
+                            _,
+                            Pin<
+                                Box<
+                                    dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>>
+                                        + 'static,
+                                >,
+                            >,
+                        >(reader)
+                    };
                     self.status = FutureStatus::OpenFile(reader);
                     continue;
                 }
@@ -127,7 +136,16 @@ where
                                 .open_options(self.path.as_ref().unwrap(), default_open_options());
                             #[allow(clippy::missing_transmute_annotations)]
                             let reader = unsafe {
-                                std::mem::transmute::<_, BoxedFuture<'static, _>>(reader)
+                                std::mem::transmute::<
+                                    _,
+                                    Pin<
+                                        Box<
+                                            dyn MaybeSendFuture<
+                                                    Output = Result<Box<dyn DynFile>, Error>,
+                                                > + 'static,
+                                        >,
+                                    >,
+                                >(reader)
                             };
                             self.status = FutureStatus::OpenFile(reader);
                             continue;
