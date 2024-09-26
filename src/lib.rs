@@ -420,11 +420,21 @@ where
         let base_fs = manager.base_fs();
         let wal_dir_path = option.wal_dir_path();
         let mut transaction_map = HashMap::new();
-        let mut wal_stream = base_fs.list(&wal_dir_path).await?;
         let mut wal_ids = Vec::new();
 
-        while let Some(file_meta) = wal_stream.next().await {
-            let wal_path = file_meta?.path;
+        let wal_metas = {
+            let mut wal_metas = Vec::new();
+            let mut wal_stream = base_fs.list(&wal_dir_path).await?;
+
+            while let Some(file_meta) = wal_stream.next().await {
+                wal_metas.push(file_meta?);
+            }
+            wal_metas.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
+            wal_metas
+        };
+
+        for wal_meta in wal_metas {
+            let wal_path = wal_meta.path;
 
             let file = base_fs
                 .open_options(&wal_path, default_open_options())

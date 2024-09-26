@@ -1,4 +1,5 @@
 use std::{
+    collections::BinaryHeap,
     mem,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -8,7 +9,7 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
-use fusio::{dynamic::DynFile, Seek};
+use fusio::{dynamic::DynFile, fs::FileMeta, Seek};
 use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
@@ -20,6 +21,28 @@ use crate::{
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
 };
+
+struct CmpMeta(FileMeta);
+
+impl Eq for CmpMeta {}
+
+impl PartialEq<Self> for CmpMeta {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.path.eq(&other.0.path)
+    }
+}
+
+impl PartialOrd<Self> for CmpMeta {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CmpMeta {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.path.cmp(&other.0.path)
+    }
+}
 
 pub(crate) struct VersionSetInner<R>
 where
@@ -80,8 +103,7 @@ where
         let fs = manager.base_fs();
         let version_dir = option.version_log_dir_path();
         let mut log_stream = fs.list(&version_dir).await?;
-        let mut latest_log_id = None;
-        let mut version_log_id = None;
+        let mut log_binary_heap = BinaryHeap::with_capacity(3);
 
         // when there are multiple logs, this means that a downtime occurred during the
         // `version_log_snap_shot` process, the second newest file has the highest data
@@ -91,20 +113,25 @@ where
         while let Some(result) = log_stream.next().await {
             let file_meta = result?;
 
-            let tmp = mem::replace(&mut latest_log_id, Some(file_meta));
-            let old = mem::replace(&mut version_log_id, tmp);
+            log_binary_heap.push(CmpMeta(file_meta));
 
-            if let Some(file_meta) = old {
-                fs.remove(&file_meta.path).await?;
+            if log_binary_heap.len() > 2 {
+                if let Some(old_meta) = log_binary_heap.pop() {
+                    fs.remove(&old_meta.0.path).await?;
+                }
             }
         }
-        if let (Some(log_id), Some(_)) = (&latest_log_id, &version_log_id) {
-            fs.remove(&log_id.path).await?;
+
+        let second_log_id = log_binary_heap.pop();
+        let latest_log_id = log_binary_heap.pop();
+
+        if let (Some(log_id), Some(_)) = (&latest_log_id, &second_log_id) {
+            fs.remove(&log_id.0.path).await?;
         }
 
-        let log_id = version_log_id
+        let log_id = second_log_id
             .or(latest_log_id)
-            .map(|file_meta| parse_file_id(&file_meta.path, FileType::Log))
+            .map(|file_meta| parse_file_id(&file_meta.0.path, FileType::Log))
             .transpose()?
             .flatten()
             .unwrap_or_else(FileId::new);
@@ -432,14 +459,16 @@ pub(crate) mod tests {
 
         let version_dir_path = option.version_log_dir_path();
         let mut stream = manager.base_fs().list(&version_dir_path).await.unwrap();
-        let mut latest_log = None;
+        let mut logs = Vec::new();
 
         while let Some(log) = stream.next().await {
-            latest_log = Some(log.unwrap())
+            logs.push(log.unwrap());
         }
+        logs.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
+
         let mut log = manager
             .base_fs()
-            .open_options(&latest_log.unwrap().path, default_open_options())
+            .open_options(&logs.pop().unwrap().path, default_open_options())
             .await
             .unwrap();
         let edits = VersionEdit::<String>::recover(&mut log).await;
