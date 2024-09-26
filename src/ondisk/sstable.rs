@@ -96,7 +96,7 @@ where
         projection_mask: ProjectionMask,
     ) -> parquet::errors::Result<Option<RecordBatchEntry<R>>> {
         self.scan(
-            (Bound::Included(key.value()), Bound::Unbounded),
+            (Bound::Included(key.value()), Bound::Included(key.value())),
             key.ts(),
             Some(1),
             projection_mask,
