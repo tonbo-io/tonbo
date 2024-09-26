@@ -687,15 +687,21 @@ fn struct_builder_codegen(
                 self.#field_name.append_null();
             });
         } else {
-            builder_push_some_fields.push(quote! {
-                self.#field_name.append_value(row.#field_name.unwrap());
-            });
-            builder_push_none_fields.push(if is_string {
-                quote!(self.#field_name.append_value("");)
+            let append_default = if is_string {
+                quote!(self.#field_name.append_value(""))
             } else if is_bytes {
-                quote!(self.#field_name.append_value(&[]);)
+                quote!(self.#field_name.append_value(&[]))
             } else {
-                quote!(self.#field_name.append_value(Default::default());)
+                quote!(self.#field_name.append_value(Default::default()))
+            };
+            builder_push_some_fields.push(quote! {
+                match row.#field_name {
+                    Some(#field_name) => self.#field_name.append_value(#field_name),
+                    None => #append_default,
+                }
+            });
+            builder_push_none_fields.push(quote! {
+                #append_default;
             });
         }
     }
