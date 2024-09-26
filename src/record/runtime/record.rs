@@ -8,7 +8,7 @@ use tokio::io::AsyncRead;
 use super::{array::DynRecordImmutableArrays, Column, ColumnDesc, Datatype, DynRecordRef};
 use crate::{
     record::{Record, RecordDecodeError},
-    serdes::Decode,
+    serdes::{Decode, Encode},
 };
 
 #[derive(Debug)]
@@ -43,11 +43,6 @@ impl DynRecord {
                     panic!("Primary key must not be nullable")
                 }
                 let mut field = Field::from(col);
-                if idx == self.primary_index {
-                    let mut metadata = HashMap::new();
-                    metadata.insert("primary_key".to_owned(), "".to_owned());
-                    field.set_metadata(metadata);
-                }
                 fields.push(field);
             }
             let mut metadata = HashMap::new();
@@ -65,7 +60,7 @@ impl DynRecord {
         let mut columns = vec![];
         for desc in column_descs.iter() {
             match desc.datatype {
-                Datatype::INT8 => match desc.is_nullable {
+                Datatype::Int8 => match desc.is_nullable {
                     true => columns.push(Column::new(
                         desc.datatype,
                         desc.name.to_owned(),
@@ -79,7 +74,7 @@ impl DynRecord {
                         desc.is_nullable,
                     )),
                 },
-                Datatype::INT16 => match desc.is_nullable {
+                Datatype::Int16 => match desc.is_nullable {
                     true => columns.push(Column::new(
                         desc.datatype,
                         desc.name.to_owned(),
@@ -90,6 +85,20 @@ impl DynRecord {
                         desc.datatype,
                         desc.name.to_owned(),
                         Arc::new(0_i16),
+                        desc.is_nullable,
+                    )),
+                },
+                Datatype::Int32 => match desc.is_nullable {
+                    true => columns.push(Column::new(
+                        desc.datatype,
+                        desc.name.to_owned(),
+                        Arc::<Option<i32>>::new(None),
+                        desc.is_nullable,
+                    )),
+                    false => columns.push(Column::new(
+                        desc.datatype,
+                        desc.name.to_owned(),
+                        Arc::new(0_i32),
                         desc.is_nullable,
                     )),
                 },
@@ -149,12 +158,16 @@ impl Record for DynRecord {
             let mut value = col.value.clone();
             if idx != self.primary_index {
                 value = match datatype {
-                    super::Datatype::INT8 if !is_nullable => {
+                    super::Datatype::Int8 if !is_nullable => {
                         let v = *col.value.as_ref().downcast_ref::<i8>().unwrap();
                         Arc::new(Some(v)) as Arc<dyn Any>
                     }
-                    super::Datatype::INT16 if !is_nullable => {
+                    super::Datatype::Int16 if !is_nullable => {
                         let v = *col.value.as_ref().downcast_ref::<i16>().unwrap();
+                        Arc::new(Some(v)) as Arc<dyn Any>
+                    }
+                    super::Datatype::Int32 if !is_nullable => {
+                        let v = *col.value.as_ref().downcast_ref::<i32>().unwrap();
                         Arc::new(Some(v)) as Arc<dyn Any>
                     }
                     _ => col.value.clone() as Arc<dyn Any>,
@@ -176,9 +189,7 @@ impl Record for DynRecord {
     }
 
     fn size(&self) -> usize {
-        self.columns
-            .iter()
-            .fold(0, |acc, col| acc + col.datatype.size())
+        self.columns.iter().fold(0, |acc, col| acc + col.size())
     }
 }
 
@@ -194,9 +205,9 @@ pub(crate) mod test {
 
     pub(crate) fn test_dyn_item_schema() -> (Vec<ColumnDesc>, usize) {
         let descs = vec![
-            ColumnDesc::new("age".to_string(), Datatype::INT8, false),
-            ColumnDesc::new("height".to_string(), Datatype::INT16, true),
-            ColumnDesc::new("weight".to_string(), Datatype::INT8, false),
+            ColumnDesc::new("age".to_string(), Datatype::Int8, false),
+            ColumnDesc::new("height".to_string(), Datatype::Int16, true),
+            ColumnDesc::new("weight".to_string(), Datatype::Int32, false),
         ];
         (descs, 0)
     }
@@ -205,17 +216,17 @@ pub(crate) mod test {
         let mut items = vec![];
         for i in 0..50 {
             let mut columns = vec![
-                Column::new(Datatype::INT8, "age".to_string(), Arc::new(i as i8), false),
+                Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false),
                 Column::new(
-                    Datatype::INT16,
+                    Datatype::Int16,
                     "height".to_string(),
                     Arc::new(Some(i as i16 * 20)),
                     true,
                 ),
                 Column::new(
-                    Datatype::INT8,
+                    Datatype::Int32,
                     "weight".to_string(),
-                    Arc::new(i as i8 * 2),
+                    Arc::new(i * 200_i32),
                     false,
                 ),
             ];

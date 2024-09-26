@@ -696,9 +696,9 @@ mod tests {
     #[tokio::test]
     async fn test_dyn_record() {
         let descs = vec![
-            ColumnDesc::new("age".to_string(), Datatype::INT8, false),
-            ColumnDesc::new("height".to_string(), Datatype::INT16, true),
-            ColumnDesc::new("weight".to_string(), Datatype::INT8, false),
+            ColumnDesc::new("age".to_string(), Datatype::Int8, false),
+            ColumnDesc::new("height".to_string(), Datatype::Int16, true),
+            ColumnDesc::new("weight".to_string(), Datatype::Int32, false),
         ];
 
         let temp_dir = TempDir::new().unwrap();
@@ -709,14 +709,19 @@ mod tests {
 
         db.insert(DynRecord::new(
             vec![
-                Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false),
+                Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
                 Column::new(
-                    Datatype::INT16,
+                    Datatype::Int16,
                     "height".to_string(),
                     Arc::new(Some(180_i16)),
                     true,
                 ),
-                Column::new(Datatype::INT8, "weight".to_string(), Arc::new(56_i8), false),
+                Column::new(
+                    Datatype::Int32,
+                    "weight".to_string(),
+                    Arc::new(56_i32),
+                    false,
+                ),
             ],
             0,
         ))
@@ -725,7 +730,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Column::new(Datatype::INT8, "age".to_string(), Arc::new(1_i8), false);
+            let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());
@@ -734,7 +739,7 @@ mod tests {
 
             assert_eq!(record_ref.columns.len(), 3);
             let col = record_ref.columns.first().unwrap();
-            assert_eq!(col.datatype, Datatype::INT8);
+            assert_eq!(col.datatype, Datatype::Int8);
             let name = col.value.as_ref().downcast_ref::<i8>();
             assert!(name.is_some());
             assert_eq!(*name.unwrap(), 1);
@@ -745,9 +750,9 @@ mod tests {
             assert_eq!(*height.unwrap(), Some(180_i16));
 
             let col = record_ref.columns.get(2).unwrap();
-            let weight = col.value.as_ref().downcast_ref::<Option<i8>>();
+            let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
             assert!(weight.is_some());
-            assert_eq!(*weight.unwrap(), Some(56_i8));
+            assert_eq!(*weight.unwrap(), Some(56_i32));
         }
         {
             let mut scan = txn
@@ -763,24 +768,24 @@ mod tests {
                 dbg!(columns.clone());
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::INT8);
+                assert_eq!(primary_key_col.datatype, Datatype::Int8);
                 assert_eq!(
                     *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
                     1
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, Datatype::INT16);
+                assert_eq!(col.datatype, Datatype::Int16);
                 assert_eq!(
                     *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
                     Some(180)
                 );
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::INT8);
-                let weight = col.value.as_ref().downcast_ref::<Option<i8>>();
+                assert_eq!(col.datatype, Datatype::Int32);
+                let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
-                assert_eq!(*weight.unwrap(), Some(56_i8));
+                assert_eq!(*weight.unwrap(), Some(56_i32));
             }
         }
     }
