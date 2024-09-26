@@ -284,7 +284,7 @@ impl Encode for Column {
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))
+                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
                 }
             }
             Datatype::Int16 => {
@@ -297,7 +297,7 @@ impl Encode for Column {
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))
+                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
                 }
             }
             Datatype::Int32 => {
@@ -310,7 +310,7 @@ impl Encode for Column {
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))
+                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
                 }
             }
         }
