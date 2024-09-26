@@ -1,8 +1,8 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::{any::Any, marker::PhantomData, sync::Arc};
 
 use arrow::{
     array::{Array, AsArray},
-    datatypes::{DataType, Schema},
+    datatypes::Schema,
 };
 
 use super::{Column, Datatype, DynRecord};
@@ -40,10 +40,7 @@ impl<'r> Encode for DynRecordRef<'r> {
         for col in self.columns.iter() {
             col.encode(writer)
                 .await
-                .map_err(|err| RecordEncodeError::Encode {
-                    field_name: "col".to_string(),
-                    error: Box::new(err),
-                })?;
+                .map_err(|err| RecordEncodeError::Io (err))?;
         }
         Ok(())
     }
@@ -90,7 +87,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         let mut columns = vec![];
 
         for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
-            let datatype = field.data_type();
+            let datatype = Datatype::from(field.data_type());
             let schema = record_batch.schema();
             let flattened_fields = schema.flattened_fields();
             let batch_field = flattened_fields
@@ -99,7 +96,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                 .find(|(_idx, f)| field.contains(f));
             if batch_field.is_none() {
                 columns.push(Column::with_none_value(
-                    Datatype::from(datatype),
+                    datatype,
                     field.name().to_owned(),
                     field.is_nullable(),
                 ));
@@ -107,50 +104,47 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             }
             let col = record_batch.column(batch_field.unwrap().0);
             let is_nullable = field.is_nullable();
-            match datatype {
-                DataType::Int8 => {
+            let value = match datatype {
+                Datatype::Int8 => {
                     let v = col.as_primitive::<arrow::datatypes::Int8Type>();
+
                     if primary_index == idx - 2 {
-                        columns.push(Column {
-                            datatype: Datatype::INT8,
-                            name: field.name().to_owned(),
-                            value: Arc::new(v.value(offset)),
-                            is_nullable,
-                        });
+                        Arc::new(v.value(offset)) as Arc<dyn Any>
                     } else {
                         let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
                             .then_some(v.value(offset));
-                        columns.push(Column {
-                            datatype: Datatype::INT8,
-                            name: field.name().to_owned(),
-                            value: Arc::new(value),
-                            is_nullable,
-                        });
+                        Arc::new(value) as Arc<dyn Any>
                     }
                 }
-                arrow::datatypes::DataType::Int16 => {
+                Datatype::Int16 => {
                     let v = col.as_primitive::<arrow::datatypes::Int16Type>();
 
                     if primary_index == idx - 2 {
-                        columns.push(Column {
-                            datatype: Datatype::INT16,
-                            name: field.name().to_owned(),
-                            value: Arc::new(v.value(offset)),
-                            is_nullable,
-                        });
+                        Arc::new(v.value(offset)) as Arc<dyn Any>
                     } else {
                         let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
                             .then_some(v.value(offset));
-                        columns.push(Column::new(
-                            Datatype::INT16,
-                            field.name().to_owned(),
-                            Arc::new(value),
-                            is_nullable,
-                        ));
+                        Arc::new(value) as Arc<dyn Any>
                     }
                 }
-                _ => todo!(),
-            }
+                Datatype::Int32 => {
+                    let v = col.as_primitive::<arrow::datatypes::Int32Type>();
+
+                    if primary_index == idx - 2 {
+                        Arc::new(v.value(offset)) as Arc<dyn Any>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset));
+                        Arc::new(value) as Arc<dyn Any>
+                    }
+                }
+            };
+            columns.push(Column::new(
+                datatype,
+                field.name().to_owned(),
+                value,
+                is_nullable,
+            ));
         }
 
         let record = DynRecordRef {
@@ -165,13 +159,15 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         for (idx, col) in self.columns.iter_mut().enumerate() {
             if idx != self.primary_index && !projection_mask.leaf_included(idx + 2) {
                 match col.datatype {
-                    Datatype::INT8 => col.value = Arc::<Option<i8>>::new(None),
-                    Datatype::INT16 => col.value = Arc::<Option<i16>>::new(None),
+                    Datatype::Int8 => col.value = Arc::<Option<i8>>::new(None),
+                    Datatype::Int16 => col.value = Arc::<Option<i16>>::new(None),
+                    Datatype::Int32 => col.value = Arc::<Option<i32>>::new(None),
                 };
             }
         }
     }
 }
+
 
 unsafe impl<'r> Send for DynRecordRef<'r> {}
 unsafe impl<'r> Sync for DynRecordRef<'r> {}

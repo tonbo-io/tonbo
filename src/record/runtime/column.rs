@@ -1,7 +1,7 @@
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
 use arrow::{
-    array::{Int16Array, Int8Array},
+    array::{Int16Array, Int32Array, Int8Array},
     datatypes::{DataType, Field},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -12,7 +12,7 @@ use crate::{
     serdes::{Decode, Encode},
 };
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ColumnDesc {
     pub datatype: Datatype,
     pub is_nullable: bool,
@@ -51,23 +51,31 @@ impl Column {
     }
 
     pub fn value(&self) -> Arc<dyn Any> {
+        // TODO: Option case
         match self.datatype {
-            Datatype::INT8 if !self.is_nullable => {
+            Datatype::Int8 if !self.is_nullable => {
                 Arc::new(*self.value.downcast_ref::<i8>().unwrap())
             }
-            Datatype::INT16 if !self.is_nullable => {
-                Arc::new(*self.value.downcast_ref::<i8>().unwrap())
+            Datatype::Int16 if !self.is_nullable => {
+                Arc::new(*self.value.downcast_ref::<i16>().unwrap())
             }
-            Datatype::INT8 => Arc::new(*self.value.downcast_ref::<i8>().unwrap()),
-            Datatype::INT16 => Arc::new(*self.value.downcast_ref::<i8>().unwrap()),
+            Datatype::Int32 if !self.is_nullable => {
+                Arc::new(*self.value.downcast_ref::<i32>().unwrap())
+            }
+            Datatype::Int8 => Arc::new(*self.value.downcast_ref::<i8>().unwrap()),
+            Datatype::Int16 => Arc::new(*self.value.downcast_ref::<i16>().unwrap()),
+            Datatype::Int32 => Arc::new(*self.value.downcast_ref::<i32>().unwrap()),
         }
     }
 
     pub fn with_none_value(datatype: Datatype, name: String, is_nullable: bool) -> Self {
         match datatype {
-            Datatype::INT8 => Self::new(datatype, name, Arc::<Option<i8>>::new(None), is_nullable),
-            Datatype::INT16 => {
+            Datatype::Int8 => Self::new(datatype, name, Arc::<Option<i8>>::new(None), is_nullable),
+            Datatype::Int16 => {
                 Self::new(datatype, name, Arc::<Option<i16>>::new(None), is_nullable)
+            }
+            Datatype::Int32 => {
+                Self::new(datatype, name, Arc::<Option<i32>>::new(None), is_nullable)
             }
         }
     }
@@ -76,14 +84,18 @@ impl Column {
 impl Ord for Column {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match self.datatype {
-            Datatype::INT8 => self
+            Datatype::Int8 => self
                 .value
                 .downcast_ref::<i8>()
                 .cmp(&other.value.downcast_ref::<i8>()),
-            Datatype::INT16 => self
+            Datatype::Int16 => self
                 .value
                 .downcast_ref::<i16>()
                 .cmp(&other.value.downcast_ref::<i16>()),
+            Datatype::Int32 => self
+                .value
+                .downcast_ref::<i32>()
+                .cmp(&other.value.downcast_ref::<i32>()),
         }
     }
 }
@@ -99,14 +111,18 @@ impl PartialOrd for Column {
 impl PartialEq for Column {
     fn eq(&self, other: &Self) -> bool {
         match self.datatype {
-            Datatype::INT8 => self
+            Datatype::Int8 => self
                 .value
                 .downcast_ref::<i8>()
                 .eq(&other.value.downcast_ref::<i8>()),
-            Datatype::INT16 => self
+            Datatype::Int16 => self
                 .value
                 .downcast_ref::<i16>()
                 .eq(&other.value.downcast_ref::<i16>()),
+            Datatype::Int32 => self
+                .value
+                .downcast_ref::<i32>()
+                .eq(&other.value.downcast_ref::<i32>()),
         }
     }
 }
@@ -115,7 +131,7 @@ impl Debug for Column {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug_struct = f.debug_struct("Column");
         match self.datatype {
-            Datatype::INT8 => {
+            Datatype::Int8 => {
                 debug_struct.field("datatype", &"i8".to_string());
                 if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
                     debug_struct.field("value", value);
@@ -126,7 +142,7 @@ impl Debug for Column {
                     );
                 }
             }
-            Datatype::INT16 => {
+            Datatype::Int16 => {
                 debug_struct.field("datatype", &"i16".to_string());
                 if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
                     debug_struct.field("value", value);
@@ -134,6 +150,17 @@ impl Debug for Column {
                     debug_struct.field(
                         "value",
                         self.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
+                    );
+                }
+            }
+            Datatype::Int32 => {
+                debug_struct.field("datatype", &"i32".to_string());
+                if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
+                    debug_struct.field("value", value);
+                } else {
+                    debug_struct.field(
+                        "value",
+                        self.value.as_ref().downcast_ref::<Option<i32>>().unwrap(),
                     );
                 }
             }
@@ -145,8 +172,9 @@ impl Debug for Column {
 impl Hash for Column {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self.datatype {
-            Datatype::INT8 => self.value.downcast_ref::<i8>().hash(state),
-            Datatype::INT16 => self.value.downcast_ref::<i16>().hash(state),
+            Datatype::Int8 => self.value.downcast_ref::<i8>().hash(state),
+            Datatype::Int16 => self.value.downcast_ref::<i16>().hash(state),
+            Datatype::Int32 => self.value.downcast_ref::<i32>().hash(state),
         }
     }
 }
@@ -160,19 +188,26 @@ impl Key for Column {
 
     fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
         match self.datatype {
-            Datatype::INT8 => Arc::new(Int8Array::new_scalar(
+            Datatype::Int8 => Arc::new(Int8Array::new_scalar(
                 *self
                     .value
                     .as_ref()
                     .downcast_ref::<i8>()
                     .expect("unexpected datatype, expected: i8"),
             )),
-            Datatype::INT16 => Arc::new(Int16Array::new_scalar(
+            Datatype::Int16 => Arc::new(Int16Array::new_scalar(
                 *self
                     .value
                     .as_ref()
                     .downcast_ref::<i16>()
                     .expect("unexpected datatype, expected: i16"),
+            )),
+            Datatype::Int32 => Arc::new(Int32Array::new_scalar(
+                *self
+                    .value
+                    .as_ref()
+                    .downcast_ref::<i32>()
+                    .expect("unexpected datatype, expected: i32"),
             )),
         }
     }
@@ -198,7 +233,7 @@ impl Decode for Column {
         let datatype = Self::tag_to_datatype(tag[0]);
         let is_nullable = bool::decode(reader).await?;
         match datatype {
-            Datatype::INT8 => {
+            Datatype::Int8 => {
                 let v = reader.read_i8().await?;
                 Ok(Column {
                     datatype,
@@ -207,8 +242,17 @@ impl Decode for Column {
                     value: Arc::new(v),
                 })
             }
-            Datatype::INT16 => {
+            Datatype::Int16 => {
                 let v = reader.read_i16().await?;
+                Ok(Column {
+                    datatype,
+                    is_nullable,
+                    name: "".to_owned(),
+                    value: Arc::new(v),
+                })
+            }
+            Datatype::Int32 => {
+                let v = reader.read_i32().await?;
                 Ok(Column {
                     datatype,
                     is_nullable,
@@ -230,7 +274,7 @@ impl Encode for Column {
         writer.write_all(&[Self::tag(self.datatype)]).await?;
         self.is_nullable.encode(writer).await?;
         match self.datatype {
-            Datatype::INT8 => {
+            Datatype::Int8 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
                     value.encode(writer).await
                 } else {
@@ -243,7 +287,7 @@ impl Encode for Column {
                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))
                 }
             }
-            Datatype::INT16 => {
+            Datatype::Int16 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
                     value.encode(writer).await
                 } else {
@@ -256,13 +300,57 @@ impl Encode for Column {
                         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))
                 }
             }
+            Datatype::Int32 => {
+                if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
+                    value.encode(writer).await
+                } else {
+                    self.value
+                        .as_ref()
+                        .downcast_ref::<Option<i32>>()
+                        .unwrap()
+                        .encode(writer)
+                        .await
+                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))
+                }
+            }
         }
     }
 
     fn size(&self) -> usize {
         2 + match self.datatype {
-            Datatype::INT8 => size_of::<i8>(),
-            Datatype::INT16 => size_of::<i16>(),
+            Datatype::Int8 => {
+                if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
+                    value.size()
+                } else {
+                    self.value
+                        .as_ref()
+                        .downcast_ref::<Option<i8>>()
+                        .unwrap()
+                        .size()
+                }
+            }
+            Datatype::Int16 => {
+                if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
+                    value.size()
+                } else {
+                    self.value
+                        .as_ref()
+                        .downcast_ref::<Option<i16>>()
+                        .unwrap()
+                        .size()
+                }
+            }
+            Datatype::Int32 => {
+                if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
+                    value.size()
+                } else {
+                    self.value
+                        .as_ref()
+                        .downcast_ref::<Option<i32>>()
+                        .unwrap()
+                        .size()
+                }
+            }
         }
     }
 }
@@ -270,15 +358,17 @@ impl Encode for Column {
 impl Column {
     fn tag(datatype: Datatype) -> u8 {
         match datatype {
-            Datatype::INT8 => 0,
-            Datatype::INT16 => 1,
+            Datatype::Int8 => 0,
+            Datatype::Int16 => 1,
+            Datatype::Int32 => 2,
         }
     }
 
     fn tag_to_datatype(tag: u8) -> Datatype {
         match tag {
-            0 => Datatype::INT8,
-            1 => Datatype::INT16,
+            0 => Datatype::Int8,
+            1 => Datatype::Int16,
+            2 => Datatype::Int32,
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -287,8 +377,9 @@ impl Column {
 impl From<&Column> for Field {
     fn from(col: &Column) -> Self {
         match col.datatype {
-            Datatype::INT8 => Field::new(&col.name, DataType::Int8, col.is_nullable),
-            Datatype::INT16 => Field::new(&col.name, DataType::Int16, col.is_nullable),
+            Datatype::Int8 => Field::new(&col.name, DataType::Int8, col.is_nullable),
+            Datatype::Int16 => Field::new(&col.name, DataType::Int16, col.is_nullable),
+            Datatype::Int32 => Field::new(&col.name, DataType::Int32, col.is_nullable),
         }
     }
 }

@@ -1625,18 +1625,28 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-        for item in test_dyn_items().into_iter() {
-            db.write(item, 0.into()).await.unwrap();
+        for (i, item) in test_dyn_items().into_iter().enumerate() {
+            if i == 28 {
+                db.remove(item.key()).await.unwrap();
+            } else {
+                db.write(item, 0.into()).await.unwrap();
+            }
         }
 
+        dbg!(db.version_set.current().await);
         // test get
         {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::INT8, "age".to_string(), Arc::new(i as i8), false);
-                let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
-                let record_ref = option1.get();
+                let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false);
+                let option1 = tx.get(&key, Projection::All).await.unwrap();
+                if i == 28 {
+                    assert!(option1.is_none());
+                    continue;
+                }
+                let entry = option1.unwrap();
+                let record_ref = entry.get();
 
                 assert_eq!(
                     *record_ref
@@ -1669,9 +1679,9 @@ pub(crate) mod tests {
                         .unwrap()
                         .value
                         .as_ref()
-                        .downcast_ref::<Option<i8>>()
+                        .downcast_ref::<Option<i32>>()
                         .unwrap(),
-                    Some(2 * i as i8),
+                    Some(200 * i),
                 );
             }
             tx.commit().await.unwrap();
@@ -1679,8 +1689,8 @@ pub(crate) mod tests {
         // test scan
         {
             let tx = db.transaction().await;
-            let lower = Column::new(Datatype::INT8, "age".to_owned(), Arc::new(8_i8), false);
-            let upper = Column::new(Datatype::INT8, "age".to_owned(), Arc::new(46_i8), false);
+            let lower = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(0_i8), false);
+            let upper = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(49_i8), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 1])
@@ -1688,12 +1698,17 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let mut i = 8_i8;
+            let mut i = 0_i8;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
+                if i == 28 {
+                    assert!(entry.value().is_none());
+                    i += 1;
+                    continue;
+                }
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::INT8);
+                assert_eq!(primary_key_col.datatype, Datatype::Int8);
                 assert_eq!(primary_key_col.name, "age".to_string());
                 assert_eq!(
                     *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
@@ -1701,7 +1716,7 @@ pub(crate) mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, Datatype::INT16);
+                assert_eq!(col.datatype, Datatype::Int16);
                 assert_eq!(col.name, "height".to_string());
                 let height = *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
                 if i < 45 {
@@ -1716,9 +1731,9 @@ pub(crate) mod tests {
                 }
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::INT8);
+                assert_eq!(col.datatype, Datatype::Int32);
                 assert_eq!(col.name, "weight".to_string());
-                let weight = col.value.as_ref().downcast_ref::<Option<i8>>();
+                let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), None);
                 i += 1

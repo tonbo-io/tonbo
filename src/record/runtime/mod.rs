@@ -10,28 +10,21 @@ pub use record_ref::*;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Datatype {
-    INT8,
-    INT16,
+    Int8,
+    Int16,
+    Int32,
+    // String,
 }
 
 impl From<&DataType> for Datatype {
     fn from(datatype: &DataType) -> Self {
         match datatype {
-            DataType::Int8 => Datatype::INT8,
-            DataType::Int16 => Datatype::INT16,
+            DataType::Int8 => Datatype::Int8,
+            DataType::Int16 => Datatype::Int16,
+            DataType::Int32 => Datatype::Int32,
+            // DataType::Utf8 => Datatype::String,
             _ => todo!(),
         }
     }
 }
 
-impl Datatype {
-    pub(crate) fn size(
-        &self,
-        // is_nullable: bool,
-    ) -> usize {
-        match self {
-            Datatype::INT8 => std::mem::size_of::<i8>(),
-            Datatype::INT16 => std::mem::size_of::<i16>(),
-        }
-    }
-}
