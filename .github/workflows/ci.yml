@@ -69,6 +69,23 @@ jobs:
           command: fmt
           args: -- --check
 
+  exmaples:
+    name: Rust exmaples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run datafusion example
+        uses: actions-rs/cargo@v1
+        with:
+          command: run
+          args: --example datafusion --features=datafusion
+
+      - name: Run declare example
+        uses: actions-rs/cargo@v1
+        with:
+          command: run
+          args: --example declare --all-features
+
   benchmark:
     name: Rust benchmark
     runs-on: self-hosted
