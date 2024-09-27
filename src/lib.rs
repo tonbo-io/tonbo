@@ -803,7 +803,8 @@ pub(crate) mod tests {
 
         type Key = String;
 
-        type Ref<'r> = TestRef<'r>
+        type Ref<'r>
+            = TestRef<'r>
         where
             Self: 'r;
 
