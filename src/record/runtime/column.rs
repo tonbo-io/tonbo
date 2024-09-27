@@ -4,7 +4,7 @@ use arrow::{
     array::{Int16Array, Int32Array, Int8Array},
     datatypes::{DataType, Field},
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use fusio::{Read, Write};
 
 use super::Datatype;
 use crate::{
@@ -224,19 +224,18 @@ impl<'r> KeyRef<'r> for Column {
 }
 
 impl Decode for Column {
-    type Error = std::io::Error;
+    type Error = fusio::Error;
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: AsyncRead + Unpin,
+        R: Read + Unpin,
     {
-        let mut tag = [0];
-        reader.read_exact(&mut tag).await?;
-        let datatype = Self::tag_to_datatype(tag[0]);
+        let tag = u8::decode(reader).await?;
+        let datatype = Self::tag_to_datatype(tag);
         let is_nullable = bool::decode(reader).await?;
         match datatype {
             Datatype::Int8 => {
-                let v = reader.read_i8().await?;
+                let v = i8::decode(reader).await?;
                 Ok(Column {
                     datatype,
                     is_nullable,
@@ -245,7 +244,7 @@ impl Decode for Column {
                 })
             }
             Datatype::Int16 => {
-                let v = reader.read_i16().await?;
+                let v = i16::decode(reader).await?;
                 Ok(Column {
                     datatype,
                     is_nullable,
@@ -254,7 +253,7 @@ impl Decode for Column {
                 })
             }
             Datatype::Int32 => {
-                let v = reader.read_i32().await?;
+                let v = i32::decode(reader).await?;
                 Ok(Column {
                     datatype,
                     is_nullable,
@@ -267,18 +266,18 @@ impl Decode for Column {
 }
 
 impl Encode for Column {
-    type Error = std::io::Error;
+    type Error = fusio::Error;
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: tokio::io::AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
-        writer.write_all(&[Self::tag(self.datatype)]).await?;
+        Self::tag(self.datatype).encode(writer).await?;
         self.is_nullable.encode(writer).await?;
         match self.datatype {
             Datatype::Int8 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
-                    value.encode(writer).await
+                    value.encode(writer).await?
                 } else {
                     self.value
                         .as_ref()
@@ -286,12 +285,12 @@ impl Encode for Column {
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+                        .map_err(|err| fusio::Error::Other(Box::new(err)))?
                 }
             }
             Datatype::Int16 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
-                    value.encode(writer).await
+                    value.encode(writer).await?
                 } else {
                     self.value
                         .as_ref()
@@ -299,12 +298,12 @@ impl Encode for Column {
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+                        .map_err(|err| fusio::Error::Other(Box::new(err)))?
                 }
             }
             Datatype::Int32 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
-                    value.encode(writer).await
+                    value.encode(writer).await?
                 } else {
                     self.value
                         .as_ref()
@@ -312,10 +311,11 @@ impl Encode for Column {
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+                        .map_err(|err| fusio::Error::Other(Box::new(err)))?
                 }
             }
-        }
+        };
+        Ok(())
     }
 
     fn size(&self) -> usize {

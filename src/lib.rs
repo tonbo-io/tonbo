@@ -190,21 +190,34 @@ impl<E: Executor> DB<DynRecord, E>
 where
     E: Executor + Send + Sync + 'static,
 {
+    /// Open [`DB`] with schema which determined by [`ColumnDesc`].
     pub async fn with_schema(
         option: DbOption<DynRecord>,
         executor: E,
+        manager: StoreManager,
         column_descs: Vec<ColumnDesc>,
         primary_index: usize,
     ) -> Result<Self, DbError<DynRecord>> {
         let option = Arc::new(option);
-        E::create_dir_all(&option.path).await?;
-        E::create_dir_all(&option.wal_dir_path()).await?;
-        E::create_dir_all(&option.version_log_dir_path()).await?;
+        let manager = Arc::new(manager);
+
+        {
+            let base_fs = manager.base_fs();
+
+            base_fs
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+            base_fs
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+        }
 
         let instance =
             RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index));
 
-        let db = Self::build(option, executor, instance).await?;
+        let db = Self::build(option, executor, instance, manager).await?;
 
         Ok(db)
     }
@@ -237,13 +250,14 @@ where
             let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
         }
 
-        Self::build(option, executor, RecordInstance::Normal).await
+        Self::build(option, executor, RecordInstance::Normal, manager).await
     }
 
     async fn build(
         option: Arc<DbOption<R>>,
         executor: E,
         instance: RecordInstance,
+        manager: Arc<StoreManager>,
     ) -> Result<Self, DbError<R>> {
         let (task_tx, task_rx) = bounded(1);
 
@@ -559,7 +573,6 @@ where
         let projection = match projection {
             Projection::All => ProjectionMask::all(),
             Projection::Parts(projection) => {
-                // let mut fixed_projection: Vec<usize> = [0, 1, R::primary_key_index()]
                 let mut fixed_projection: Vec<usize> = [0, 1, primary_key_index]
                     .into_iter()
                     .chain(projection.into_iter().map(|p| p + 2))
@@ -1609,9 +1622,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_read_write_dyn() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
-        let mut option = DbOption::with_path(temp_dir.path(), "age".to_string(), primary_key_index);
+        let mut option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "age".to_string(),
+            primary_key_index,
+        );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1620,10 +1638,15 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
+            option,
+            TokioExecutor::new(),
+            manager,
+            cols_desc,
+            primary_key_index,
+        )
+        .await
+        .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i == 28 {
@@ -1743,11 +1766,17 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_dyn_multiple_db() {
+        let manager1 = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let manager2 = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let manager3 = StoreManager::new(Arc::new(TokioFs), vec![]);
         let temp_dir1 = TempDir::with_prefix("db1").unwrap();
 
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
-        let mut option =
-            DbOption::with_path(temp_dir1.path(), "age".to_string(), primary_key_index);
+        let mut option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir1.path()).unwrap(),
+            "age".to_string(),
+            primary_key_index,
+        );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1755,8 +1784,11 @@ pub(crate) mod tests {
         option.trigger_type = TriggerType::Length(5);
 
         let temp_dir2 = TempDir::with_prefix("db2").unwrap();
-        let mut option2 =
-            DbOption::with_path(temp_dir2.path(), "age".to_string(), primary_key_index);
+        let mut option2 = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir2.path()).unwrap(),
+            "age".to_string(),
+            primary_key_index,
+        );
         option2.immutable_chunk_num = 1;
         option2.immutable_chunk_max_num = 1;
         option2.major_threshold_with_sst_size = 3;
@@ -1764,8 +1796,11 @@ pub(crate) mod tests {
         option2.trigger_type = TriggerType::Length(5);
 
         let temp_dir3 = TempDir::with_prefix("db3").unwrap();
-        let mut option3 =
-            DbOption::with_path(temp_dir3.path(), "age".to_string(), primary_key_index);
+        let mut option3 = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir3.path()).unwrap(),
+            "age".to_string(),
+            primary_key_index,
+        );
         option3.immutable_chunk_num = 1;
         option3.immutable_chunk_max_num = 1;
         option3.major_threshold_with_sst_size = 3;
@@ -1775,6 +1810,7 @@ pub(crate) mod tests {
         let db1: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option,
             TokioExecutor::new(),
+            manager1,
             cols_desc.clone(),
             primary_key_index,
         )
@@ -1783,15 +1819,21 @@ pub(crate) mod tests {
         let db2: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option2,
             TokioExecutor::new(),
+            manager2,
             cols_desc.clone(),
             primary_key_index,
         )
         .await
         .unwrap();
-        let db3: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+        let db3: DB<DynRecord, TokioExecutor> = DB::with_schema(
+            option3,
+            TokioExecutor::new(),
+            manager3,
+            cols_desc,
+            primary_key_index,
+        )
+        .await
+        .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i >= 40 {
@@ -1938,13 +1980,5 @@ pub(crate) mod tests {
     fn fail_build_test() {
         let t = trybuild::TestCases::new();
         t.compile_fail("tests/fail/*.rs");
-    }
-
-    #[test]
-    fn slice_range() {
-        let slice = vec![0, 1, 2, 3, 4, 5, 6];
-        for v in slice[1..6].iter() {
-            dbg!(v);
-        }
     }
 }

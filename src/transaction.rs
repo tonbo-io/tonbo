@@ -260,11 +260,11 @@ mod tests {
     use crate::{
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
+        fs::manager::StoreManager,
         record::{
             runtime::{Column, Datatype, DynRecord},
             ColumnDesc,
         },
-        fs::manager::StoreManager,
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
         version::TransactionTs,
@@ -797,8 +797,13 @@ mod tests {
         ];
 
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::with_path(temp_dir.path(), "age".to_string(), 0);
-        let db = DB::with_schema(option, TokioExecutor::default(), descs, 0)
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "age".to_string(),
+            0,
+        );
+        let db = DB::with_schema(option, TokioExecutor::default(), manager, descs, 0)
             .await
             .unwrap();
 

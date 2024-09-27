@@ -27,4 +27,3 @@ impl From<&DataType> for Datatype {
         }
     }
 }
-

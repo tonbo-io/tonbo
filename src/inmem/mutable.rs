@@ -199,8 +199,6 @@ mod tests {
 
     use super::Mutable;
     use crate::{
-        executor::tokio::TokioExecutor,
-        fs::FileProvider,
         record::{Column, Datatype, DynRecord, Record},
         tests::{Test, TestRef},
         timestamp::Timestamped,
@@ -347,14 +345,17 @@ mod tests {
     #[tokio::test]
     async fn test_dyn_read() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::with_path(temp_dir.path(), "age".to_string(), 0);
-        TokioExecutor::create_dir_all(&option.wal_dir_path())
-            .await
-            .unwrap();
+        let option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "age".to_string(),
+            0,
+        );
+        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let mutable = Mutable::<DynRecord, TokioExecutor>::new(&option, trigger)
+        let mutable = Mutable::<DynRecord>::new(&option, trigger, &fs)
             .await
             .unwrap();
 

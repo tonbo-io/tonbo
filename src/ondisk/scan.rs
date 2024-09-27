@@ -5,8 +5,8 @@ use std::{
     task::{Context, Poll},
 };
 
-use fusio_parquet::reader::AsyncReader;
 use arrow::datatypes::Schema;
+use fusio_parquet::reader::AsyncReader;
 use futures_core::{ready, Stream};
 use parquet::arrow::{async_reader::ParquetRecordBatchStream, ProjectionMask};
 use pin_project_lite::pin_project;
