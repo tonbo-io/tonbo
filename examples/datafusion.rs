@@ -17,8 +17,11 @@ use datafusion::{
     error::{DataFusionError, Result},
     execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext},
     physical_expr::EquivalenceProperties,
-    physical_plan::{DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties},
+    physical_plan::{
+        execute_stream, DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
+    },
     prelude::*,
+    sql::parser::DFParser,
 };
 use fusio::{local::TokioFs, path::Path};
 use futures_core::Stream;
@@ -225,9 +228,29 @@ async fn main() -> Result<()> {
     let provider = MusicProvider { db: Arc::new(db) };
     ctx.register_table("music", Arc::new(provider))?;
 
-    let df = ctx.table("music").await?;
-    let df = df.select(vec![col("name")])?;
-    let batches = df.collect().await?;
-    pretty::print_batches(&batches).unwrap();
+    {
+        let df = ctx.table("music").await?;
+        let df = df.select(vec![col("name")])?;
+        let batches = df.collect().await?;
+        pretty::print_batches(&batches).unwrap();
+    }
+
+    {
+        // support sql query for tonbo
+        let statements = DFParser::parse_sql("select * from music")?;
+        let plan = ctx
+            .state()
+            .statement_to_plan(statements.front().cloned().unwrap())
+            .await?;
+        ctx.execute_logical_plan(plan).await?;
+        let df = ctx.table("music").await?;
+        let physical_plan = df.create_physical_plan().await?;
+        let mut stream = execute_stream(physical_plan, ctx.task_ctx())?;
+        while let Some(maybe_batch) = stream.next().await {
+            let batch = maybe_batch?;
+            pretty::print_batches(&[batch]).unwrap();
+        }
+    }
+
     Ok(())
 }
