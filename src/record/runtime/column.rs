@@ -110,20 +110,22 @@ impl PartialOrd for Column {
 
 impl PartialEq for Column {
     fn eq(&self, other: &Self) -> bool {
-        match self.datatype {
-            Datatype::Int8 => self
-                .value
-                .downcast_ref::<i8>()
-                .eq(&other.value.downcast_ref::<i8>()),
-            Datatype::Int16 => self
-                .value
-                .downcast_ref::<i16>()
-                .eq(&other.value.downcast_ref::<i16>()),
-            Datatype::Int32 => self
-                .value
-                .downcast_ref::<i32>()
-                .eq(&other.value.downcast_ref::<i32>()),
-        }
+        self.datatype == other.datatype
+            && self.is_nullable == other.is_nullable
+            && match self.datatype {
+                Datatype::Int8 => self
+                    .value
+                    .downcast_ref::<i8>()
+                    .eq(&other.value.downcast_ref::<i8>()),
+                Datatype::Int16 => self
+                    .value
+                    .downcast_ref::<i16>()
+                    .eq(&other.value.downcast_ref::<i16>()),
+                Datatype::Int32 => self
+                    .value
+                    .downcast_ref::<i32>()
+                    .eq(&other.value.downcast_ref::<i32>()),
+            }
     }
 }
 

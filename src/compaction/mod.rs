@@ -383,7 +383,7 @@ where
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
-        let mut builder = R::Columns::builder(instance.arrow_schema::<R>(), 8192);
+        let mut builder = R::Columns::builder(&instance.arrow_schema::<R>(), 8192);
         let mut min = None;
         let mut max = None;
 
@@ -507,7 +507,7 @@ pub(crate) mod tests {
         executor::tokio::TokioExecutor,
         fs::{default_open_options, manager::StoreManager, FileId},
         inmem::{immutable::Immutable, mutable::Mutable},
-        record::{Record, RecordInstance},
+        record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -661,6 +661,66 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(scope.min, 1.to_string());
         assert_eq!(scope.max, 6.to_string());
+    }
+
+    #[tokio::test]
+    async fn dyn_minor_compaction() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let option = DbOption::with_path(temp_dir.path(), "id".to_string(), 0);
+        TokioExecutor::create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let empty_record = DynRecord::empty_record(
+            vec![ColumnDesc::new("id".to_owned(), Datatype::Int32, false)],
+            0,
+        );
+        let instance = RecordInstance::Runtime(empty_record);
+
+        let mut batch1_data = vec![];
+        let mut batch2_data = vec![];
+        for i in 0..40 {
+            let col = Column::new(Datatype::Int32, "id".to_owned(), Arc::new(i), false);
+            if i % 4 == 0 {
+                continue;
+            }
+            if i < 35 && (i % 2 == 0 || i % 5 == 0) {
+                batch1_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+            } else if i >= 7 {
+                batch2_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+            }
+        }
+
+        // data range: [2, 34]
+        let batch_1 = build_immutable::<DynRecord, TokioExecutor>(&option, batch1_data, &instance)
+            .await
+            .unwrap();
+
+        // data range: [7, 39]
+        let batch_2 = build_immutable::<DynRecord, TokioExecutor>(&option, batch2_data, &instance)
+            .await
+            .unwrap();
+
+        let scope = Compactor::<DynRecord, TokioExecutor>::minor_compaction(
+            &option,
+            None,
+            &vec![
+                (Some(FileId::new()), batch_1),
+                (Some(FileId::new()), batch_2),
+            ],
+            &instance,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            scope.min,
+            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(2), false)
+        );
+        assert_eq!(
+            scope.max,
+            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(39), false)
+        );
     }
 
     #[tokio::test]

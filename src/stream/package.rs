@@ -39,7 +39,7 @@ where
             row_count: 0,
             batch_size,
             inner: merge,
-            builder: R::Columns::builder(instance.arrow_schema::<R>(), batch_size),
+            builder: R::Columns::builder(&instance.arrow_schema::<R>(), batch_size),
             projection_indices,
         }
     }

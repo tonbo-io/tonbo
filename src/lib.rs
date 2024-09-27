@@ -567,7 +567,7 @@ where
                 fixed_projection.dedup();
 
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(self.record_instance.arrow_schema::<R>()).unwrap(),
+                    &arrow_to_parquet_schema(&self.record_instance.arrow_schema::<R>()).unwrap(),
                     fixed_projection,
                 )
             }
@@ -663,7 +663,7 @@ where
         fixed_projection.dedup();
 
         let mask = ProjectionMask::roots(
-            &arrow_to_parquet_schema(self.schema.record_instance.arrow_schema::<R>()).unwrap(),
+            &arrow_to_parquet_schema(&self.schema.record_instance.arrow_schema::<R>()).unwrap(),
             fixed_projection.clone(),
         );
 
@@ -1741,6 +1741,194 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_dyn_multiple_db() {
+        let temp_dir1 = TempDir::with_prefix("db1").unwrap();
+
+        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+        let mut option =
+            DbOption::with_path(temp_dir1.path(), "age".to_string(), primary_key_index);
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let temp_dir2 = TempDir::with_prefix("db2").unwrap();
+        let mut option2 =
+            DbOption::with_path(temp_dir2.path(), "age".to_string(), primary_key_index);
+        option2.immutable_chunk_num = 1;
+        option2.immutable_chunk_max_num = 1;
+        option2.major_threshold_with_sst_size = 3;
+        option2.major_default_oldest_table_num = 1;
+        option2.trigger_type = TriggerType::Length(5);
+
+        let temp_dir3 = TempDir::with_prefix("db3").unwrap();
+        let mut option3 =
+            DbOption::with_path(temp_dir3.path(), "age".to_string(), primary_key_index);
+        option3.immutable_chunk_num = 1;
+        option3.immutable_chunk_max_num = 1;
+        option3.major_threshold_with_sst_size = 3;
+        option3.major_default_oldest_table_num = 1;
+        option3.trigger_type = TriggerType::Length(5);
+
+        let db1: DB<DynRecord, TokioExecutor> = DB::with_schema(
+            option,
+            TokioExecutor::new(),
+            cols_desc.clone(),
+            primary_key_index,
+        )
+        .await
+        .unwrap();
+        let db2: DB<DynRecord, TokioExecutor> = DB::with_schema(
+            option2,
+            TokioExecutor::new(),
+            cols_desc.clone(),
+            primary_key_index,
+        )
+        .await
+        .unwrap();
+        let db3: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
+                .await
+                .unwrap();
+
+        for (i, item) in test_dyn_items().into_iter().enumerate() {
+            if i >= 40 {
+                db3.write(item, 0.into()).await.unwrap();
+            } else if i % 2 == 0 {
+                db1.write(item, 0.into()).await.unwrap();
+            } else {
+                db2.write(item, 0.into()).await.unwrap();
+            }
+        }
+
+        // test get
+        {
+            let tx1 = db1.transaction().await;
+            let tx2 = db2.transaction().await;
+            let tx3 = db3.transaction().await;
+
+            for i in 0..50 {
+                let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false);
+                let option1 = tx1.get(&key, Projection::All).await.unwrap();
+                let option2 = tx2.get(&key, Projection::All).await.unwrap();
+                let option3 = tx3.get(&key, Projection::All).await.unwrap();
+                let entry = if i >= 40 {
+                    assert!(option2.is_none());
+                    assert!(option1.is_none());
+                    option3.unwrap()
+                } else if i % 2 == 0 {
+                    assert!(option2.is_none());
+                    assert!(option3.is_none());
+                    option1.unwrap()
+                } else {
+                    assert!(option1.is_none());
+                    assert!(option3.is_none());
+                    option2.unwrap()
+                };
+                let record_ref = entry.get();
+
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .first()
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i8>()
+                        .unwrap(),
+                    i as i8
+                );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(2)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<i32>>()
+                        .unwrap(),
+                    Some(200 * i),
+                );
+            }
+            tx1.commit().await.unwrap();
+        }
+        // test scan
+        {
+            let tx1 = db1.transaction().await;
+            let lower = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(8_i8), false);
+            let upper = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(43_i8), false);
+            let mut scan = tx1
+                .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                .projection(vec![0, 1])
+                .take()
+                .await
+                .unwrap();
+
+            let mut i = 8_i8;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
+
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.datatype, Datatype::Int8);
+                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(
+                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    i
+                );
+
+                i += 2
+            }
+            assert_eq!(i, 40);
+            let tx2 = db2.transaction().await;
+            let mut scan = tx2
+                .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                .projection(vec![0, 1])
+                .take()
+                .await
+                .unwrap();
+
+            let mut i = 9_i8;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
+
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.datatype, Datatype::Int8);
+                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(
+                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    i
+                );
+
+                i += 2
+            }
+            assert_eq!(i, 41);
+            let tx3 = db3.transaction().await;
+            let mut scan = tx3
+                .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                .projection(vec![0, 1])
+                .take()
+                .await
+                .unwrap();
+
+            let mut i = 40_i8;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
+
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.datatype, Datatype::Int8);
+                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(
+                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    i
+                );
+
+                i += 1
+            }
+        }
+    }
+
     #[test]
     fn build_test() {
         let t = trybuild::TestCases::new();
@@ -1750,5 +1938,13 @@ pub(crate) mod tests {
     fn fail_build_test() {
         let t = trybuild::TestCases::new();
         t.compile_fail("tests/fail/*.rs");
+    }
+
+    #[test]
+    fn slice_range() {
+        let slice = vec![0, 1, 2, 3, 4, 5, 6];
+        for v in slice[1..6].iter() {
+            dbg!(v);
+        }
     }
 }

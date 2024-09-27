@@ -1,7 +1,6 @@
 use std::{any::Any, collections::HashMap, io, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
-use once_cell::sync::OnceCell;
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
 use tokio::io::AsyncRead;
 
@@ -30,28 +29,25 @@ impl DynRecord {
         self.primary_index + 2
     }
 
-    pub(crate) fn arrow_schema(&self) -> &'static std::sync::Arc<Schema> {
-        static DYN_SCHEMA: OnceCell<Arc<Schema>> = OnceCell::new();
-        DYN_SCHEMA.get_or_init(|| {
-            let mut fields = vec![
-                Field::new("_null", DataType::Boolean, false),
-                Field::new("_ts", DataType::UInt32, false),
-            ];
+    pub(crate) fn arrow_schema(&self) -> Arc<Schema> {
+        let mut fields = vec![
+            Field::new("_null", DataType::Boolean, false),
+            Field::new("_ts", DataType::UInt32, false),
+        ];
 
-            for (idx, col) in self.columns.iter().enumerate() {
-                if idx == self.primary_index && col.is_nullable {
-                    panic!("Primary key must not be nullable")
-                }
-                let mut field = Field::from(col);
-                fields.push(field);
+        for (idx, col) in self.columns.iter().enumerate() {
+            if idx == self.primary_index && col.is_nullable {
+                panic!("Primary key must not be nullable")
             }
-            let mut metadata = HashMap::new();
-            metadata.insert(
-                "primary_key_index".to_string(),
-                self.primary_index.to_string(),
-            );
-            Arc::new(Schema::new_with_metadata(fields, metadata))
-        })
+            let mut field = Field::from(col);
+            fields.push(field);
+        }
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "primary_key_index".to_string(),
+            self.primary_index.to_string(),
+        );
+        Arc::new(Schema::new_with_metadata(fields, metadata))
     }
 }
 
