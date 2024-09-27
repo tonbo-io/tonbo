@@ -1,17 +1,21 @@
 use std::{
     collections::{Bound, VecDeque},
     future::Future,
-    io,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
+use fusio::{
+    dynamic::{DynFile, MaybeSendFuture},
+    path::Path,
+    DynFs, Error,
+};
 use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
 
 use crate::{
-    fs::{FileId, FileProvider},
+    fs::{default_open_options, FileId},
     ondisk::{scan::SsTableScan, sstable::SsTable},
     record::Record,
     scope::Scope,
@@ -21,29 +25,22 @@ use crate::{
     DbOption,
 };
 
-enum FutureStatus<'level, R, FP>
+enum FutureStatus<'level, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     Init(FileId),
-    Ready(SsTableScan<'level, R, FP>),
-    OpenFile(Pin<Box<dyn Future<Output = io::Result<FP::File>> + Send + 'level>>),
+    Ready(SsTableScan<'level, R>),
+    OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
+    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, Error>> + Send + 'level>>),
     LoadStream(
-        Pin<
-            Box<
-                dyn Future<Output = Result<SsTableScan<'level, R, FP>, ParquetError>>
-                    + Send
-                    + 'level,
-            >,
-        >,
+        Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
     ),
 }
 
-pub(crate) struct LevelStream<'level, R, FP>
+pub(crate) struct LevelStream<'level, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     lower: Bound<&'level R::Key>,
     upper: Bound<&'level R::Key>,
@@ -52,18 +49,19 @@ where
     gens: VecDeque<FileId>,
     limit: Option<usize>,
     projection_mask: ProjectionMask,
-    status: FutureStatus<'level, R, FP>,
+    status: FutureStatus<'level, R>,
+    fs: Arc<dyn DynFs>,
+    path: Option<Path>,
 }
 
-impl<'level, R, FP> LevelStream<'level, R, FP>
+impl<'level, R> LevelStream<'level, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     // Kould: only used by Compaction now, and the start and end of the sstables range are known
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        version: &Version<R, FP>,
+        version: &Version<R>,
         level: usize,
         start: usize,
         end: usize,
@@ -71,6 +69,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        fs: Arc<dyn DynFs>,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -89,14 +88,15 @@ where
             limit,
             projection_mask,
             status,
+            fs,
+            path: None,
         })
     }
 }
 
-impl<'level, R, FP> Stream for LevelStream<'level, R, FP>
+impl<'level, R> Stream for LevelStream<'level, R>
 where
     R: Record,
-    FP: FileProvider + 'level,
 {
     type Item = Result<RecordBatchEntry<R>, ParquetError>;
 
@@ -105,17 +105,49 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.status =
-                        FutureStatus::OpenFile(Box::pin(FP::open(self.option.table_path(&gen))));
+                    self.path = Some(self.option.table_path(&gen));
+
+                    let reader = self
+                        .fs
+                        .open_options(self.path.as_ref().unwrap(), default_open_options());
+                    #[allow(clippy::missing_transmute_annotations)]
+                    let reader = unsafe {
+                        std::mem::transmute::<
+                            _,
+                            Pin<
+                                Box<
+                                    dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>>
+                                        + 'static,
+                                >,
+                            >,
+                        >(reader)
+                    };
+                    self.status = FutureStatus::OpenFile(reader);
                     continue;
                 }
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.status = FutureStatus::OpenFile(Box::pin(FP::open(
-                                self.option.table_path(&gen),
-                            )));
+                            self.path = Some(self.option.table_path(&gen));
+
+                            let reader = self
+                                .fs
+                                .open_options(self.path.as_ref().unwrap(), default_open_options());
+                            #[allow(clippy::missing_transmute_annotations)]
+                            let reader = unsafe {
+                                std::mem::transmute::<
+                                    _,
+                                    Pin<
+                                        Box<
+                                            dyn MaybeSendFuture<
+                                                    Output = Result<Box<dyn DynFile>, Error>,
+                                                > + 'static,
+                                        >,
+                                    >,
+                                >(reader)
+                            };
+                            self.status = FutureStatus::OpenFile(reader);
                             continue;
                         }
                     },
@@ -129,7 +161,17 @@ where
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::LoadStream(Box::pin(SsTable::open(file).scan(
+                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file)));
+                        continue;
+                    }
+                    Poll::Ready(Err(err)) => {
+                        Poll::Ready(Some(Err(ParquetError::External(Box::new(err)))))
+                    }
+                    Poll::Pending => Poll::Pending,
+                },
+                FutureStatus::OpenSst(sst_future) => match Pin::new(sst_future).poll(cx) {
+                    Poll::Ready(Ok(sst)) => {
+                        self.status = FutureStatus::LoadStream(Box::pin(sst.scan(
                             (self.lower, self.upper),
                             self.ts,
                             self.limit,
@@ -137,7 +179,9 @@ where
                         )));
                         continue;
                     }
-                    Poll::Ready(Err(err)) => Poll::Ready(Some(Err(ParquetError::from(err)))),
+                    Poll::Ready(Err(err)) => {
+                        Poll::Ready(Some(Err(ParquetError::External(Box::new(err)))))
+                    }
                     Poll::Pending => Poll::Pending,
                 },
                 FutureStatus::LoadStream(stream_future) => match Pin::new(stream_future).poll(cx) {
@@ -157,21 +201,34 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
+    use fusio::{local::TokioFs, path::Path};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version, record::Record, stream::level::LevelStream, tests::Test,
-        DbOption,
+        compaction::tests::build_version, fs::manager::StoreManager, record::Record,
+        stream::level::LevelStream, tests::Test, DbOption,
     };
 
     #[tokio::test]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
-        let (_, version) = build_version(&option).await;
+        manager
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (_, version) = build_version(&option, &manager).await;
 
         {
             let mut level_stream_1 = LevelStream::new(
@@ -186,6 +243,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2, 3],
                 ),
+                manager.base_fs().clone(),
             )
             .unwrap();
 
@@ -221,6 +279,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2, 4],
                 ),
+                manager.base_fs().clone(),
             )
             .unwrap();
 
@@ -256,6 +315,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2],
                 ),
+                manager.base_fs().clone(),
             )
             .unwrap();
 

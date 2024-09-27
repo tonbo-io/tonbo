@@ -1,6 +1,6 @@
 use std::{borrow::Borrow, cmp::Ordering, marker::PhantomData, mem::size_of, ptr};
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use fusio::{Read, Write};
 
 use crate::{
     serdes::{Decode, Encode},
@@ -150,7 +150,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         self.ts.encode(writer).await?;
         self.value.encode(writer).await
@@ -169,7 +169,7 @@ where
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: AsyncRead + Unpin,
+        R: Read + Unpin,
     {
         let ts = Timestamp::decode(reader).await?;
         let value = V::decode(reader).await?;

@@ -1,16 +1,14 @@
-use std::{io, mem::size_of};
+use std::mem::size_of;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fusio::{Read, Write};
 
 use crate::serdes::{Decode, Encode};
 
 impl Encode for bool {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
-    async fn encode<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
-        writer
-            .write_all(&if *self { 1u8 } else { 0u8 }.to_le_bytes())
-            .await
+    async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+        if *self { 1u8 } else { 0u8 }.encode(writer).await
     }
 
     fn size(&self) -> usize {
@@ -19,15 +17,41 @@ impl Encode for bool {
 }
 
 impl Decode for bool {
-    type Error = io::Error;
+    type Error = fusio::Error;
 
-    async fn decode<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-        let buf = {
-            let mut buf = [0; size_of::<u8>()];
-            reader.read_exact(&mut buf).await?;
-            buf
-        };
+    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+        Ok(u8::decode(reader).await? == 1u8)
+    }
+}
 
-        Ok(u8::from_le_bytes(buf) == 1u8)
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use fusio::Seek;
+
+    use crate::serdes::{Decode, Encode};
+
+    #[tokio::test]
+    async fn test_encode_decode() {
+        let source_0 = true;
+        let source_1 = false;
+        let source_2 = true;
+
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+
+        source_0.encode(&mut cursor).await.unwrap();
+        source_1.encode(&mut cursor).await.unwrap();
+        source_2.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(0).await.unwrap();
+        let decoded_0 = bool::decode(&mut cursor).await.unwrap();
+        let decoded_1 = bool::decode(&mut cursor).await.unwrap();
+        let decoded_2 = bool::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(source_0, decoded_0);
+        assert_eq!(source_1, decoded_1);
+        assert_eq!(source_2, decoded_2);
     }
 }

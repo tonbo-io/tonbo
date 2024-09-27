@@ -1,16 +1,12 @@
-#[cfg(any(test, feature = "tokio"))]
-pub mod tokio_fs;
+pub mod manager;
 
 use std::{
     fmt::{Display, Formatter},
-    future::Future,
-    io,
-    path::Path,
+    str::FromStr,
 };
 
-use futures_core::Stream;
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use ulid::Ulid;
+use fusio::{fs::OpenOptions, path::Path};
+use ulid::{DecodeError, Ulid};
 
 pub(crate) type FileId = Ulid;
 
@@ -18,26 +14,6 @@ pub enum FileType {
     Wal,
     Parquet,
     Log,
-}
-
-pub trait AsyncFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
-
-impl<T> AsyncFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static {}
-
-pub trait FileProvider {
-    type File: AsyncFile;
-
-    fn create_dir_all(path: impl AsRef<Path>) -> impl Future<Output = io::Result<()>>;
-
-    fn open(path: impl AsRef<Path> + Send) -> impl Future<Output = io::Result<Self::File>> + Send;
-
-    fn remove(path: impl AsRef<Path> + Send) -> impl Future<Output = io::Result<()>> + Send;
-
-    fn list(
-        dir_path: impl AsRef<Path> + Send,
-        file_type: FileType,
-        is_reverse: bool,
-    ) -> io::Result<impl Stream<Item = io::Result<(Self::File, FileId)>>>;
 }
 
 impl Display for FileType {
@@ -48,4 +24,19 @@ impl Display for FileType {
             FileType::Log => write!(f, "log"),
         }
     }
+}
+
+pub(crate) fn default_open_options() -> OpenOptions {
+    OpenOptions::default().create().append().read()
+}
+
+pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<FileId>, DecodeError> {
+    path.filename()
+        .map(|file_name| {
+            let file_id = file_name
+                .strip_suffix(&format!(".{}", suffix))
+                .unwrap_or(file_name);
+            FileId::from_str(file_id)
+        })
+        .transpose()
 }

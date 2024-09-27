@@ -1,12 +1,10 @@
 pub mod timestamped;
 
-use std::io;
-
 use arrow::{
     array::{PrimitiveArray, Scalar},
     datatypes::UInt32Type,
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use fusio::{Read, Write};
 
 pub(crate) use self::timestamped::*;
 use crate::serdes::{Decode, Encode};
@@ -36,10 +34,10 @@ impl Timestamp {
 }
 
 impl Encode for Timestamp {
-    type Error = io::Error;
+    type Error = fusio::Error;
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         self.0.encode(writer).await
     }
@@ -48,10 +46,10 @@ impl Encode for Timestamp {
     }
 }
 impl Decode for Timestamp {
-    type Error = io::Error;
+    type Error = fusio::Error;
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: AsyncRead + Unpin,
+        R: Read + Unpin,
     {
         u32::decode(reader).await.map(Timestamp)
     }

@@ -5,16 +5,19 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_stream::stream;
+use fusio::local::TokioFs;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
 use tonbo::{
-    executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
+    executor::tokio::TokioExecutor, fs::manager::StoreManager, stream,
+    transaction::TransactionEntry, DbOption, Projection,
 };
 use tonbo_macros::Record;
 
@@ -222,15 +225,20 @@ impl BenchDatabase for TonboBenchDataBase {
     }
 
     async fn build(path: impl AsRef<Path>) -> Self {
-        let option = DbOption::from(path.as_ref()).disable_wal();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option =
+            DbOption::from(fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap())
+                .disable_wal();
 
-        let db = tonbo::DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db = tonbo::DB::new(option, TokioExecutor::new(), manager)
+            .await
+            .unwrap();
         TonboBenchDataBase::new(db)
     }
 }
 
 pub struct TonboBenchReadTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer, TokioExecutor>,
+    txn: tonbo::transaction::Transaction<'a, Customer>,
 }
 
 impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
@@ -245,7 +253,7 @@ impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
 }
 
 pub struct TonboBenchReader<'db, 'txn> {
-    txn: &'txn tonbo::transaction::Transaction<'db, Customer, TokioExecutor>,
+    txn: &'txn tonbo::transaction::Transaction<'db, Customer>,
 }
 
 impl BenchReader for TonboBenchReader<'_, '_> {
@@ -285,7 +293,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
 }
 
 pub struct TonboBenchWriteTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer, TokioExecutor>,
+    txn: tonbo::transaction::Transaction<'a, Customer>,
 }
 
 impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
@@ -305,7 +313,7 @@ impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
 }
 
 pub struct TonboBenchInserter<'db, 'txn> {
-    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer, TokioExecutor>,
+    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer>,
 }
 
 impl BenchInserter for TonboBenchInserter<'_, '_> {

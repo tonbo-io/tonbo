@@ -6,16 +6,16 @@ mod num;
 pub(crate) mod option;
 mod string;
 
-use std::{future::Future, io};
+use std::future::Future;
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use fusio::{Read, Write};
 
 pub trait Encode {
-    type Error: From<io::Error> + std::error::Error + Send + Sync + 'static;
+    type Error: From<fusio::Error> + std::error::Error + Send + Sync + 'static;
 
     fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
-        W: AsyncWrite + Unpin + Send;
+        W: Write + Unpin + Send;
 
     fn size(&self) -> usize;
 }
@@ -25,7 +25,7 @@ impl<T: Encode + Sync> Encode for &T {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         Encode::encode(*self, writer).await
     }
@@ -36,16 +36,18 @@ impl<T: Encode + Sync> Encode for &T {
 }
 
 pub trait Decode: Sized {
-    type Error: From<io::Error> + std::error::Error + Send + Sync + 'static;
+    type Error: From<fusio::Error> + std::error::Error + Send + Sync + 'static;
 
     fn decode<R>(reader: &mut R) -> impl Future<Output = Result<Self, Self::Error>>
     where
-        R: AsyncRead + Unpin;
+        R: Read + Unpin;
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt;
+    use std::io;
+
+    use fusio::{Read, Seek};
 
     use super::*;
 
@@ -55,13 +57,14 @@ mod tests {
         struct TestStruct(u32);
 
         impl Encode for TestStruct {
-            type Error = io::Error;
+            type Error = fusio::Error;
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: AsyncWrite + Unpin + Send,
+                W: Write + Unpin + Send,
             {
-                writer.write_u32(self.0).await?;
+                self.0.encode(writer).await?;
+
                 Ok(())
             }
 
@@ -71,25 +74,23 @@ mod tests {
         }
 
         impl Decode for TestStruct {
-            type Error = io::Error;
+            type Error = fusio::Error;
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
-                R: AsyncRead + Unpin,
+                R: Read + Unpin,
             {
-                let value = tokio::io::AsyncReadExt::read_u32(reader).await?;
-                Ok(TestStruct(value))
+                Ok(TestStruct(u32::decode(reader).await?))
             }
         }
 
         // Test encoding and decoding
         let original = TestStruct(42);
-        let mut buffer = Vec::new();
+        let mut buf = Vec::new();
+        let mut cursor = io::Cursor::new(&mut buf);
+        original.encode(&mut cursor).await.unwrap();
 
-        original.encode(&mut buffer).await.unwrap();
-        assert_eq!(buffer.len(), original.size());
-
-        let mut cursor = std::io::Cursor::new(buffer);
+        cursor.seek(0).await.unwrap();
         let decoded = TestStruct::decode(&mut cursor).await.unwrap();
 
         assert_eq!(original.0, decoded.0);

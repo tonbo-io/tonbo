@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fusio::{Read, Write};
 
 use crate::serdes::{Decode, Encode};
 
@@ -45,9 +45,9 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
-        writer.write_all(&[self.log_type as u8]).await?;
+        (self.log_type as u8).encode(writer).await?;
         self.record.encode(writer).await
     }
 
@@ -64,12 +64,9 @@ where
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: AsyncRead + Unpin,
+        R: Read + Unpin,
     {
-        let mut log_type = [0];
-        reader.read_exact(&mut log_type).await?;
-        let log_type = LogType::from(log_type[0]);
-
+        let log_type = LogType::from(u8::decode(reader).await?);
         let log = Re::decode(reader).await?;
 
         Ok(Self {
