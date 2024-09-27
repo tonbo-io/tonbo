@@ -196,8 +196,14 @@ impl TonboBenchDataBase {
 }
 
 impl BenchDatabase for TonboBenchDataBase {
-    type W<'db> = TonboBenchWriteTransaction<'db> where Self: 'db;
-    type R<'db> = TonboBenchReadTransaction<'db> where Self: 'db;
+    type W<'db>
+        = TonboBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = TonboBenchReadTransaction<'db>
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "tonbo"
@@ -228,7 +234,10 @@ pub struct TonboBenchReadTransaction<'a> {
 }
 
 impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
-    type T<'txn> = TonboBenchReader<'db, 'txn> where Self: 'txn;
+    type T<'txn>
+        = TonboBenchReader<'db, 'txn>
+    where
+        Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         TonboBenchReader { txn: &self.txn }
@@ -280,7 +289,10 @@ pub struct TonboBenchWriteTransaction<'a> {
 }
 
 impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
-    type W<'txn> = TonboBenchInserter<'db, 'txn> where Self: 'txn;
+    type W<'txn>
+        = TonboBenchInserter<'db, 'txn>
+    where
+        Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         TonboBenchInserter { txn: &mut self.txn }
@@ -320,8 +332,14 @@ impl RedbBenchDatabase {
 }
 
 impl BenchDatabase for RedbBenchDatabase {
-    type W<'db> = RedbBenchWriteTransaction where Self: 'db;
-    type R<'db> = RedbBenchReadTransaction where Self: 'db;
+    type W<'db>
+        = RedbBenchWriteTransaction
+    where
+        Self: 'db;
+    type R<'db>
+        = RedbBenchReadTransaction
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "redb"
@@ -351,7 +369,10 @@ pub struct RedbBenchReadTransaction {
 }
 
 impl BenchReadTransaction for RedbBenchReadTransaction {
-    type T<'txn> = RedbBenchReader where Self: 'txn;
+    type T<'txn>
+        = RedbBenchReader
+    where
+        Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         let table = self.txn.open_table(X).unwrap();
@@ -416,7 +437,10 @@ pub struct RedbBenchWriteTransaction {
 }
 
 impl BenchWriteTransaction for RedbBenchWriteTransaction {
-    type W<'txn> = RedbBenchInserter<'txn> where Self: 'txn;
+    type W<'txn>
+        = RedbBenchInserter<'txn>
+    where
+        Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         let table = self.txn.open_table(X).unwrap();
@@ -464,11 +488,11 @@ impl SledBenchDatabase {
 
 impl BenchDatabase for SledBenchDatabase {
     type W<'db>
-    = SledBenchWriteTransaction<'db>
+        = SledBenchWriteTransaction<'db>
     where
         Self: 'db;
     type R<'db>
-    = SledBenchReadTransaction<'db>
+        = SledBenchReadTransaction<'db>
     where
         Self: 'db;
 
@@ -500,7 +524,7 @@ pub struct SledBenchReadTransaction<'db> {
 
 impl BenchReadTransaction for SledBenchReadTransaction<'_> {
     type T<'txn>
-    = SledBenchReader<'txn>
+        = SledBenchReader<'txn>
     where
         Self: 'txn;
 
@@ -568,7 +592,7 @@ pub struct SledBenchWriteTransaction<'a> {
 
 impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
     type W<'txn>
-    = SledBenchInserter<'txn>
+        = SledBenchInserter<'txn>
     where
         Self: 'txn;
 
@@ -624,11 +648,11 @@ impl RocksdbBenchDatabase {
 
 impl BenchDatabase for RocksdbBenchDatabase {
     type W<'db>
-    = RocksdbBenchWriteTransaction<'db>
+        = RocksdbBenchWriteTransaction<'db>
     where
         Self: 'db;
     type R<'db>
-    = RocksdbBenchReadTransaction<'db>
+        = RocksdbBenchReadTransaction<'db>
     where
         Self: 'db;
 
@@ -667,7 +691,7 @@ pub struct RocksdbBenchWriteTransaction<'a> {
 
 impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
     type W<'txn>
-    = RocksdbBenchInserter<'txn>
+        = RocksdbBenchInserter<'txn>
     where
         Self: 'txn;
 
@@ -706,7 +730,7 @@ pub struct RocksdbBenchReadTransaction<'db> {
 
 impl<'db> BenchReadTransaction for RocksdbBenchReadTransaction<'db> {
     type T<'txn>
-    = RocksdbBenchReader<'db, 'txn>
+        = RocksdbBenchReader<'db, 'txn>
     where
         Self: 'txn;
 

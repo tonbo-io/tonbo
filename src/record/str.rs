@@ -23,7 +23,8 @@ impl Record for String {
 
     type Key = Self;
 
-    type Ref<'r> = &'r str
+    type Ref<'r>
+        = &'r str
     where
         Self: 'r;
 
