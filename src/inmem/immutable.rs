@@ -70,7 +70,7 @@ where
         ),
     ) -> Self {
         let mut index = BTreeMap::new();
-        let mut builder = A::builder(mutable.1.arrow_schema::<A::Record>(), mutable.0.len());
+        let mut builder = A::builder(&mutable.1.arrow_schema::<A::Record>(), mutable.0.len());
 
         for (offset, (key, value)) in mutable.0.into_iter().enumerate() {
             builder.push(

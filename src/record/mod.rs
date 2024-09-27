@@ -46,12 +46,12 @@ impl RecordInstance {
         }
     }
 
-    pub(crate) fn arrow_schema<R>(&self) -> &'static Arc<Schema>
+    pub(crate) fn arrow_schema<R>(&self) -> Arc<Schema>
     where
         R: Record,
     {
         match self {
-            RecordInstance::Normal => R::arrow_schema(),
+            RecordInstance::Normal => R::arrow_schema().clone(),
             RecordInstance::Runtime(record) => record.arrow_schema(),
         }
     }
