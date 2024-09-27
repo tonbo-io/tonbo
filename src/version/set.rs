@@ -1,7 +1,6 @@
 use std::{
-    io::SeekFrom,
+    collections::BinaryHeap,
     mem,
-    pin::pin,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -10,12 +9,12 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
+use fusio::{dynamic::DynFile, fs::FileMeta, Seek};
 use futures_util::StreamExt;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{FileId, FileProvider, FileType},
+    fs::{default_open_options, manager::StoreManager, parse_file_id, FileId, FileType},
     record::Record,
     serdes::Encode,
     timestamp::Timestamp,
@@ -23,30 +22,50 @@ use crate::{
     DbOption,
 };
 
-pub(crate) struct VersionSetInner<R, FP>
-where
-    R: Record,
-    FP: FileProvider,
-{
-    current: VersionRef<R, FP>,
-    log_with_id: (FP::File, FileId),
+struct CmpMeta(FileMeta);
+
+impl Eq for CmpMeta {}
+
+impl PartialEq<Self> for CmpMeta {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.path.eq(&other.0.path)
+    }
 }
 
-pub(crate) struct VersionSet<R, FP>
+impl PartialOrd<Self> for CmpMeta {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CmpMeta {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.path.cmp(&other.0.path)
+    }
+}
+
+pub(crate) struct VersionSetInner<R>
 where
     R: Record,
-    FP: FileProvider,
 {
-    inner: Arc<RwLock<VersionSetInner<R, FP>>>,
+    current: VersionRef<R>,
+    log_with_id: (Box<dyn DynFile>, FileId),
+}
+
+pub(crate) struct VersionSet<R>
+where
+    R: Record,
+{
+    inner: Arc<RwLock<VersionSetInner<R>>>,
     clean_sender: Sender<CleanTag>,
     timestamp: Arc<AtomicU32>,
     option: Arc<DbOption<R>>,
+    manager: Arc<StoreManager>,
 }
 
-impl<R, FP> Clone for VersionSet<R, FP>
+impl<R> Clone for VersionSet<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn clone(&self) -> Self {
         VersionSet {
@@ -54,14 +73,14 @@ where
             clean_sender: self.clean_sender.clone(),
             timestamp: self.timestamp.clone(),
             option: self.option.clone(),
+            manager: self.manager.clone(),
         }
     }
 }
 
-impl<R, FP> TransactionTs for VersionSet<R, FP>
+impl<R> TransactionTs for VersionSet<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn load_ts(&self) -> Timestamp {
         self.timestamp.load(Ordering::Acquire).into()
@@ -72,88 +91,90 @@ where
     }
 }
 
-impl<R, FP> VersionSet<R, FP>
+impl<R> VersionSet<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     pub(crate) async fn new(
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption<R>>,
+        manager: Arc<StoreManager>,
     ) -> Result<Self, VersionError<R>> {
-        let mut log_stream = pin!(FP::list(
-            option.version_log_dir_path(),
-            FileType::Log,
-            true
-        )?);
-        let mut first_log_id = None;
-        let mut version_log_id = None;
-        let mut version_log = None;
+        let fs = manager.base_fs();
+        let version_dir = option.version_log_dir_path();
+        let mut log_stream = fs.list(&version_dir).await?;
+        let mut log_binary_heap = BinaryHeap::with_capacity(3);
 
         // when there are multiple logs, this means that a downtime occurred during the
         // `version_log_snap_shot` process, the second newest file has the highest data
         // integrity, so it is used as the version log, and the older log is deleted first
         // to avoid midway downtime, which will cause the second newest file to become the
         // first newest after restart.
-        let mut i = 0;
         while let Some(result) = log_stream.next().await {
-            let (log, log_id) = result?;
+            let file_meta = result?;
 
-            if i <= 1 {
-                version_log = Some(log);
-                first_log_id = mem::replace(&mut version_log_id, Some(log_id));
-            } else {
-                FP::remove(option.version_log_path(&log_id)).await?;
+            log_binary_heap.push(CmpMeta(file_meta));
+
+            if log_binary_heap.len() > 2 {
+                if let Some(old_meta) = log_binary_heap.pop() {
+                    fs.remove(&old_meta.0.path).await?;
+                }
             }
-
-            i += 1;
-        }
-        if let Some(log_id) = first_log_id {
-            FP::remove(option.version_log_path(&log_id)).await?;
         }
 
-        let (mut log, log_id) = if let (Some(log), Some(log_id)) = (version_log, version_log_id) {
-            (log, log_id)
-        } else {
-            let log_id = FileId::new();
-            let log = FP::open(option.version_log_path(&log_id)).await?;
-            (log, log_id)
-        };
+        let second_log_id = log_binary_heap.pop();
+        let latest_log_id = log_binary_heap.pop();
 
+        if let (Some(log_id), Some(_)) = (&latest_log_id, &second_log_id) {
+            fs.remove(&log_id.0.path).await?;
+        }
+
+        let log_id = second_log_id
+            .or(latest_log_id)
+            .map(|file_meta| parse_file_id(&file_meta.0.path, FileType::Log))
+            .transpose()?
+            .flatten()
+            .unwrap_or_else(FileId::new);
+
+        let mut log = fs
+            .open_options(&option.version_log_path(&log_id), default_open_options())
+            .await?;
+
+        log.seek(0).await.unwrap();
         let edits = VersionEdit::recover(&mut log).await;
-        log.seek(SeekFrom::End(0)).await?;
 
         let timestamp = Arc::new(AtomicU32::default());
-        let set = VersionSet::<R, FP> {
+        drop(log_stream);
+        let set = VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
-                current: Arc::new(Version::<R, FP> {
+                current: Arc::new(Version::<R> {
                     ts: Timestamp::from(0),
                     level_slice: [const { Vec::new() }; MAX_LEVEL],
                     clean_sender: clean_sender.clone(),
                     option: option.clone(),
                     timestamp: timestamp.clone(),
                     log_length: 0,
-                    _p: Default::default(),
                 }),
                 log_with_id: (log, log_id),
             })),
             clean_sender,
             timestamp,
             option,
+            manager,
         };
         set.apply_edits(edits, None, true).await?;
 
         Ok(set)
     }
 
-    pub(crate) async fn current(&self) -> VersionRef<R, FP> {
+    pub(crate) async fn current(&self) -> VersionRef<R> {
         self.inner.read().await.current.clone()
     }
 
     pub(crate) async fn apply_edits(
         &self,
         mut version_edits: Vec<VersionEdit<R::Key>>,
-        delete_gens: Option<Vec<FileId>>,
+        delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {
         let timestamp = &self.timestamp;
@@ -178,7 +199,11 @@ where
                     if let Some(wal_ids) = scope.wal_ids.take() {
                         for wal_id in wal_ids {
                             // may have been removed after multiple starts
-                            let _ = FP::remove(option.wal_path(&wal_id)).await;
+                            let _ = self
+                                .manager
+                                .base_fs()
+                                .remove(&option.wal_path(&wal_id))
+                                .await;
                         }
                     }
                     if level == 0 {
@@ -203,7 +228,7 @@ where
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
                         new_version
                             .clean_sender
-                            .send_async(CleanTag::RecoverClean { gen })
+                            .send_async(CleanTag::RecoverClean { wal_id: gen })
                             .await
                             .map_err(VersionError::Send)?;
                     }
@@ -229,17 +254,22 @@ where
                 .await
                 .map_err(VersionError::Send)?;
         }
-        log.flush().await?;
+        log.sync_all().await?;
         if edit_len >= option.version_log_snapshot_threshold {
+            let fs = self.manager.base_fs();
             let old_log_id = mem::replace(log_id, FileId::new());
-            let _ = mem::replace(log, FP::open(option.version_log_path(log_id)).await?);
+            let new_log = fs
+                .open_options(&option.version_log_path(log_id), default_open_options())
+                .await?;
+            let mut old_log = mem::replace(log, new_log);
+            old_log.close().await?;
 
             new_version.log_length = 0;
             for new_edit in new_version.to_edits() {
                 new_edit.encode(log).await.map_err(VersionError::Encode)?;
             }
-            log.flush().await?;
-            FP::remove(option.version_log_path(&old_log_id)).await?;
+            log.sync_all().await?;
+            fs.remove(&option.version_log_path(&old_log_id)).await?;
         }
         guard.current = Arc::new(new_version);
         Ok(())
@@ -248,17 +278,16 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{io::SeekFrom, pin::pin, sync::Arc};
+    use std::sync::Arc;
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
+    use fusio::{local::TokioFs, path::Path};
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tokio::io::AsyncSeekExt;
 
     use crate::{
-        executor::tokio::TokioExecutor,
-        fs::{FileId, FileProvider, FileType},
+        fs::{default_open_options, manager::StoreManager, FileId},
         record::Record,
         scope::Scope,
         version::{
@@ -270,21 +299,23 @@ pub(crate) mod tests {
         DbOption,
     };
 
-    pub(crate) async fn build_version_set<R, FP>(
-        version: Version<R, FP>,
+    pub(crate) async fn build_version_set<R>(
+        version: Version<R>,
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption<R>>,
-    ) -> Result<VersionSet<R, FP>, VersionError<R>>
+        manager: Arc<StoreManager>,
+    ) -> Result<VersionSet<R>, VersionError<R>>
     where
         R: Record,
-        FP: FileProvider,
     {
         let log_id = FileId::new();
-        let mut log = FP::open(option.version_log_path(&log_id)).await?;
-        log.seek(SeekFrom::End(0)).await?;
-
+        let log = manager
+            .base_fs()
+            .open_options(&option.version_log_path(&log_id), default_open_options())
+            .await?;
         let timestamp = version.timestamp.clone();
-        Ok(VersionSet::<R, FP> {
+
+        Ok(VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
                 log_with_id: (log, log_id),
@@ -292,20 +323,26 @@ pub(crate) mod tests {
             clean_sender,
             timestamp,
             option,
+            manager,
         })
     }
 
     #[tokio::test]
     async fn timestamp_persistence() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
         let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::from(temp_dir.path()));
-        TokioExecutor::create_dir_all(&option.version_log_dir_path())
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
 
-        let version_set: VersionSet<String, TokioExecutor> =
-            VersionSet::new(sender.clone(), option.clone())
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
 
@@ -320,8 +357,8 @@ pub(crate) mod tests {
 
         drop(version_set);
 
-        let version_set: VersionSet<String, TokioExecutor> =
-            VersionSet::new(sender.clone(), option.clone())
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
         assert_eq!(version_set.load_ts(), 20_u32.into());
@@ -330,17 +367,19 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn version_log_snap_shot() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
         let (sender, _) = bounded(1);
-        let mut option = DbOption::from(temp_dir.path());
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
-        TokioExecutor::create_dir_all(&option.version_log_dir_path())
+        manager
+            .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
 
-        let version_set: VersionSet<String, TokioExecutor> =
-            VersionSet::new(sender.clone(), option.clone())
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
         let gen_0 = FileId::new();
@@ -395,7 +434,7 @@ pub(crate) mod tests {
         let mut guard = version_set.inner.write().await;
         let log = &mut guard.log_with_id.0;
 
-        log.seek(SeekFrom::Start(0)).await.unwrap();
+        log.seek(0).await.unwrap();
         let edits = VersionEdit::<String>::recover(log).await;
 
         assert_eq!(edits.len(), 3);
@@ -418,12 +457,20 @@ pub(crate) mod tests {
         drop(guard);
         drop(version_set);
 
-        let (mut log, _) =
-            pin!(TokioExecutor::list(option.version_log_dir_path(), FileType::Log, true).unwrap())
-                .next()
-                .await
-                .unwrap()
-                .unwrap();
+        let version_dir_path = option.version_log_dir_path();
+        let mut stream = manager.base_fs().list(&version_dir_path).await.unwrap();
+        let mut logs = Vec::new();
+
+        while let Some(log) = stream.next().await {
+            logs.push(log.unwrap());
+        }
+        logs.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
+
+        let mut log = manager
+            .base_fs()
+            .open_options(&logs.pop().unwrap().path, default_open_options())
+            .await
+            .unwrap();
         let edits = VersionEdit::<String>::recover(&mut log).await;
 
         assert_eq!(edits.len(), 3);
@@ -448,16 +495,20 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn version_level_sort() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from(temp_dir.path());
-        let option = Arc::new(option);
+        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
         let (sender, _) = bounded(1);
-        TokioExecutor::create_dir_all(&option.version_log_dir_path())
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
 
-        let version_set: VersionSet<String, TokioExecutor> =
-            VersionSet::new(sender.clone(), option.clone())
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
         let gen_0 = FileId::new();

@@ -2,14 +2,14 @@ mod checksum;
 pub(crate) mod log;
 pub(crate) mod record_entry;
 
-use std::{io, marker::PhantomData};
+use std::marker::PhantomData;
 
 use async_stream::stream;
 use checksum::{HashReader, HashWriter};
+use fusio::{Read, Write};
 use futures_core::Stream;
 use log::Log;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::{
     fs::FileId,
@@ -42,7 +42,7 @@ impl<F, R> WalFile<F, R> {
 
 impl<F, R> WalFile<F, R>
 where
-    F: AsyncWrite + Unpin + Send,
+    F: Write + Unpin + Send,
     R: Record,
 {
     pub(crate) async fn write<'r>(
@@ -59,14 +59,14 @@ where
         Ok(())
     }
 
-    pub(crate) async fn flush(&mut self) -> io::Result<()> {
-        self.file.flush().await
+    pub(crate) async fn flush(&mut self) -> Result<(), fusio::Error> {
+        self.file.close().await
     }
 }
 
 impl<F, R> WalFile<F, R>
 where
-    F: AsyncRead + Unpin,
+    F: Read + Unpin,
     R: Record,
 {
     pub(crate) fn recover(
@@ -78,17 +78,13 @@ where
         >,
     > + '_ {
         stream! {
-            let mut file = BufReader::new(&mut self.file);
-
             loop {
-                if file.buffer().is_empty() && file.fill_buf().await?.is_empty() {
-                    return;
-                }
+                let mut reader = HashReader::new(&mut self.file);
 
-                let mut reader = HashReader::new(&mut file);
-
-                let record = Log::<RecordEntry<'static, R>>::decode(&mut reader).await.map_err(RecoverError::Io)?;
-
+                let record = match Log::<RecordEntry<'static, R>>::decode(&mut reader).await {
+                    Ok(record) => record,
+                    Err(_) => return,
+                };
                 if !reader.checksum().await? {
                     yield Err(RecoverError::Checksum);
                     return;
@@ -111,12 +107,15 @@ pub enum RecoverError<E: std::error::Error> {
     Checksum,
     #[error("wal recover io error")]
     Io(#[from] std::io::Error),
+    #[error("wal recover fusio error")]
+    Fusio(#[from] fusio::Error),
 }
 
 #[cfg(test)]
 mod tests {
     use std::{io::Cursor, pin::pin};
 
+    use fusio::Seek;
     use futures_util::StreamExt;
 
     use super::{log::LogType, FileId, WalFile};
@@ -124,9 +123,10 @@ mod tests {
 
     #[tokio::test]
     async fn write_and_recover() {
-        let mut file = Vec::new();
+        let mut bytes = Vec::new();
+        let mut file = Cursor::new(&mut bytes);
         {
-            let mut wal = WalFile::<_, String>::new(Cursor::new(&mut file), FileId::new());
+            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
             wal.write(
                 LogType::Full,
                 Timestamped::new("hello", 0.into()),
@@ -137,7 +137,8 @@ mod tests {
             wal.flush().await.unwrap();
         }
         {
-            let mut wal = WalFile::<_, String>::new(Cursor::new(&mut file), FileId::new());
+            file.seek(0).await.unwrap();
+            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
 
             {
                 let mut stream = pin!(wal.recover());
@@ -145,6 +146,8 @@ mod tests {
                 assert_eq!(key.ts, 0.into());
                 assert_eq!(value, Some("hello".to_string()));
             }
+
+            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
 
             wal.write(
                 LogType::Full,
@@ -156,7 +159,8 @@ mod tests {
         }
 
         {
-            let mut wal = WalFile::<_, String>::new(Cursor::new(&mut file), FileId::new());
+            file.seek(0).await.unwrap();
+            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
 
             {
                 let mut stream = pin!(wal.recover());

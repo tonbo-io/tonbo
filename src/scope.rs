@@ -1,6 +1,6 @@
 use std::ops::Bound;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use fusio::{Read, Write};
 
 use crate::{
     fs::FileId,
@@ -79,12 +79,13 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         self.min.encode(writer).await?;
         self.max.encode(writer).await?;
 
-        writer.write_all(&self.gen.to_bytes()).await?;
+        let (result, _) = writer.write_all(&self.gen.to_bytes()[..]).await;
+        result?;
 
         match &self.wal_ids {
             None => {
@@ -94,7 +95,8 @@ where
                 1u8.encode(writer).await?;
                 (ids.len() as u32).encode(writer).await?;
                 for id in ids {
-                    writer.write_all(&id.to_bytes()).await?;
+                    let (result, _) = writer.write_all(&id.to_bytes()[..]).await;
+                    result?;
                 }
             }
         }
@@ -113,14 +115,15 @@ where
 {
     type Error = <K as Decode>::Error;
 
-    async fn decode<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+        let mut buf = vec![0u8; 16];
         let min = K::decode(reader).await?;
         let max = K::decode(reader).await?;
 
         let gen = {
-            let mut slice = [0; 16];
-            reader.read_exact(&mut slice).await?;
-            FileId::from_bytes(slice)
+            buf = reader.read_exact(buf).await?;
+            // SAFETY
+            FileId::from_bytes(buf.as_slice().try_into().unwrap())
         };
         let wal_ids = match u8::decode(reader).await? {
             0 => None,
@@ -129,9 +132,9 @@ where
                 let mut ids = Vec::with_capacity(len);
 
                 for _ in 0..len {
-                    let mut slice = [0; 16];
-                    reader.read_exact(&mut slice).await?;
-                    ids.push(FileId::from_bytes(slice));
+                    buf = reader.read_exact(buf).await?;
+                    // SAFETY
+                    ids.push(FileId::from_bytes(buf.as_slice().try_into().unwrap()));
                 }
                 Some(ids)
             }

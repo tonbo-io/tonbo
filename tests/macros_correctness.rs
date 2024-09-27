@@ -10,9 +10,10 @@ pub struct User {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{io::Cursor, sync::Arc};
 
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array, UInt8Array};
+    use fusio::Seek;
     use parquet::{
         arrow::{arrow_to_parquet_schema, ProjectionMask},
         format::SortingColumn,
@@ -184,14 +185,14 @@ mod tests {
             age: 32,
         };
         let original_ref = original.as_record_ref();
-        let mut buffer = Vec::new();
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
 
         assert_eq!(original_ref.size(), 26);
-        original_ref.encode(&mut buffer).await.unwrap();
+        original_ref.encode(&mut cursor).await.unwrap();
 
-        let mut cursor = std::io::Cursor::new(buffer);
+        cursor.seek(0).await.unwrap();
         let decoded = User::decode(&mut cursor).await.unwrap();
-
         assert_eq!(original, decoded);
     }
 

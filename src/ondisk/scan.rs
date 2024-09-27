@@ -4,36 +4,30 @@ use std::{
     task::{Context, Poll},
 };
 
+use fusio_parquet::reader::AsyncReader;
 use futures_core::{ready, Stream};
 use parquet::arrow::{async_reader::ParquetRecordBatchStream, ProjectionMask};
 use pin_project_lite::pin_project;
 
 use crate::{
-    fs::FileProvider,
     record::Record,
     stream::record_batch::{RecordBatchEntry, RecordBatchIterator},
 };
 
 pin_project! {
     #[derive(Debug)]
-    pub struct SsTableScan<'scan, R, FP>
-    where
-        FP: FileProvider,
-    {
+    pub struct SsTableScan<'scan, R>{
         #[pin]
-        stream: ParquetRecordBatchStream<FP::File>,
+        stream: ParquetRecordBatchStream<AsyncReader>,
         iter: Option<RecordBatchIterator<R>>,
         projection_mask: ProjectionMask,
         _marker: PhantomData<&'scan ()>
     }
 }
 
-impl<R, FP> SsTableScan<'_, R, FP>
-where
-    FP: FileProvider,
-{
+impl<R> SsTableScan<'_, R> {
     pub fn new(
-        stream: ParquetRecordBatchStream<FP::File>,
+        stream: ParquetRecordBatchStream<AsyncReader>,
         projection_mask: ProjectionMask,
     ) -> Self {
         SsTableScan {
@@ -45,10 +39,9 @@ where
     }
 }
 
-impl<'scan, R, FP> Stream for SsTableScan<'scan, R, FP>
+impl<'scan, R> Stream for SsTableScan<'scan, R>
 where
     R: Record,
-    FP: FileProvider,
 {
     type Item = Result<RecordBatchEntry<R>, parquet::errors::ParquetError>;
 

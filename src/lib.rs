@@ -31,10 +31,15 @@
 //! # Examples
 //!
 //! ```no_run
-//! use std::ops::Bound;
+//! use std::{ops::Bound, sync::Arc};
 //!
+//! use fusio::{local::TokioFs, path::Path};
 //! use futures_util::stream::StreamExt;
-//! use tonbo::{executor::tokio::TokioExecutor, Projection, Record, DB};
+//! use tokio::fs;
+//! use tokio_util::bytes::Bytes;
+//! use tonbo::{
+//!     executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Projection, Record, DB,
+//! };
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
@@ -48,11 +53,15 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
+//!     // make sure the path exists
+//!     let _ = fs::create_dir_all("./db_path/users").await;
+//!
+//!     let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+//!     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new("./db_path/users".into(), TokioExecutor::default())
+//!     let db = DB::new(options, TokioExecutor::default(), manager)
 //!         .await
 //!         .unwrap();
-//!
 //!     // insert with owned value
 //!     db.insert(User {
 //!         name: "Alice".into(),
@@ -130,7 +139,7 @@ pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
-use fs::FileProvider;
+use fusio::dynamic::DynFile;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
@@ -153,7 +162,7 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, Compactor},
     executor::Executor,
-    fs::{FileId, FileType},
+    fs::{default_open_options, manager::StoreManager, parse_file_id, FileId, FileType},
     serdes::Decode,
     stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
@@ -170,9 +179,10 @@ where
     R: Record,
     E: Executor,
 {
-    schema: Arc<RwLock<Schema<R, E>>>,
-    version_set: VersionSet<R, E>,
+    schema: Arc<RwLock<Schema<R>>>,
+    version_set: VersionSet<R>,
     lock_map: LockMap<R::Key>,
+    manager: Arc<StoreManager>,
     _p: PhantomData<E>,
 }
 
@@ -187,22 +197,36 @@ where
     /// according to the configuration of [`DbOption`].
     ///
     /// For more configurable options, please refer to [`DbOption`].
-    pub async fn new(option: DbOption<R>, executor: E) -> Result<Self, DbError<R>> {
+    pub async fn new(
+        option: DbOption<R>,
+        executor: E,
+        manager: StoreManager,
+    ) -> Result<Self, DbError<R>> {
         let option = Arc::new(option);
-        E::create_dir_all(&option.path).await?;
-        E::create_dir_all(&option.wal_dir_path()).await?;
-        E::create_dir_all(&option.version_log_dir_path()).await?;
+        let manager = Arc::new(manager);
+
+        {
+            let base_fs = manager.base_fs();
+
+            // FIXME: error handle
+            let _ = base_fs.create_dir_all(&option.wal_dir_path()).await;
+            let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
+        }
 
         let (task_tx, task_rx) = bounded(1);
 
-        let (mut cleaner, clean_sender) = Cleaner::<R, E>::new(option.clone());
+        let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
 
-        let version_set = VersionSet::new(clean_sender, option.clone()).await?;
+        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let schema = Arc::new(RwLock::new(
-            Schema::new(option.clone(), task_tx, &version_set).await?,
+            Schema::new(option.clone(), task_tx, &version_set, &manager).await?,
         ));
-        let mut compactor =
-            Compactor::<R, E>::new(schema.clone(), option.clone(), version_set.clone());
+        let mut compactor = Compactor::<R>::new(
+            schema.clone(),
+            option.clone(),
+            version_set.clone(),
+            manager.clone(),
+        );
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -226,16 +250,18 @@ where
             schema,
             version_set,
             lock_map: Arc::new(Default::default()),
+            manager,
             _p: Default::default(),
         })
     }
 
     /// open an optimistic ACID transaction
-    pub async fn transaction(&self) -> Transaction<'_, R, E> {
+    pub async fn transaction(&self) -> Transaction<'_, R> {
         Transaction::new(
             self.version_set.current().await,
             self.schema.read().await,
             self.lock_map.clone(),
+            self.manager.clone(),
         )
     }
 
@@ -286,6 +312,7 @@ where
             .await
             .get(
                 &*self.version_set.current().await,
+                &self.manager,
                 key,
                 self.version_set.load_ts(),
                 Projection::All,
@@ -302,9 +329,11 @@ where
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
+            let manager = &self.manager;
             let current = self.version_set.current().await;
             let mut scan = Scan::new(
                 &schema,
+                manager,
                 range,
                 self.version_set.load_ts(),
                 &*current,
@@ -358,44 +387,61 @@ where
     }
 }
 
-pub(crate) struct Schema<R, FP>
+pub(crate) struct Schema<R>
 where
     R: Record,
-    FP: FileProvider,
 {
-    mutable: Mutable<R, FP>,
-    immutables: Vec<(Option<FileId>, Immutable<R::Columns>)>,
+    pub mutable: Mutable<R>,
+    pub immutables: Vec<(Option<FileId>, Immutable<R::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
-impl<R, FP> Schema<R, FP>
+impl<R> Schema<R>
 where
     R: Record + Send,
-    FP: FileProvider,
 {
     async fn new(
         option: Arc<DbOption<R>>,
         compaction_tx: Sender<CompactTask>,
-        version_set: &VersionSet<R, FP>,
+        version_set: &VersionSet<R>,
+        manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
         let mut schema = Schema {
-            mutable: Mutable::new(&option, trigger.clone()).await?,
+            mutable: Mutable::new(&option, trigger.clone(), manager.base_fs()).await?,
             immutables: Default::default(),
             compaction_tx,
             recover_wal_ids: None,
             trigger,
         };
 
+        let base_fs = manager.base_fs();
+        let wal_dir_path = option.wal_dir_path();
         let mut transaction_map = HashMap::new();
-        let mut wal_stream = pin!(FP::list(option.wal_dir_path(), FileType::Wal, false)?);
         let mut wal_ids = Vec::new();
 
-        while let Some(wal) = wal_stream.next().await {
-            let (file, wal_id) = wal?;
-            let mut wal = WalFile::<FP::File, R>::new(file, wal_id);
+        let wal_metas = {
+            let mut wal_metas = Vec::new();
+            let mut wal_stream = base_fs.list(&wal_dir_path).await?;
+
+            while let Some(file_meta) = wal_stream.next().await {
+                wal_metas.push(file_meta?);
+            }
+            wal_metas.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
+            wal_metas
+        };
+
+        for wal_meta in wal_metas {
+            let wal_path = wal_meta.path;
+
+            let file = base_fs
+                .open_options(&wal_path, default_open_options())
+                .await?;
+            // SAFETY: wal_stream return only file name
+            let wal_id = parse_file_id(&wal_path, FileType::Wal)?.unwrap();
+            let mut wal = WalFile::<Box<dyn DynFile>, R>::new(file, wal_id);
             wal_ids.push(wal_id);
 
             let mut recover_stream = pin!(wal.recover());
@@ -465,14 +511,12 @@ where
 
     async fn get<'get>(
         &'get self,
-        version: &'get Version<R, FP>,
+        version: &'get Version<R>,
+        manager: &StoreManager,
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
-    ) -> Result<Option<Entry<'get, R>>, DbError<R>>
-    where
-        FP: FileProvider,
-    {
+    ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
         if let Some(entry) = self.mutable.get(key, ts) {
             return Ok(Some(Entry::Mutable(entry)));
         }
@@ -500,7 +544,7 @@ where
         }
 
         Ok(version
-            .query(TimestampedRef::new(key, ts), projection)
+            .query(manager, TimestampedRef::new(key, ts), projection)
             .await?
             .map(|entry| Entry::RecordBatch(entry)))
     }
@@ -516,41 +560,42 @@ where
 }
 
 /// scan configuration intermediate structure
-pub struct Scan<'scan, R, FP>
+pub struct Scan<'scan, R>
 where
     R: Record,
-    FP: FileProvider,
 {
-    schema: &'scan Schema<R, FP>,
+    schema: &'scan Schema<R>,
+    manager: &'scan StoreManager,
     lower: Bound<&'scan R::Key>,
     upper: Bound<&'scan R::Key>,
     ts: Timestamp,
 
-    version: &'scan Version<R, FP>,
+    version: &'scan Version<R>,
     fn_pre_stream:
-        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, FP>> + 'scan>,
+        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
 
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
 }
 
-impl<'scan, R, FP> Scan<'scan, R, FP>
+impl<'scan, R> Scan<'scan, R>
 where
     R: Record + Send,
-    FP: FileProvider,
 {
     fn new(
-        schema: &'scan Schema<R, FP>,
+        schema: &'scan Schema<R>,
+        manager: &'scan StoreManager,
         (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
-        version: &'scan Version<R, FP>,
+        version: &'scan Version<R>,
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, FP>> + 'scan,
+            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
     ) -> Self {
         Self {
             schema,
+            manager,
             lower,
             upper,
             ts,
@@ -627,6 +672,7 @@ where
         }
         self.version
             .streams(
+                self.manager,
                 &mut streams,
                 (self.lower, self.upper),
                 self.ts,
@@ -678,6 +724,7 @@ where
         }
         self.version
             .streams(
+                self.manager,
                 &mut streams,
                 (self.lower, self.upper),
                 self.ts,
@@ -706,12 +753,18 @@ where
     Version(#[from] VersionError<R>),
     #[error("write parquet error: {0}")]
     Parquet(#[from] ParquetError),
+    #[error("write ulid decode error: {0}")]
+    UlidDecode(#[from] ulid::DecodeError),
+    #[error("write fusio error: {0}")]
+    Fusio(#[from] fusio::Error),
     // #[error("write encode error: {0}")]
     // Encode(<<R as Record>::Ref as Encode>::Error),
     #[error("write recover error: {0}")]
     Recover(#[from] RecoverError<<R as Decode>::Error>),
     #[error("wal write error: {0}")]
     WalWrite(Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error("exceeds the maximum level(0-6)")]
+    ExceedsMaxLevel,
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
@@ -735,16 +788,16 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
+    use fusio::{local::TokioFs, path::Path, DynFs, Read, Write};
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
-    use tokio::io;
     use tracing::error;
 
     use crate::{
         compaction::{CompactTask, Compactor},
         executor::{tokio::TokioExecutor, Executor},
-        fs::{FileId, FileProvider},
+        fs::{manager::StoreManager, FileId},
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
         record::{internal::InternalRecordRef, RecordDecodeError, RecordEncodeError, RecordRef},
         serdes::{Decode, Encode},
@@ -766,7 +819,7 @@ pub(crate) mod tests {
 
         async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
         where
-            R: tokio::io::AsyncRead + Unpin,
+            R: Read + Unpin,
         {
             let vstring =
                 String::decode(reader)
@@ -868,7 +921,7 @@ pub(crate) mod tests {
 
         async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
         where
-            W: io::AsyncWrite + Unpin + Send,
+            W: Write + Unpin + Send,
         {
             self.vstring
                 .encode(writer)
@@ -970,8 +1023,10 @@ pub(crate) mod tests {
     pub(crate) async fn get_test_record_batch<E: Executor + Send + Sync + 'static>(
         option: DbOption<Test>,
         executor: E,
+        manager: StoreManager,
     ) -> RecordBatch {
-        let db: DB<Test, E> = DB::new(option.clone(), executor).await.unwrap();
+        let base_fs = manager.base_fs().clone();
+        let db: DB<Test, E> = DB::new(option.clone(), executor, manager).await.unwrap();
 
         db.write(
             Test {
@@ -999,7 +1054,7 @@ pub(crate) mod tests {
         let trigger = schema.trigger.clone();
         let mutable = mem::replace(
             &mut schema.mutable,
-            Mutable::new(&option, trigger).await.unwrap(),
+            Mutable::new(&option, trigger, &base_fs).await.unwrap(),
         );
 
         Immutable::<<Test as Record>::Columns>::from(mutable.data)
@@ -1009,10 +1064,11 @@ pub(crate) mod tests {
 
     pub(crate) async fn build_schema(
         option: Arc<DbOption<Test>>,
-    ) -> io::Result<(crate::Schema<Test, TokioExecutor>, Receiver<CompactTask>)> {
+        fs: &Arc<dyn DynFs>,
+    ) -> Result<(crate::Schema<Test>, Receiver<CompactTask>), fusio::Error> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let mutable = Mutable::new(&option, trigger.clone()).await?;
+        let mutable = Mutable::new(&option, trigger.clone(), fs).await?;
 
         mutable
             .insert(
@@ -1054,8 +1110,7 @@ pub(crate) mod tests {
         let immutables = {
             let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-            let mutable: Mutable<Test, TokioExecutor> =
-                Mutable::new(&option, trigger.clone()).await?;
+            let mutable: Mutable<Test> = Mutable::new(&option, trigger.clone(), fs).await?;
 
             mutable
                 .insert(
@@ -1115,25 +1170,33 @@ pub(crate) mod tests {
         option: Arc<DbOption<R>>,
         compaction_rx: Receiver<CompactTask>,
         executor: E,
-        schema: crate::Schema<R, E>,
-        version: Version<R, E>,
+        schema: crate::Schema<R>,
+        version: Version<R>,
+        manager: Arc<StoreManager>,
     ) -> Result<DB<R, E>, DbError<R>>
     where
         R: Record + Send + Sync,
         R::Columns: Send + Sync,
         E: Executor + Send + Sync + 'static,
     {
-        E::create_dir_all(&option.path).await?;
-        E::create_dir_all(&option.version_log_dir_path())
-            .await
-            .unwrap();
+        {
+            let base_fs = manager.base_fs();
+
+            let _ = base_fs.create_dir_all(&option.wal_dir_path()).await;
+            let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
+        }
 
         let schema = Arc::new(RwLock::new(schema));
 
-        let (mut cleaner, clean_sender) = Cleaner::<R, E>::new(option.clone());
-        let version_set = build_version_set(version, clean_sender, option.clone()).await?;
-        let mut compactor =
-            Compactor::<R, E>::new(schema.clone(), option.clone(), version_set.clone());
+        let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
+        let version_set =
+            build_version_set(version, clean_sender, option.clone(), manager.clone()).await?;
+        let mut compactor = Compactor::<R>::new(
+            schema.clone(),
+            option.clone(),
+            version_set.clone(),
+            manager.clone(),
+        );
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -1157,6 +1220,7 @@ pub(crate) mod tests {
             schema,
             version_set,
             lock_map: Arc::new(Default::default()),
+            manager,
             _p: Default::default(),
         })
     }
@@ -1369,8 +1433,9 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
-        let mut option = DbOption::from(temp_dir.path());
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1379,12 +1444,16 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
+            .await
+            .unwrap();
 
-        for item in test_items() {
+        for (i, item) in test_items().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
+            if i % 5 == 0 {
+                db.flush().await.unwrap();
+            }
         }
-        let _ = db.flush().await;
 
         let tx = db.transaction().await;
         let key = 20.to_string();
@@ -1403,8 +1472,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_flush() {
         let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
-        let mut option = DbOption::from(temp_dir.path());
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1413,7 +1483,9 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
+            .await
+            .unwrap();
 
         for item in &test_items()[0..10] {
             db.write(item.clone(), 0.into()).await.unwrap();
@@ -1430,16 +1502,18 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn schema_recover() {
         let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::from(temp_dir.path()));
-        TokioExecutor::create_dir_all(&option.wal_dir_path())
-            .await
-            .unwrap();
+        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
+        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
-        let schema: crate::Schema<Test, TokioExecutor> = crate::Schema {
-            mutable: Mutable::new(&option, trigger.clone()).await.unwrap(),
+        let schema: crate::Schema<Test> = crate::Schema {
+            mutable: Mutable::new(&option, trigger.clone(), &fs).await.unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx.clone(),
             recover_wal_ids: None,
@@ -1456,8 +1530,8 @@ pub(crate) mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let schema: crate::Schema<Test, TokioExecutor> = crate::Schema {
-            mutable: Mutable::new(&option, trigger.clone()).await.unwrap(),
+        let schema: crate::Schema<Test> = crate::Schema {
+            mutable: Mutable::new(&option, trigger.clone(), &fs).await.unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx,
             recover_wal_ids: None,

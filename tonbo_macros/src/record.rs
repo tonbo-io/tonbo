@@ -310,7 +310,7 @@ fn trait_decode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
-                R: ::tokio::io::AsyncRead + Unpin,
+                R: ::fusio::Read + Unpin,
             {
                 #(#decode_method_fields)*
 
@@ -498,7 +498,7 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: ::tokio::io::AsyncWrite + Unpin + Send,
+                W: ::fusio::Write + Unpin + Send,
             {
                 #(#encode_method_fields)*
 
@@ -691,15 +691,21 @@ fn struct_builder_codegen(
                 self.#field_name.append_null();
             });
         } else {
-            builder_push_some_fields.push(quote! {
-                self.#field_name.append_value(row.#field_name.unwrap());
-            });
-            builder_push_none_fields.push(if is_string {
-                quote!(self.#field_name.append_value("");)
+            let append_default = if is_string {
+                quote!(self.#field_name.append_value(""))
             } else if is_bytes {
-                quote!(self.#field_name.append_value(&[]);)
+                quote!(self.#field_name.append_value(&[]))
             } else {
-                quote!(self.#field_name.append_value(Default::default());)
+                quote!(self.#field_name.append_value(Default::default()))
+            };
+            builder_push_some_fields.push(quote! {
+                match row.#field_name {
+                    Some(#field_name) => self.#field_name.append_value(#field_name),
+                    None => #append_default,
+                }
+            });
+            builder_push_none_fields.push(quote! {
+                #append_default;
             });
         }
     }

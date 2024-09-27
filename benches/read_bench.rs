@@ -2,15 +2,13 @@ mod common;
 
 use std::{
     collections::Bound,
-    env::current_dir,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use futures_util::{future::join_all, StreamExt};
-use tokio::io::AsyncWriteExt;
-use tonbo::{executor::tokio::TokioExecutor, fs::FileProvider};
+use tokio::{fs, io::AsyncWriteExt};
 
 use crate::common::{
     read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
@@ -181,7 +179,7 @@ async fn main() {
     println!();
     println!("{table}");
 
-    let mut file = TokioExecutor::open("read_benchmark.md").await.unwrap();
+    let mut file = fs::File::create("read_benchmark.md").await.unwrap();
     file.write_all(b"Read: \n```shell\n").await.unwrap();
     for line in table.lines() {
         file.write_all(line.as_bytes()).await.unwrap();

@@ -17,12 +17,20 @@ use datafusion::{
     error::{DataFusionError, Result},
     execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext},
     physical_expr::EquivalenceProperties,
-    physical_plan::{DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties},
+    physical_plan::{
+        execute_stream, DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
+    },
     prelude::*,
+    sql::parser::DFParser,
 };
+use fusio::{local::TokioFs, path::Path};
 use futures_core::Stream;
 use futures_util::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DB};
+use tokio::fs;
+use tonbo::{
+    executor::tokio::TokioExecutor, fs::manager::StoreManager, inmem::immutable::ArrowArrays,
+    record::Record, DbOption, DB,
+};
 use tonbo_macros::Record;
 
 #[derive(Record, Debug)]
@@ -198,7 +206,13 @@ impl ExecutionPlan for MusicExec {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let db = DB::new("./db_path/music".into(), TokioExecutor::default())
+    // make sure the path exists
+    let _ = fs::create_dir_all("./db_path/music").await;
+
+    let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+    let options = DbOption::from(Path::from_filesystem_path("./db_path/music").unwrap());
+
+    let db = DB::new(options, TokioExecutor::default(), manager)
         .await
         .unwrap();
     for (id, name, like) in [
@@ -214,9 +228,29 @@ async fn main() -> Result<()> {
     let provider = MusicProvider { db: Arc::new(db) };
     ctx.register_table("music", Arc::new(provider))?;
 
-    let df = ctx.table("music").await?;
-    let df = df.select(vec![col("name")])?;
-    let batches = df.collect().await?;
-    pretty::print_batches(&batches).unwrap();
+    {
+        let df = ctx.table("music").await?;
+        let df = df.select(vec![col("name")])?;
+        let batches = df.collect().await?;
+        pretty::print_batches(&batches).unwrap();
+    }
+
+    {
+        // support sql query for tonbo
+        let statements = DFParser::parse_sql("select * from music")?;
+        let plan = ctx
+            .state()
+            .statement_to_plan(statements.front().cloned().unwrap())
+            .await?;
+        ctx.execute_logical_plan(plan).await?;
+        let df = ctx.table("music").await?;
+        let physical_plan = df.create_physical_plan().await?;
+        let mut stream = execute_stream(physical_plan, ctx.task_ctx())?;
+        while let Some(maybe_batch) = stream.next().await {
+            let batch = maybe_batch?;
+            pretty::print_batches(&[batch]).unwrap();
+        }
+    }
+
     Ok(())
 }

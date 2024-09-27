@@ -3,7 +3,6 @@ pub(crate) mod edit;
 pub(crate) mod set;
 
 use std::{
-    marker::PhantomData,
     ops::Bound,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -12,12 +11,13 @@ use std::{
 };
 
 use flume::{SendError, Sender};
+use fusio::DynFs;
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    fs::{FileId, FileProvider},
+    fs::{default_open_options, manager::StoreManager, FileId},
     ondisk::sstable::SsTable,
     record::Record,
     scope::Scope,
@@ -30,7 +30,7 @@ use crate::{
 
 pub(crate) const MAX_LEVEL: usize = 7;
 
-pub(crate) type VersionRef<R, FP> = Arc<Version<R, FP>>;
+pub(crate) type VersionRef<R> = Arc<Version<R>>;
 
 pub(crate) trait TransactionTs {
     fn load_ts(&self) -> Timestamp;
@@ -39,10 +39,9 @@ pub(crate) trait TransactionTs {
 }
 
 #[derive(Debug)]
-pub(crate) struct Version<R, FP>
+pub(crate) struct Version<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     ts: Timestamp,
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
@@ -50,13 +49,11 @@ where
     option: Arc<DbOption<R>>,
     timestamp: Arc<AtomicU32>,
     log_length: u32,
-    _p: PhantomData<FP>,
 }
 
-impl<R, FP> Version<R, FP>
+impl<R> Version<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     #[cfg(test)]
     pub(crate) fn new(
@@ -71,7 +68,6 @@ where
             option: option.clone(),
             timestamp,
             log_length: 0,
-            _p: Default::default(),
         }
     }
 
@@ -80,10 +76,9 @@ where
     }
 }
 
-impl<R, FP> TransactionTs for Version<R, FP>
+impl<R> TransactionTs for Version<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn load_ts(&self) -> Timestamp {
         self.timestamp.load(Ordering::Acquire).into()
@@ -94,10 +89,9 @@ where
     }
 }
 
-impl<R, FP> Clone for Version<R, FP>
+impl<R> Clone for Version<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn clone(&self) -> Self {
         let mut level_slice = [const { Vec::new() }; MAX_LEVEL];
@@ -113,42 +107,56 @@ where
             option: self.option.clone(),
             timestamp: self.timestamp.clone(),
             log_length: self.log_length,
-            _p: Default::default(),
         }
     }
 }
 
-impl<R, FP> Version<R, FP>
+impl<R> Version<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     pub(crate) async fn query(
         &self,
+        manager: &StoreManager,
         key: &TimestampedRef<R::Key>,
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+        let level_0_path = self
+            .option
+            .level_fs_path(0)
+            .unwrap_or(&self.option.base_path);
+        let level_0_fs = manager.get_fs(level_0_path);
         for scope in self.level_slice[0].iter().rev() {
             if !scope.contains(key.value()) {
                 continue;
             }
             if let Some(entry) = self
-                .table_query(key, &scope.gen, projection_mask.clone())
+                .table_query(level_0_fs, key, &scope.gen, projection_mask.clone())
                 .await?
             {
                 return Ok(Some(entry));
             }
         }
-        for level in self.level_slice[1..6].iter() {
-            if level.is_empty() {
+        for (i, sort_runs) in self.level_slice[1..MAX_LEVEL].iter().enumerate() {
+            let level_path = self
+                .option
+                .level_fs_path(i + 1)
+                .unwrap_or(&self.option.base_path);
+            let level_fs = manager.get_fs(level_path);
+            if sort_runs.is_empty() {
                 continue;
             }
-            let index = Self::scope_search(key.value(), level);
-            if !level[index].contains(key.value()) {
+            let index = Self::scope_search(key.value(), sort_runs);
+            if !sort_runs[index].contains(key.value()) {
                 continue;
             }
             if let Some(entry) = self
-                .table_query(key, &level[index].gen, projection_mask.clone())
+                .table_query(
+                    level_fs,
+                    key,
+                    &sort_runs[index].gen,
+                    projection_mask.clone(),
+                )
                 .await?
             {
                 return Ok(Some(entry));
@@ -160,14 +168,17 @@ where
 
     async fn table_query(
         &self,
+        store: &Arc<dyn DynFs>,
         key: &TimestampedRef<<R as Record>::Key>,
         gen: &FileId,
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
-        let file = FP::open(self.option.table_path(gen))
+        let file = store
+            .open_options(&self.option.table_path(gen), default_open_options())
             .await
-            .map_err(VersionError::Io)?;
-        SsTable::<R, FP>::open(file)
+            .map_err(VersionError::Fusio)?;
+        SsTable::<R>::open(file)
+            .await?
             .get(key, projection_mask)
             .await
             .map_err(VersionError::Parquet)
@@ -185,20 +196,27 @@ where
 
     pub(crate) async fn streams<'streams>(
         &self,
-        streams: &mut Vec<ScanStream<'streams, R, FP>>,
+        manager: &StoreManager,
+        streams: &mut Vec<ScanStream<'streams, R>>,
         range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
     ) -> Result<(), VersionError<R>> {
+        let level_0_path = self
+            .option
+            .level_fs_path(0)
+            .unwrap_or(&self.option.base_path);
+        let level_0_fs = manager.get_fs(level_0_path);
         for scope in self.level_slice[0].iter() {
             if !scope.meets_range(range) {
                 continue;
             }
-            let file = FP::open(self.option.table_path(&scope.gen))
+            let file = level_0_fs
+                .open_options(&self.option.table_path(&scope.gen), default_open_options())
                 .await
-                .map_err(VersionError::Io)?;
-            let table = SsTable::open(file);
+                .map_err(VersionError::Fusio)?;
+            let table = SsTable::open(file).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -211,6 +229,11 @@ where
             if scopes.is_empty() {
                 continue;
             }
+            let level_path = self
+                .option
+                .level_fs_path(i + 1)
+                .unwrap_or(&self.option.base_path);
+            let level_fs = manager.get_fs(level_path);
 
             let (mut start, mut end) = (None, None);
 
@@ -237,6 +260,7 @@ where
                     ts,
                     limit,
                     projection_mask.clone(),
+                    level_fs.clone(),
                 )
                 .unwrap(),
             });
@@ -261,10 +285,9 @@ where
     }
 }
 
-impl<R, FP> Drop for Version<R, FP>
+impl<R> Drop for Version<R>
 where
     R: Record,
-    FP: FileProvider,
 {
     fn drop(&mut self) {
         if let Err(err) = self.clean_sender.send(CleanTag::Clean { ts: self.ts }) {
@@ -284,6 +307,10 @@ where
     Io(#[from] std::io::Error),
     #[error("version parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
+    #[error("version fusio error: {0}")]
+    Fusio(#[from] fusio::Error),
+    #[error("version ulid decode error: {0}")]
+    UlidDecode(#[from] ulid::DecodeError),
     #[error("version send error: {0}")]
     Send(#[from] SendError<CleanTag>),
 }

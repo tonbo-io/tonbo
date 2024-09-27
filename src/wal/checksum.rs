@@ -1,24 +1,15 @@
-use std::{
-    hash::Hasher,
-    io,
-    io::Error,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::{future::Future, hash::Hasher};
 
-use futures_core::ready;
-use pin_project_lite::pin_project;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use fusio::{Error, IoBuf, IoBufMut, MaybeSend, Read, Write};
 
-pin_project! {
-    pub(crate) struct HashWriter<W: AsyncWrite> {
-        hasher: crc32fast::Hasher,
-        #[pin]
-        writer: W,
-    }
+use crate::serdes::{Decode, Encode};
+
+pub(crate) struct HashWriter<W: Write> {
+    hasher: crc32fast::Hasher,
+    writer: W,
 }
 
-impl<W: AsyncWrite + Unpin> HashWriter<W> {
+impl<W: Write + Unpin> HashWriter<W> {
     pub(crate) fn new(writer: W) -> Self {
         Self {
             hasher: crc32fast::Hasher::new(),
@@ -26,46 +17,39 @@ impl<W: AsyncWrite + Unpin> HashWriter<W> {
         }
     }
 
-    pub(crate) async fn eol(mut self) -> io::Result<usize> {
-        self.writer.write(&self.hasher.finish().to_le_bytes()).await
+    pub(crate) async fn eol(mut self) -> Result<(), fusio::Error> {
+        let i = self.hasher.finish();
+        i.encode(&mut self.writer).await
     }
 }
 
-impl<W: AsyncWrite> AsyncWrite for HashWriter<W> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, Error>> {
-        let this = self.project();
+impl<W: Write> Write for HashWriter<W> {
+    async fn write_all<B: IoBuf>(&mut self, buf: B) -> (Result<(), Error>, B) {
+        let (result, buf) = self.writer.write_all(buf).await;
+        self.hasher.write(buf.as_slice());
 
-        Poll::Ready(match ready!(this.writer.poll_write(cx, buf)) {
-            Ok(n) => {
-                this.hasher.write(&buf[..n]);
-                Ok(n)
-            }
-            e => e,
-        })
+        (result, buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project().writer.poll_flush(cx)
+    fn sync_data(&self) -> impl Future<Output = Result<(), fusio::Error>> + MaybeSend {
+        self.writer.sync_data()
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        self.project().writer.poll_shutdown(cx)
+    fn sync_all(&self) -> impl Future<Output = Result<(), fusio::Error>> + MaybeSend {
+        self.writer.sync_all()
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), fusio::Error>> + MaybeSend {
+        self.writer.close()
     }
 }
 
-pin_project! {
-    pub(crate) struct HashReader<R: AsyncRead> {
-        hasher: crc32fast::Hasher,
-        #[pin]
-        reader: R,
-    }
+pub(crate) struct HashReader<R: Read> {
+    hasher: crc32fast::Hasher,
+    reader: R,
 }
 
-impl<R: AsyncRead + Unpin> HashReader<R> {
+impl<R: Read + Unpin> HashReader<R> {
     pub(crate) fn new(reader: R) -> Self {
         Self {
             hasher: crc32fast::Hasher::new(),
@@ -73,28 +57,55 @@ impl<R: AsyncRead + Unpin> HashReader<R> {
         }
     }
 
-    pub(crate) async fn checksum(mut self) -> io::Result<bool> {
-        let mut hash = [0; 8];
-        self.reader.read_exact(&mut hash).await?;
-        let checksum = u64::from_le_bytes(hash);
+    pub(crate) async fn checksum(mut self) -> Result<bool, fusio::Error> {
+        let checksum = u64::decode(&mut self.reader).await?;
 
         Ok(self.hasher.finish() == checksum)
     }
 }
 
-impl<R: AsyncRead> AsyncRead for HashReader<R> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.project();
-        Poll::Ready(match ready!(this.reader.poll_read(cx, buf)) {
-            Ok(()) => {
-                this.hasher.write(buf.filled());
-                Ok(())
-            }
-            e => e,
-        })
+impl<R: Read> Read for HashReader<R> {
+    async fn read_exact<B: IoBufMut>(&mut self, buf: B) -> Result<B, Error> {
+        let bytes = self.reader.read_exact(buf).await?;
+        self.hasher.write(bytes.as_slice());
+
+        Ok(bytes)
+    }
+
+    async fn size(&self) -> Result<u64, fusio::Error> {
+        self.reader.size().await
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::io::Cursor;
+
+    use fusio::Seek;
+
+    use crate::{
+        serdes::{Decode, Encode},
+        wal::checksum::{HashReader, HashWriter},
+    };
+
+    #[tokio::test]
+    async fn test_encode_decode() {
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+
+        let mut writer = HashWriter::new(&mut cursor);
+        4_u64.encode(&mut writer).await.unwrap();
+        3_u32.encode(&mut writer).await.unwrap();
+        2_u16.encode(&mut writer).await.unwrap();
+        1_u8.encode(&mut writer).await.unwrap();
+        writer.eol().await.unwrap();
+
+        cursor.seek(0).await.unwrap();
+        let mut reader = HashReader::new(&mut cursor);
+        assert_eq!(u64::decode(&mut reader).await.unwrap(), 4);
+        assert_eq!(u32::decode(&mut reader).await.unwrap(), 3);
+        assert_eq!(u16::decode(&mut reader).await.unwrap(), 2);
+        assert_eq!(u8::decode(&mut reader).await.unwrap(), 1);
+        assert!(reader.checksum().await.unwrap());
     }
 }
