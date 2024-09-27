@@ -41,26 +41,23 @@ pub struct DbOption<R> {
     _p: PhantomData<R>,
 }
 
-// #[cfg(feature = "runtime_schema")]
 impl<R> DbOption<R>
 where
     R: Record,
 {
-    pub fn with_path<P>(path: P, primary_key_name: String, primary_key_index: usize) -> Self
-    where
-        P: Into<PathBuf>,
-    {
+    /// build the default configured [`DbOption`] with base path and primary key
+    pub fn with_path(base_path: Path, primary_key_name: String, primary_key_index: usize) -> Self {
         let (column_paths, sorting_columns) =
             Self::primary_key_path(primary_key_name, primary_key_index);
 
         DbOption {
-            path: path.into(),
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
             level_sst_magnification: 10,
             max_sst_file_size: 256 * 1024 * 1024,
             clean_channel_buffer: 10,
+            base_path,
             write_parquet_properties: WriterProperties::builder()
                 .set_compression(Compression::LZ4)
                 .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
@@ -75,6 +72,7 @@ where
             trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
             _p: Default::default(),
             version_log_snapshot_threshold: 200,
+            level_paths: vec![None; MAX_LEVEL],
         }
     }
 

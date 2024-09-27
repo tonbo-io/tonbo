@@ -4,6 +4,7 @@ use arrow::{
     array::{Array, AsArray},
     datatypes::Schema,
 };
+use fusio::Write;
 
 use super::{Column, Datatype, DynRecord};
 use crate::{
@@ -34,11 +35,11 @@ impl<'r> Encode for DynRecordRef<'r> {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: tokio::io::AsyncWrite + Unpin + Send,
+        W: Write + Unpin + Send,
     {
         (self.primary_index as u32).encode(writer).await?;
         for col in self.columns.iter() {
-            col.encode(writer).await.map_err(RecordEncodeError::Io)?;
+            col.encode(writer).await.map_err(RecordEncodeError::Fusio)?;
         }
         Ok(())
     }

@@ -191,6 +191,7 @@ where
         Ok(None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn major_compaction(
         version: &Version<R>,
         option: &DbOption<R>,
@@ -435,6 +436,7 @@ where
         Ok((lower, upper))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn build_table(
         option: &DbOption<R>,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
@@ -666,8 +668,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dyn_minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::with_path(temp_dir.path(), "id".to_string(), 0);
-        TokioExecutor::create_dir_all(&option.wal_dir_path())
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "id".to_string(),
+            0,
+        );
+        manager
+            .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
 
@@ -692,16 +700,18 @@ pub(crate) mod tests {
         }
 
         // data range: [2, 34]
-        let batch_1 = build_immutable::<DynRecord, TokioExecutor>(&option, batch1_data, &instance)
-            .await
-            .unwrap();
+        let batch_1 =
+            build_immutable::<DynRecord>(&option, batch1_data, &instance, manager.base_fs())
+                .await
+                .unwrap();
 
         // data range: [7, 39]
-        let batch_2 = build_immutable::<DynRecord, TokioExecutor>(&option, batch2_data, &instance)
-            .await
-            .unwrap();
+        let batch_2 =
+            build_immutable::<DynRecord>(&option, batch2_data, &instance, manager.base_fs())
+                .await
+                .unwrap();
 
-        let scope = Compactor::<DynRecord, TokioExecutor>::minor_compaction(
+        let scope = Compactor::<DynRecord>::minor_compaction(
             &option,
             None,
             &vec![
@@ -709,6 +719,7 @@ pub(crate) mod tests {
                 (Some(FileId::new()), batch_2),
             ],
             &instance,
+            &manager,
         )
         .await
         .unwrap()

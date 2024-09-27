@@ -1,8 +1,8 @@
 use std::{any::Any, collections::HashMap, io, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
+use fusio::Read;
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
-use tokio::io::AsyncRead;
 
 use super::{array::DynRecordImmutableArrays, Column, ColumnDesc, Datatype, DynRecordRef};
 use crate::{
@@ -110,16 +110,19 @@ impl Decode for DynRecord {
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: AsyncRead + Unpin,
+        R: Read + Unpin,
     {
         let primary_index = u32::decode(reader).await? as usize;
         let mut columns = vec![];
         loop {
             match Column::decode(reader).await {
                 Ok(col) => columns.push(col),
-                Err(err) => match err.kind() {
-                    io::ErrorKind::UnexpectedEof => break,
-                    _ => return Err(RecordDecodeError::Io(err)),
+                Err(err) => match err {
+                    fusio::Error::Io(io_error) => match io_error.kind() {
+                        io::ErrorKind::UnexpectedEof => break,
+                        _ => return Err(RecordDecodeError::Io(io_error)),
+                    },
+                    _ => return Err(RecordDecodeError::Fusio(err)),
                 },
             }
         }
