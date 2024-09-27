@@ -26,10 +26,10 @@ macro_rules! implement_encode_decode {
             type Error = fusio::Error;
 
             async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-                let bytes = reader.read_exact(vec![0u8; size_of::<Self>()]).await?;
+                let mut bytes = [0u8; size_of::<Self>()];
+                let _ = reader.read_exact(&mut bytes[..]).await?;
 
-                // SAFETY
-                Ok(Self::from_le_bytes(bytes.as_slice().try_into().unwrap()))
+                Ok(Self::from_le_bytes(bytes))
             }
         }
     };

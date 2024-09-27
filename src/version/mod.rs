@@ -137,7 +137,7 @@ where
                 return Ok(Some(entry));
             }
         }
-        for (i, sort_runs) in self.level_slice[1..6].iter().enumerate() {
+        for (i, sort_runs) in self.level_slice[1..MAX_LEVEL].iter().enumerate() {
             let level_path = self
                 .option
                 .level_fs_path(i + 1)
