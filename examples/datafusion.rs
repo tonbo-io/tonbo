@@ -237,13 +237,12 @@ async fn main() -> Result<()> {
 
     {
         // support sql query for tonbo
-        let statements = DFParser::parse_sql("select * from music")?;
+        let statements = DFParser::parse_sql("select id from music")?;
         let plan = ctx
             .state()
             .statement_to_plan(statements.front().cloned().unwrap())
             .await?;
-        ctx.execute_logical_plan(plan).await?;
-        let df = ctx.table("music").await?;
+        let df = ctx.execute_logical_plan(plan).await?;
         let physical_plan = df.create_physical_plan().await?;
         let mut stream = execute_stream(physical_plan, ctx.task_ctx())?;
         while let Some(maybe_batch) = stream.next().await {
