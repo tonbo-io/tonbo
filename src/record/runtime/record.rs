@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, io, sync::Arc};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
 use fusio::Read;
@@ -112,19 +112,29 @@ impl Decode for DynRecord {
     where
         R: Read + Unpin,
     {
+        let len = u32::decode(reader).await? as usize;
         let primary_index = u32::decode(reader).await? as usize;
         let mut columns = vec![];
-        loop {
-            match Column::decode(reader).await {
-                Ok(col) => columns.push(col),
-                Err(err) => match err {
-                    fusio::Error::Io(io_error) => match io_error.kind() {
-                        io::ErrorKind::UnexpectedEof => break,
-                        _ => return Err(RecordDecodeError::Io(io_error)),
-                    },
-                    _ => return Err(RecordDecodeError::Fusio(err)),
-                },
+        // keep invariant for record: nullable --> Some(v); non-nullable --> v
+        for i in 0..len {
+            let mut col = Column::decode(reader).await?;
+            if i != primary_index && !col.is_nullable {
+                match col.datatype {
+                    Datatype::Int8 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<i8>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::Int16 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::Int32 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<i32>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                }
             }
+            columns.push(col);
         }
 
         Ok(DynRecord {

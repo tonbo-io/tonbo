@@ -37,6 +37,7 @@ impl<'r> Encode for DynRecordRef<'r> {
     where
         W: Write + Unpin + Send,
     {
+        (self.columns.len() as u32).encode(writer).await?;
         (self.primary_index as u32).encode(writer).await?;
         for col in self.columns.iter() {
             col.encode(writer).await.map_err(RecordEncodeError::Fusio)?;
@@ -45,7 +46,7 @@ impl<'r> Encode for DynRecordRef<'r> {
     }
 
     fn size(&self) -> usize {
-        let mut size = 0;
+        let mut size = 2 * size_of::<u32>();
         for col in self.columns.iter() {
             size += col.size();
         }

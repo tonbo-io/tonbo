@@ -9,7 +9,7 @@ use fusio::{Read, Write};
 use super::Datatype;
 use crate::{
     record::{Key, KeyRef},
-    serdes::{Decode, Encode},
+    serdes::{option::DecodeError, Decode, Encode},
 };
 
 #[derive(Debug, Clone)]
@@ -47,24 +47,6 @@ impl Column {
             name,
             value,
             is_nullable,
-        }
-    }
-
-    pub fn value(&self) -> Arc<dyn Any> {
-        // TODO: Option case
-        match self.datatype {
-            Datatype::Int8 if !self.is_nullable => {
-                Arc::new(*self.value.downcast_ref::<i8>().unwrap())
-            }
-            Datatype::Int16 if !self.is_nullable => {
-                Arc::new(*self.value.downcast_ref::<i16>().unwrap())
-            }
-            Datatype::Int32 if !self.is_nullable => {
-                Arc::new(*self.value.downcast_ref::<i32>().unwrap())
-            }
-            Datatype::Int8 => Arc::new(*self.value.downcast_ref::<i8>().unwrap()),
-            Datatype::Int16 => Arc::new(*self.value.downcast_ref::<i16>().unwrap()),
-            Datatype::Int32 => Arc::new(*self.value.downcast_ref::<i32>().unwrap()),
         }
     }
 
@@ -233,35 +215,46 @@ impl Decode for Column {
         let tag = u8::decode(reader).await?;
         let datatype = Self::tag_to_datatype(tag);
         let is_nullable = bool::decode(reader).await?;
-        match datatype {
-            Datatype::Int8 => {
-                let v = i8::decode(reader).await?;
-                Ok(Column {
-                    datatype,
-                    is_nullable,
-                    name: "".to_owned(),
-                    value: Arc::new(v),
-                })
-            }
-            Datatype::Int16 => {
-                let v = i16::decode(reader).await?;
-                Ok(Column {
-                    datatype,
-                    is_nullable,
-                    name: "".to_owned(),
-                    value: Arc::new(v),
-                })
-            }
-            Datatype::Int32 => {
-                let v = i32::decode(reader).await?;
-                Ok(Column {
-                    datatype,
-                    is_nullable,
-                    name: "".to_owned(),
-                    value: Arc::new(v),
-                })
-            }
-        }
+        let is_some = !bool::decode(reader).await?;
+        let value =
+            match datatype {
+                Datatype::Int8 => match is_some {
+                    true => Arc::new(Option::<i8>::decode(reader).await.map_err(
+                        |err| match err {
+                            DecodeError::Io(error) => fusio::Error::Io(error),
+                            DecodeError::Fusio(error) => error,
+                            DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
+                        },
+                    )?) as Arc<dyn Any>,
+                    false => Arc::new(i8::decode(reader).await?) as Arc<dyn Any>,
+                },
+                Datatype::Int16 => match is_some {
+                    true => Arc::new(Option::<i16>::decode(reader).await.map_err(
+                        |err| match err {
+                            DecodeError::Io(error) => fusio::Error::Io(error),
+                            DecodeError::Fusio(error) => error,
+                            DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
+                        },
+                    )?) as Arc<dyn Any>,
+                    false => Arc::new(i16::decode(reader).await?) as Arc<dyn Any>,
+                },
+                Datatype::Int32 => match is_some {
+                    true => Arc::new(Option::<i32>::decode(reader).await.map_err(
+                        |err| match err {
+                            DecodeError::Io(error) => fusio::Error::Io(error),
+                            DecodeError::Fusio(error) => error,
+                            DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
+                        },
+                    )?) as Arc<dyn Any>,
+                    false => Arc::new(i32::decode(reader).await?) as Arc<dyn Any>,
+                },
+            };
+        Ok(Column {
+            datatype,
+            is_nullable,
+            name: "".to_owned(),
+            value,
+        })
     }
 }
 
@@ -277,41 +270,47 @@ impl Encode for Column {
         match self.datatype {
             Datatype::Int8 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
+                    true.encode(writer).await?;
                     value.encode(writer).await?
                 } else {
+                    false.encode(writer).await?;
                     self.value
                         .as_ref()
                         .downcast_ref::<Option<i8>>()
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| fusio::Error::Other(Box::new(err)))?
+                        .map_err(|err| fusio::Error::Other(Box::new(err)))?;
                 }
             }
             Datatype::Int16 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
+                    true.encode(writer).await?;
                     value.encode(writer).await?
                 } else {
+                    false.encode(writer).await?;
                     self.value
                         .as_ref()
                         .downcast_ref::<Option<i16>>()
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| fusio::Error::Other(Box::new(err)))?
+                        .map_err(|err| fusio::Error::Other(Box::new(err)))?;
                 }
             }
             Datatype::Int32 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
+                    true.encode(writer).await?;
                     value.encode(writer).await?
                 } else {
+                    false.encode(writer).await?;
                     self.value
                         .as_ref()
                         .downcast_ref::<Option<i32>>()
                         .unwrap()
                         .encode(writer)
                         .await
-                        .map_err(|err| fusio::Error::Other(Box::new(err)))?
+                        .map_err(|err| fusio::Error::Other(Box::new(err)))?;
                 }
             }
         };
@@ -319,7 +318,7 @@ impl Encode for Column {
     }
 
     fn size(&self) -> usize {
-        2 + match self.datatype {
+        3 + match self.datatype {
             Datatype::Int8 => {
                 if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
                     value.size()

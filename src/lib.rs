@@ -1620,6 +1620,80 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn dyn_schema_recover() {
+        let temp_dir = TempDir::new().unwrap();
+        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+
+        let (desc, primary_key_index) = test_dyn_item_schema();
+        let option = Arc::new(DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "age".to_owned(),
+            primary_key_index,
+        ));
+        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
+
+        let (task_tx, _task_rx) = bounded(1);
+
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let schema: crate::Schema<DynRecord> = crate::Schema {
+            mutable: Mutable::new(&option, trigger.clone(), &fs).await.unwrap(),
+            immutables: Default::default(),
+            compaction_tx: task_tx.clone(),
+            recover_wal_ids: None,
+            trigger,
+            record_instance: RecordInstance::Normal,
+        };
+
+        for item in test_dyn_items().into_iter() {
+            schema
+                .write(LogType::Full, item, 0_u32.into())
+                .await
+                .unwrap();
+        }
+        drop(schema);
+
+        let option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "age".to_owned(),
+            primary_key_index,
+        );
+        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
+            option,
+            TokioExecutor::new(),
+            manager,
+            desc,
+            primary_key_index,
+        )
+        .await
+        .unwrap();
+
+        let mut sort_items = BTreeMap::new();
+        for item in test_dyn_items() {
+            sort_items.insert(item.key(), item);
+        }
+
+        {
+            let tx = db.transaction().await;
+            let mut scan = tx
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(vec![0, 1, 2])
+                .take()
+                .await
+                .unwrap();
+
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns1 = entry.value().unwrap().columns;
+                let (_, record) = sort_items.pop_first().unwrap();
+                let columns2 = record.as_record_ref().columns;
+
+                assert_eq!(columns1.get(1), columns2.get(1));
+                assert_eq!(columns1.get(2), columns2.get(2));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_read_write_dyn() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
