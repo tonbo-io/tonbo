@@ -37,9 +37,7 @@
 //! use futures_util::stream::StreamExt;
 //! use tokio::fs;
 //! use tokio_util::bytes::Bytes;
-//! use tonbo::{
-//!     executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Projection, Record, DB,
-//! };
+//! use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
@@ -56,12 +54,9 @@
 //!     // make sure the path exists
 //!     let _ = fs::create_dir_all("./db_path/users").await;
 //!
-//!     let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 //!     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new(options, TokioExecutor::default(), manager)
-//!         .await
-//!         .unwrap();
+//!     let db = DB::new(options, TokioExecutor::default()).await.unwrap();
 //!     // insert with owned value
 //!     db.insert(User {
 //!         name: "Alice".into(),
@@ -232,13 +227,12 @@ where
     /// according to the configuration of [`DbOption`].
     ///
     /// For more configurable options, please refer to [`DbOption`].
-    pub async fn new(
-        option: DbOption<R>,
-        executor: E,
-        manager: StoreManager,
-    ) -> Result<Self, DbError<R>> {
+    pub async fn new(option: DbOption<R>, executor: E) -> Result<Self, DbError<R>> {
         let option = Arc::new(option);
-        let manager = Arc::new(manager);
+        let manager = Arc::new(StoreManager::new(
+            option.base_fs.clone(),
+            option.level_paths.clone(),
+        )?);
 
         {
             let base_fs = manager.base_fs();
@@ -1079,10 +1073,9 @@ pub(crate) mod tests {
     pub(crate) async fn get_test_record_batch<E: Executor + Send + Sync + 'static>(
         option: DbOption<Test>,
         executor: E,
-        manager: StoreManager,
     ) -> RecordBatch {
-        let base_fs = manager.base_fs().clone();
-        let db: DB<Test, E> = DB::new(option.clone(), executor, manager).await.unwrap();
+        let db: DB<Test, E> = DB::new(option.clone(), executor).await.unwrap();
+        let base_fs = db.manager.base_fs();
 
         db.write(
             Test {
@@ -1493,7 +1486,6 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
@@ -1504,9 +1496,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (i, item) in test_items().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
@@ -1532,7 +1522,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_flush() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
@@ -1543,9 +1532,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for item in &test_items()[0..10] {
             db.write(item.clone(), 0.into()).await.unwrap();
