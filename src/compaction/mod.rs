@@ -499,7 +499,7 @@ pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
     use flume::bounded;
-    use fusio::{local::TokioFs, path::Path, DynFs};
+    use fusio::{path::Path, DynFs};
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;
@@ -566,8 +566,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let manager =
+            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
 
         manager
             .create_dir_all(&option.wal_dir_path())
@@ -737,11 +738,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn major_compaction() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
+        let manager =
+            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
 
         manager
             .create_dir_all(&option.version_log_dir_path())
@@ -1056,11 +1058,12 @@ pub(crate) mod tests {
     #[tokio::test]
     pub(crate) async fn major_panic() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.major_threshold_with_sst_size = 1;
         option.level_sst_magnification = 1;
+        let manager =
+            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
 
         manager
             .create_dir_all(&option.version_log_dir_path())
@@ -1158,7 +1161,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
@@ -1170,9 +1172,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for i in 5..9 {
             let item = Test {

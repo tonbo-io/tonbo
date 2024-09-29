@@ -282,7 +282,7 @@ pub(crate) mod tests {
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
-    use fusio::{local::TokioFs, path::Path};
+    use fusio::{parse::FsOptions, path::Path};
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
@@ -330,7 +330,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn timestamp_persistence() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
         let option = Arc::new(DbOption::from(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -367,7 +367,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn version_log_snap_shot() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.version_log_snapshot_threshold = 4;
@@ -495,7 +495,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn version_level_sort() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::from(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
         ));

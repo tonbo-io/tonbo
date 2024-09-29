@@ -216,12 +216,9 @@ async fn main() -> Result<()> {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/music").await;
 
-    let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
     let options = DbOption::from(Path::from_filesystem_path("./db_path/music").unwrap());
 
-    let db = DB::new(options, TokioExecutor::default(), manager)
-        .await
-        .unwrap();
+    let db = DB::new(options, TokioExecutor::default()).await.unwrap();
     for (id, name, like) in [
         (0, "welcome".to_string(), 0),
         (1, "tonbo".to_string(), 999),

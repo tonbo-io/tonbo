@@ -1,10 +1,9 @@
 use std::{
     fmt::{Debug, Formatter},
     marker::PhantomData,
-    sync::Arc,
 };
 
-use fusio::{path::Path, DynFs};
+use fusio::{parse::FsOptions, path::Path};
 use parquet::{
     basic::Compression,
     file::properties::{EnabledStatistics, WriterProperties},
@@ -25,8 +24,9 @@ use crate::{
 pub struct DbOption<R> {
     pub(crate) clean_channel_buffer: usize,
     pub(crate) base_path: Path,
+    pub(crate) base_fs: FsOptions,
     // TODO: DEBUG
-    pub(crate) level_paths: Vec<Option<(Path, Arc<dyn DynFs>)>>,
+    pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,
     pub(crate) level_sst_magnification: usize,
@@ -105,6 +105,7 @@ where
             max_sst_file_size: 256 * 1024 * 1024,
             clean_channel_buffer: 10,
             base_path,
+            base_fs: FsOptions::Local,
             write_parquet_properties: WriterProperties::builder()
                 .set_compression(Compression::LZ4)
                 .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
@@ -216,13 +217,18 @@ where
         mut self,
         level: usize,
         path: Path,
-        store: Arc<dyn DynFs>,
+        fs_options: FsOptions,
     ) -> Result<Self, DbError<R>> {
         if level >= MAX_LEVEL {
             Err(DbError::ExceedsMaxLevel)?;
         }
-        self.level_paths[level] = Some((path, store));
+        self.level_paths[level] = Some((path, fs_options));
         Ok(self)
+    }
+
+    pub fn base_fs(mut self, base_fs: FsOptions) -> Self {
+        self.base_fs = base_fs;
+        self
     }
 }
 
