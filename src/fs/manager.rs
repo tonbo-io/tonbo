@@ -14,10 +14,8 @@ impl StoreManager {
     ) -> Result<Self, Error> {
         let mut fs_map = HashMap::with_capacity(levels_fs.len());
 
-        for fs_option in levels_fs {
-            if let Some((path, fs_options)) = fs_option {
-                fs_map.entry(path).or_insert(fs_options.parse()?);
-            }
+        for (path, fs_options) in levels_fs.into_iter().flatten() {
+            fs_map.entry(path).or_insert(fs_options.parse()?);
         }
         let base_fs = base_options.parse()?;
 
