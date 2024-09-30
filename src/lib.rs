@@ -217,9 +217,7 @@ where
         let instance =
             RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index));
 
-        let db = Self::build(option, executor, instance, manager).await?;
-
-        Ok(db)
+        Self::build(option, executor, instance, manager).await
     }
 }
 
