@@ -78,7 +78,7 @@ impl TableProvider for MusicProvider {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let mut exec = MusicExec::new(self.db.clone());
+        let mut exec = MusicExec::new(self.db.clone(), projection);
 
         // TODO: filters to range detach
         // exec.range =
@@ -96,10 +96,17 @@ impl TableProvider for MusicProvider {
 }
 
 impl MusicExec {
-    fn new(db: Arc<DB<Music, TokioExecutor>>) -> Self {
+    fn new(db: Arc<DB<Music, TokioExecutor>>, projection: Option<&Vec<usize>>) -> Self {
+        let schema = Music::arrow_schema();
+        let schema = if let Some(projection) = &projection {
+            Arc::new(schema.project(projection).unwrap())
+        } else {
+            schema.clone()
+        };
+
         MusicExec {
             cache: PlanProperties::new(
-                EquivalenceProperties::new_with_orderings(Music::arrow_schema().clone(), &[]),
+                EquivalenceProperties::new_with_orderings(schema, &[]),
                 datafusion::physical_expr::Partitioning::UnknownPartitioning(1),
                 ExecutionMode::Unbounded,
             ),
@@ -238,6 +245,22 @@ async fn main() -> Result<()> {
     {
         // support sql query for tonbo
         let statements = DFParser::parse_sql("select id from music")?;
+        let plan = ctx
+            .state()
+            .statement_to_plan(statements.front().cloned().unwrap())
+            .await?;
+        let df = ctx.execute_logical_plan(plan).await?;
+        let physical_plan = df.create_physical_plan().await?;
+        let mut stream = execute_stream(physical_plan, ctx.task_ctx())?;
+        while let Some(maybe_batch) = stream.next().await {
+            let batch = maybe_batch?;
+            pretty::print_batches(&[batch]).unwrap();
+        }
+    }
+    // https://github.com/tonbo-io/tonbo/issues/172
+    {
+        let statements =
+            DFParser::parse_sql("select _null, _ts, id, name from music where id = 1")?;
         let plan = ctx
             .state()
             .statement_to_plan(statements.front().cloned().unwrap())
