@@ -64,15 +64,15 @@ where
     A::Record: Send,
 {
     fn from(
-        mutable: (
+        (mutable, instance): (
             SkipMap<Timestamped<<A::Record as Record>::Key>, Option<A::Record>>,
             &RecordInstance,
         ),
     ) -> Self {
         let mut index = BTreeMap::new();
-        let mut builder = A::builder(&mutable.1.arrow_schema::<A::Record>(), mutable.0.len());
+        let mut builder = A::builder(&instance.arrow_schema::<A::Record>(), mutable.len());
 
-        for (offset, (key, value)) in mutable.0.into_iter().enumerate() {
+        for (offset, (key, value)) in mutable.into_iter().enumerate() {
             builder.push(
                 Timestamped::new(key.value.as_key_ref(), key.ts),
                 value.as_ref().map(Record::as_record_ref),

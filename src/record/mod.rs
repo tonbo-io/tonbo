@@ -36,16 +36,6 @@ impl RecordInstance {
         }
     }
 
-    pub(crate) fn primary_key_path<R>(&self) -> (ColumnPath, Vec<SortingColumn>)
-    where
-        R: Record,
-    {
-        match self {
-            RecordInstance::Normal => R::primary_key_path(),
-            RecordInstance::Runtime(_) => todo!(),
-        }
-    }
-
     pub(crate) fn arrow_schema<R>(&self) -> Arc<Schema>
     where
         R: Record,
@@ -54,10 +44,6 @@ impl RecordInstance {
             RecordInstance::Normal => R::arrow_schema().clone(),
             RecordInstance::Runtime(record) => record.arrow_schema(),
         }
-    }
-
-    pub(crate) fn size(&self) -> usize {
-        todo!()
     }
 }
 
