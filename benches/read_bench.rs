@@ -10,7 +10,11 @@ use std::{
 use futures_util::{future::join_all, StreamExt};
 use tokio::{fs, io::AsyncWriteExt};
 
-use crate::common::{read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase, RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, NUM_SCAN, READ_TIMES, SlateDBBenchDatabase};
+use crate::common::{
+    read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
+    RocksdbBenchDatabase, SlateDBBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS,
+    NUM_SCAN, READ_TIMES,
+};
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
     path: impl AsRef<Path> + Clone,

@@ -9,13 +9,11 @@ use std::{
 };
 
 use async_stream::stream;
-use fusio::DynFs;
-use fusio::local::TokioFs;
+use fusio::{local::TokioFs, DynFs};
 use futures::executor::block_on;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use object_store::local::LocalFileSystem;
-use object_store::ObjectStore;
+use object_store::{local::LocalFileSystem, ObjectStore};
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
@@ -43,6 +41,7 @@ type ProjectionField = String;
 pub enum BenchResult<'a> {
     Ref(TransactionEntry<'a, Customer>),
     Owned(Box<Customer>),
+    None,
 }
 
 #[allow(dead_code)]
@@ -50,6 +49,7 @@ pub enum ProjectionResult<'a> {
     // the entry is directly used to represent the field being projected.
     Ref(stream::Entry<'a, Customer>),
     Owned(ProjectionField),
+    None,
 }
 
 #[derive(Record, Debug, ::serde::Serialize, ::serde::Deserialize)]
@@ -649,11 +649,6 @@ impl<'a> BenchInserter for SledBenchInserter<'a> {
     }
 }
 
-
-
-
-
-
 pub struct RocksdbBenchDatabase {
     db: TransactionDB,
 }
@@ -860,9 +855,7 @@ impl BenchDatabase for SlateDBBenchDatabase {
     }
 
     async fn write_transaction(&self) -> Self::W<'_> {
-        SlateDBBenchWriteTransaction {
-            db: &self.db,
-        }
+        SlateDBBenchWriteTransaction { db: &self.db }
     }
 
     async fn read_transaction(&self) -> Self::R<'_> {
@@ -872,15 +865,16 @@ impl BenchDatabase for SlateDBBenchDatabase {
     async fn build(path: impl AsRef<Path>) -> Self {
         fs::create_dir_all(path.as_ref()).unwrap();
 
-        let object_store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(path).unwrap());
+        let object_store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFileSystem::new_with_prefix(path.as_ref()).unwrap());
         let options = DbOptions::default();
         let db = slatedb::db::Db::open_with_opts(
-            Path::from("/tmp/test_kv_store"),
+            object_store::path::Path::from_filesystem_path(path).unwrap(),
             options,
             object_store,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         SlateDBBenchDatabase::new(db)
     }
 }
@@ -920,7 +914,9 @@ impl<'db> BenchReader for SlateDBBenchReader<'db> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = BenchResult> + 'a {
         // Slated is not yet supported
-        stream! {}
+        stream! {
+            yield BenchResult::None;
+        }
     }
 
     fn projection_range_from<'a>(
@@ -928,7 +924,9 @@ impl<'db> BenchReader for SlateDBBenchReader<'db> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = ProjectionResult> + 'a {
         // Slated is not yet supported
-        stream! {}
+        stream! {
+            yield ProjectionResult::None;
+        }
     }
 }
 
@@ -968,6 +966,8 @@ impl<'a> BenchInserter for SlateDBBenchInserter<'a> {
     }
 
     fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
-        block_on(self.db.remove(key.as_bytes())).map_err(|_| ())
+        block_on(self.db.delete(key.as_bytes()));
+
+        Ok(())
     }
 }
