@@ -11,7 +11,7 @@ use ulid::Ulid;
 use crate::{
     fs::{default_open_options, FileId},
     inmem::immutable::Immutable,
-    record::{Key, KeyRef, Record},
+    record::{Key, KeyRef, Record, RecordInstance},
     timestamp::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
@@ -167,6 +167,7 @@ where
 
     pub(crate) async fn into_immutable(
         self,
+        instance: &RecordInstance,
     ) -> Result<(Option<FileId>, Immutable<R::Columns>), fusio::Error> {
         let mut file_id = None;
 
@@ -176,7 +177,7 @@ where
             file_id = Some(wal_guard.file_id());
         }
 
-        Ok((file_id, Immutable::from(self.data)))
+        Ok((file_id, Immutable::from((self.data, instance))))
     }
 }
 
@@ -198,7 +199,7 @@ mod tests {
 
     use super::Mutable;
     use crate::{
-        record::Record,
+        record::{Column, Datatype, DynRecord, Record},
         tests::{Test, TestRef},
         timestamp::Timestamped,
         trigger::TriggerFactory,
@@ -339,5 +340,56 @@ mod tests {
             scan.next().unwrap().key(),
             &Timestamped::new("4".into(), 0_u32.into())
         );
+    }
+
+    #[tokio::test]
+    async fn test_dyn_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "age".to_string(),
+            0,
+        );
+        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
+
+        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+
+        let mutable = Mutable::<DynRecord>::new(&option, trigger, &fs)
+            .await
+            .unwrap();
+
+        mutable
+            .insert(
+                LogType::Full,
+                DynRecord::new(
+                    vec![
+                        Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
+                        Column::new(
+                            Datatype::Int16,
+                            "height".to_string(),
+                            Arc::new(1236_i16),
+                            true,
+                        ),
+                    ],
+                    0,
+                ),
+                0_u32.into(),
+            )
+            .await
+            .unwrap();
+
+        {
+            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+            let entry = scan.next().unwrap();
+            assert_eq!(
+                entry.key(),
+                &Timestamped::new(
+                    Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
+                    0_u32.into()
+                )
+            );
+            dbg!(entry.clone().value().as_ref().unwrap());
+        }
     }
 }

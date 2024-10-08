@@ -449,6 +449,7 @@ fn trait_decode_ref_codegen(
                 record_batch: &'r ::tonbo::arrow::record_batch::RecordBatch,
                 offset: usize,
                 projection_mask: &'r ::tonbo::parquet::arrow::ProjectionMask,
+                _: &::std::sync::Arc<::tonbo::arrow::datatypes::Schema>,
             ) -> ::tonbo::record::internal::InternalRecordRef<'r, Self> {
                 use ::tonbo::arrow::array::AsArray;
 
@@ -598,7 +599,7 @@ fn trait_arrow_array_codegen(
 
             type Builder = #struct_builder_name;
 
-            fn builder(capacity: usize) -> Self::Builder {
+            fn builder(schema: &::std::sync::Arc<::tonbo::arrow::datatypes::Schema>, capacity: usize) -> Self::Builder {
                 #struct_builder_name {
                     #(#builder_init_fields)*
 

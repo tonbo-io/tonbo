@@ -1,7 +1,7 @@
 mod num;
 mod str;
 
-use std::hash::Hash;
+use std::{hash::Hash, sync::Arc};
 
 use arrow::array::Datum;
 
@@ -16,7 +16,7 @@ pub trait Key:
 
     fn as_key_ref(&self) -> Self::Ref<'_>;
 
-    fn to_arrow_datum(&self) -> impl Datum;
+    fn to_arrow_datum(&self) -> Arc<dyn Datum>;
 }
 
 pub trait KeyRef<'r>: Clone + Encode + Send + Sync + Ord + std::fmt::Debug {
