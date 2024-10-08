@@ -10,10 +10,7 @@ use std::{
 use futures_util::{future::join_all, StreamExt};
 use tokio::{fs, io::AsyncWriteExt};
 
-use crate::common::{
-    read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
-    RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, NUM_SCAN, READ_TIMES,
-};
+use crate::common::{read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase, RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, NUM_SCAN, READ_TIMES, SlateDBBenchDatabase};
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
     path: impl AsRef<Path> + Clone,
@@ -152,10 +149,12 @@ async fn main() {
 
         load::<TonboBenchDataBase>(&tbl_path, data_dir.join("tonbo")).await;
         load::<RocksdbBenchDatabase>(&tbl_path, data_dir.join("rocksdb")).await;
+        load::<SlateDBBenchDatabase>(&tbl_path, data_dir.join("slatedb")).await;
     }
 
     let tonbo_latency_results = { benchmark::<TonboBenchDataBase>(data_dir.join("tonbo")).await };
     let rocksdb_results = { benchmark::<RocksdbBenchDatabase>(data_dir.join("rocksdb")).await };
+    let slatedb_results = { benchmark::<SlateDBBenchDatabase>(data_dir.join("slatedb")).await };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
 
@@ -163,7 +162,7 @@ async fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [tonbo_latency_results, rocksdb_results] {
+    for results in [tonbo_latency_results, rocksdb_results, slatedb_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }

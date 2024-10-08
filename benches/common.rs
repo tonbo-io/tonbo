@@ -9,12 +9,17 @@ use std::{
 };
 
 use async_stream::stream;
+use fusio::DynFs;
 use fusio::local::TokioFs;
+use futures::executor::block_on;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use object_store::local::LocalFileSystem;
+use object_store::ObjectStore;
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
+use slatedb::config::DbOptions;
 use tonbo::{
     executor::tokio::TokioExecutor, fs::manager::StoreManager, stream,
     transaction::TransactionEntry, DbOption, Projection,
@@ -644,6 +649,11 @@ impl<'a> BenchInserter for SledBenchInserter<'a> {
     }
 }
 
+
+
+
+
+
 pub struct RocksdbBenchDatabase {
     db: TransactionDB,
 }
@@ -822,5 +832,142 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
                 yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_name)
             }
         }
+    }
+}
+
+pub struct SlateDBBenchDatabase {
+    db: slatedb::db::Db,
+}
+
+impl SlateDBBenchDatabase {
+    pub fn new(db: slatedb::db::Db) -> Self {
+        Self { db }
+    }
+}
+
+impl BenchDatabase for SlateDBBenchDatabase {
+    type W<'db>
+    = SlateDBBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+    = SlateDBBenchReadTransaction<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "slatedb"
+    }
+
+    async fn write_transaction(&self) -> Self::W<'_> {
+        SlateDBBenchWriteTransaction {
+            db: &self.db,
+        }
+    }
+
+    async fn read_transaction(&self) -> Self::R<'_> {
+        SlateDBBenchReadTransaction { db: &self.db }
+    }
+
+    async fn build(path: impl AsRef<Path>) -> Self {
+        fs::create_dir_all(path.as_ref()).unwrap();
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(path).unwrap());
+        let options = DbOptions::default();
+        let db = slatedb::db::Db::open_with_opts(
+            Path::from("/tmp/test_kv_store"),
+            options,
+            object_store,
+        )
+            .await
+            .unwrap();
+        SlateDBBenchDatabase::new(db)
+    }
+}
+
+pub struct SlateDBBenchReadTransaction<'db> {
+    db: &'db slatedb::db::Db,
+}
+
+impl BenchReadTransaction for SlateDBBenchReadTransaction<'_> {
+    type T<'txn>
+    = SlateDBBenchReader<'txn>
+    where
+        Self: 'txn;
+
+    fn get_reader(&self) -> Self::T<'_> {
+        SlateDBBenchReader { db: &self.db }
+    }
+}
+
+pub struct SlateDBBenchReader<'db> {
+    db: &'db slatedb::db::Db,
+}
+
+impl<'db> BenchReader for SlateDBBenchReader<'db> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+        self.db.get(key.as_bytes()).await.unwrap().map(|guard| {
+            BenchResult::Owned(
+                bincode::deserialize::<Customer>(guard.as_bytes())
+                    .unwrap()
+                    .into(),
+            )
+        })
+    }
+
+    fn range_from<'a>(
+        &'a self,
+        range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
+    ) -> impl Stream<Item = BenchResult> + 'a {
+        // Slated is not yet supported
+        stream! {}
+    }
+
+    fn projection_range_from<'a>(
+        &'a self,
+        range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
+    ) -> impl Stream<Item = ProjectionResult> + 'a {
+        // Slated is not yet supported
+        stream! {}
+    }
+}
+
+pub struct SlateDBBenchWriteTransaction<'a> {
+    db: &'a slatedb::db::Db,
+}
+
+impl BenchWriteTransaction for SlateDBBenchWriteTransaction<'_> {
+    type W<'txn>
+    = SlateDBBenchInserter<'txn>
+    where
+        Self: 'txn;
+
+    fn get_inserter(&mut self) -> Self::W<'_> {
+        SlateDBBenchInserter { db: self.db }
+    }
+
+    async fn commit(self) -> Result<(), ()> {
+        self.db.flush().await.map_err(|_| ())?;
+
+        Ok(())
+    }
+}
+
+pub struct SlateDBBenchInserter<'a> {
+    db: &'a slatedb::db::Db,
+}
+
+impl<'a> BenchInserter for SlateDBBenchInserter<'a> {
+    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+        block_on(self.db.put(
+            record.c_custkey.as_bytes(),
+            bincode::serialize(&record).unwrap().as_bytes(),
+        ));
+
+        Ok(())
+    }
+
+    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+        block_on(self.db.remove(key.as_bytes())).map_err(|_| ())
     }
 }

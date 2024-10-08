@@ -14,12 +14,13 @@ version = "0.1.0"
 msrv = "1.79.0"
 
 [features]
-bench = ["redb", "rocksdb", "sled"]
+bench = ["redb", "rocksdb", "slatedb", "sled"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
 default = ["tokio"]
 load_tbl = []
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]
+slatedb = ["dep:slatedb"]
 sled = ["dep:sled"]
 tokio = ["tokio/fs"]
 type_bytes = ["dep:bytes"]
@@ -77,8 +78,10 @@ ulid = "1"
 
 # Only used for benchmarks
 log = "0.4.22"
+object_store = "0.11.0"
 redb = { version = "2", optional = true }
 rocksdb = { version = "0.22", optional = true }
+slatedb = { version = "0.2.0", optional = true }
 sled = { version = "0.34", optional = true }
 
 [dev-dependencies]
