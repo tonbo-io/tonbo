@@ -2,14 +2,15 @@ use std::{
     collections::{btree_map::Range, BTreeMap},
     mem::transmute,
     ops::Bound,
+    sync::Arc,
 };
 
-use arrow::array::RecordBatch;
+use arrow::{array::RecordBatch, datatypes::Schema};
 use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{internal::InternalRecordRef, Key, Record, RecordRef},
+    record::{internal::InternalRecordRef, Key, Record, RecordInstance, RecordRef},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Timestamped, TimestampedRef, EPOCH},
 };
@@ -19,7 +20,7 @@ pub trait ArrowArrays: Sized + Sync {
 
     type Builder: Builder<Self>;
 
-    fn builder(capacity: usize) -> Self::Builder;
+    fn builder(schema: &Arc<Schema>, capacity: usize) -> Self::Builder;
 
     fn get(
         &self,
@@ -53,14 +54,23 @@ where
     index: BTreeMap<Timestamped<<A::Record as Record>::Key>, u32>,
 }
 
-impl<A> From<SkipMap<Timestamped<<A::Record as Record>::Key>, Option<A::Record>>> for Immutable<A>
+impl<A>
+    From<(
+        SkipMap<Timestamped<<A::Record as Record>::Key>, Option<A::Record>>,
+        &RecordInstance,
+    )> for Immutable<A>
 where
     A: ArrowArrays,
     A::Record: Send,
 {
-    fn from(mutable: SkipMap<Timestamped<<A::Record as Record>::Key>, Option<A::Record>>) -> Self {
+    fn from(
+        (mutable, instance): (
+            SkipMap<Timestamped<<A::Record as Record>::Key>, Option<A::Record>>,
+            &RecordInstance,
+        ),
+    ) -> Self {
         let mut index = BTreeMap::new();
-        let mut builder = A::builder(mutable.len());
+        let mut builder = A::builder(&instance.arrow_schema::<A::Record>(), mutable.len());
 
         for (offset, (key, value)) in mutable.into_iter().enumerate() {
             builder.push(
@@ -182,10 +192,12 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|(_, &offset)| {
+            let schema = self.record_batch.schema();
             let record_ref = R::Ref::from_record_batch(
                 self.record_batch,
                 offset as usize,
                 &self.projection_mask,
+                &schema,
             );
             // TODO: remove cloning record batch
             RecordBatchEntry::new(self.record_batch.clone(), {
@@ -209,7 +221,7 @@ pub(crate) mod tests {
             Array, BooleanArray, BooleanBufferBuilder, BooleanBuilder, PrimitiveBuilder,
             RecordBatch, StringArray, StringBuilder, UInt32Array, UInt32Builder,
         },
-        datatypes::{ArrowPrimitiveType, UInt32Type},
+        datatypes::{ArrowPrimitiveType, Schema, UInt32Type},
     };
     use parquet::arrow::ProjectionMask;
 
@@ -236,7 +248,7 @@ pub(crate) mod tests {
 
         type Builder = TestBuilder;
 
-        fn builder(capacity: usize) -> Self::Builder {
+        fn builder(_schema: &Arc<Schema>, capacity: usize) -> Self::Builder {
             TestBuilder {
                 vstring: StringBuilder::with_capacity(capacity, 0),
                 vu32: PrimitiveBuilder::<UInt32Type>::with_capacity(capacity),

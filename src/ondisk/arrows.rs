@@ -71,10 +71,7 @@ where
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                lower_cmp(
-                    record_batch.column(0),
-                    &lower_key.to_arrow_datum() as &dyn Datum,
-                )
+                lower_cmp(record_batch.column(0), lower_key.to_arrow_datum().as_ref())
             },
         )));
     }
@@ -82,10 +79,7 @@ where
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                upper_cmp(
-                    &upper_key.to_arrow_datum() as &dyn Datum,
-                    record_batch.column(0),
-                )
+                upper_cmp(upper_key.to_arrow_datum().as_ref(), record_batch.column(0))
             },
         )));
     }

@@ -16,7 +16,7 @@ use crate::{
         mutable::Mutable,
     },
     ondisk::sstable::SsTable,
-    record::{KeyRef, Record},
+    record::{KeyRef, Record, RecordInstance},
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
     transaction::CommitError,
@@ -80,7 +80,7 @@ where
             &mut guard.mutable,
             Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await?,
         );
-        let (file_id, immutable) = mutable.into_immutable().await?;
+        let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
 
         guard.immutables.push((file_id, immutable));
         if guard.immutables.len() > self.option.immutable_chunk_max_num {
@@ -91,8 +91,14 @@ where
             let chunk_num = self.option.immutable_chunk_num;
             let excess = &guard.immutables[0..chunk_num];
 
-            if let Some(scope) =
-                Self::minor_compaction(&self.option, recover_wal_ids, excess, &self.manager).await?
+            if let Some(scope) = Self::minor_compaction(
+                &self.option,
+                recover_wal_ids,
+                excess,
+                &guard.record_instance,
+                &self.manager,
+            )
+            .await?
             {
                 let version_ref = self.version_set.current().await;
                 let mut version_edits = vec![];
@@ -106,6 +112,7 @@ where
                         &scope.max,
                         &mut version_edits,
                         &mut delete_gens,
+                        &guard.record_instance,
                         &self.manager,
                     )
                     .await?;
@@ -133,6 +140,7 @@ where
         option: &DbOption<R>,
         recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(Option<FileId>, Immutable<R::Columns>)],
+        instance: &RecordInstance,
         manager: &StoreManager,
     ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
         if !batches.is_empty() {
@@ -151,7 +159,7 @@ where
                         .open_options(&option.table_path(&gen), default_open_options())
                         .await?,
                 ),
-                R::arrow_schema().clone(),
+                instance.arrow_schema::<R>().clone(),
                 Some(option.write_parquet_properties.clone()),
             )?;
 
@@ -183,6 +191,7 @@ where
         Ok(None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn major_compaction(
         version: &Version<R>,
         option: &DbOption<R>,
@@ -190,6 +199,7 @@ where
         mut max: &R::Key,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
         delete_gens: &mut Vec<(FileId, usize)>,
+        instance: &RecordInstance,
         manager: &StoreManager,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
@@ -263,7 +273,7 @@ where
                     inner: level_scan_ll,
                 });
             }
-            Self::build_tables(option, version_edits, level, streams, level_fs).await?;
+            Self::build_tables(option, version_edits, level, streams, instance, level_fs).await?;
 
             for scope in meet_scopes_l {
                 version_edits.push(VersionEdit::Remove {
@@ -368,12 +378,13 @@ where
         version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'scan, R>>,
+        instance: &RecordInstance,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
-        let mut builder = R::Columns::builder(8192);
+        let mut builder = R::Columns::builder(&instance.arrow_schema::<R>(), 8192);
         let mut min = None;
         let mut max = None;
 
@@ -395,6 +406,7 @@ where
                     &mut builder,
                     &mut min,
                     &mut max,
+                    instance,
                     fs,
                 )
                 .await?;
@@ -408,6 +420,7 @@ where
                 &mut builder,
                 &mut min,
                 &mut max,
+                instance,
                 fs,
             )
             .await?;
@@ -423,6 +436,7 @@ where
         Ok((lower, upper))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn build_table(
         option: &DbOption<R>,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
@@ -430,6 +444,7 @@ where
         builder: &mut <R::Columns as ArrowArrays>::Builder,
         min: &mut Option<R::Key>,
         max: &mut Option<R::Key>,
+        instance: &RecordInstance,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         debug_assert!(min.is_some());
@@ -442,7 +457,7 @@ where
                 fs.open_options(&option.table_path(&gen), default_open_options())
                     .await?,
             ),
-            R::arrow_schema().clone(),
+            instance.arrow_schema::<R>().clone(),
             Some(option.write_parquet_properties.clone()),
         )?;
         writer.write(columns.as_record_batch()).await?;
@@ -494,7 +509,7 @@ pub(crate) mod tests {
         executor::tokio::TokioExecutor,
         fs::{default_open_options, manager::StoreManager, FileId},
         inmem::{immutable::Immutable, mutable::Mutable},
-        record::Record,
+        record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -507,6 +522,7 @@ pub(crate) mod tests {
     async fn build_immutable<R>(
         option: &DbOption<R>,
         records: Vec<(LogType, R, Timestamp)>,
+        instance: &RecordInstance,
         fs: &Arc<dyn DynFs>,
     ) -> Result<Immutable<R::Columns>, DbError<R>>
     where
@@ -519,19 +535,20 @@ pub(crate) mod tests {
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
         }
-        Ok(Immutable::from(mutable.data))
+        Ok(Immutable::from((mutable.data, instance)))
     }
 
     pub(crate) async fn build_parquet_table<R>(
         option: &DbOption<R>,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
+        instance: &RecordInstance,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), DbError<R>>
     where
         R: Record + Send,
     {
-        let immutable = build_immutable::<R>(option, records, fs).await?;
+        let immutable = build_immutable::<R>(option, records, instance, fs).await?;
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
                 fs.open_options(&option.table_path(&gen), default_open_options())
@@ -588,6 +605,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
             manager.base_fs(),
         )
         .await
@@ -624,6 +642,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
             manager.base_fs(),
         )
         .await
@@ -636,6 +655,7 @@ pub(crate) mod tests {
                 (Some(FileId::new()), batch_1),
                 (Some(FileId::new()), batch_2),
             ],
+            &RecordInstance::Normal,
             &manager,
         )
         .await
@@ -643,6 +663,75 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(scope.min, 1.to_string());
         assert_eq!(scope.max, 6.to_string());
+    }
+
+    #[tokio::test]
+    async fn dyn_minor_compaction() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let option = DbOption::with_path(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            "id".to_string(),
+            0,
+        );
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let empty_record = DynRecord::empty_record(
+            vec![ColumnDesc::new("id".to_owned(), Datatype::Int32, false)],
+            0,
+        );
+        let instance = RecordInstance::Runtime(empty_record);
+
+        let mut batch1_data = vec![];
+        let mut batch2_data = vec![];
+        for i in 0..40 {
+            let col = Column::new(Datatype::Int32, "id".to_owned(), Arc::new(i), false);
+            if i % 4 == 0 {
+                continue;
+            }
+            if i < 35 && (i % 2 == 0 || i % 5 == 0) {
+                batch1_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+            } else if i >= 7 {
+                batch2_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+            }
+        }
+
+        // data range: [2, 34]
+        let batch_1 =
+            build_immutable::<DynRecord>(&option, batch1_data, &instance, manager.base_fs())
+                .await
+                .unwrap();
+
+        // data range: [7, 39]
+        let batch_2 =
+            build_immutable::<DynRecord>(&option, batch2_data, &instance, manager.base_fs())
+                .await
+                .unwrap();
+
+        let scope = Compactor::<DynRecord>::minor_compaction(
+            &option,
+            None,
+            &vec![
+                (Some(FileId::new()), batch_1),
+                (Some(FileId::new()), batch_2),
+            ],
+            &instance,
+            &manager,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            scope.min,
+            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(2), false)
+        );
+        assert_eq!(
+            scope.max,
+            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(39), false)
+        );
     }
 
     #[tokio::test]
@@ -677,6 +766,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
+            &RecordInstance::Normal,
             &manager,
         )
         .await
@@ -758,6 +848,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
             level_0_fs,
         )
         .await
@@ -794,6 +885,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
             level_0_fs,
         )
         .await
@@ -835,6 +927,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
             level_1_fs,
         )
         .await
@@ -871,6 +964,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
             level_1_fs,
         )
         .await
@@ -907,6 +1001,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
+            &RecordInstance::Normal,
             level_1_fs,
         )
         .await
@@ -1005,12 +1100,24 @@ pub(crate) mod tests {
                 records1.push(record);
             }
         }
-        build_parquet_table::<Test>(&option, table_gen0, records0, level_0_fs)
-            .await
-            .unwrap();
-        build_parquet_table::<Test>(&option, table_gen1, records1, level_1_fs)
-            .await
-            .unwrap();
+        build_parquet_table::<Test>(
+            &option,
+            table_gen0,
+            records0,
+            &RecordInstance::Normal,
+            level_0_fs,
+        )
+        .await
+        .unwrap();
+        build_parquet_table::<Test>(
+            &option,
+            table_gen1,
+            records1,
+            &RecordInstance::Normal,
+            level_1_fs,
+        )
+        .await
+        .unwrap();
 
         let option = Arc::new(option);
         let (sender, _) = bounded(1);
@@ -1040,6 +1147,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
+            &RecordInstance::Normal,
             &manager,
         )
         .await
