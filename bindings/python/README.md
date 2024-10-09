@@ -5,7 +5,7 @@ This package intends to build a native python binding for [Tonbo](https://github
 ## Example
 
 ```py
-from tonbo import DbOption, Column, DataType, Record, TonboDB
+from tonbo import DbOption, Column, DataType, Record, TonboDB, Bound
 import asyncio
 
 @Record
@@ -32,7 +32,9 @@ async def main():
 
     txn = await db.transaction()
     # range scan, supports pushing down and limit
-    scan = await txn.scan(1, 120, limit=100, projection=["age", "weight"])
+    scan = await txn.scan(
+        Bound.Excluded(18), None, limit=100, projection=["age", "weight"]
+    )
     async for record in scan:
         print(record)
 

@@ -8,6 +8,7 @@ mod datatype;
 mod db;
 mod error;
 mod options;
+mod range;
 mod record;
 mod stream;
 mod transaction;
@@ -29,6 +30,7 @@ fn _tonbo(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Record>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<ScanStream>()?;
+    m.add_class::<range::Bound>()?;
 
     let error_module = PyModule::new_bound(py, "error")?;
     error_module.add_class::<DbError>()?;
