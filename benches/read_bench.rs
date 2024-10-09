@@ -141,13 +141,13 @@ async fn main() {
             println!("{}: start loading", T::db_type_name());
             let database = T::build(path).await;
 
+            let mut tx = database.write_transaction().await;
+            let mut inserter = tx.get_inserter();
             for customer in read_tbl(tbl_path) {
-                let mut tx = database.write_transaction().await;
-                let mut inserter = tx.get_inserter();
-                inserter.insert(customer).unwrap();
-                drop(inserter);
-                tx.commit().await.unwrap();
+                inserter.insert(customer).await.unwrap();
             }
+            drop(inserter);
+            tx.commit().await.unwrap();
             println!("{}: loading completed", T::db_type_name());
         }
 

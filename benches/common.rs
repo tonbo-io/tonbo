@@ -163,10 +163,10 @@ pub trait BenchWriteTransaction {
 
 pub trait BenchInserter {
     #[allow(clippy::result_unit_err)]
-    fn insert(&mut self, record: Customer) -> Result<(), ()>;
+    async fn insert(&mut self, record: Customer) -> Result<(), ()>;
 
     #[allow(clippy::result_unit_err)]
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()>;
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()>;
 }
 
 pub trait BenchReadTransaction {
@@ -322,12 +322,12 @@ pub struct TonboBenchInserter<'db, 'txn> {
 }
 
 impl BenchInserter for TonboBenchInserter<'_, '_> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.txn.insert(record);
         Ok(())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.txn.remove(key);
         Ok(())
     }
@@ -470,7 +470,7 @@ pub struct RedbBenchInserter<'txn> {
 }
 
 impl BenchInserter for RedbBenchInserter<'_> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.table
             .insert(
                 record.c_custkey.as_bytes(),
@@ -480,7 +480,7 @@ impl BenchInserter for RedbBenchInserter<'_> {
             .map_err(|_| ())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.table
             .remove(key.as_bytes())
             .map(|_| ())
@@ -634,7 +634,7 @@ pub struct SledBenchInserter<'a> {
 }
 
 impl<'a> BenchInserter for SledBenchInserter<'a> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.db
             .insert(
                 record.c_custkey.as_bytes(),
@@ -644,7 +644,7 @@ impl<'a> BenchInserter for SledBenchInserter<'a> {
             .map_err(|_| ())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.db.remove(key.as_bytes()).map(|_| ()).map_err(|_| ())
     }
 }
@@ -722,7 +722,7 @@ pub struct RocksdbBenchInserter<'a> {
 }
 
 impl BenchInserter for RocksdbBenchInserter<'_> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.txn
             .put(
                 record.c_custkey.as_bytes(),
@@ -732,7 +732,7 @@ impl BenchInserter for RocksdbBenchInserter<'_> {
             .map_err(|_| ())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.txn.delete(key.as_bytes()).map(|_| ()).map_err(|_| ())
     }
 }
@@ -956,17 +956,19 @@ pub struct SlateDBBenchInserter<'a> {
 }
 
 impl<'a> BenchInserter for SlateDBBenchInserter<'a> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
-        block_on(self.db.put(
-            record.c_custkey.as_bytes(),
-            bincode::serialize(&record).unwrap().as_bytes(),
-        ));
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
+        self.db
+            .put(
+                record.c_custkey.as_bytes(),
+                bincode::serialize(&record).unwrap().as_bytes(),
+            )
+            .await;
 
         Ok(())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
-        block_on(self.db.delete(key.as_bytes()));
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+        self.db.delete(key.as_bytes()).await;
 
         Ok(())
     }
