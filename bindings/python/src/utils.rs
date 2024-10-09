@@ -6,7 +6,7 @@ use pyo3::{
 };
 use tonbo::record::Datatype;
 
-use crate::{column::Column, datatype::DataType};
+use crate::{column::Column, datatype::DataType, range};
 
 pub(crate) fn to_dict(
     py: Python,
@@ -68,28 +68,18 @@ pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> tonbo::record:
 pub(crate) fn to_bound(
     py: Python,
     col: &Column,
-    lower: Option<Py<PyAny>>,
-    high: Option<Py<PyAny>>,
+    lower: Option<Py<range::Bound>>,
+    high: Option<Py<range::Bound>>,
 ) -> (
     std::ops::Bound<tonbo::record::Column>,
     std::ops::Bound<tonbo::record::Column>,
 ) {
     let lower = match lower {
-        Some(key) => std::ops::Bound::Included(tonbo::record::Column::new(
-            Datatype::from(&col.datatype),
-            col.name.to_owned(),
-            to_key(py, &col.datatype, key),
-            col.nullable,
-        )),
+        Some(bound) => bound.get().to_bound(py, col),
         None => std::ops::Bound::Unbounded,
     };
     let high = match high {
-        Some(key) => std::ops::Bound::Included(tonbo::record::Column::new(
-            Datatype::from(&col.datatype),
-            col.name.to_owned(),
-            to_key(py, &col.datatype, key),
-            col.nullable,
-        )),
+        Some(bound) => bound.get().to_bound(py, col),
         None => std::ops::Bound::Unbounded,
     };
 

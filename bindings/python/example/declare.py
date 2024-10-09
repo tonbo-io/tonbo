@@ -1,4 +1,4 @@
-from tonbo import DbOption, Column, DataType, Record, TonboDB
+from tonbo import DbOption, Column, DataType, Record, TonboDB, Bound
 import asyncio
 import tempfile
 
@@ -29,7 +29,9 @@ async def main():
 
     await txn.commit()
     txn = await db.transaction()
-    scan = await txn.scan(1, None, limit=100, projection=["age", "weight"])
+    scan = await txn.scan(
+        Bound.Excluded(18), None, limit=100, projection=["age", "weight"]
+    )
     async for record in scan:
         assert record["height"] is None
         print(record)

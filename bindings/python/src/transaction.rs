@@ -11,6 +11,7 @@ use tonbo::{record::DynRecord, transaction, Projection};
 use crate::{
     column::Column,
     error::{repeated_commit_err, CommitError, DbError},
+    range,
     stream::ScanStream,
     utils::{to_bound, to_col, to_dict},
 };
@@ -137,8 +138,8 @@ impl Transaction {
     fn scan<'py>(
         &'py mut self,
         py: Python<'py>,
-        lower: Option<Py<PyAny>>,
-        high: Option<Py<PyAny>>,
+        lower: Option<Py<range::Bound>>,
+        high: Option<Py<range::Bound>>,
         limit: Option<usize>,
         projection: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
