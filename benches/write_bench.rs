@@ -29,7 +29,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
     let mut inserter = txn.get_inserter();
     {
         for _ in 0..WRITE_TIMES {
-            inserter.insert(gen_record(&mut rng)).unwrap();
+            inserter.insert(gen_record(&mut rng)).await.unwrap();
         }
     }
     drop(inserter);
@@ -50,7 +50,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         for _ in 0..WRITE_TIMES {
             let mut txn = db.write_transaction().await;
             let mut inserter = txn.get_inserter();
-            inserter.insert(gen_record(&mut rng)).unwrap();
+            inserter.insert(gen_record(&mut rng)).await.unwrap();
             drop(inserter);
             txn.commit().await.unwrap();
         }
@@ -78,7 +78,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
                 for _ in 0..(WRITE_TIMES / num_threads) {
                     let mut txn = db2.write_transaction().await;
                     let mut inserter = txn.get_inserter();
-                    inserter.insert(gen_record(&mut rng)).unwrap();
+                    inserter.insert(gen_record(&mut rng)).await.unwrap();
                     drop(inserter);
                     txn.commit().await.unwrap();
                 }
@@ -107,7 +107,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
             let mut txn = db.write_transaction().await;
             let mut inserter = txn.get_inserter();
             for _ in 0..WRITE_BATCH_SIZE {
-                inserter.insert(gen_record(&mut rng)).unwrap();
+                inserter.insert(gen_record(&mut rng)).await.unwrap();
             }
             drop(inserter);
             txn.commit().await.unwrap();
@@ -138,7 +138,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
                     let mut txn = db2.write_transaction().await;
                     let mut inserter = txn.get_inserter();
                     for _ in 0..WRITE_BATCH_SIZE {
-                        inserter.insert(gen_record(&mut rng)).unwrap();
+                        inserter.insert(gen_record(&mut rng)).await.unwrap();
                     }
                     drop(inserter);
                     txn.commit().await.unwrap();
@@ -168,7 +168,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         let mut inserter = txn.get_inserter();
         for _ in 0..deletes {
             let record = gen_record(&mut rng);
-            inserter.remove(record.c_custkey).unwrap();
+            inserter.remove(record.c_custkey).await.unwrap();
         }
         drop(inserter);
         txn.commit().await.unwrap();
@@ -201,6 +201,10 @@ async fn main() {
         let tmp_file: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         benchmark::<RocksdbBenchDatabase>(tmp_file.path()).await
     };
+    let slatedb_results = {
+        let tmp_file: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
+        benchmark::<SlateDBBenchDatabase>(tmp_file.path()).await
+    };
 
     let _ = fs::remove_dir_all(&tmpdir);
 
@@ -210,7 +214,7 @@ async fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [tonbo_latency_results, rocksdb_results] {
+    for results in [tonbo_latency_results, rocksdb_results, slatedb_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -218,7 +222,7 @@ async fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "tonbo", "rocksdb"]);
+    table.set_header(["", "tonbo", "rocksdb", "slatedb"]);
     for row in rows {
         table.add_row(row);
     }

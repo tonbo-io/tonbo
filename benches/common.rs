@@ -9,12 +9,15 @@ use std::{
 };
 
 use async_stream::stream;
-use fusio::local::TokioFs;
+use fusio::{local::TokioFs, DynFs};
+use futures::executor::block_on;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use object_store::{local::LocalFileSystem, ObjectStore};
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
+use slatedb::config::DbOptions;
 use tonbo::{
     executor::tokio::TokioExecutor, fs::manager::StoreManager, stream,
     transaction::TransactionEntry, DbOption, Projection,
@@ -38,6 +41,7 @@ type ProjectionField = String;
 pub enum BenchResult<'a> {
     Ref(TransactionEntry<'a, Customer>),
     Owned(Box<Customer>),
+    None,
 }
 
 #[allow(dead_code)]
@@ -45,6 +49,7 @@ pub enum ProjectionResult<'a> {
     // the entry is directly used to represent the field being projected.
     Ref(stream::Entry<'a, Customer>),
     Owned(ProjectionField),
+    None,
 }
 
 #[derive(Record, Debug, ::serde::Serialize, ::serde::Deserialize)]
@@ -158,10 +163,10 @@ pub trait BenchWriteTransaction {
 
 pub trait BenchInserter {
     #[allow(clippy::result_unit_err)]
-    fn insert(&mut self, record: Customer) -> Result<(), ()>;
+    async fn insert(&mut self, record: Customer) -> Result<(), ()>;
 
     #[allow(clippy::result_unit_err)]
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()>;
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()>;
 }
 
 pub trait BenchReadTransaction {
@@ -317,12 +322,12 @@ pub struct TonboBenchInserter<'db, 'txn> {
 }
 
 impl BenchInserter for TonboBenchInserter<'_, '_> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.txn.insert(record);
         Ok(())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.txn.remove(key);
         Ok(())
     }
@@ -465,7 +470,7 @@ pub struct RedbBenchInserter<'txn> {
 }
 
 impl BenchInserter for RedbBenchInserter<'_> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.table
             .insert(
                 record.c_custkey.as_bytes(),
@@ -475,7 +480,7 @@ impl BenchInserter for RedbBenchInserter<'_> {
             .map_err(|_| ())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.table
             .remove(key.as_bytes())
             .map(|_| ())
@@ -629,7 +634,7 @@ pub struct SledBenchInserter<'a> {
 }
 
 impl<'a> BenchInserter for SledBenchInserter<'a> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.db
             .insert(
                 record.c_custkey.as_bytes(),
@@ -639,7 +644,7 @@ impl<'a> BenchInserter for SledBenchInserter<'a> {
             .map_err(|_| ())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.db.remove(key.as_bytes()).map(|_| ()).map_err(|_| ())
     }
 }
@@ -717,7 +722,7 @@ pub struct RocksdbBenchInserter<'a> {
 }
 
 impl BenchInserter for RocksdbBenchInserter<'_> {
-    fn insert(&mut self, record: Customer) -> Result<(), ()> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.txn
             .put(
                 record.c_custkey.as_bytes(),
@@ -727,7 +732,7 @@ impl BenchInserter for RocksdbBenchInserter<'_> {
             .map_err(|_| ())
     }
 
-    fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
         self.txn.delete(key.as_bytes()).map(|_| ()).map_err(|_| ())
     }
 }
@@ -822,5 +827,149 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
                 yield ProjectionResult::Owned(bincode::deserialize::<Customer>(v.as_bytes()).unwrap().c_name)
             }
         }
+    }
+}
+
+pub struct SlateDBBenchDatabase {
+    db: slatedb::db::Db,
+}
+
+impl SlateDBBenchDatabase {
+    pub fn new(db: slatedb::db::Db) -> Self {
+        Self { db }
+    }
+}
+
+impl BenchDatabase for SlateDBBenchDatabase {
+    type W<'db>
+        = SlateDBBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = SlateDBBenchReadTransaction<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "slatedb"
+    }
+
+    async fn write_transaction(&self) -> Self::W<'_> {
+        SlateDBBenchWriteTransaction { db: &self.db }
+    }
+
+    async fn read_transaction(&self) -> Self::R<'_> {
+        SlateDBBenchReadTransaction { db: &self.db }
+    }
+
+    async fn build(path: impl AsRef<Path>) -> Self {
+        fs::create_dir_all(path.as_ref()).unwrap();
+
+        let object_store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFileSystem::new_with_prefix(path.as_ref()).unwrap());
+        let options = DbOptions::default();
+        let db = slatedb::db::Db::open_with_opts(
+            object_store::path::Path::from_filesystem_path(path).unwrap(),
+            options,
+            object_store,
+        )
+        .await
+        .unwrap();
+        SlateDBBenchDatabase::new(db)
+    }
+}
+
+pub struct SlateDBBenchReadTransaction<'db> {
+    db: &'db slatedb::db::Db,
+}
+
+impl BenchReadTransaction for SlateDBBenchReadTransaction<'_> {
+    type T<'txn>
+        = SlateDBBenchReader<'txn>
+    where
+        Self: 'txn;
+
+    fn get_reader(&self) -> Self::T<'_> {
+        SlateDBBenchReader { db: &self.db }
+    }
+}
+
+pub struct SlateDBBenchReader<'db> {
+    db: &'db slatedb::db::Db,
+}
+
+impl<'db> BenchReader for SlateDBBenchReader<'db> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+        self.db.get(key.as_bytes()).await.unwrap().map(|guard| {
+            BenchResult::Owned(
+                bincode::deserialize::<Customer>(guard.as_bytes())
+                    .unwrap()
+                    .into(),
+            )
+        })
+    }
+
+    fn range_from<'a>(
+        &'a self,
+        range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
+    ) -> impl Stream<Item = BenchResult> + 'a {
+        // Slated is not yet supported
+        stream! {
+            yield BenchResult::None;
+        }
+    }
+
+    fn projection_range_from<'a>(
+        &'a self,
+        range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
+    ) -> impl Stream<Item = ProjectionResult> + 'a {
+        // Slated is not yet supported
+        stream! {
+            yield ProjectionResult::None;
+        }
+    }
+}
+
+pub struct SlateDBBenchWriteTransaction<'a> {
+    db: &'a slatedb::db::Db,
+}
+
+impl BenchWriteTransaction for SlateDBBenchWriteTransaction<'_> {
+    type W<'txn>
+        = SlateDBBenchInserter<'txn>
+    where
+        Self: 'txn;
+
+    fn get_inserter(&mut self) -> Self::W<'_> {
+        SlateDBBenchInserter { db: self.db }
+    }
+
+    async fn commit(self) -> Result<(), ()> {
+        self.db.flush().await.map_err(|_| ())?;
+
+        Ok(())
+    }
+}
+
+pub struct SlateDBBenchInserter<'a> {
+    db: &'a slatedb::db::Db,
+}
+
+impl<'a> BenchInserter for SlateDBBenchInserter<'a> {
+    async fn insert(&mut self, record: Customer) -> Result<(), ()> {
+        self.db
+            .put(
+                record.c_custkey.as_bytes(),
+                bincode::serialize(&record).unwrap().as_bytes(),
+            )
+            .await;
+
+        Ok(())
+    }
+
+    async fn remove(&mut self, key: ItemKey) -> Result<(), ()> {
+        self.db.delete(key.as_bytes()).await;
+
+        Ok(())
     }
 }

@@ -58,7 +58,7 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
-    use fusio::{local::TokioFs, path::Path, DynFs};
+    use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
 

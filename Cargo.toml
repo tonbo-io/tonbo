@@ -14,12 +14,13 @@ version = "0.1.0"
 msrv = "1.79.0"
 
 [features]
-bench = ["redb", "rocksdb", "sled"]
+bench = ["redb", "rocksdb", "slatedb", "sled"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
 default = ["tokio"]
 load_tbl = []
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]
+slatedb = ["dep:slatedb"]
 sled = ["dep:sled"]
 tokio = ["tokio/fs"]
 type_bytes = ["dep:bytes"]
@@ -58,8 +59,8 @@ crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "42", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", rev = "317b1b0621b297f52145b41b90506632f2dc7a1d", features = ["tokio", "dyn"] }
-fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet", rev = "317b1b0621b297f52145b41b90506632f2dc7a1d" }
+fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", rev = "39e5d292fb6a67f8c034df9a0f77755ea2c93f55", features = ["tokio", "dyn"] }
+fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet", rev = "39e5d292fb6a67f8c034df9a0f77755ea2c93f55" }
 futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"
@@ -77,8 +78,10 @@ ulid = "1"
 
 # Only used for benchmarks
 log = "0.4.22"
+object_store = "0.11.0"
 redb = { version = "2", optional = true }
 rocksdb = { version = "0.22", optional = true }
+slatedb = { version = "0.2.0", optional = true }
 sled = { version = "0.34", optional = true }
 
 [dev-dependencies]

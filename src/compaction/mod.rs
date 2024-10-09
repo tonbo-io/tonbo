@@ -499,7 +499,7 @@ pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
     use flume::bounded;
-    use fusio::{local::TokioFs, path::Path, DynFs};
+    use fusio::{disk::TokioFs, path::Path, DynFs};
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;

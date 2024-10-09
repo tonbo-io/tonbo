@@ -27,7 +27,7 @@ impl Display for FileType {
 }
 
 pub(crate) fn default_open_options() -> OpenOptions {
-    OpenOptions::default().create().append().read()
+    OpenOptions::default().create(true).append(true).read(true)
 }
 
 pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<FileId>, DecodeError> {

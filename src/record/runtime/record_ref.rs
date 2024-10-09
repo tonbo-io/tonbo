@@ -1,4 +1,4 @@
-use std::{any::Any, marker::PhantomData, sync::Arc};
+use std::{any::Any, marker::PhantomData, mem, sync::Arc};
 
 use arrow::{
     array::{Array, AsArray},
@@ -46,7 +46,7 @@ impl<'r> Encode for DynRecordRef<'r> {
     }
 
     fn size(&self) -> usize {
-        let mut size = 2 * size_of::<u32>();
+        let mut size = 2 * mem::size_of::<u32>();
         for col in self.columns.iter() {
             size += col.size();
         }

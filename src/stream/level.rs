@@ -201,7 +201,7 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use fusio::{local::TokioFs, path::Path};
+    use fusio::{disk::TokioFs, path::Path};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;

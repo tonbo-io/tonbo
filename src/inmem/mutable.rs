@@ -195,7 +195,7 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
-    use fusio::{local::TokioFs, path::Path, DynFs};
+    use fusio::{disk::TokioFs, path::Path, DynFs};
 
     use super::Mutable;
     use crate::{

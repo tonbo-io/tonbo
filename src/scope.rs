@@ -127,7 +127,8 @@ where
         let max = K::decode(reader).await?;
 
         let gen = {
-            buf = reader.read_exact(buf).await?;
+            let (result, _) = reader.read_exact(buf.as_mut_slice()).await;
+            result?;
             // SAFETY
             FileId::from_bytes(buf.as_slice().try_into().unwrap())
         };
@@ -138,7 +139,8 @@ where
                 let mut ids = Vec::with_capacity(len);
 
                 for _ in 0..len {
-                    buf = reader.read_exact(buf).await?;
+                    let (result, _) = reader.read_exact(buf.as_mut_slice()).await;
+                    result?;
                     // SAFETY
                     ids.push(FileId::from_bytes(buf.as_slice().try_into().unwrap()));
                 }

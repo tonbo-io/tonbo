@@ -102,7 +102,7 @@ pub(crate) mod tests {
     use std::{borrow::Borrow, fs::File, ops::Bound, sync::Arc};
 
     use arrow::array::RecordBatch;
-    use fusio::{dynamic::DynFile, local::TokioFs, path::Path, DynFs};
+    use fusio::{disk::TokioFs, dynamic::DynFile, path::Path, DynFs};
     use fusio_parquet::writer::AsyncWriter;
     use futures_util::StreamExt;
     use parquet::{

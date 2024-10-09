@@ -12,7 +12,8 @@ use tokio::{fs, io::AsyncWriteExt};
 
 use crate::common::{
     read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
-    RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, NUM_SCAN, READ_TIMES,
+    RocksdbBenchDatabase, SlateDBBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS,
+    NUM_SCAN, READ_TIMES,
 };
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
@@ -140,22 +141,24 @@ async fn main() {
             println!("{}: start loading", T::db_type_name());
             let database = T::build(path).await;
 
+            let mut tx = database.write_transaction().await;
+            let mut inserter = tx.get_inserter();
             for customer in read_tbl(tbl_path) {
-                let mut tx = database.write_transaction().await;
-                let mut inserter = tx.get_inserter();
-                inserter.insert(customer).unwrap();
-                drop(inserter);
-                tx.commit().await.unwrap();
+                inserter.insert(customer).await.unwrap();
             }
+            drop(inserter);
+            tx.commit().await.unwrap();
             println!("{}: loading completed", T::db_type_name());
         }
 
         load::<TonboBenchDataBase>(&tbl_path, data_dir.join("tonbo")).await;
         load::<RocksdbBenchDatabase>(&tbl_path, data_dir.join("rocksdb")).await;
+        load::<SlateDBBenchDatabase>(&tbl_path, data_dir.join("slatedb")).await;
     }
 
     let tonbo_latency_results = { benchmark::<TonboBenchDataBase>(data_dir.join("tonbo")).await };
     let rocksdb_results = { benchmark::<RocksdbBenchDatabase>(data_dir.join("rocksdb")).await };
+    let slatedb_results = { benchmark::<SlateDBBenchDatabase>(data_dir.join("slatedb")).await };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
 
@@ -163,7 +166,7 @@ async fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [tonbo_latency_results, rocksdb_results] {
+    for results in [tonbo_latency_results, rocksdb_results, slatedb_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
