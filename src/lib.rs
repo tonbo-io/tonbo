@@ -837,7 +837,7 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
-    use fusio::{local::TokioFs, path::Path, DynFs, Read, Write};
+    use fusio::{disk::TokioFs, path::Path, DynFs, Read, Write};
     use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};

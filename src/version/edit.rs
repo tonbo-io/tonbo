@@ -97,7 +97,8 @@ where
             1 => {
                 let level = u8::decode(reader).await?;
                 let gen = {
-                    let buf = reader.read_exact(vec![0u8; 16]).await?;
+                    let (result, buf) = reader.read_exact(vec![0u8; 16]).await;
+                    result?;
                     // SAFETY
                     FileId::from_bytes(buf.as_slice().try_into().unwrap())
                 };

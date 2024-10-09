@@ -2,7 +2,7 @@
 mod tests {
     use std::{hash::Hasher, ops::Bound, sync::Arc};
 
-    use fusio::{local::TokioFs, path::Path};
+    use fusio::{disk::TokioFs, path::Path};
     use futures_util::StreamExt;
     use tempfile::TempDir;
     use tonbo::{executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Record, DB};

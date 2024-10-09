@@ -282,7 +282,7 @@ pub(crate) mod tests {
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
-    use fusio::{local::TokioFs, path::Path};
+    use fusio::{disk::TokioFs, path::Path};
     use futures_util::StreamExt;
     use tempfile::TempDir;
 

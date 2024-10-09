@@ -842,11 +842,11 @@ impl SlateDBBenchDatabase {
 
 impl BenchDatabase for SlateDBBenchDatabase {
     type W<'db>
-    = SlateDBBenchWriteTransaction<'db>
+        = SlateDBBenchWriteTransaction<'db>
     where
         Self: 'db;
     type R<'db>
-    = SlateDBBenchReadTransaction<'db>
+        = SlateDBBenchReadTransaction<'db>
     where
         Self: 'db;
 
@@ -885,7 +885,7 @@ pub struct SlateDBBenchReadTransaction<'db> {
 
 impl BenchReadTransaction for SlateDBBenchReadTransaction<'_> {
     type T<'txn>
-    = SlateDBBenchReader<'txn>
+        = SlateDBBenchReader<'txn>
     where
         Self: 'txn;
 
@@ -936,7 +936,7 @@ pub struct SlateDBBenchWriteTransaction<'a> {
 
 impl BenchWriteTransaction for SlateDBBenchWriteTransaction<'_> {
     type W<'txn>
-    = SlateDBBenchInserter<'txn>
+        = SlateDBBenchInserter<'txn>
     where
         Self: 'txn;
 
