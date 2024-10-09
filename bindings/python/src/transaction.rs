@@ -47,18 +47,22 @@ impl Transaction {
     }
 
     fn projection(&self, projection: Vec<String>) -> Vec<usize> {
-        self.desc
-            .iter()
-            .enumerate()
-            .filter(|(_idx, col)| projection.contains(&col.name))
-            .map(|(idx, _col)| idx)
-            .collect()
+        match projection.contains(&"*".to_string()) {
+            true => (0..self.desc.len()).collect(),
+            false => self
+                .desc
+                .iter()
+                .enumerate()
+                .filter(|(_idx, col)| projection.contains(&col.name))
+                .map(|(idx, _col)| idx)
+                .collect(),
+        }
     }
 }
 
 #[pymethods]
 impl Transaction {
-    #[pyo3(signature= (key, projection=vec![]))]
+    #[pyo3(signature= (key, projection=vec!["*".to_owned()]))]
     fn get<'py>(
         &'py self,
         py: Python<'py>,
@@ -134,7 +138,7 @@ impl Transaction {
         Ok(())
     }
 
-    #[pyo3(signature= (lower, high, limit=None,  projection=vec![]))]
+    #[pyo3(signature= (lower, high, limit=None,  projection=vec!["*".to_string()]))]
     fn scan<'py>(
         &'py mut self,
         py: Python<'py>,
