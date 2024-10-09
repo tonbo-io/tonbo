@@ -3,7 +3,7 @@ use std::{
     marker::PhantomData,
 };
 
-use fusio::{parse::FsOptions, path::Path};
+use fusio::{options::FsOptions, path::Path};
 use parquet::{
     basic::Compression,
     file::properties::{EnabledStatistics, WriterProperties},

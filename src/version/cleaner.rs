@@ -98,7 +98,7 @@ pub(crate) mod tests {
     use std::{sync::Arc, time::Duration};
 
     use fusio::{
-        parse::FsOptions,
+        options::FsOptions,
         path::{path_to_local, Path},
     };
     use tempfile::TempDir;

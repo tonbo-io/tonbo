@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use fusio::{dynamic::DynFs, parse::FsOptions, path::Path, Error};
+use fusio::{dynamic::DynFs, options::FsOptions, path::Path, Error};
 
 pub struct StoreManager {
     base_fs: Arc<dyn DynFs>,

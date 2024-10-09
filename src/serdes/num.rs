@@ -27,7 +27,8 @@ macro_rules! implement_encode_decode {
 
             async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
                 let mut bytes = [0u8; size_of::<Self>()];
-                let _ = reader.read_exact(&mut bytes[..]).await?;
+                let (result, _) = reader.read_exact(&mut bytes[..]).await;
+                result?;
 
                 Ok(Self::from_le_bytes(bytes))
             }
