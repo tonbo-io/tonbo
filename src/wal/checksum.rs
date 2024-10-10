@@ -65,11 +65,31 @@ impl<R: Read + Unpin> HashReader<R> {
 }
 
 impl<R: Read> Read for HashReader<R> {
-    async fn read_exact<B: IoBufMut>(&mut self, buf: B) -> Result<B, Error> {
-        let bytes = self.reader.read_exact(buf).await?;
-        self.hasher.write(bytes.as_slice());
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> (Result<u64, Error>, B) {
+        let (result, bytes) = self.reader.read(buf).await;
+        if result.is_ok() {
+            self.hasher.write(bytes.as_slice());
+        }
 
-        Ok(bytes)
+        (result, bytes)
+    }
+
+    async fn read_exact<B: IoBufMut>(&mut self, buf: B) -> (Result<(), Error>, B) {
+        let (result, bytes) = self.reader.read_exact(buf).await;
+        if result.is_ok() {
+            self.hasher.write(bytes.as_slice());
+        }
+
+        (result, bytes)
+    }
+
+    async fn read_to_end(&mut self, buf: Vec<u8>) -> (Result<(), Error>, Vec<u8>) {
+        let (result, bytes) = self.reader.read_to_end(buf).await;
+        if result.is_ok() {
+            self.hasher.write(&bytes);
+        }
+
+        (result, bytes)
     }
 
     async fn size(&self) -> Result<u64, fusio::Error> {
