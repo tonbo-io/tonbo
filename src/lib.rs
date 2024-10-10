@@ -347,7 +347,7 @@ where
     pub async fn get<T>(
         &self,
         key: &R::Key,
-        mut f: impl FnMut(TransactionEntry<'_, R>) -> T,
+        mut f: impl FnMut(TransactionEntry<'_, R>) -> Option<T>,
     ) -> Result<Option<T>, CommitError<R>> {
         Ok(self
             .schema
@@ -361,7 +361,13 @@ where
                 Projection::All,
             )
             .await?
-            .map(|e| f(TransactionEntry::Stream(e))))
+            .and_then(|entry| {
+                if entry.value().is_none() {
+                    None
+                } else {
+                    f(TransactionEntry::Stream(entry))
+                }
+            }))
     }
 
     /// scan records with primary keys in the `range` and process them using closure `f`
@@ -1687,6 +1693,43 @@ pub(crate) mod tests {
 
                 assert_eq!(columns1.get(1), columns2.get(1));
                 assert_eq!(columns1.get(2), columns2.get(2));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_removed() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
+            .await
+            .unwrap();
+
+        for (idx, item) in test_items().into_iter().enumerate() {
+            if idx % 2 == 0 {
+                db.write(item, 0.into()).await.unwrap();
+            } else {
+                db.remove(item.vstring).await.unwrap();
+            }
+        }
+
+        for i in 0..40 {
+            let vstring = db
+                .get(&i.to_string(), |e| Some(e.get().vstring.to_string()))
+                .await
+                .unwrap();
+            if i % 2 == 0 {
+                assert!(vstring.is_some());
+                assert_eq!(vstring, Some(i.to_string()));
+            } else {
+                assert!(vstring.is_none());
             }
         }
     }
