@@ -499,7 +499,7 @@ pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
     use flume::bounded;
-    use fusio::{path::Path, DynFs};
+    use fusio::{options::FsOptions, path::Path, DynFs};
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;
@@ -669,7 +669,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dyn_minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "id".to_string(),
