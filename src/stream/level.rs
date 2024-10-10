@@ -45,6 +45,7 @@ where
     lower: Bound<&'level R::Key>,
     upper: Bound<&'level R::Key>,
     ts: Timestamp,
+    level: usize,
     option: Arc<DbOption<R>>,
     gens: VecDeque<FileId>,
     limit: Option<usize>,
@@ -83,6 +84,7 @@ where
             lower,
             upper,
             ts,
+            level,
             option: version.option().clone(),
             gens,
             limit,
@@ -105,7 +107,7 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.path = Some(self.option.table_path(&gen));
+                    self.path = Some(self.option.table_path(&gen, self.level));
 
                     let reader = self
                         .fs
@@ -129,7 +131,7 @@ where
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.path = Some(self.option.table_path(&gen));
+                            self.path = Some(self.option.table_path(&gen, self.level));
 
                             let reader = self
                                 .fs
