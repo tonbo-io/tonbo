@@ -23,13 +23,12 @@ use datafusion::{
     prelude::*,
     sql::parser::DFParser,
 };
-use fusio::{local::TokioFs, path::Path};
+use fusio::path::Path;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
 use tonbo::{
-    executor::tokio::TokioExecutor, fs::manager::StoreManager, inmem::immutable::ArrowArrays,
-    record::Record, DbOption, DB,
+    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DbOption, DB,
 };
 use tonbo_macros::Record;
 
@@ -216,12 +215,9 @@ async fn main() -> Result<()> {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/music").await;
 
-    let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
     let options = DbOption::from(Path::from_filesystem_path("./db_path/music").unwrap());
 
-    let db = DB::new(options, TokioExecutor::default(), manager)
-        .await
-        .unwrap();
+    let db = DB::new(options, TokioExecutor::default()).await.unwrap();
     for (id, name, like) in [
         (0, "welcome".to_string(), 0),
         (1, "tonbo".to_string(), 999),

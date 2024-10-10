@@ -98,7 +98,7 @@ pub(crate) mod tests {
     use std::{sync::Arc, time::Duration};
 
     use fusio::{
-        local::TokioFs,
+        options::FsOptions,
         path::{path_to_local, Path},
     };
     use tempfile::TempDir;
@@ -116,7 +116,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_cleaner() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = Arc::new(StoreManager::new(Arc::new(TokioFs), vec![]));
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::from(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
         ));

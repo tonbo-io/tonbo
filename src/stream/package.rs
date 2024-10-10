@@ -82,7 +82,7 @@ mod tests {
     use std::{collections::Bound, sync::Arc};
 
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array};
-    use fusio::{local::TokioFs, path::Path, DynFs};
+    use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
