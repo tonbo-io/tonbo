@@ -73,6 +73,7 @@ where
             _p: Default::default(),
             version_log_snapshot_threshold: 200,
             level_paths: vec![None; MAX_LEVEL],
+            base_fs: FsOptions::Local,
         }
     }
 

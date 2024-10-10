@@ -793,13 +793,12 @@ mod tests {
         ];
 
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
         let option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "age".to_string(),
             0,
         );
-        let db = DB::with_schema(option, TokioExecutor::default(), manager, descs, 0)
+        let db = DB::with_schema(option, TokioExecutor::default(), descs, 0)
             .await
             .unwrap();
 

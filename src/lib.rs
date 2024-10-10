@@ -189,30 +189,15 @@ where
     pub async fn with_schema(
         option: DbOption<DynRecord>,
         executor: E,
-        manager: StoreManager,
         column_descs: Vec<ColumnDesc>,
         primary_index: usize,
     ) -> Result<Self, DbError<DynRecord>> {
         let option = Arc::new(option);
-        let manager = Arc::new(manager);
-
-        {
-            let base_fs = manager.base_fs();
-
-            base_fs
-                .create_dir_all(&option.wal_dir_path())
-                .await
-                .map_err(DbError::Fusio)?;
-            base_fs
-                .create_dir_all(&option.version_log_dir_path())
-                .await
-                .map_err(DbError::Fusio)?;
-        }
 
         let instance =
             RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index));
 
-        Self::build(option, executor, instance, manager).await
+        Self::build(option, executor, instance).await
     }
 }
 
@@ -228,29 +213,30 @@ where
     ///
     /// For more configurable options, please refer to [`DbOption`].
     pub async fn new(option: DbOption<R>, executor: E) -> Result<Self, DbError<R>> {
-        let option = Arc::new(option);
-        let manager = Arc::new(StoreManager::new(
-            option.base_fs.clone(),
-            option.level_paths.clone(),
-        )?);
-
-        {
-            let base_fs = manager.base_fs();
-
-            // FIXME: error handle
-            let _ = base_fs.create_dir_all(&option.wal_dir_path()).await;
-            let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
-        }
-
-        Self::build(option, executor, RecordInstance::Normal, manager).await
+        Self::build(Arc::new(option), executor, RecordInstance::Normal).await
     }
 
     async fn build(
         option: Arc<DbOption<R>>,
         executor: E,
         instance: RecordInstance,
-        manager: Arc<StoreManager>,
     ) -> Result<Self, DbError<R>> {
+        let manager = Arc::new(StoreManager::new(
+            option.base_fs.clone(),
+            option.level_paths.clone(),
+        )?);
+        {
+            let base_fs = manager.base_fs();
+
+            base_fs
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+            base_fs
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+        }
         let (task_tx, task_rx) = bounded(1);
 
         let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
@@ -831,7 +817,7 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
-    use fusio::{disk::TokioFs, path::Path, DynFs, Read, Write};
+    use fusio::{disk::TokioFs, options::FsOptions, path::Path, DynFs, Read, Write};
     use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
@@ -1607,8 +1593,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dyn_schema_recover() {
         let temp_dir = TempDir::new().unwrap();
-        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
 
         let (desc, primary_key_index) = test_dyn_item_schema();
         let option = Arc::new(DbOption::with_path(
@@ -1616,13 +1601,18 @@ pub(crate) mod tests {
             "age".to_owned(),
             primary_key_index,
         ));
-        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
 
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
         let schema: crate::Schema<DynRecord> = crate::Schema {
-            mutable: Mutable::new(&option, trigger.clone(), &fs).await.unwrap(),
+            mutable: Mutable::new(&option, trigger.clone(), manager.base_fs())
+                .await
+                .unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx.clone(),
             recover_wal_ids: None,
@@ -1643,15 +1633,10 @@ pub(crate) mod tests {
             "age".to_owned(),
             primary_key_index,
         );
-        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
-            option,
-            TokioExecutor::new(),
-            manager,
-            desc,
-            primary_key_index,
-        )
-        .await
-        .unwrap();
+        let db: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option, TokioExecutor::new(), desc, primary_key_index)
+                .await
+                .unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_dyn_items() {
@@ -1681,7 +1666,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_read_write_dyn() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
         let mut option = DbOption::with_path(
@@ -1697,15 +1681,10 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
-            option,
-            TokioExecutor::new(),
-            manager,
-            cols_desc,
-            primary_key_index,
-        )
-        .await
-        .unwrap();
+        let db: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
+                .await
+                .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i == 28 {
@@ -1825,9 +1804,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_dyn_multiple_db() {
-        let manager1 = StoreManager::new(Arc::new(TokioFs), vec![]);
-        let manager2 = StoreManager::new(Arc::new(TokioFs), vec![]);
-        let manager3 = StoreManager::new(Arc::new(TokioFs), vec![]);
         let temp_dir1 = TempDir::with_prefix("db1").unwrap();
 
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
@@ -1869,7 +1845,6 @@ pub(crate) mod tests {
         let db1: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option,
             TokioExecutor::new(),
-            manager1,
             cols_desc.clone(),
             primary_key_index,
         )
@@ -1878,21 +1853,15 @@ pub(crate) mod tests {
         let db2: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option2,
             TokioExecutor::new(),
-            manager2,
             cols_desc.clone(),
             primary_key_index,
         )
         .await
         .unwrap();
-        let db3: DB<DynRecord, TokioExecutor> = DB::with_schema(
-            option3,
-            TokioExecutor::new(),
-            manager3,
-            cols_desc,
-            primary_key_index,
-        )
-        .await
-        .unwrap();
+        let db3: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
+                .await
+                .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i >= 40 {
