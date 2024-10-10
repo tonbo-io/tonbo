@@ -104,12 +104,7 @@ impl TonboDB {
         })
     }
 
-    fn insert_batch<'py>(
-        &'py self,
-        py: Python<'py>,
-        // batch: Py<PyAny>,
-        batch: RecordBatch,
-    ) -> PyResult<Bound<PyAny>> {
+    fn insert_batch<'py>(&'py self, py: Python<'py>, batch: RecordBatch) -> PyResult<Bound<PyAny>> {
         let record_batch = batch.into_record_batch();
         let db = self.db.clone();
 
