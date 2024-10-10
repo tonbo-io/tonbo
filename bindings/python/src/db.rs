@@ -19,6 +19,7 @@ use crate::{
     column::Column,
     error::CommitError,
     options::DbOption,
+    record_batch::RecordBatch,
     transaction::Transaction,
     utils::{to_col, to_dict},
 };
@@ -103,6 +104,23 @@ impl TonboDB {
         })
     }
 
+    fn insert_batch<'py>(
+        &'py self,
+        py: Python<'py>,
+        // batch: Py<PyAny>,
+        batch: RecordBatch,
+    ) -> PyResult<Bound<PyAny>> {
+        let record_batch = batch.into_record_batch();
+        let db = self.db.clone();
+
+        future_into_py(py, async move {
+            db.insert_batch(record_batch.into_iter())
+                .await
+                .map_err(CommitError::from)?;
+            Ok(Python::with_gil(|py| PyDict::new_bound(py).into_py(py)))
+        })
+    }
+
     fn get<'py>(&'py self, py: Python<'py>, key: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let col_desc = self.desc.get(self.primary_key_index).unwrap();
         let col = to_col(py, col_desc, key);
@@ -110,7 +128,7 @@ impl TonboDB {
         let primary_key_index = self.primary_key_index;
         future_into_py(py, async move {
             let record = db
-                .get(&col, |e| e.get().columns)
+                .get(&col, |e| Some(e.get().columns))
                 .await
                 .map_err(CommitError::from)?;
             Ok(Python::with_gil(|py| match record {
@@ -137,6 +155,15 @@ impl TonboDB {
         future_into_py(py, async move {
             let txn = db.transaction().await;
             Ok(Transaction::new(txn, desc.clone()))
+        })
+    }
+
+    fn flush<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<PyAny>> {
+        let db = self.db.clone();
+
+        future_into_py(py, async move {
+            db.flush().await.map_err(CommitError::from)?;
+            Ok(Python::with_gil(|py| py.None()))
         })
     }
 }

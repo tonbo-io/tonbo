@@ -54,3 +54,9 @@ pip install maturin
 # build bindings
 maturin develop
 ```
+
+Run tests:
+```bash
+maturin develop -E test
+python -m pytest
+```
