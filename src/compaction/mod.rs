@@ -156,7 +156,7 @@ where
             let mut writer = AsyncArrowWriter::try_new(
                 AsyncWriter::new(
                     level_0_fs
-                        .open_options(&option.table_path(&gen), default_open_options())
+                        .open_options(&option.table_path(&gen, 0), default_open_options())
                         .await?,
                 ),
                 instance.arrow_schema::<R>().clone(),
@@ -219,7 +219,7 @@ where
             if level == 0 {
                 for scope in meet_scopes_l.iter() {
                     let file = level_fs
-                        .open_options(&option.table_path(&scope.gen), default_open_options())
+                        .open_options(&option.table_path(&scope.gen, level), default_open_options())
                         .await?;
 
                     streams.push(ScanStream::SsTable {
@@ -454,7 +454,7 @@ where
         let columns = builder.finish(None);
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(&option.table_path(&gen), default_open_options())
+                fs.open_options(&option.table_path(&gen, level), default_open_options())
                     .await?,
             ),
             instance.arrow_schema::<R>().clone(),
@@ -543,6 +543,7 @@ pub(crate) mod tests {
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
         instance: &RecordInstance,
+        level: usize,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), DbError<R>>
     where
@@ -551,7 +552,7 @@ pub(crate) mod tests {
         let immutable = build_immutable::<R>(option, records, instance, fs).await?;
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(&option.table_path(&gen), default_open_options())
+                fs.open_options(&option.table_path(&gen, level), default_open_options())
                     .await?,
             ),
             R::arrow_schema().clone(),
@@ -849,6 +850,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            0,
             level_0_fs,
         )
         .await
@@ -886,6 +888,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            0,
             level_0_fs,
         )
         .await
@@ -928,6 +931,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await
@@ -965,6 +969,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await
@@ -1002,6 +1007,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await
@@ -1105,6 +1111,7 @@ pub(crate) mod tests {
             table_gen0,
             records0,
             &RecordInstance::Normal,
+            0,
             level_0_fs,
         )
         .await
@@ -1114,6 +1121,7 @@ pub(crate) mod tests {
             table_gen1,
             records1,
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await

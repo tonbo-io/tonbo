@@ -74,7 +74,7 @@ where
                                 .level_fs_path(level)
                                 .map(|path| self.manager.get_fs(path))
                                 .unwrap_or(self.manager.base_fs());
-                            fs.remove(&self.option.table_path(&gen)).await?;
+                            fs.remove(&self.option.table_path(&gen, level)).await?;
                         }
                     }
                 }
@@ -84,7 +84,7 @@ where
                         .level_fs_path(0)
                         .map(|path| self.manager.get_fs(path))
                         .unwrap_or(self.manager.base_fs());
-                    fs.remove(&self.option.table_path(&gen)).await?;
+                    fs.remove(&self.option.table_path(&gen, 0)).await?;
                 }
             }
         }
@@ -130,16 +130,16 @@ pub(crate) mod tests {
             .map(|path| manager.get_fs(path))
             .unwrap_or(manager.base_fs());
         {
-            fs.open_options(&option.table_path(&gen_0), default_open_options())
+            fs.open_options(&option.table_path(&gen_0, 0), default_open_options())
                 .await
                 .unwrap();
-            fs.open_options(&option.table_path(&gen_1), default_open_options())
+            fs.open_options(&option.table_path(&gen_1, 0), default_open_options())
                 .await
                 .unwrap();
-            fs.open_options(&option.table_path(&gen_2), default_open_options())
+            fs.open_options(&option.table_path(&gen_2, 0), default_open_options())
                 .await
                 .unwrap();
-            fs.open_options(&option.table_path(&gen_3), default_open_options())
+            fs.open_options(&option.table_path(&gen_3, 0), default_open_options())
                 .await
                 .unwrap();
         }
@@ -178,32 +178,32 @@ pub(crate) mod tests {
             .unwrap();
 
         // FIXME
-        assert!(path_to_local(&option.table_path(&gen_0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_1)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_2)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_3)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_0, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_1, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_2, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
 
         tx.send_async(CleanTag::Clean { ts: 0.into() })
             .await
             .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_1)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_2)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_3)).unwrap().exists());
+        assert!(!path_to_local(&option.table_path(&gen_0, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_1, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_2, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
 
         tx.send_async(CleanTag::Clean { ts: 1.into() })
             .await
             .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_1)).unwrap().exists());
-        assert!(!path_to_local(&option.table_path(&gen_2)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_3)).unwrap().exists());
+        assert!(!path_to_local(&option.table_path(&gen_1, 0)).unwrap().exists());
+        assert!(!path_to_local(&option.table_path(&gen_2, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
 
         tx.send_async(CleanTag::RecoverClean { wal_id: gen_3 })
             .await
             .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_3)).unwrap().exists());
+        assert!(!path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
     }
 }
