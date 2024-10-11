@@ -1598,7 +1598,7 @@ pub(crate) mod tests {
         let (desc, primary_key_index) = test_dyn_item_schema();
         let option = Arc::new(DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_owned(),
+            "id".to_owned(),
             primary_key_index,
         ));
         manager
@@ -1630,7 +1630,7 @@ pub(crate) mod tests {
 
         let option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_owned(),
+            "id".to_owned(),
             primary_key_index,
         );
         let db: DB<DynRecord, TokioExecutor> =
@@ -1670,7 +1670,7 @@ pub(crate) mod tests {
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
         let mut option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option.immutable_chunk_num = 1;
@@ -1700,7 +1700,7 @@ pub(crate) mod tests {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false);
+                let key = Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx.get(&key, Projection::All).await.unwrap();
                 if i == 28 {
                     assert!(option1.is_none());
@@ -1716,13 +1716,13 @@ pub(crate) mod tests {
                         .unwrap()
                         .value
                         .as_ref()
-                        .downcast_ref::<i8>()
+                        .downcast_ref::<i64>()
                         .unwrap(),
-                    i as i8
+                    i as i64
                 );
                 let height = record_ref
                     .columns
-                    .get(1)
+                    .get(2)
                     .unwrap()
                     .value
                     .as_ref()
@@ -1736,7 +1736,7 @@ pub(crate) mod tests {
                 assert_eq!(
                     *record_ref
                         .columns
-                        .get(2)
+                        .get(3)
                         .unwrap()
                         .value
                         .as_ref()
@@ -1744,22 +1744,55 @@ pub(crate) mod tests {
                         .unwrap(),
                     Some(200 * i),
                 );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(4)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<String>>()
+                        .unwrap(),
+                    Some(i.to_string()),
+                );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(5)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<String>>()
+                        .unwrap(),
+                    Some(format!("{}@tonbo.io", i)),
+                );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(6)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<bool>>()
+                        .unwrap(),
+                    Some(i % 2 == 0),
+                );
             }
             tx.commit().await.unwrap();
         }
         // test scan
         {
             let tx = db.transaction().await;
-            let lower = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(0_i8), false);
-            let upper = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(49_i8), false);
+            let lower = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(0_i64), false);
+            let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 1])
+                .projection(vec![0, 2])
                 .take()
                 .await
                 .unwrap();
 
-            let mut i = 0_i8;
+            let mut i = 0_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 if i == 28 {
                     assert!(entry.value().is_none());
@@ -1769,14 +1802,18 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 
-                let col = columns.get(1).unwrap();
+                let col = columns.get(2).unwrap();
                 assert_eq!(col.datatype, Datatype::Int16);
                 assert_eq!(col.name, "height".to_string());
                 let height = *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
@@ -1791,12 +1828,26 @@ pub(crate) mod tests {
                         .is_none(),);
                 }
 
-                let col = columns.get(2).unwrap();
+                let col = columns.get(3).unwrap();
                 assert_eq!(col.datatype, Datatype::Int32);
                 assert_eq!(col.name, "weight".to_string());
                 let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), None);
+
+                let col = columns.get(4).unwrap();
+                assert_eq!(col.datatype, Datatype::String);
+                assert_eq!(col.name, "name".to_string());
+                let name = col.value.as_ref().downcast_ref::<Option<String>>();
+                assert!(name.is_some());
+                assert_eq!(name.unwrap(), &None);
+
+                let col = columns.get(6).unwrap();
+                assert_eq!(col.datatype, Datatype::Boolean);
+                assert_eq!(col.name, "enabled".to_string());
+                let enabled = col.value.as_ref().downcast_ref::<Option<bool>>();
+                assert!(enabled.is_some());
+                assert_eq!(*enabled.unwrap(), None);
                 i += 1
             }
         }
@@ -1809,7 +1860,7 @@ pub(crate) mod tests {
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
         let mut option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir1.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option.immutable_chunk_num = 1;
@@ -1821,7 +1872,7 @@ pub(crate) mod tests {
         let temp_dir2 = TempDir::with_prefix("db2").unwrap();
         let mut option2 = DbOption::with_path(
             Path::from_filesystem_path(temp_dir2.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option2.immutable_chunk_num = 1;
@@ -1833,7 +1884,7 @@ pub(crate) mod tests {
         let temp_dir3 = TempDir::with_prefix("db3").unwrap();
         let mut option3 = DbOption::with_path(
             Path::from_filesystem_path(temp_dir3.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option3.immutable_chunk_num = 1;
@@ -1880,7 +1931,7 @@ pub(crate) mod tests {
             let tx3 = db3.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false);
+                let key = Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx1.get(&key, Projection::All).await.unwrap();
                 let option2 = tx2.get(&key, Projection::All).await.unwrap();
                 let option3 = tx3.get(&key, Projection::All).await.unwrap();
@@ -1906,14 +1957,14 @@ pub(crate) mod tests {
                         .unwrap()
                         .value
                         .as_ref()
-                        .downcast_ref::<i8>()
+                        .downcast_ref::<i64>()
                         .unwrap(),
-                    i as i8
+                    i as i64
                 );
                 assert_eq!(
                     *record_ref
                         .columns
-                        .get(2)
+                        .get(3)
                         .unwrap()
                         .value
                         .as_ref()
@@ -1921,14 +1972,25 @@ pub(crate) mod tests {
                         .unwrap(),
                     Some(200 * i),
                 );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(4)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<String>>()
+                        .unwrap(),
+                    Some(i.to_string()),
+                );
             }
             tx1.commit().await.unwrap();
         }
         // test scan
         {
             let tx1 = db1.transaction().await;
-            let lower = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(8_i8), false);
-            let upper = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(43_i8), false);
+            let lower = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(8_i64), false);
+            let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(43_i64), false);
             let mut scan = tx1
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 1])
@@ -1936,15 +1998,19 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let mut i = 8_i8;
+            let mut i = 8_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 
@@ -1959,15 +2025,19 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let mut i = 9_i8;
+            let mut i = 9_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 
@@ -1982,15 +2052,19 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let mut i = 40_i8;
+            let mut i = 40_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 

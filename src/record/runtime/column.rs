@@ -1,7 +1,7 @@
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
 use arrow::{
-    array::{Int16Array, Int32Array, Int8Array},
+    array::{BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray},
     datatypes::{DataType, Field},
 };
 use fusio::{Read, Write};
@@ -59,25 +59,18 @@ impl Column {
             Datatype::Int32 => {
                 Self::new(datatype, name, Arc::<Option<i32>>::new(None), is_nullable)
             }
-        }
-    }
-}
-
-impl Ord for Column {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.datatype {
-            Datatype::Int8 => self
-                .value
-                .downcast_ref::<i8>()
-                .cmp(&other.value.downcast_ref::<i8>()),
-            Datatype::Int16 => self
-                .value
-                .downcast_ref::<i16>()
-                .cmp(&other.value.downcast_ref::<i16>()),
-            Datatype::Int32 => self
-                .value
-                .downcast_ref::<i32>()
-                .cmp(&other.value.downcast_ref::<i32>()),
+            Datatype::Int64 => {
+                Self::new(datatype, name, Arc::<Option<i64>>::new(None), is_nullable)
+            }
+            Datatype::String => Self::new(
+                datatype,
+                name,
+                Arc::<Option<String>>::new(None),
+                is_nullable,
+            ),
+            Datatype::Boolean => {
+                Self::new(datatype, name, Arc::<Option<bool>>::new(None), is_nullable)
+            }
         }
     }
 }
@@ -90,109 +83,109 @@ impl PartialOrd for Column {
     }
 }
 
-impl PartialEq for Column {
-    fn eq(&self, other: &Self) -> bool {
-        self.datatype == other.datatype
-            && self.is_nullable == other.is_nullable
-            && match self.datatype {
-                Datatype::Int8 => self
-                    .value
-                    .downcast_ref::<i8>()
-                    .eq(&other.value.downcast_ref::<i8>()),
-                Datatype::Int16 => self
-                    .value
-                    .downcast_ref::<i16>()
-                    .eq(&other.value.downcast_ref::<i16>()),
-                Datatype::Int32 => self
-                    .value
-                    .downcast_ref::<i32>()
-                    .eq(&other.value.downcast_ref::<i32>()),
-            }
-    }
-}
-
-impl Debug for Column {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug_struct = f.debug_struct("Column");
-        match self.datatype {
-            Datatype::Int8 => {
-                debug_struct.field("datatype", &"i8".to_string());
-                if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
-                    debug_struct.field("value", value);
-                } else {
-                    debug_struct.field(
-                        "value",
-                        self.value.as_ref().downcast_ref::<Option<i8>>().unwrap(),
-                    );
-                }
-            }
-            Datatype::Int16 => {
-                debug_struct.field("datatype", &"i16".to_string());
-                if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
-                    debug_struct.field("value", value);
-                } else {
-                    debug_struct.field(
-                        "value",
-                        self.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
-                    );
-                }
-            }
-            Datatype::Int32 => {
-                debug_struct.field("datatype", &"i32".to_string());
-                if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
-                    debug_struct.field("value", value);
-                } else {
-                    debug_struct.field(
-                        "value",
-                        self.value.as_ref().downcast_ref::<Option<i32>>().unwrap(),
-                    );
+#[macro_export]
+macro_rules! implement_col {
+    ([], $({$Type:ty, $Datatype:ident}), *) => {
+        impl Ord for Column {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                match self.datatype {
+                    $(
+                        Datatype::$Datatype => self
+                            .value
+                            .downcast_ref::<$Type>()
+                            .cmp(&other.value.downcast_ref::<$Type>()),
+                    )*
                 }
             }
         }
-        debug_struct.field("nullable", &self.is_nullable).finish()
-    }
-}
 
-impl Hash for Column {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self.datatype {
-            Datatype::Int8 => self.value.downcast_ref::<i8>().hash(state),
-            Datatype::Int16 => self.value.downcast_ref::<i16>().hash(state),
-            Datatype::Int32 => self.value.downcast_ref::<i32>().hash(state),
+        impl PartialEq for Column {
+            fn eq(&self, other: &Self) -> bool {
+                self.datatype == other.datatype
+                    && self.is_nullable == other.is_nullable
+                    && match self.datatype {
+                        $(
+                            Datatype::$Datatype => self
+                                .value
+                                .downcast_ref::<$Type>()
+                                .eq(&other.value.downcast_ref::<$Type>()),
+                        )*
+                    }
+            }
         }
-    }
+
+        impl Hash for Column {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                match self.datatype {
+                    $(
+                        Datatype::$Datatype => self.value.downcast_ref::<$Type>().hash(state),
+                    )*
+                }
+            }
+        }
+
+        impl Debug for Column {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut debug_struct = f.debug_struct("Column");
+                match self.datatype {
+                    $(
+                        Datatype::$Datatype => {
+                            debug_struct.field("datatype", &stringify!($Type));
+                            if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
+                                debug_struct.field("value", value);
+                            } else {
+                                debug_struct.field(
+                                    "value",
+                                    self.value.as_ref().downcast_ref::<Option<$Type>>().unwrap(),
+                                );
+                            }
+                        }
+                    )*
+                }
+                debug_struct.field("nullable", &self.is_nullable).finish()
+            }
+        }
+
+    };
 }
 
-impl Key for Column {
-    type Ref<'a> = Column;
+#[macro_export]
+macro_rules! implement_key_col {
+    ($({$Type:ident, $Datatype:ident, $Array:ident}), *) => {
+        impl Key for Column {
+            type Ref<'a> = Column;
 
-    fn as_key_ref(&self) -> Self::Ref<'_> {
-        self.clone()
-    }
+            fn as_key_ref(&self) -> Self::Ref<'_> {
+                self.clone()
+            }
 
-    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-        match self.datatype {
-            Datatype::Int8 => Arc::new(Int8Array::new_scalar(
-                *self
-                    .value
-                    .as_ref()
-                    .downcast_ref::<i8>()
-                    .expect("unexpected datatype, expected: i8"),
-            )),
-            Datatype::Int16 => Arc::new(Int16Array::new_scalar(
-                *self
-                    .value
-                    .as_ref()
-                    .downcast_ref::<i16>()
-                    .expect("unexpected datatype, expected: i16"),
-            )),
-            Datatype::Int32 => Arc::new(Int32Array::new_scalar(
-                *self
-                    .value
-                    .as_ref()
-                    .downcast_ref::<i32>()
-                    .expect("unexpected datatype, expected: i32"),
-            )),
+            fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+                match self.datatype {
+                    $(
+                        Datatype::$Datatype => Arc::new($Array::new_scalar(
+                            *self
+                                .value
+                                .as_ref()
+                                .downcast_ref::<$Type>()
+                                .expect(stringify!("unexpected datatype, expected " $Type))
+                        )),
+                    )*
+                    Datatype::String => Arc::new(StringArray::new_scalar(
+                        self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<String>()
+                                .expect("unexpected datatype, expected String"),
+                    )),
+                    Datatype::Boolean => Arc::new(BooleanArray::new_scalar(
+                        *self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<bool>()
+                            .expect("unexpected datatype, expected bool"),
+                    )),
+                }
+            }
         }
     }
 }
@@ -205,151 +198,95 @@ impl<'r> KeyRef<'r> for Column {
     }
 }
 
-impl Decode for Column {
-    type Error = fusio::Error;
+#[macro_export]
+macro_rules! implement_decode_col {
+    ([], $({$Type:ty, $Datatype:ident}), *) => {
+        impl Decode for Column {
+            type Error = fusio::Error;
 
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
-    where
-        R: Read + Unpin,
-    {
-        let tag = u8::decode(reader).await?;
-        let datatype = Self::tag_to_datatype(tag);
-        let is_nullable = bool::decode(reader).await?;
-        let is_some = !bool::decode(reader).await?;
-        let value =
-            match datatype {
-                Datatype::Int8 => match is_some {
-                    true => Arc::new(Option::<i8>::decode(reader).await.map_err(
-                        |err| match err {
-                            DecodeError::Io(error) => fusio::Error::Io(error),
-                            DecodeError::Fusio(error) => error,
-                            DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
-                        },
-                    )?) as Arc<dyn Any>,
-                    false => Arc::new(i8::decode(reader).await?) as Arc<dyn Any>,
-                },
-                Datatype::Int16 => match is_some {
-                    true => Arc::new(Option::<i16>::decode(reader).await.map_err(
-                        |err| match err {
-                            DecodeError::Io(error) => fusio::Error::Io(error),
-                            DecodeError::Fusio(error) => error,
-                            DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
-                        },
-                    )?) as Arc<dyn Any>,
-                    false => Arc::new(i16::decode(reader).await?) as Arc<dyn Any>,
-                },
-                Datatype::Int32 => match is_some {
-                    true => Arc::new(Option::<i32>::decode(reader).await.map_err(
-                        |err| match err {
-                            DecodeError::Io(error) => fusio::Error::Io(error),
-                            DecodeError::Fusio(error) => error,
-                            DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
-                        },
-                    )?) as Arc<dyn Any>,
-                    false => Arc::new(i32::decode(reader).await?) as Arc<dyn Any>,
-                },
-            };
-        Ok(Column {
-            datatype,
-            is_nullable,
-            name: "".to_owned(),
-            value,
-        })
+            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            where
+                R: Read + Unpin,
+            {
+                let tag = u8::decode(reader).await?;
+                let datatype = Self::tag_to_datatype(tag);
+                let is_nullable = bool::decode(reader).await?;
+                let is_some = !bool::decode(reader).await?;
+                let value =
+                    match datatype {
+                        $(
+                            Datatype::$Datatype => match is_some {
+                                true => Arc::new(Option::<$Type>::decode(reader).await.map_err(
+                                    |err| match err {
+                                        DecodeError::Io(error) => fusio::Error::Io(error),
+                                        DecodeError::Fusio(error) => error,
+                                        DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
+                                    },
+                                )?) as Arc<dyn Any>,
+                                false => Arc::new(<$Type>::decode(reader).await?) as Arc<dyn Any>,
+                            },
+                        )*
+                    };
+                Ok(Column {
+                    datatype,
+                    is_nullable,
+                    name: "".to_owned(),
+                    value,
+                })
+            }
+        }
     }
 }
 
-impl Encode for Column {
-    type Error = fusio::Error;
+#[macro_export]
+macro_rules! implement_encode_col {
+    ([], $({$Type:ty, $Datatype:ident}), *) => {
+        impl Encode for Column {
+            type Error = fusio::Error;
 
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
-    where
-        W: Write + Unpin + Send,
-    {
-        Self::tag(self.datatype).encode(writer).await?;
-        self.is_nullable.encode(writer).await?;
-        match self.datatype {
-            Datatype::Int8 => {
-                if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
-                    true.encode(writer).await?;
-                    value.encode(writer).await?
-                } else {
-                    false.encode(writer).await?;
-                    self.value
-                        .as_ref()
-                        .downcast_ref::<Option<i8>>()
-                        .unwrap()
-                        .encode(writer)
-                        .await
-                        .map_err(|err| fusio::Error::Other(Box::new(err)))?;
-                }
+            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+            where
+                W: Write + Unpin + Send,
+            {
+                Self::tag(self.datatype).encode(writer).await?;
+                self.is_nullable.encode(writer).await?;
+                match self.datatype {
+                        $(
+                            Datatype::$Datatype => {
+                                if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
+                                    true.encode(writer).await?;
+                                    value.encode(writer).await?
+                                } else {
+                                    false.encode(writer).await?;
+                                    self.value
+                                        .as_ref()
+                                        .downcast_ref::<Option<$Type>>()
+                                        .unwrap()
+                                        .encode(writer)
+                                        .await
+                                        .map_err(|err| fusio::Error::Other(Box::new(err)))?;
+                                }
+                            }
+                        )*
+                };
+                Ok(())
             }
-            Datatype::Int16 => {
-                if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
-                    true.encode(writer).await?;
-                    value.encode(writer).await?
-                } else {
-                    false.encode(writer).await?;
-                    self.value
-                        .as_ref()
-                        .downcast_ref::<Option<i16>>()
-                        .unwrap()
-                        .encode(writer)
-                        .await
-                        .map_err(|err| fusio::Error::Other(Box::new(err)))?;
-                }
-            }
-            Datatype::Int32 => {
-                if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
-                    true.encode(writer).await?;
-                    value.encode(writer).await?
-                } else {
-                    false.encode(writer).await?;
-                    self.value
-                        .as_ref()
-                        .downcast_ref::<Option<i32>>()
-                        .unwrap()
-                        .encode(writer)
-                        .await
-                        .map_err(|err| fusio::Error::Other(Box::new(err)))?;
-                }
-            }
-        };
-        Ok(())
-    }
 
-    fn size(&self) -> usize {
-        3 + match self.datatype {
-            Datatype::Int8 => {
-                if let Some(value) = self.value.as_ref().downcast_ref::<i8>() {
-                    value.size()
-                } else {
-                    self.value
-                        .as_ref()
-                        .downcast_ref::<Option<i8>>()
-                        .unwrap()
-                        .size()
-                }
-            }
-            Datatype::Int16 => {
-                if let Some(value) = self.value.as_ref().downcast_ref::<i16>() {
-                    value.size()
-                } else {
-                    self.value
-                        .as_ref()
-                        .downcast_ref::<Option<i16>>()
-                        .unwrap()
-                        .size()
-                }
-            }
-            Datatype::Int32 => {
-                if let Some(value) = self.value.as_ref().downcast_ref::<i32>() {
-                    value.size()
-                } else {
-                    self.value
-                        .as_ref()
-                        .downcast_ref::<Option<i32>>()
-                        .unwrap()
-                        .size()
+            fn size(&self) -> usize {
+                3 + match self.datatype {
+                    $(
+                        Datatype::$Datatype => {
+                            if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
+                                value.size()
+                            } else {
+                                self.value
+                                    .as_ref()
+                                    .downcast_ref::<Option<$Type>>()
+                                    .unwrap()
+                                    .size()
+                            }
+                        }
+                    )*
                 }
             }
         }
@@ -362,6 +299,9 @@ impl Column {
             Datatype::Int8 => 0,
             Datatype::Int16 => 1,
             Datatype::Int32 => 2,
+            Datatype::Int64 => 3,
+            Datatype::String => 4,
+            Datatype::Boolean => 5,
         }
     }
 
@@ -370,6 +310,9 @@ impl Column {
             0 => Datatype::Int8,
             1 => Datatype::Int16,
             2 => Datatype::Int32,
+            3 => Datatype::Int64,
+            4 => Datatype::String,
+            5 => Datatype::Boolean,
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -381,6 +324,31 @@ impl From<&Column> for Field {
             Datatype::Int8 => Field::new(&col.name, DataType::Int8, col.is_nullable),
             Datatype::Int16 => Field::new(&col.name, DataType::Int16, col.is_nullable),
             Datatype::Int32 => Field::new(&col.name, DataType::Int32, col.is_nullable),
+            Datatype::Int64 => Field::new(&col.name, DataType::Int64, col.is_nullable),
+            Datatype::String => Field::new(&col.name, DataType::Utf8, col.is_nullable),
+            Datatype::Boolean => Field::new(&col.name, DataType::Boolean, col.is_nullable),
         }
     }
 }
+
+#[macro_export]
+macro_rules! for_datatype {
+    ($macro:tt $(, $x:tt)*) => {
+        $macro! {
+            [$($x),*],
+                { i8, Int8 },
+                { i16, Int16 },
+                { i32, Int32 },
+                { i64, Int64 },
+                { String, String },
+                { bool, Boolean }
+        }
+    };
+}
+
+implement_key_col!(
+    { i8, Int8, Int8Array }, { i16, Int16, Int16Array }, { i32, Int32, Int32Array }, { i64, Int64, Int64Array }
+);
+for_datatype! { implement_col }
+for_datatype! { implement_decode_col }
+for_datatype! { implement_encode_col }
