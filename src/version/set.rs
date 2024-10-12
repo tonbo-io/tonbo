@@ -288,7 +288,7 @@ pub(crate) mod tests {
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
-    use fusio::{path::Path};
+    use fusio::path::Path;
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;

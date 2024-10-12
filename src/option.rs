@@ -3,7 +3,7 @@ use std::{
     marker::PhantomData,
 };
 
-use fusio::{path::Path};
+use fusio::path::Path;
 use fusio_dispatch::FsOptions;
 use parquet::{
     basic::Compression,
@@ -239,12 +239,11 @@ where
     R: Record,
 {
     pub(crate) fn table_path(&self, gen: &FileId, level: usize) -> Path {
-        let path = self.level_paths[level]
+        self.level_paths[level]
             .as_ref()
             .map(|(path, _)| path)
             .unwrap_or(&self.base_path)
-            .child(format!("{}.{}", gen, FileType::Parquet));
-        path
+            .child(format!("{}.{}", gen, FileType::Parquet))
     }
 
     pub(crate) fn wal_dir_path(&self) -> Path {

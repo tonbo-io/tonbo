@@ -218,17 +218,13 @@ where
             if !scope.meets_range(range) {
                 continue;
             }
-            let result = level_0_fs
+            let file = level_0_fs
                 .open_options(
                     &self.option.table_path(&scope.gen, 0),
                     default_open_options(false),
                 )
                 .await
-                .map_err(VersionError::Fusio);
-            if result.is_err() {
-                println!("WWWWWWWWWWWWW");
-            }
-            let file = result?;
+                .map_err(VersionError::Fusio)?;
             let table = SsTable::open(file).await?;
 
             streams.push(ScanStream::SsTable {

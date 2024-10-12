@@ -253,7 +253,7 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use fusio::{path::Path};
+    use fusio::path::Path;
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;

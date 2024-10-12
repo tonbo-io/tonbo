@@ -204,7 +204,7 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use fusio::{path::Path};
+    use fusio::path::Path;
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
