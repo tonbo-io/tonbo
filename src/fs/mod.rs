@@ -26,8 +26,13 @@ impl Display for FileType {
     }
 }
 
-pub(crate) fn default_open_options() -> OpenOptions {
-    OpenOptions::default().create(true).append(true).read(true)
+pub(crate) fn default_open_options(is_append: bool) -> OpenOptions {
+    let options = OpenOptions::default().create(true).read(true);
+    if is_append {
+        options.append(true)
+    } else {
+        options.write(true)
+    }
 }
 
 pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<FileId>, DecodeError> {

@@ -54,7 +54,7 @@ where
         if option.use_wal {
             let file_id = Ulid::new();
             let file = fs
-                .open_options(&option.wal_path(&file_id), default_open_options())
+                .open_options(&option.wal_path(&file_id), default_open_options(true))
                 .await?;
 
             wal = Some(Mutex::new(WalFile::new(file, file_id)));

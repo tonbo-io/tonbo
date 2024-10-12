@@ -177,7 +177,10 @@ where
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = store
-            .open_options(&self.option.table_path(gen, level), default_open_options())
+            .open_options(
+                &self.option.table_path(gen, level),
+                default_open_options(false),
+            )
             .await
             .map_err(VersionError::Fusio)?;
         SsTable::<R>::open(file)
@@ -215,10 +218,17 @@ where
             if !scope.meets_range(range) {
                 continue;
             }
-            let file = level_0_fs
-                .open_options(&self.option.table_path(&scope.gen, 0), default_open_options())
+            let result = level_0_fs
+                .open_options(
+                    &self.option.table_path(&scope.gen, 0),
+                    default_open_options(false),
+                )
                 .await
-                .map_err(VersionError::Fusio)?;
+                .map_err(VersionError::Fusio);
+            if result.is_err() {
+                println!("WWWWWWWWWWWWW");
+            }
+            let file = result?;
             let table = SsTable::open(file).await?;
 
             streams.push(ScanStream::SsTable {

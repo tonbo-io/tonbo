@@ -19,6 +19,7 @@ pub enum CleanTag {
     },
     RecoverClean {
         wal_id: FileId,
+        level: usize,
     },
 }
 
@@ -78,13 +79,13 @@ where
                         }
                     }
                 }
-                CleanTag::RecoverClean { wal_id: gen } => {
+                CleanTag::RecoverClean { wal_id: gen, level } => {
                     let fs = self
                         .option
-                        .level_fs_path(0)
+                        .level_fs_path(level)
                         .map(|path| self.manager.get_fs(path))
                         .unwrap_or(self.manager.base_fs());
-                    fs.remove(&self.option.table_path(&gen, 0)).await?;
+                    fs.remove(&self.option.table_path(&gen, level)).await?;
                 }
             }
         }
@@ -98,9 +99,9 @@ pub(crate) mod tests {
     use std::{sync::Arc, time::Duration};
 
     use fusio::{
-        options::FsOptions,
         path::{path_to_local, Path},
     };
+    use fusio_dispatch::FsOptions;
     use tempfile::TempDir;
     use tokio::time::sleep;
     use tracing::error;
@@ -130,16 +131,16 @@ pub(crate) mod tests {
             .map(|path| manager.get_fs(path))
             .unwrap_or(manager.base_fs());
         {
-            fs.open_options(&option.table_path(&gen_0, 0), default_open_options())
+            fs.open_options(&option.table_path(&gen_0, 0), default_open_options(false))
                 .await
                 .unwrap();
-            fs.open_options(&option.table_path(&gen_1, 0), default_open_options())
+            fs.open_options(&option.table_path(&gen_1, 0), default_open_options(false))
                 .await
                 .unwrap();
-            fs.open_options(&option.table_path(&gen_2, 0), default_open_options())
+            fs.open_options(&option.table_path(&gen_2, 0), default_open_options(false))
                 .await
                 .unwrap();
-            fs.open_options(&option.table_path(&gen_3, 0), default_open_options())
+            fs.open_options(&option.table_path(&gen_3, 0), default_open_options(false))
                 .await
                 .unwrap();
         }
@@ -178,32 +179,59 @@ pub(crate) mod tests {
             .unwrap();
 
         // FIXME
-        assert!(path_to_local(&option.table_path(&gen_0, 0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_1, 0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_2, 0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
+        assert!(path_to_local(&option.table_path(&gen_0, 0))
+            .unwrap()
+            .exists());
+        assert!(path_to_local(&option.table_path(&gen_1, 0))
+            .unwrap()
+            .exists());
+        assert!(path_to_local(&option.table_path(&gen_2, 0))
+            .unwrap()
+            .exists());
+        assert!(path_to_local(&option.table_path(&gen_3, 0))
+            .unwrap()
+            .exists());
 
         tx.send_async(CleanTag::Clean { ts: 0.into() })
             .await
             .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_0, 0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_1, 0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_2, 0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
+        assert!(!path_to_local(&option.table_path(&gen_0, 0))
+            .unwrap()
+            .exists());
+        assert!(path_to_local(&option.table_path(&gen_1, 0))
+            .unwrap()
+            .exists());
+        assert!(path_to_local(&option.table_path(&gen_2, 0))
+            .unwrap()
+            .exists());
+        assert!(path_to_local(&option.table_path(&gen_3, 0))
+            .unwrap()
+            .exists());
 
         tx.send_async(CleanTag::Clean { ts: 1.into() })
             .await
             .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_1, 0)).unwrap().exists());
-        assert!(!path_to_local(&option.table_path(&gen_2, 0)).unwrap().exists());
-        assert!(path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
+        assert!(!path_to_local(&option.table_path(&gen_1, 0))
+            .unwrap()
+            .exists());
+        assert!(!path_to_local(&option.table_path(&gen_2, 0))
+            .unwrap()
+            .exists());
+        assert!(path_to_local(&option.table_path(&gen_3, 0))
+            .unwrap()
+            .exists());
 
-        tx.send_async(CleanTag::RecoverClean { wal_id: gen_3 })
-            .await
-            .unwrap();
+        tx.send_async(CleanTag::RecoverClean {
+            wal_id: gen_3,
+            level: 0,
+        })
+        .await
+        .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_3, 0)).unwrap().exists());
+        assert!(!path_to_local(&option.table_path(&gen_3, 0))
+            .unwrap()
+            .exists());
     }
 }
