@@ -98,9 +98,7 @@ where
 pub(crate) mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use fusio::{
-        path::{path_to_local, Path},
-    };
+    use fusio::path::{path_to_local, Path};
     use fusio_dispatch::FsOptions;
     use tempfile::TempDir;
     use tokio::time::sleep;
