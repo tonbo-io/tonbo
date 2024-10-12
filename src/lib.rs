@@ -155,7 +155,7 @@ use transaction::{CommitError, Transaction, TransactionEntry};
 
 pub use crate::option::*;
 use crate::{
-    compaction::{CompactTask, Compactor},
+    compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
     fs::{default_open_options, manager::StoreManager, parse_file_id, FileId, FileType},
     serdes::Decode,
@@ -226,13 +226,13 @@ where
             option.level_paths.clone(),
         )?);
         {
-            let base_fs = manager.base_fs();
-
-            base_fs
+            manager
+                .base_fs()
                 .create_dir_all(&option.wal_dir_path())
                 .await
                 .map_err(DbError::Fusio)?;
-            base_fs
+            manager
+                .base_fs()
                 .create_dir_all(&option.version_log_dir_path())
                 .await
                 .map_err(DbError::Fusio)?;
@@ -260,9 +260,15 @@ where
         executor.spawn(async move {
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction(None).await,
+                    CompactTask::Freeze => compactor.check_then_compaction().await,
                     CompactTask::Flush(option_tx) => {
-                        compactor.check_then_compaction(option_tx).await
+                        let mut result = compactor.check_then_compaction().await;
+                        if let Some(tx) = option_tx {
+                            if result.is_ok() {
+                                result = tx.send(()).map_err(|_| CompactionError::ChannelClose);
+                            }
+                        }
+                        result
                     }
                 } {
                     error!("[Compaction Error]: {}", err)
@@ -463,7 +469,7 @@ where
             let wal_path = wal_meta.path;
 
             let file = base_fs
-                .open_options(&wal_path, default_open_options())
+                .open_options(&wal_path, default_open_options(true))
                 .await?;
             // SAFETY: wal_stream return only file name
             let wal_id = parse_file_id(&wal_path, FileType::Wal)?.unwrap();
@@ -817,7 +823,8 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
-    use fusio::{disk::TokioFs, options::FsOptions, path::Path, DynFs, Read, Write};
+    use fusio::{disk::TokioFs, path::Path, DynFs, Read, Write};
+    use fusio_dispatch::FsOptions;
     use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
@@ -825,7 +832,7 @@ pub(crate) mod tests {
     use tracing::error;
 
     use crate::{
-        compaction::{CompactTask, Compactor},
+        compaction::{CompactTask, CompactionError, Compactor},
         executor::{tokio::TokioExecutor, Executor},
         fs::{manager::StoreManager, FileId},
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
@@ -1245,9 +1252,17 @@ pub(crate) mod tests {
         executor.spawn(async move {
             while let Ok(task) = compaction_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction(None).await,
+                    CompactTask::Freeze => compactor.check_then_compaction().await,
                     CompactTask::Flush(option_tx) => {
-                        compactor.check_then_compaction(option_tx).await
+                        let mut result = compactor.check_then_compaction().await;
+                        if let Some(tx) = option_tx {
+                            let channel_result =
+                                tx.send(()).map_err(|_| CompactionError::ChannelClose);
+                            if result.is_ok() {
+                                result = channel_result;
+                            }
+                        }
+                        result
                     }
                 } {
                     error!("[Compaction Error]: {}", err)
@@ -1472,8 +1487,14 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
+        let temp_dir_l0 = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
+        let path_l0 = Path::from_filesystem_path(temp_dir_l0.path()).unwrap();
+
+        let mut option = DbOption::from(path)
+            .level_path(0, path_l0, FsOptions::Local)
+            .unwrap();
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1602,6 +1623,7 @@ pub(crate) mod tests {
             primary_key_index,
         ));
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

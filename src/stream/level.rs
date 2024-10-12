@@ -111,7 +111,7 @@ where
 
                     let reader = self
                         .fs
-                        .open_options(self.path.as_ref().unwrap(), default_open_options());
+                        .open_options(self.path.as_ref().unwrap(), default_open_options(false));
                     #[allow(clippy::missing_transmute_annotations)]
                     let reader = unsafe {
                         std::mem::transmute::<
@@ -133,9 +133,10 @@ where
                         Some(gen) => {
                             self.path = Some(self.option.table_path(&gen, self.level));
 
-                            let reader = self
-                                .fs
-                                .open_options(self.path.as_ref().unwrap(), default_open_options());
+                            let reader = self.fs.open_options(
+                                self.path.as_ref().unwrap(),
+                                default_open_options(false),
+                            );
                             #[allow(clippy::missing_transmute_annotations)]
                             let reader = unsafe {
                                 std::mem::transmute::<
@@ -203,7 +204,8 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use fusio::{options::FsOptions, path::Path};
+    use fusio::{path::Path};
+    use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
@@ -222,10 +224,12 @@ mod tests {
         ));
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
