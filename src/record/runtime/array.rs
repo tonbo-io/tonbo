@@ -3,8 +3,8 @@ use std::{any::Any, mem, sync::Arc};
 use arrow::{
     array::{
         Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, BooleanBuilder,
-        Int16Array, Int32Array, Int64Array, Int8Array, PrimitiveBuilder, StringArray,
-        StringBuilder, UInt32Builder,
+        GenericBinaryArray, GenericBinaryBuilder, Int16Array, Int32Array, Int64Array, Int8Array,
+        PrimitiveBuilder, StringArray, StringBuilder, UInt32Builder,
     },
     datatypes::{Int16Type, Int32Type, Int64Type, Int8Type, Schema},
 };
@@ -60,6 +60,11 @@ impl ArrowArrays for DynRecordImmutableArrays {
                 }
                 Datatype::Boolean => {
                     builders.push(Box::new(BooleanBuilder::with_capacity(capacity)));
+                }
+                Datatype::Bytes => {
+                    builders.push(Box::new(GenericBinaryBuilder::<i32>::with_capacity(
+                        capacity, 0,
+                    )));
                 }
             }
             datatypes.push(datatype);
@@ -135,6 +140,14 @@ impl ArrowArrays for DynRecordImmutableArrays {
                             .downcast_ref::<BooleanArray>()
                             .unwrap()
                             .value(offset),
+                    ),
+                    Datatype::Bytes => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<GenericBinaryArray<i32>>()
+                            .unwrap()
+                            .value(offset)
+                            .to_owned(),
                     ),
                 };
                 columns.push(Column {
@@ -259,6 +272,21 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
+                        Datatype::Bytes => {
+                            let bd = builder
+                                .as_any_mut()
+                                .downcast_mut::<GenericBinaryBuilder<i32>>()
+                                .unwrap();
+                            let value = col
+                                .value
+                                .as_ref()
+                                .downcast_ref::<Option<Vec<u8>>>()
+                                .unwrap();
+                            match value {
+                                Some(value) => bd.append_value(value),
+                                None => bd.append_null(),
+                            }
+                        }
                     }
                 }
             }
@@ -315,6 +343,13 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 .unwrap()
                                 .append_value(bool::default());
                         }
+                        Datatype::Bytes => {
+                            builder
+                                .as_any_mut()
+                                .downcast_mut::<GenericBinaryBuilder<i32>>()
+                                .unwrap()
+                                .append_value(Vec::<u8>::default());
+                        }
                     }
                 }
             }
@@ -367,6 +402,13 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         builder
                             .as_any()
                             .downcast_ref::<BooleanBuilder>()
+                            .unwrap()
+                            .values_slice(),
+                    ),
+                    Datatype::Bytes => mem::size_of_val(
+                        builder
+                            .as_any()
+                            .downcast_ref::<GenericBinaryBuilder<i32>>()
                             .unwrap()
                             .values_slice(),
                     ),
@@ -485,6 +527,22 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     });
                     array_refs.push(value);
                 }
+                Datatype::Bytes => {
+                    let value = Arc::new(
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<GenericBinaryBuilder<i32>>()
+                            .unwrap()
+                            .finish(),
+                    );
+                    columns.push(Column {
+                        datatype: Datatype::Bytes,
+                        name: field.name().to_owned(),
+                        value: value.clone(),
+                        is_nullable,
+                    });
+                    array_refs.push(value);
+                }
             };
         }
 
@@ -515,7 +573,6 @@ impl DynRecordBuilder {
         let builder = self.builders.get_mut(primary_key_index).unwrap();
         let datatype = self.datatypes.get_mut(primary_key_index).unwrap();
         let col = key.value;
-        // *col.value.as_ref().downcast_ref::<i32>().unwrap()
         match datatype {
             Datatype::Int8 => builder
                 .as_any_mut()
@@ -547,6 +604,11 @@ impl DynRecordBuilder {
                 .downcast_mut::<BooleanBuilder>()
                 .unwrap()
                 .append_value(*col.value.as_ref().downcast_ref::<bool>().unwrap()),
+            Datatype::Bytes => builder
+                .as_any_mut()
+                .downcast_mut::<GenericBinaryBuilder<i32>>()
+                .unwrap()
+                .append_value(col.value.as_ref().downcast_ref::<Vec<u8>>().unwrap()),
         };
     }
 }

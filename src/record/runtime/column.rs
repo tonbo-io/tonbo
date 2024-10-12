@@ -1,7 +1,10 @@
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
 use arrow::{
-    array::{BooleanArray, Int16Array, Int32Array, Int64Array, Int8Array, StringArray},
+    array::{
+        BooleanArray, GenericBinaryArray, Int16Array, Int32Array, Int64Array, Int8Array,
+        StringArray,
+    },
     datatypes::{DataType, Field},
 };
 use fusio::{Read, Write};
@@ -71,6 +74,12 @@ impl Column {
             Datatype::Boolean => {
                 Self::new(datatype, name, Arc::<Option<bool>>::new(None), is_nullable)
             }
+            Datatype::Bytes => Self::new(
+                datatype,
+                name,
+                Arc::<Option<Vec<u8>>>::new(None),
+                is_nullable,
+            ),
         }
     }
 }
@@ -183,6 +192,13 @@ macro_rules! implement_key_col {
                             .as_ref()
                             .downcast_ref::<bool>()
                             .expect("unexpected datatype, expected bool"),
+                    )),
+                    Datatype::Bytes => Arc::new(GenericBinaryArray::<i32>::new_scalar(
+                        self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<Vec<u8>>()
+                            .expect("unexpected datatype, expected bytes"),
                     )),
                 }
             }
@@ -302,6 +318,7 @@ impl Column {
             Datatype::Int64 => 3,
             Datatype::String => 4,
             Datatype::Boolean => 5,
+            Datatype::Bytes => 6,
         }
     }
 
@@ -313,6 +330,7 @@ impl Column {
             3 => Datatype::Int64,
             4 => Datatype::String,
             5 => Datatype::Boolean,
+            6 => Datatype::Bytes,
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -327,6 +345,7 @@ impl From<&Column> for Field {
             Datatype::Int64 => Field::new(&col.name, DataType::Int64, col.is_nullable),
             Datatype::String => Field::new(&col.name, DataType::Utf8, col.is_nullable),
             Datatype::Boolean => Field::new(&col.name, DataType::Boolean, col.is_nullable),
+            Datatype::Bytes => Field::new(&col.name, DataType::Binary, col.is_nullable),
         }
     }
 }
@@ -341,7 +360,8 @@ macro_rules! for_datatype {
                 { i32, Int32 },
                 { i64, Int64 },
                 { String, String },
-                { bool, Boolean }
+                { bool, Boolean },
+                { Vec<u8>, Bytes }
         }
     };
 }
