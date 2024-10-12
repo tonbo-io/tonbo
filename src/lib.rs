@@ -1777,6 +1777,17 @@ pub(crate) mod tests {
                         .unwrap(),
                     Some(i % 2 == 0),
                 );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(7)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<Vec<u8>>>()
+                        .unwrap(),
+                    Some(i.to_le_bytes().to_vec()),
+                );
             }
             tx.commit().await.unwrap();
         }
@@ -1787,7 +1798,7 @@ pub(crate) mod tests {
             let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 2])
+                .projection(vec![0, 2, 7])
                 .take()
                 .await
                 .unwrap();
@@ -1848,6 +1859,13 @@ pub(crate) mod tests {
                 let enabled = col.value.as_ref().downcast_ref::<Option<bool>>();
                 assert!(enabled.is_some());
                 assert_eq!(*enabled.unwrap(), None);
+
+                let col = columns.get(7).unwrap();
+                assert_eq!(col.datatype, Datatype::Bytes);
+                assert_eq!(col.name, "bytes".to_string());
+                let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
+                assert!(bytes.is_some());
+                assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
                 i += 1
             }
         }

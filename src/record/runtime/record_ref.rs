@@ -171,6 +171,16 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                         Arc::new(value) as Arc<dyn Any>
                     }
                 }
+                Datatype::Bytes => {
+                    let v = col.as_binary::<i32>();
+                    if primary_index == idx - 2 {
+                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset).to_owned());
+                        Arc::new(value) as Arc<dyn Any>
+                    }
+                }
             };
             columns.push(Column::new(
                 datatype,
@@ -198,6 +208,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     Datatype::Int64 => col.value = Arc::<Option<i64>>::new(None),
                     Datatype::String => col.value = Arc::<Option<String>>::new(None),
                     Datatype::Boolean => col.value = Arc::<Option<bool>>::new(None),
+                    Datatype::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
                 };
             }
         }

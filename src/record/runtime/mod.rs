@@ -16,6 +16,7 @@ pub enum Datatype {
     Int64,
     String,
     Boolean,
+    Bytes,
 }
 
 impl From<&DataType> for Datatype {
@@ -27,6 +28,7 @@ impl From<&DataType> for Datatype {
             DataType::Int64 => Datatype::Int64,
             DataType::Utf8 => Datatype::String,
             DataType::Boolean => Datatype::Boolean,
+            DataType::Binary => Datatype::Bytes,
             _ => todo!(),
         }
     }

@@ -80,6 +80,10 @@ impl DynRecord {
                     true => Arc::<Option<bool>>::new(None),
                     false => Arc::new(bool::default()),
                 },
+                Datatype::Bytes => match desc.is_nullable {
+                    true => Arc::<Option<Vec<u8>>>::new(None),
+                    false => Arc::new(Vec::<u8>::default()),
+                },
             };
             columns.push(Column::new(
                 desc.datatype,
@@ -131,6 +135,14 @@ impl Decode for DynRecord {
                     Datatype::Boolean => {
                         let value = col.value.as_ref().downcast_ref::<Option<bool>>().unwrap();
                         col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::Bytes => {
+                        let value = col
+                            .value
+                            .as_ref()
+                            .downcast_ref::<Option<Vec<u8>>>()
+                            .unwrap();
+                        col.value = Arc::new(value.clone().unwrap());
                     }
                 }
             }
@@ -189,6 +201,13 @@ impl Record for DynRecord {
                     Datatype::Boolean => {
                         Arc::new(Some(*col.value.as_ref().downcast_ref::<bool>().unwrap()))
                     }
+                    Datatype::Bytes => Arc::new(Some(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<Vec<u8>>()
+                            .unwrap()
+                            .to_owned(),
+                    )),
                 };
             }
 
@@ -230,6 +249,7 @@ pub(crate) mod test {
             ColumnDesc::new("name".to_string(), Datatype::String, false),
             ColumnDesc::new("email".to_string(), Datatype::String, true),
             ColumnDesc::new("enabled".to_string(), Datatype::Boolean, false),
+            ColumnDesc::new("bytes".to_string(), Datatype::Bytes, true),
         ];
         (descs, 0)
     }
@@ -274,6 +294,12 @@ pub(crate) mod test {
                     "enabled".to_string(),
                     Arc::new(i % 2 == 0),
                     false,
+                ),
+                Column::new(
+                    Datatype::Bytes,
+                    "bytes".to_string(),
+                    Arc::new(Some(i.to_le_bytes().to_vec())),
+                    true,
                 ),
             ];
             if i >= 45 {
