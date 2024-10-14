@@ -106,7 +106,7 @@ pub(crate) mod tests {
 
     use crate::{
         executor::{tokio::TokioExecutor, Executor},
-        fs::{default_open_options, manager::StoreManager, FileId},
+        fs::{manager::StoreManager, FileId, FileType},
         tests::Test,
         version::cleaner::{CleanTag, Cleaner},
         DbOption,
@@ -129,18 +129,30 @@ pub(crate) mod tests {
             .map(|path| manager.get_fs(path))
             .unwrap_or(manager.base_fs());
         {
-            fs.open_options(&option.table_path(&gen_0, 0), default_open_options(false))
-                .await
-                .unwrap();
-            fs.open_options(&option.table_path(&gen_1, 0), default_open_options(false))
-                .await
-                .unwrap();
-            fs.open_options(&option.table_path(&gen_2, 0), default_open_options(false))
-                .await
-                .unwrap();
-            fs.open_options(&option.table_path(&gen_3, 0), default_open_options(false))
-                .await
-                .unwrap();
+            fs.open_options(
+                &option.table_path(&gen_0, 0),
+                FileType::Parquet.open_options(false),
+            )
+            .await
+            .unwrap();
+            fs.open_options(
+                &option.table_path(&gen_1, 0),
+                FileType::Parquet.open_options(false),
+            )
+            .await
+            .unwrap();
+            fs.open_options(
+                &option.table_path(&gen_2, 0),
+                FileType::Parquet.open_options(false),
+            )
+            .await
+            .unwrap();
+            fs.open_options(
+                &option.table_path(&gen_3, 0),
+                FileType::Parquet.open_options(false),
+            )
+            .await
+            .unwrap();
         }
 
         let (mut cleaner, tx) = Cleaner::<Test>::new(option.clone(), manager.clone());

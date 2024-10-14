@@ -9,7 +9,7 @@ use fusio::{dynamic::DynFile, DynFs};
 use ulid::Ulid;
 
 use crate::{
-    fs::{default_open_options, FileId},
+    fs::{FileId, FileType},
     inmem::immutable::Immutable,
     record::{Key, KeyRef, Record, RecordInstance},
     timestamp::{
@@ -54,7 +54,10 @@ where
         if option.use_wal {
             let file_id = Ulid::new();
             let file = fs
-                .open_options(&option.wal_path(&file_id), default_open_options(true))
+                .open_options(
+                    &option.wal_path(&file_id),
+                    FileType::Wal.open_options(false),
+                )
                 .await?;
 
             wal = Some(Mutex::new(WalFile::new(file, file_id)));

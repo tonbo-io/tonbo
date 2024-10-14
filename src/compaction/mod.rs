@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use ulid::Ulid;
 
 use crate::{
-    fs::{default_open_options, manager::StoreManager, FileId},
+    fs::{manager::StoreManager, FileId, FileType},
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
         mutable::Mutable,
@@ -147,7 +147,10 @@ where
             let mut writer = AsyncArrowWriter::try_new(
                 AsyncWriter::new(
                     level_0_fs
-                        .open_options(&option.table_path(&gen, 0), default_open_options(false))
+                        .open_options(
+                            &option.table_path(&gen, 0),
+                            FileType::Parquet.open_options(false),
+                        )
                         .await?,
                 ),
                 instance.arrow_schema::<R>().clone(),
@@ -212,7 +215,7 @@ where
                     let file = level_fs
                         .open_options(
                             &option.table_path(&scope.gen, level),
-                            default_open_options(false),
+                            FileType::Parquet.open_options(true),
                         )
                         .await?;
 
@@ -456,8 +459,11 @@ where
         let columns = builder.finish(None);
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(&option.table_path(&gen, level), default_open_options(false))
-                    .await?,
+                fs.open_options(
+                    &option.table_path(&gen, level),
+                    FileType::Parquet.open_options(false),
+                )
+                .await?,
             ),
             instance.arrow_schema::<R>().clone(),
             Some(option.write_parquet_properties.clone()),
@@ -512,7 +518,7 @@ pub(crate) mod tests {
     use crate::{
         compaction::Compactor,
         executor::tokio::TokioExecutor,
-        fs::{default_open_options, manager::StoreManager, FileId},
+        fs::{manager::StoreManager, FileId, FileType},
         inmem::{immutable::Immutable, mutable::Mutable},
         record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance},
         scope::Scope,
@@ -557,8 +563,11 @@ pub(crate) mod tests {
         let immutable = build_immutable::<R>(option, records, instance, fs).await?;
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(&option.table_path(&gen, level), default_open_options(false))
-                    .await?,
+                fs.open_options(
+                    &option.table_path(&gen, level),
+                    FileType::Parquet.open_options(false),
+                )
+                .await?,
             ),
             R::arrow_schema().clone(),
             None,

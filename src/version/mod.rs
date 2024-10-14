@@ -17,7 +17,7 @@ use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    fs::{default_open_options, manager::StoreManager, FileId},
+    fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
     record::Record,
     scope::Scope,
@@ -179,7 +179,7 @@ where
         let file = store
             .open_options(
                 &self.option.table_path(gen, level),
-                default_open_options(false),
+                FileType::Parquet.open_options(true),
             )
             .await
             .map_err(VersionError::Fusio)?;
@@ -221,7 +221,7 @@ where
             let file = level_0_fs
                 .open_options(
                     &self.option.table_path(&scope.gen, 0),
-                    default_open_options(false),
+                    FileType::Parquet.open_options(true),
                 )
                 .await
                 .map_err(VersionError::Fusio)?;

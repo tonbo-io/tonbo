@@ -15,7 +15,7 @@ use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
 
 use crate::{
-    fs::{default_open_options, FileId},
+    fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
     record::Record,
     scope::Scope,
@@ -109,9 +109,10 @@ where
                     let gen = *gen;
                     self.path = Some(self.option.table_path(&gen, self.level));
 
-                    let reader = self
-                        .fs
-                        .open_options(self.path.as_ref().unwrap(), default_open_options(false));
+                    let reader = self.fs.open_options(
+                        self.path.as_ref().unwrap(),
+                        FileType::Parquet.open_options(true),
+                    );
                     #[allow(clippy::missing_transmute_annotations)]
                     let reader = unsafe {
                         std::mem::transmute::<
@@ -135,7 +136,7 @@ where
 
                             let reader = self.fs.open_options(
                                 self.path.as_ref().unwrap(),
-                                default_open_options(false),
+                                FileType::Parquet.open_options(true),
                             );
                             #[allow(clippy::missing_transmute_annotations)]
                             let reader = unsafe {
