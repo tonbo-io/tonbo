@@ -43,7 +43,8 @@ impl Decode for String {
 
     async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
         let len = u16::decode(reader).await?;
-        let buf = reader.read_exact(vec![0u8; len as usize]).await?;
+        let (result, buf) = reader.read_exact(vec![0u8; len as usize]).await;
+        result?;
 
         Ok(unsafe { String::from_utf8_unchecked(buf.as_slice().to_vec()) })
     }

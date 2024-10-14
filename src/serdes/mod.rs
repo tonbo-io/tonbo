@@ -2,6 +2,7 @@ mod arc;
 mod boolean;
 #[cfg(feature = "type_bytes")]
 mod bytes;
+mod list;
 mod num;
 pub(crate) mod option;
 mod string;

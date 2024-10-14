@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use std::{hash::Hasher, ops::Bound, sync::Arc};
+    use std::{hash::Hasher, ops::Bound};
 
-    use fusio::{local::TokioFs, path::Path};
+    use fusio::path::Path;
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo::{executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Record, DB};
+    use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
 
     const WRITE_TIMES: usize = 500_000;
     const STRING_SIZE: usize = 50;
@@ -69,13 +69,10 @@ mod tests {
         let mut primary_key_count = 0;
         let mut write_hasher = crc32fast::Hasher::new();
 
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db: DB<Customer, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db: DB<Customer, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for _ in 0..WRITE_TIMES {
             let customer = gen_record(&mut rng, &mut primary_key_count);

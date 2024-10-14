@@ -15,6 +15,10 @@ class DataType(Enum):
     Int8 = auto()
     Int16 = auto()
     Int32 = auto()
+    Int64 = auto()
+    String = auto()
+    Boolean = auto()
+    Bytes = auto()
 
 @final
 class Column:

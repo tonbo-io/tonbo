@@ -59,11 +59,10 @@ fn single_write(c: &mut Criterion) {
     let _ = std::fs::create_dir_all("/tmp/tonbo");
 
     for batch in batches {
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
         let option = DbOption::from(fusio::path::Path::from_filesystem_path("/tmp/tonbo").unwrap())
             .disable_wal();
         let db = runtime
-            .block_on(async { DB::new(option, TokioExecutor::default(), manager).await })
+            .block_on(async { DB::new(option, TokioExecutor::default()).await })
             .unwrap();
 
         group.bench_with_input(BenchmarkId::new("Tonbo", batch), &batch, |b, batch| {

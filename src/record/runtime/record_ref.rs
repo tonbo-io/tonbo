@@ -1,4 +1,4 @@
-use std::{any::Any, marker::PhantomData, sync::Arc};
+use std::{any::Any, marker::PhantomData, mem, sync::Arc};
 
 use arrow::{
     array::{Array, AsArray},
@@ -46,7 +46,7 @@ impl<'r> Encode for DynRecordRef<'r> {
     }
 
     fn size(&self) -> usize {
-        let mut size = 2 * size_of::<u32>();
+        let mut size = 2 * mem::size_of::<u32>();
         for col in self.columns.iter() {
             size += col.size();
         }
@@ -138,6 +138,49 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                         Arc::new(value) as Arc<dyn Any>
                     }
                 }
+                Datatype::Int64 => {
+                    let v = col.as_primitive::<arrow::datatypes::Int64Type>();
+
+                    if primary_index == idx - 2 {
+                        Arc::new(v.value(offset)) as Arc<dyn Any>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset));
+                        Arc::new(value) as Arc<dyn Any>
+                    }
+                }
+                Datatype::String => {
+                    let v = col.as_string::<i32>();
+
+                    if primary_index == idx - 2 {
+                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset).to_owned());
+                        Arc::new(value) as Arc<dyn Any>
+                    }
+                }
+                Datatype::Boolean => {
+                    let v = col.as_boolean();
+
+                    if primary_index == idx - 2 {
+                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset).to_owned());
+                        Arc::new(value) as Arc<dyn Any>
+                    }
+                }
+                Datatype::Bytes => {
+                    let v = col.as_binary::<i32>();
+                    if primary_index == idx - 2 {
+                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(v.value(offset).to_owned());
+                        Arc::new(value) as Arc<dyn Any>
+                    }
+                }
             };
             columns.push(Column::new(
                 datatype,
@@ -162,6 +205,10 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     Datatype::Int8 => col.value = Arc::<Option<i8>>::new(None),
                     Datatype::Int16 => col.value = Arc::<Option<i16>>::new(None),
                     Datatype::Int32 => col.value = Arc::<Option<i32>>::new(None),
+                    Datatype::Int64 => col.value = Arc::<Option<i64>>::new(None),
+                    Datatype::String => col.value = Arc::<Option<String>>::new(None),
+                    Datatype::Boolean => col.value = Arc::<Option<bool>>::new(None),
+                    Datatype::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
                 };
             }
         }

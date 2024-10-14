@@ -31,15 +31,13 @@
 //! # Examples
 //!
 //! ```no_run
-//! use std::{ops::Bound, sync::Arc};
+//! use std::ops::Bound;
 //!
-//! use fusio::{local::TokioFs, path::Path};
+//! use fusio::path::Path;
 //! use futures_util::stream::StreamExt;
 //! use tokio::fs;
 //! use tokio_util::bytes::Bytes;
-//! use tonbo::{
-//!     executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Projection, Record, DB,
-//! };
+//! use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
@@ -56,12 +54,9 @@
 //!     // make sure the path exists
 //!     let _ = fs::create_dir_all("./db_path/users").await;
 //!
-//!     let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 //!     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new(options, TokioExecutor::default(), manager)
-//!         .await
-//!         .unwrap();
+//!     let db = DB::new(options, TokioExecutor::default()).await.unwrap();
 //!     // insert with owned value
 //!     db.insert(User {
 //!         name: "Alice".into(),
@@ -194,30 +189,15 @@ where
     pub async fn with_schema(
         option: DbOption<DynRecord>,
         executor: E,
-        manager: StoreManager,
         column_descs: Vec<ColumnDesc>,
         primary_index: usize,
     ) -> Result<Self, DbError<DynRecord>> {
         let option = Arc::new(option);
-        let manager = Arc::new(manager);
-
-        {
-            let base_fs = manager.base_fs();
-
-            base_fs
-                .create_dir_all(&option.wal_dir_path())
-                .await
-                .map_err(DbError::Fusio)?;
-            base_fs
-                .create_dir_all(&option.version_log_dir_path())
-                .await
-                .map_err(DbError::Fusio)?;
-        }
 
         let instance =
             RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index));
 
-        Self::build(option, executor, instance, manager).await
+        Self::build(option, executor, instance).await
     }
 }
 
@@ -232,31 +212,31 @@ where
     /// according to the configuration of [`DbOption`].
     ///
     /// For more configurable options, please refer to [`DbOption`].
-    pub async fn new(
-        option: DbOption<R>,
-        executor: E,
-        manager: StoreManager,
-    ) -> Result<Self, DbError<R>> {
-        let option = Arc::new(option);
-        let manager = Arc::new(manager);
-
-        {
-            let base_fs = manager.base_fs();
-
-            // FIXME: error handle
-            let _ = base_fs.create_dir_all(&option.wal_dir_path()).await;
-            let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
-        }
-
-        Self::build(option, executor, RecordInstance::Normal, manager).await
+    pub async fn new(option: DbOption<R>, executor: E) -> Result<Self, DbError<R>> {
+        Self::build(Arc::new(option), executor, RecordInstance::Normal).await
     }
 
     async fn build(
         option: Arc<DbOption<R>>,
         executor: E,
         instance: RecordInstance,
-        manager: Arc<StoreManager>,
     ) -> Result<Self, DbError<R>> {
+        let manager = Arc::new(StoreManager::new(
+            option.base_fs.clone(),
+            option.level_paths.clone(),
+        )?);
+        {
+            let base_fs = manager.base_fs();
+
+            base_fs
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+            base_fs
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+        }
         let (task_tx, task_rx) = bounded(1);
 
         let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
@@ -843,7 +823,7 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
-    use fusio::{local::TokioFs, path::Path, DynFs, Read, Write};
+    use fusio::{disk::TokioFs, options::FsOptions, path::Path, DynFs, Read, Write};
     use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
@@ -1085,10 +1065,9 @@ pub(crate) mod tests {
     pub(crate) async fn get_test_record_batch<E: Executor + Send + Sync + 'static>(
         option: DbOption<Test>,
         executor: E,
-        manager: StoreManager,
     ) -> RecordBatch {
-        let base_fs = manager.base_fs().clone();
-        let db: DB<Test, E> = DB::new(option.clone(), executor, manager).await.unwrap();
+        let db: DB<Test, E> = DB::new(option.clone(), executor).await.unwrap();
+        let base_fs = db.manager.base_fs();
 
         db.write(
             Test {
@@ -1499,7 +1478,6 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
@@ -1510,9 +1488,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (i, item) in test_items().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
@@ -1538,7 +1514,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_flush() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
@@ -1549,9 +1524,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for item in &test_items()[0..10] {
             db.write(item.clone(), 0.into()).await.unwrap();
@@ -1626,22 +1599,26 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dyn_schema_recover() {
         let temp_dir = TempDir::new().unwrap();
-        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
 
         let (desc, primary_key_index) = test_dyn_item_schema();
         let option = Arc::new(DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_owned(),
+            "id".to_owned(),
             primary_key_index,
         ));
-        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
+        manager
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
 
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
         let schema: crate::Schema<DynRecord> = crate::Schema {
-            mutable: Mutable::new(&option, trigger.clone(), &fs).await.unwrap(),
+            mutable: Mutable::new(&option, trigger.clone(), manager.base_fs())
+                .await
+                .unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx.clone(),
             recover_wal_ids: None,
@@ -1659,18 +1636,13 @@ pub(crate) mod tests {
 
         let option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_owned(),
+            "id".to_owned(),
             primary_key_index,
         );
-        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
-            option,
-            TokioExecutor::new(),
-            manager,
-            desc,
-            primary_key_index,
-        )
-        .await
-        .unwrap();
+        let db: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option, TokioExecutor::new(), desc, primary_key_index)
+                .await
+                .unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_dyn_items() {
@@ -1700,7 +1672,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_get_removed() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
@@ -1708,9 +1679,7 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (idx, item) in test_items().into_iter().enumerate() {
             if idx % 2 == 0 {
@@ -1737,12 +1706,11 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_read_write_dyn() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
 
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
         let mut option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option.immutable_chunk_num = 1;
@@ -1753,15 +1721,10 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
-            option,
-            TokioExecutor::new(),
-            manager,
-            cols_desc,
-            primary_key_index,
-        )
-        .await
-        .unwrap();
+        let db: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
+                .await
+                .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i == 28 {
@@ -1777,7 +1740,7 @@ pub(crate) mod tests {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false);
+                let key = Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx.get(&key, Projection::All).await.unwrap();
                 if i == 28 {
                     assert!(option1.is_none());
@@ -1793,13 +1756,13 @@ pub(crate) mod tests {
                         .unwrap()
                         .value
                         .as_ref()
-                        .downcast_ref::<i8>()
+                        .downcast_ref::<i64>()
                         .unwrap(),
-                    i as i8
+                    i as i64
                 );
                 let height = record_ref
                     .columns
-                    .get(1)
+                    .get(2)
                     .unwrap()
                     .value
                     .as_ref()
@@ -1813,7 +1776,7 @@ pub(crate) mod tests {
                 assert_eq!(
                     *record_ref
                         .columns
-                        .get(2)
+                        .get(3)
                         .unwrap()
                         .value
                         .as_ref()
@@ -1821,22 +1784,66 @@ pub(crate) mod tests {
                         .unwrap(),
                     Some(200 * i),
                 );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(4)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<String>>()
+                        .unwrap(),
+                    Some(i.to_string()),
+                );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(5)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<String>>()
+                        .unwrap(),
+                    Some(format!("{}@tonbo.io", i)),
+                );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(6)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<bool>>()
+                        .unwrap(),
+                    Some(i % 2 == 0),
+                );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(7)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<Vec<u8>>>()
+                        .unwrap(),
+                    Some(i.to_le_bytes().to_vec()),
+                );
             }
             tx.commit().await.unwrap();
         }
         // test scan
         {
             let tx = db.transaction().await;
-            let lower = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(0_i8), false);
-            let upper = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(49_i8), false);
+            let lower = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(0_i64), false);
+            let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 1])
+                .projection(vec![0, 2, 7])
                 .take()
                 .await
                 .unwrap();
 
-            let mut i = 0_i8;
+            let mut i = 0_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 if i == 28 {
                     assert!(entry.value().is_none());
@@ -1846,14 +1853,18 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 
-                let col = columns.get(1).unwrap();
+                let col = columns.get(2).unwrap();
                 assert_eq!(col.datatype, Datatype::Int16);
                 assert_eq!(col.name, "height".to_string());
                 let height = *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
@@ -1868,12 +1879,33 @@ pub(crate) mod tests {
                         .is_none(),);
                 }
 
-                let col = columns.get(2).unwrap();
+                let col = columns.get(3).unwrap();
                 assert_eq!(col.datatype, Datatype::Int32);
                 assert_eq!(col.name, "weight".to_string());
                 let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), None);
+
+                let col = columns.get(4).unwrap();
+                assert_eq!(col.datatype, Datatype::String);
+                assert_eq!(col.name, "name".to_string());
+                let name = col.value.as_ref().downcast_ref::<Option<String>>();
+                assert!(name.is_some());
+                assert_eq!(name.unwrap(), &None);
+
+                let col = columns.get(6).unwrap();
+                assert_eq!(col.datatype, Datatype::Boolean);
+                assert_eq!(col.name, "enabled".to_string());
+                let enabled = col.value.as_ref().downcast_ref::<Option<bool>>();
+                assert!(enabled.is_some());
+                assert_eq!(*enabled.unwrap(), None);
+
+                let col = columns.get(7).unwrap();
+                assert_eq!(col.datatype, Datatype::Bytes);
+                assert_eq!(col.name, "bytes".to_string());
+                let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
+                assert!(bytes.is_some());
+                assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
                 i += 1
             }
         }
@@ -1881,15 +1913,12 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_dyn_multiple_db() {
-        let manager1 = StoreManager::new(Arc::new(TokioFs), vec![]);
-        let manager2 = StoreManager::new(Arc::new(TokioFs), vec![]);
-        let manager3 = StoreManager::new(Arc::new(TokioFs), vec![]);
         let temp_dir1 = TempDir::with_prefix("db1").unwrap();
 
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
         let mut option = DbOption::with_path(
             Path::from_filesystem_path(temp_dir1.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option.immutable_chunk_num = 1;
@@ -1901,7 +1930,7 @@ pub(crate) mod tests {
         let temp_dir2 = TempDir::with_prefix("db2").unwrap();
         let mut option2 = DbOption::with_path(
             Path::from_filesystem_path(temp_dir2.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option2.immutable_chunk_num = 1;
@@ -1913,7 +1942,7 @@ pub(crate) mod tests {
         let temp_dir3 = TempDir::with_prefix("db3").unwrap();
         let mut option3 = DbOption::with_path(
             Path::from_filesystem_path(temp_dir3.path()).unwrap(),
-            "age".to_string(),
+            "id".to_string(),
             primary_key_index,
         );
         option3.immutable_chunk_num = 1;
@@ -1925,7 +1954,6 @@ pub(crate) mod tests {
         let db1: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option,
             TokioExecutor::new(),
-            manager1,
             cols_desc.clone(),
             primary_key_index,
         )
@@ -1934,21 +1962,15 @@ pub(crate) mod tests {
         let db2: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option2,
             TokioExecutor::new(),
-            manager2,
             cols_desc.clone(),
             primary_key_index,
         )
         .await
         .unwrap();
-        let db3: DB<DynRecord, TokioExecutor> = DB::with_schema(
-            option3,
-            TokioExecutor::new(),
-            manager3,
-            cols_desc,
-            primary_key_index,
-        )
-        .await
-        .unwrap();
+        let db3: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
+                .await
+                .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i >= 40 {
@@ -1967,7 +1989,7 @@ pub(crate) mod tests {
             let tx3 = db3.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false);
+                let key = Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx1.get(&key, Projection::All).await.unwrap();
                 let option2 = tx2.get(&key, Projection::All).await.unwrap();
                 let option3 = tx3.get(&key, Projection::All).await.unwrap();
@@ -1993,14 +2015,14 @@ pub(crate) mod tests {
                         .unwrap()
                         .value
                         .as_ref()
-                        .downcast_ref::<i8>()
+                        .downcast_ref::<i64>()
                         .unwrap(),
-                    i as i8
+                    i as i64
                 );
                 assert_eq!(
                     *record_ref
                         .columns
-                        .get(2)
+                        .get(3)
                         .unwrap()
                         .value
                         .as_ref()
@@ -2008,14 +2030,25 @@ pub(crate) mod tests {
                         .unwrap(),
                     Some(200 * i),
                 );
+                assert_eq!(
+                    *record_ref
+                        .columns
+                        .get(4)
+                        .unwrap()
+                        .value
+                        .as_ref()
+                        .downcast_ref::<Option<String>>()
+                        .unwrap(),
+                    Some(i.to_string()),
+                );
             }
             tx1.commit().await.unwrap();
         }
         // test scan
         {
             let tx1 = db1.transaction().await;
-            let lower = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(8_i8), false);
-            let upper = Column::new(Datatype::Int8, "age".to_owned(), Arc::new(43_i8), false);
+            let lower = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(8_i64), false);
+            let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(43_i64), false);
             let mut scan = tx1
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 1])
@@ -2023,15 +2056,19 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let mut i = 8_i8;
+            let mut i = 8_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 
@@ -2046,15 +2083,19 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let mut i = 9_i8;
+            let mut i = 9_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 
@@ -2069,15 +2110,19 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let mut i = 40_i8;
+            let mut i = 40_i64;
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
-                assert_eq!(primary_key_col.name, "age".to_string());
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
                     i
                 );
 

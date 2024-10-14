@@ -55,50 +55,42 @@ impl DynRecord {
     pub(crate) fn empty_record(column_descs: Vec<ColumnDesc>, primary_index: usize) -> DynRecord {
         let mut columns = vec![];
         for desc in column_descs.iter() {
-            match desc.datatype {
+            let value: Arc<dyn Any> = match desc.datatype {
                 Datatype::Int8 => match desc.is_nullable {
-                    true => columns.push(Column::new(
-                        desc.datatype,
-                        desc.name.to_owned(),
-                        Arc::<Option<i8>>::new(None),
-                        desc.is_nullable,
-                    )),
-                    false => columns.push(Column::new(
-                        desc.datatype,
-                        desc.name.to_owned(),
-                        Arc::new(0_i8),
-                        desc.is_nullable,
-                    )),
+                    true => Arc::<Option<i8>>::new(None),
+                    false => Arc::new(i8::default()),
                 },
                 Datatype::Int16 => match desc.is_nullable {
-                    true => columns.push(Column::new(
-                        desc.datatype,
-                        desc.name.to_owned(),
-                        Arc::<Option<i16>>::new(None),
-                        desc.is_nullable,
-                    )),
-                    false => columns.push(Column::new(
-                        desc.datatype,
-                        desc.name.to_owned(),
-                        Arc::new(0_i16),
-                        desc.is_nullable,
-                    )),
+                    true => Arc::<Option<i16>>::new(None),
+                    false => Arc::new(i16::default()),
                 },
                 Datatype::Int32 => match desc.is_nullable {
-                    true => columns.push(Column::new(
-                        desc.datatype,
-                        desc.name.to_owned(),
-                        Arc::<Option<i32>>::new(None),
-                        desc.is_nullable,
-                    )),
-                    false => columns.push(Column::new(
-                        desc.datatype,
-                        desc.name.to_owned(),
-                        Arc::new(0_i32),
-                        desc.is_nullable,
-                    )),
+                    true => Arc::<Option<i32>>::new(None),
+                    false => Arc::new(i32::default()),
                 },
-            }
+                Datatype::Int64 => match desc.is_nullable {
+                    true => Arc::<Option<i64>>::new(None),
+                    false => Arc::new(i64::default()),
+                },
+                Datatype::String => match desc.is_nullable {
+                    true => Arc::<Option<String>>::new(None),
+                    false => Arc::new(String::default()),
+                },
+                Datatype::Boolean => match desc.is_nullable {
+                    true => Arc::<Option<bool>>::new(None),
+                    false => Arc::new(bool::default()),
+                },
+                Datatype::Bytes => match desc.is_nullable {
+                    true => Arc::<Option<Vec<u8>>>::new(None),
+                    false => Arc::new(Vec::<u8>::default()),
+                },
+            };
+            columns.push(Column::new(
+                desc.datatype,
+                desc.name.to_owned(),
+                value,
+                desc.is_nullable,
+            ));
         }
 
         DynRecord::new(columns, primary_index)
@@ -131,6 +123,26 @@ impl Decode for DynRecord {
                     Datatype::Int32 => {
                         let value = col.value.as_ref().downcast_ref::<Option<i32>>().unwrap();
                         col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::Int64 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<i64>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::String => {
+                        let value = col.value.as_ref().downcast_ref::<Option<String>>().unwrap();
+                        col.value = Arc::new(value.clone().unwrap());
+                    }
+                    Datatype::Boolean => {
+                        let value = col.value.as_ref().downcast_ref::<Option<bool>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::Bytes => {
+                        let value = col
+                            .value
+                            .as_ref()
+                            .downcast_ref::<Option<Vec<u8>>>()
+                            .unwrap();
+                        col.value = Arc::new(value.clone().unwrap());
                     }
                 }
             }
@@ -165,21 +177,37 @@ impl Record for DynRecord {
             let datatype = col.datatype;
             let is_nullable = col.is_nullable;
             let mut value = col.value.clone();
-            if idx != self.primary_index {
+            if idx != self.primary_index && !is_nullable {
                 value = match datatype {
-                    super::Datatype::Int8 if !is_nullable => {
-                        let v = *col.value.as_ref().downcast_ref::<i8>().unwrap();
-                        Arc::new(Some(v)) as Arc<dyn Any>
+                    Datatype::Int8 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<i8>().unwrap()))
                     }
-                    super::Datatype::Int16 if !is_nullable => {
-                        let v = *col.value.as_ref().downcast_ref::<i16>().unwrap();
-                        Arc::new(Some(v)) as Arc<dyn Any>
+                    Datatype::Int16 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<i16>().unwrap()))
                     }
-                    super::Datatype::Int32 if !is_nullable => {
-                        let v = *col.value.as_ref().downcast_ref::<i32>().unwrap();
-                        Arc::new(Some(v)) as Arc<dyn Any>
+                    Datatype::Int32 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<i32>().unwrap()))
                     }
-                    _ => col.value.clone() as Arc<dyn Any>,
+                    Datatype::Int64 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<i64>().unwrap()))
+                    }
+                    Datatype::String => Arc::new(Some(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<String>()
+                            .unwrap()
+                            .to_owned(),
+                    )),
+                    Datatype::Boolean => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<bool>().unwrap()))
+                    }
+                    Datatype::Bytes => Arc::new(Some(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<Vec<u8>>()
+                            .unwrap()
+                            .to_owned(),
+                    )),
                 };
             }
 
@@ -214,9 +242,14 @@ pub(crate) mod test {
 
     pub(crate) fn test_dyn_item_schema() -> (Vec<ColumnDesc>, usize) {
         let descs = vec![
-            ColumnDesc::new("age".to_string(), Datatype::Int8, false),
+            ColumnDesc::new("id".to_string(), Datatype::Int64, false),
+            ColumnDesc::new("age".to_string(), Datatype::Int8, true),
             ColumnDesc::new("height".to_string(), Datatype::Int16, true),
             ColumnDesc::new("weight".to_string(), Datatype::Int32, false),
+            ColumnDesc::new("name".to_string(), Datatype::String, false),
+            ColumnDesc::new("email".to_string(), Datatype::String, true),
+            ColumnDesc::new("enabled".to_string(), Datatype::Boolean, false),
+            ColumnDesc::new("bytes".to_string(), Datatype::Bytes, true),
         ];
         (descs, 0)
     }
@@ -225,7 +258,13 @@ pub(crate) mod test {
         let mut items = vec![];
         for i in 0..50 {
             let mut columns = vec![
-                Column::new(Datatype::Int8, "age".to_string(), Arc::new(i as i8), false),
+                Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false),
+                Column::new(
+                    Datatype::Int8,
+                    "age".to_string(),
+                    Arc::new(Some(i as i8)),
+                    true,
+                ),
                 Column::new(
                     Datatype::Int16,
                     "height".to_string(),
@@ -238,9 +277,33 @@ pub(crate) mod test {
                     Arc::new(i * 200_i32),
                     false,
                 ),
+                Column::new(
+                    Datatype::String,
+                    "name".to_string(),
+                    Arc::new(i.to_string()),
+                    false,
+                ),
+                Column::new(
+                    Datatype::String,
+                    "email".to_string(),
+                    Arc::new(Some(format!("{}@tonbo.io", i))),
+                    true,
+                ),
+                Column::new(
+                    Datatype::Boolean,
+                    "enabled".to_string(),
+                    Arc::new(i % 2 == 0),
+                    false,
+                ),
+                Column::new(
+                    Datatype::Bytes,
+                    "bytes".to_string(),
+                    Arc::new(Some(i.to_le_bytes().to_vec())),
+                    true,
+                ),
             ];
             if i >= 45 {
-                columns[1].value = Arc::<Option<i16>>::new(None);
+                columns[2].value = Arc::<Option<i16>>::new(None);
             }
 
             let record = DynRecord::new(columns, 0);
