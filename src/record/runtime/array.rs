@@ -1,11 +1,12 @@
-use std::{any::Any, sync::Arc};
+use std::{any::Any, mem, sync::Arc};
 
 use arrow::{
     array::{
-        Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, PrimitiveBuilder,
-        UInt32Builder,
+        Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, BooleanBuilder,
+        GenericBinaryArray, GenericBinaryBuilder, Int16Array, Int32Array, Int64Array, Int8Array,
+        PrimitiveBuilder, StringArray, StringBuilder, UInt32Builder,
     },
-    datatypes::{Int16Type, Int32Type, Int8Type, Schema},
+    datatypes::{Int16Type, Int32Type, Int64Type, Int8Type, Schema},
 };
 
 use super::{column::Column, record::DynRecord, record_ref::DynRecordRef, Datatype};
@@ -49,6 +50,22 @@ impl ArrowArrays for DynRecordImmutableArrays {
                         capacity,
                     )));
                 }
+                Datatype::Int64 => {
+                    builders.push(Box::new(PrimitiveBuilder::<Int64Type>::with_capacity(
+                        capacity,
+                    )));
+                }
+                Datatype::String => {
+                    builders.push(Box::new(StringBuilder::with_capacity(capacity, 0)));
+                }
+                Datatype::Boolean => {
+                    builders.push(Box::new(BooleanBuilder::with_capacity(capacity)));
+                }
+                Datatype::Bytes => {
+                    builders.push(Box::new(GenericBinaryBuilder::<i32>::with_capacity(
+                        capacity, 0,
+                    )));
+                }
             }
             datatypes.push(datatype);
         }
@@ -80,16 +97,58 @@ impl ArrowArrays for DynRecordImmutableArrays {
             if projection_mask.leaf_included(idx + 2) && !col.is_nullable {
                 let datatype = col.datatype;
                 let name = col.name.to_string();
-                let value = match datatype {
-                    Datatype::Int8 => {
-                        Arc::new(col.value.as_ref().downcast_ref::<i8>().copied()) as Arc<dyn Any>
-                    }
-                    Datatype::Int16 => {
-                        Arc::new(col.value.as_ref().downcast_ref::<i16>().copied()) as Arc<dyn Any>
-                    }
-                    Datatype::Int32 => {
-                        Arc::new(col.value.as_ref().downcast_ref::<i32>().copied()) as Arc<dyn Any>
-                    }
+                let value: Arc<dyn Any> = match datatype {
+                    Datatype::Int8 => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<Int8Array>()
+                            .unwrap()
+                            .value(offset),
+                    ),
+                    Datatype::Int16 => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<Int16Array>()
+                            .unwrap()
+                            .value(offset),
+                    ),
+                    Datatype::Int32 => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<Int32Array>()
+                            .unwrap()
+                            .value(offset),
+                    ),
+                    Datatype::Int64 => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                            .value(offset),
+                    ),
+                    Datatype::String => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .value(offset)
+                            .to_owned(),
+                    ),
+                    Datatype::Boolean => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<BooleanArray>()
+                            .unwrap()
+                            .value(offset),
+                    ),
+                    Datatype::Bytes => Arc::new(
+                        col.value
+                            .as_ref()
+                            .downcast_ref::<GenericBinaryArray<i32>>()
+                            .unwrap()
+                            .value(offset)
+                            .to_owned(),
+                    ),
                 };
                 columns.push(Column {
                     datatype,
@@ -179,6 +238,55 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
+                        Datatype::Int64 => {
+                            let bd = builder
+                                .as_any_mut()
+                                .downcast_mut::<PrimitiveBuilder<Int64Type>>()
+                                .unwrap();
+                            let value = col.value.as_ref().downcast_ref::<Option<i64>>().unwrap();
+                            match value {
+                                Some(value) => bd.append_value(*value),
+                                None => bd.append_null(),
+                            }
+                        }
+                        Datatype::String => {
+                            let bd = builder
+                                .as_any_mut()
+                                .downcast_mut::<StringBuilder>()
+                                .unwrap();
+                            let value =
+                                col.value.as_ref().downcast_ref::<Option<String>>().unwrap();
+                            match value {
+                                Some(value) => bd.append_value(value),
+                                None => bd.append_null(),
+                            }
+                        }
+                        Datatype::Boolean => {
+                            let bd = builder
+                                .as_any_mut()
+                                .downcast_mut::<BooleanBuilder>()
+                                .unwrap();
+                            let value = col.value.as_ref().downcast_ref::<Option<bool>>().unwrap();
+                            match value {
+                                Some(value) => bd.append_value(*value),
+                                None => bd.append_null(),
+                            }
+                        }
+                        Datatype::Bytes => {
+                            let bd = builder
+                                .as_any_mut()
+                                .downcast_mut::<GenericBinaryBuilder<i32>>()
+                                .unwrap();
+                            let value = col
+                                .value
+                                .as_ref()
+                                .downcast_ref::<Option<Vec<u8>>>()
+                                .unwrap();
+                            match value {
+                                Some(value) => bd.append_value(value),
+                                None => bd.append_null(),
+                            }
+                        }
                     }
                 }
             }
@@ -214,6 +322,34 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 .unwrap()
                                 .append_value(i32::default());
                         }
+                        Datatype::Int64 => {
+                            builder
+                                .as_any_mut()
+                                .downcast_mut::<PrimitiveBuilder<Int64Type>>()
+                                .unwrap()
+                                .append_value(i64::default());
+                        }
+                        Datatype::String => {
+                            builder
+                                .as_any_mut()
+                                .downcast_mut::<StringBuilder>()
+                                .unwrap()
+                                .append_value(String::default());
+                        }
+                        Datatype::Boolean => {
+                            builder
+                                .as_any_mut()
+                                .downcast_mut::<BooleanBuilder>()
+                                .unwrap()
+                                .append_value(bool::default());
+                        }
+                        Datatype::Bytes => {
+                            builder
+                                .as_any_mut()
+                                .downcast_mut::<GenericBinaryBuilder<i32>>()
+                                .unwrap()
+                                .append_value(Vec::<u8>::default());
+                        }
                     }
                 }
             }
@@ -221,30 +357,58 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
     }
 
     fn written_size(&self) -> usize {
-        let size = self._null.as_slice().len() + std::mem::size_of_val(self._ts.values_slice());
+        let size = self._null.as_slice().len() + mem::size_of_val(self._ts.values_slice());
         self.builders
             .iter()
             .zip(self.datatypes.iter())
             .fold(size, |acc, (builder, datatype)| {
                 acc + match datatype {
-                    Datatype::Int8 => std::mem::size_of_val(
+                    Datatype::Int8 => mem::size_of_val(
                         builder
                             .as_any()
                             .downcast_ref::<PrimitiveBuilder<Int8Type>>()
                             .unwrap()
                             .values_slice(),
                     ),
-                    Datatype::Int16 => std::mem::size_of_val(
+                    Datatype::Int16 => mem::size_of_val(
                         builder
                             .as_any()
                             .downcast_ref::<PrimitiveBuilder<Int16Type>>()
                             .unwrap()
                             .values_slice(),
                     ),
-                    Datatype::Int32 => std::mem::size_of_val(
+                    Datatype::Int32 => mem::size_of_val(
                         builder
                             .as_any()
                             .downcast_ref::<PrimitiveBuilder<Int32Type>>()
+                            .unwrap()
+                            .values_slice(),
+                    ),
+                    Datatype::Int64 => mem::size_of_val(
+                        builder
+                            .as_any()
+                            .downcast_ref::<PrimitiveBuilder<Int64Type>>()
+                            .unwrap()
+                            .values_slice(),
+                    ),
+                    Datatype::String => mem::size_of_val(
+                        builder
+                            .as_any()
+                            .downcast_ref::<StringBuilder>()
+                            .unwrap()
+                            .values_slice(),
+                    ),
+                    Datatype::Boolean => mem::size_of_val(
+                        builder
+                            .as_any()
+                            .downcast_ref::<BooleanBuilder>()
+                            .unwrap()
+                            .values_slice(),
+                    ),
+                    Datatype::Bytes => mem::size_of_val(
+                        builder
+                            .as_any()
+                            .downcast_ref::<GenericBinaryBuilder<i32>>()
                             .unwrap()
                             .values_slice(),
                     ),
@@ -315,6 +479,70 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     });
                     array_refs.push(value);
                 }
+                Datatype::Int64 => {
+                    let value = Arc::new(
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<PrimitiveBuilder<Int64Type>>()
+                            .unwrap()
+                            .finish(),
+                    );
+                    columns.push(Column {
+                        datatype: Datatype::Int64,
+                        name: field.name().to_owned(),
+                        value: value.clone(),
+                        is_nullable,
+                    });
+                    array_refs.push(value);
+                }
+                Datatype::String => {
+                    let value = Arc::new(
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<StringBuilder>()
+                            .unwrap()
+                            .finish(),
+                    );
+                    columns.push(Column {
+                        datatype: Datatype::String,
+                        name: field.name().to_owned(),
+                        value: value.clone(),
+                        is_nullable,
+                    });
+                    array_refs.push(value);
+                }
+                Datatype::Boolean => {
+                    let value = Arc::new(
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<BooleanBuilder>()
+                            .unwrap()
+                            .finish(),
+                    );
+                    columns.push(Column {
+                        datatype: Datatype::Boolean,
+                        name: field.name().to_owned(),
+                        value: value.clone(),
+                        is_nullable,
+                    });
+                    array_refs.push(value);
+                }
+                Datatype::Bytes => {
+                    let value = Arc::new(
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<GenericBinaryBuilder<i32>>()
+                            .unwrap()
+                            .finish(),
+                    );
+                    columns.push(Column {
+                        datatype: Datatype::Bytes,
+                        name: field.name().to_owned(),
+                        value: value.clone(),
+                        is_nullable,
+                    });
+                    array_refs.push(value);
+                }
             };
         }
 
@@ -345,7 +573,6 @@ impl DynRecordBuilder {
         let builder = self.builders.get_mut(primary_key_index).unwrap();
         let datatype = self.datatypes.get_mut(primary_key_index).unwrap();
         let col = key.value;
-        // *col.value.as_ref().downcast_ref::<i32>().unwrap()
         match datatype {
             Datatype::Int8 => builder
                 .as_any_mut()
@@ -362,6 +589,26 @@ impl DynRecordBuilder {
                 .downcast_mut::<PrimitiveBuilder<Int32Type>>()
                 .unwrap()
                 .append_value(*col.value.as_ref().downcast_ref::<i32>().unwrap()),
+            Datatype::Int64 => builder
+                .as_any_mut()
+                .downcast_mut::<PrimitiveBuilder<Int64Type>>()
+                .unwrap()
+                .append_value(*col.value.as_ref().downcast_ref::<i64>().unwrap()),
+            Datatype::String => builder
+                .as_any_mut()
+                .downcast_mut::<StringBuilder>()
+                .unwrap()
+                .append_value(col.value.as_ref().downcast_ref::<String>().unwrap()),
+            Datatype::Boolean => builder
+                .as_any_mut()
+                .downcast_mut::<BooleanBuilder>()
+                .unwrap()
+                .append_value(*col.value.as_ref().downcast_ref::<bool>().unwrap()),
+            Datatype::Bytes => builder
+                .as_any_mut()
+                .downcast_mut::<GenericBinaryBuilder<i32>>()
+                .unwrap()
+                .append_value(col.value.as_ref().downcast_ref::<Vec<u8>>().unwrap()),
         };
     }
 }
