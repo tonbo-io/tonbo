@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{default_open_options, manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
     record::Record,
     serdes::Encode,
     timestamp::Timestamp,
@@ -139,7 +139,7 @@ where
         let mut log = fs
             .open_options(
                 &option.version_log_path(&log_id),
-                default_open_options(true),
+                FileType::Log.open_options(false),
             )
             .await?;
 
@@ -265,7 +265,10 @@ where
             let fs = self.manager.base_fs();
             let old_log_id = mem::replace(log_id, FileId::new());
             let new_log = fs
-                .open_options(&option.version_log_path(log_id), default_open_options(true))
+                .open_options(
+                    &option.version_log_path(log_id),
+                    FileType::Log.open_options(false),
+                )
                 .await?;
             let mut old_log = mem::replace(log, new_log);
             old_log.close().await?;
@@ -294,7 +297,7 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        fs::{default_open_options, manager::StoreManager, FileId},
+        fs::{manager::StoreManager, FileId, FileType},
         record::Record,
         scope::Scope,
         version::{
@@ -320,7 +323,7 @@ pub(crate) mod tests {
             .base_fs()
             .open_options(
                 &option.version_log_path(&log_id),
-                default_open_options(true),
+                FileType::Log.open_options(false),
             )
             .await?;
         let timestamp = version.timestamp.clone();
@@ -479,7 +482,7 @@ pub(crate) mod tests {
 
         let mut log = manager
             .base_fs()
-            .open_options(&logs.pop().unwrap().path, default_open_options(true))
+            .open_options(&logs.pop().unwrap().path, FileType::Log.open_options(false))
             .await
             .unwrap();
         let edits = VersionEdit::<String>::recover(&mut log).await;

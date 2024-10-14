@@ -157,7 +157,7 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
-    fs::{default_open_options, manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
     serdes::Decode,
     stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
@@ -469,7 +469,7 @@ where
             let wal_path = wal_meta.path;
 
             let file = base_fs
-                .open_options(&wal_path, default_open_options(true))
+                .open_options(&wal_path, FileType::Wal.open_options(false))
                 .await?;
             // SAFETY: wal_stream return only file name
             let wal_id = parse_file_id(&wal_path, FileType::Wal)?.unwrap();

@@ -26,12 +26,20 @@ impl Display for FileType {
     }
 }
 
-pub(crate) fn default_open_options(is_append: bool) -> OpenOptions {
-    let options = OpenOptions::default().create(true).read(true);
-    if is_append {
-        options.append(true)
-    } else {
-        options.write(true)
+impl FileType {
+    pub(crate) fn open_options(&self, only_read: bool) -> OpenOptions {
+        match self {
+            FileType::Wal | FileType::Log => {
+                OpenOptions::default().create(true).read(true).append(true)
+            }
+            FileType::Parquet => {
+                if only_read {
+                    OpenOptions::default().read(true)
+                } else {
+                    OpenOptions::default().create(true).write(true)
+                }
+            }
+        }
     }
 }
 

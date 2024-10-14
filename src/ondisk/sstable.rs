@@ -118,7 +118,7 @@ pub(crate) mod tests {
     use super::SsTable;
     use crate::{
         executor::tokio::TokioExecutor,
-        fs::{default_open_options, manager::StoreManager},
+        fs::{manager::StoreManager, FileType},
         record::Record,
         tests::{get_test_record_batch, Test},
         timestamp::Timestamped,
@@ -158,7 +158,7 @@ pub(crate) mod tests {
     {
         SsTable::open(
             store
-                .open_options(path, default_open_options(false))
+                .open_options(path, FileType::Parquet.open_options(true))
                 .await
                 .unwrap(),
         )
@@ -181,7 +181,7 @@ pub(crate) mod tests {
         let table_path = Path::from_filesystem_path(table_path).unwrap();
 
         let file = base_fs
-            .open_options(&table_path, default_open_options(false))
+            .open_options(&table_path, FileType::Parquet.open_options(false))
             .await
             .unwrap();
         write_record_batch(file, &record_batch).await.unwrap();
@@ -256,7 +256,7 @@ pub(crate) mod tests {
         let table_path = Path::from_filesystem_path(table_path).unwrap();
 
         let file = base_fs
-            .open_options(&table_path, default_open_options(false))
+            .open_options(&table_path, FileType::Parquet.open_options(false))
             .await
             .unwrap();
         write_record_batch(file, &record_batch).await.unwrap();
