@@ -102,7 +102,7 @@ pub(crate) mod tests {
     use std::{borrow::Borrow, fs::File, ops::Bound, sync::Arc};
 
     use arrow::array::RecordBatch;
-    use fusio::{dynamic::DynFile, local::TokioFs, path::Path, DynFs};
+    use fusio::{dynamic::DynFile, options::FsOptions, path::Path, DynFs};
     use fusio_parquet::writer::AsyncWriter;
     use futures_util::StreamExt;
     use parquet::{
@@ -168,12 +168,11 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn projection_query() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
-        let base_fs = manager.base_fs().clone();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::new(),
-            manager,
         )
         .await;
         let table_path = temp_dir.path().join("projection_query_test.parquet");
@@ -244,12 +243,11 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn projection_scan() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
-        let base_fs = manager.base_fs().clone();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::new(),
-            manager,
         )
         .await;
         let table_path = temp_dir.path().join("projection_scan_test.parquet");

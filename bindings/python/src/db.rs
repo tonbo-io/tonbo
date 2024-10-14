@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use fusio::local::TokioFs;
 use pyo3::{
     prelude::*,
     pyclass, pymethods,
@@ -10,7 +9,6 @@ use pyo3::{
 use pyo3_asyncio::tokio::{future_into_py, get_runtime};
 use tonbo::{
     executor::tokio::TokioExecutor,
-    fs::manager::StoreManager,
     record::{ColumnDesc, DynRecord},
     DB,
 };
@@ -60,13 +58,11 @@ impl TonboDB {
             }
         }
         let option = option.into_option(primary_key_index.unwrap(), primary_key_name.unwrap());
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
         let db = get_runtime()
             .block_on(async {
                 DB::with_schema(
                     option,
                     TokioExecutor::new(),
-                    manager,
                     desc,
                     primary_key_index.unwrap(),
                 )

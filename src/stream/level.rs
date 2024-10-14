@@ -201,7 +201,7 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use fusio::{local::TokioFs, path::Path};
+    use fusio::{options::FsOptions, path::Path};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
@@ -214,7 +214,7 @@ mod tests {
     #[tokio::test]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let option = Arc::new(DbOption::from(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
         ));

@@ -1,23 +1,19 @@
 use std::{
     collections::Bound,
-    error::Error,
     fs,
     fs::File,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use async_stream::stream;
-use fusio::local::TokioFs;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
 use tonbo::{
-    executor::tokio::TokioExecutor, fs::manager::StoreManager, stream,
-    transaction::TransactionEntry, DbOption, Projection,
+    executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
 use tonbo_macros::Record;
 
@@ -225,14 +221,11 @@ impl BenchDatabase for TonboBenchDataBase {
     }
 
     async fn build(path: impl AsRef<Path>) -> Self {
-        let manager = StoreManager::new(Arc::new(TokioFs), vec![]);
         let option =
             DbOption::from(fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap())
                 .disable_wal();
 
-        let db = tonbo::DB::new(option, TokioExecutor::new(), manager)
-            .await
-            .unwrap();
+        let db = tonbo::DB::new(option, TokioExecutor::new()).await.unwrap();
         TonboBenchDataBase::new(db)
     }
 }

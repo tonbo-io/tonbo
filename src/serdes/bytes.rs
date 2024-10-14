@@ -40,7 +40,8 @@ impl Decode for Bytes {
 
     async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
         let len = u32::decode(reader).await?;
-        let buf = reader.read_exact(vec![0u8; len as usize]).await?;
+        let (result, buf) = reader.read_exact(vec![0u8; len as usize]).await;
+        result?;
 
         Ok(buf.as_bytes())
     }

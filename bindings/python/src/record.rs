@@ -52,6 +52,34 @@ impl Record {
                             false => col.value = Arc::new(value),
                         }
                     }
+                    DataType::Int64 => {
+                        let value = v.extract::<i64>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
+                    DataType::String => {
+                        let value = v.extract::<String>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
+                    DataType::Boolean => {
+                        let value = v.extract::<bool>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
+                    DataType::Bytes => {
+                        let value = v.extract::<Vec<u8>>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
                 };
                 self.wraps.setattr(py, attr, col).unwrap();
             }
