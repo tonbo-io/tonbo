@@ -1,9 +1,8 @@
 use std::{iter::repeat_with, sync::Arc};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use fusio::local::TokioFs;
 use mimalloc::MiMalloc;
-use tonbo::{executor::tokio::TokioExecutor, fs::manager::StoreManager, DbOption, Record, DB};
+use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;

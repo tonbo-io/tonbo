@@ -17,7 +17,7 @@ use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    fs::{default_open_options, manager::StoreManager, FileId},
+    fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
     record::Record,
     scope::Scope,
@@ -131,16 +131,17 @@ where
                 continue;
             }
             if let Some(entry) = self
-                .table_query(level_0_fs, key, &scope.gen, projection_mask.clone())
+                .table_query(level_0_fs, key, 0, &scope.gen, projection_mask.clone())
                 .await?
             {
                 return Ok(Some(entry));
             }
         }
         for (i, sort_runs) in self.level_slice[1..MAX_LEVEL].iter().enumerate() {
+            let leve = i + 1;
             let level_path = self
                 .option
-                .level_fs_path(i + 1)
+                .level_fs_path(leve)
                 .unwrap_or(&self.option.base_path);
             let level_fs = manager.get_fs(level_path);
             if sort_runs.is_empty() {
@@ -154,6 +155,7 @@ where
                 .table_query(
                     level_fs,
                     key,
+                    leve,
                     &sort_runs[index].gen,
                     projection_mask.clone(),
                 )
@@ -170,11 +172,15 @@ where
         &self,
         store: &Arc<dyn DynFs>,
         key: &TimestampedRef<<R as Record>::Key>,
+        level: usize,
         gen: &FileId,
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = store
-            .open_options(&self.option.table_path(gen), default_open_options())
+            .open_options(
+                &self.option.table_path(gen, level),
+                FileType::Parquet.open_options(true),
+            )
             .await
             .map_err(VersionError::Fusio)?;
         SsTable::<R>::open(file)
@@ -213,7 +219,10 @@ where
                 continue;
             }
             let file = level_0_fs
-                .open_options(&self.option.table_path(&scope.gen), default_open_options())
+                .open_options(
+                    &self.option.table_path(&scope.gen, 0),
+                    FileType::Parquet.open_options(true),
+                )
                 .await
                 .map_err(VersionError::Fusio)?;
             let table = SsTable::open(file).await?;

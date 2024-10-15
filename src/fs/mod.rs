@@ -26,8 +26,21 @@ impl Display for FileType {
     }
 }
 
-pub(crate) fn default_open_options() -> OpenOptions {
-    OpenOptions::default().create(true).append(true).read(true)
+impl FileType {
+    pub(crate) fn open_options(&self, only_read: bool) -> OpenOptions {
+        match self {
+            FileType::Wal | FileType::Log => {
+                OpenOptions::default().create(true).read(true).append(true)
+            }
+            FileType::Parquet => {
+                if only_read {
+                    OpenOptions::default().read(true)
+                } else {
+                    OpenOptions::default().create(true).write(true)
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<FileId>, DecodeError> {

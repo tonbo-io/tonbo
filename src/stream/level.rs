@@ -15,7 +15,7 @@ use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
 
 use crate::{
-    fs::{default_open_options, FileId},
+    fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
     record::Record,
     scope::Scope,
@@ -45,6 +45,7 @@ where
     lower: Bound<&'level R::Key>,
     upper: Bound<&'level R::Key>,
     ts: Timestamp,
+    level: usize,
     option: Arc<DbOption<R>>,
     gens: VecDeque<FileId>,
     limit: Option<usize>,
@@ -83,6 +84,7 @@ where
             lower,
             upper,
             ts,
+            level,
             option: version.option().clone(),
             gens,
             limit,
@@ -105,11 +107,12 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.path = Some(self.option.table_path(&gen));
+                    self.path = Some(self.option.table_path(&gen, self.level));
 
-                    let reader = self
-                        .fs
-                        .open_options(self.path.as_ref().unwrap(), default_open_options());
+                    let reader = self.fs.open_options(
+                        self.path.as_ref().unwrap(),
+                        FileType::Parquet.open_options(true),
+                    );
                     #[allow(clippy::missing_transmute_annotations)]
                     let reader = unsafe {
                         std::mem::transmute::<
@@ -129,11 +132,12 @@ where
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.path = Some(self.option.table_path(&gen));
+                            self.path = Some(self.option.table_path(&gen, self.level));
 
-                            let reader = self
-                                .fs
-                                .open_options(self.path.as_ref().unwrap(), default_open_options());
+                            let reader = self.fs.open_options(
+                                self.path.as_ref().unwrap(),
+                                FileType::Parquet.open_options(true),
+                            );
                             #[allow(clippy::missing_transmute_annotations)]
                             let reader = unsafe {
                                 std::mem::transmute::<
@@ -201,7 +205,8 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use fusio::{options::FsOptions, path::Path};
+    use fusio::path::Path;
+    use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
     use tempfile::TempDir;
@@ -220,10 +225,12 @@ mod tests {
         ));
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use ulid::Ulid;
 
 use crate::{
-    fs::{default_open_options, manager::StoreManager, FileId},
+    fs::{manager::StoreManager, FileId, FileType},
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
         mutable::Mutable,
@@ -60,18 +60,12 @@ where
         }
     }
 
-    pub(crate) async fn check_then_compaction(
-        &mut self,
-        option_tx: Option<oneshot::Sender<()>>,
-    ) -> Result<(), CompactionError<R>> {
+    pub(crate) async fn check_then_compaction(&mut self) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
         guard.trigger.reset();
 
         if guard.mutable.is_empty() {
-            if let Some(tx) = option_tx {
-                tx.send(()).map_err(|_| CommitError::ChannelClose)?
-            }
             return Ok(());
         }
 
@@ -130,9 +124,6 @@ where
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
-        if let Some(tx) = option_tx {
-            tx.send(()).map_err(|_| CommitError::ChannelClose)?
-        }
         Ok(())
     }
 
@@ -156,7 +147,10 @@ where
             let mut writer = AsyncArrowWriter::try_new(
                 AsyncWriter::new(
                     level_0_fs
-                        .open_options(&option.table_path(&gen), default_open_options())
+                        .open_options(
+                            &option.table_path(&gen, 0),
+                            FileType::Parquet.open_options(false),
+                        )
                         .await?,
                 ),
                 instance.arrow_schema::<R>().clone(),
@@ -219,7 +213,10 @@ where
             if level == 0 {
                 for scope in meet_scopes_l.iter() {
                     let file = level_fs
-                        .open_options(&option.table_path(&scope.gen), default_open_options())
+                        .open_options(
+                            &option.table_path(&scope.gen, level),
+                            FileType::Parquet.open_options(true),
+                        )
                         .await?;
 
                     streams.push(ScanStream::SsTable {
@@ -273,7 +270,15 @@ where
                     inner: level_scan_ll,
                 });
             }
-            Self::build_tables(option, version_edits, level, streams, instance, level_fs).await?;
+            Self::build_tables(
+                option,
+                version_edits,
+                level + 1,
+                streams,
+                instance,
+                level_fs,
+            )
+            .await?;
 
             for scope in meet_scopes_l {
                 version_edits.push(VersionEdit::Remove {
@@ -454,8 +459,11 @@ where
         let columns = builder.finish(None);
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(&option.table_path(&gen), default_open_options())
-                    .await?,
+                fs.open_options(
+                    &option.table_path(&gen, level),
+                    FileType::Parquet.open_options(false),
+                )
+                .await?,
             ),
             instance.arrow_schema::<R>().clone(),
             Some(option.write_parquet_properties.clone()),
@@ -463,7 +471,7 @@ where
         writer.write(columns.as_record_batch()).await?;
         writer.close().await?;
         version_edits.push(VersionEdit::Add {
-            level: (level + 1) as u8,
+            level: level as u8,
             scope: Scope {
                 min: min.take().ok_or(CompactionError::EmptyLevel)?,
                 max: max.take().ok_or(CompactionError::EmptyLevel)?,
@@ -488,6 +496,8 @@ where
     Fusio(#[from] fusio::Error),
     #[error("compaction version error: {0}")]
     Version(#[from] VersionError<R>),
+    #[error("compaction channel is closed")]
+    ChannelClose,
     #[error("database error: {0}")]
     Commit(#[from] CommitError<R>),
     #[error("the level being compacted does not have a table")]
@@ -499,7 +509,8 @@ pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
     use flume::bounded;
-    use fusio::{options::FsOptions, path::Path, DynFs};
+    use fusio::{path::Path, DynFs};
+    use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;
@@ -507,7 +518,7 @@ pub(crate) mod tests {
     use crate::{
         compaction::Compactor,
         executor::tokio::TokioExecutor,
-        fs::{default_open_options, manager::StoreManager, FileId},
+        fs::{manager::StoreManager, FileId, FileType},
         inmem::{immutable::Immutable, mutable::Mutable},
         record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance},
         scope::Scope,
@@ -543,6 +554,7 @@ pub(crate) mod tests {
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
         instance: &RecordInstance,
+        level: usize,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), DbError<R>>
     where
@@ -551,8 +563,11 @@ pub(crate) mod tests {
         let immutable = build_immutable::<R>(option, records, instance, fs).await?;
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(&option.table_path(&gen), default_open_options())
-                    .await?,
+                fs.open_options(
+                    &option.table_path(&gen, level),
+                    FileType::Parquet.open_options(false),
+                )
+                .await?,
             ),
             R::arrow_schema().clone(),
             None,
@@ -566,11 +581,19 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let temp_dir_l0 = tempfile::tempdir().unwrap();
+
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .level_path(
+                0,
+                Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
+                FsOptions::Local,
+            )
+            .unwrap();
         let manager =
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
-
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -650,7 +673,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let scope = Compactor::<Test>::minor_compaction(
-            &DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            &option,
             None,
             &vec![
                 (Some(FileId::new()), batch_1),
@@ -676,6 +699,7 @@ pub(crate) mod tests {
             0,
         );
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -738,18 +762,34 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn major_compaction() {
         let temp_dir = TempDir::new().unwrap();
+        let temp_dir_l0 = TempDir::new().unwrap();
+        let temp_dir_l1 = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .level_path(
+                0,
+                Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
+                FsOptions::Local,
+            )
+            .unwrap()
+            .level_path(
+                1,
+                Path::from_filesystem_path(temp_dir_l1.path()).unwrap(),
+                FsOptions::Local,
+            )
+            .unwrap();
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
         let manager =
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -851,6 +891,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            0,
             level_0_fs,
         )
         .await
@@ -888,6 +929,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            0,
             level_0_fs,
         )
         .await
@@ -930,6 +972,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await
@@ -967,6 +1010,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await
@@ -1004,6 +1048,7 @@ pub(crate) mod tests {
                 ),
             ],
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await
@@ -1066,10 +1111,12 @@ pub(crate) mod tests {
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -1108,6 +1155,7 @@ pub(crate) mod tests {
             table_gen0,
             records0,
             &RecordInstance::Normal,
+            0,
             level_0_fs,
         )
         .await
@@ -1117,6 +1165,7 @@ pub(crate) mod tests {
             table_gen1,
             records1,
             &RecordInstance::Normal,
+            1,
             level_1_fs,
         )
         .await
