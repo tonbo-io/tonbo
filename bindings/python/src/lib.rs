@@ -8,6 +8,7 @@ mod column;
 mod datatype;
 mod db;
 mod error;
+mod fs;
 mod options;
 mod range;
 mod record;
@@ -19,6 +20,7 @@ mod utils;
 pub use column::*;
 pub use datatype::*;
 pub use db::*;
+pub use fs::*;
 pub use options::*;
 pub use stream::*;
 pub use transaction::*;
@@ -36,6 +38,19 @@ fn _tonbo(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ScanStream>()?;
     m.add_class::<range::Bound>()?;
     m.add_class::<RecordBatch>()?;
+
+    let fs_module = PyModule::new_bound(py, "fs")?;
+    fs_module.add_class::<FsOptions>()?;
+    fs_module.add_class::<AwsCredential>()?;
+    fs_module.add_function(wrap_pyfunction!(parse, &fs_module)?)?;
+    fs_module.add_function(wrap_pyfunction!(from_filesystem_path, &fs_module)?)?;
+    fs_module.add_function(wrap_pyfunction!(from_absolute_path, &fs_module)?)?;
+    fs_module.add_function(wrap_pyfunction!(from_url_path, &fs_module)?)?;
+
+    fs_module.add_submodule(&fs_module)?;
+    py.import_bound("sys")?
+        .getattr("modules")?
+        .set_item("tonbo.fs", fs_module)?;
 
     let error_module = PyModule::new_bound(py, "error")?;
     error_module.add_class::<DbError>()?;
@@ -56,10 +71,12 @@ fn _tonbo(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
         "RepeatedCommitError",
         py.get_type_bound::<RepeatedCommitError>(),
     )?;
+    error_module.add("PathParseError", py.get_type_bound::<PathParseError>())?;
 
     m.add_submodule(&error_module)?;
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("tonbo.error", error_module)?;
+
     Ok(())
 }

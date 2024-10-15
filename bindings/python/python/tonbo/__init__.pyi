@@ -1,6 +1,8 @@
 from typing import Any, AsyncIterable, Optional, final
 from enum import Enum, auto
 from tonbo import error as error
+from tonbo.fs import FsOptions
+
 
 @final
 class Record: ...
@@ -39,6 +41,7 @@ class RecordBatch:
     def __init__(self): ...
     def append(self, record: object): ...
 
+
 class DbOption:
     clean_channel_buffer: int
     immutable_chunk_num: int
@@ -51,6 +54,8 @@ class DbOption:
     path: str
 
     def __init__(self, path: str): ...
+    def level_path(self, level: int, path: str, fs_options: FsOptions): ...
+
 
 @final
 class TonboDB:

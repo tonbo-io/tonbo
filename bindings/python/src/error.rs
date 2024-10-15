@@ -28,6 +28,8 @@ create_exception!(
     "Repeated commit exception"
 );
 
+create_exception!(tonbo, PathParseError, PyException, "Path parse exception");
+
 pub(crate) fn repeated_commit_err() -> PyErr {
     RepeatedCommitError::new_err("Transaction has been committed!")
 }
