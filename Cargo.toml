@@ -58,8 +58,9 @@ crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "42", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", rev = "65e9325daf1e8a4c363a5498058cecacc4b2e0fa", features = ["tokio", "dyn"] }
-fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet", rev = "65e9325daf1e8a4c363a5498058cecacc4b2e0fa" }
+fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", version = "0.2.0", features = ["tokio", "dyn", "aws", "fs", "object_store", "tokio-http"] }
+fusio-dispatch = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-dispatch", version = "0.2.0", features = ["aws", "tokio"] }
+fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet", version = "0.2.0" }
 futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"

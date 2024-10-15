@@ -253,7 +253,8 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use fusio::{options::FsOptions, path::Path};
+    use fusio::path::Path;
+    use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
@@ -316,10 +317,12 @@ mod tests {
         ));
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -465,10 +468,12 @@ mod tests {
         ));
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -558,10 +563,12 @@ mod tests {
         ));
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();
@@ -732,10 +739,12 @@ mod tests {
         ));
 
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
         manager
+            .base_fs()
             .create_dir_all(&option.wal_dir_path())
             .await
             .unwrap();

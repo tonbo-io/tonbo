@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use fusio::{dynamic::DynFs, options::FsOptions, path::Path, Error};
+use fusio::{dynamic::DynFs, path::Path, Error};
+use fusio_dispatch::FsOptions;
 
 pub struct StoreManager {
     base_fs: Arc<dyn DynFs>,
@@ -20,15 +21,6 @@ impl StoreManager {
         let base_fs = base_options.parse()?;
 
         Ok(StoreManager { base_fs, fs_map })
-    }
-
-    pub async fn create_dir_all(&self, path: &Path) -> Result<(), Error> {
-        self.base_fs.create_dir_all(path).await?;
-        for (_, fs) in self.fs_map.iter() {
-            fs.create_dir_all(path).await?;
-        }
-
-        Ok(())
     }
 
     pub fn base_fs(&self) -> &Arc<dyn DynFs> {
