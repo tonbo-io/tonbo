@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{default_open_options, manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
     record::Record,
     serdes::Encode,
     timestamp::Timestamp,
@@ -137,7 +137,10 @@ where
             .unwrap_or_else(FileId::new);
 
         let mut log = fs
-            .open_options(&option.version_log_path(&log_id), default_open_options())
+            .open_options(
+                &option.version_log_path(&log_id),
+                FileType::Log.open_options(false),
+            )
             .await?;
 
         log.seek(0).await.unwrap();
@@ -228,7 +231,10 @@ where
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
                         new_version
                             .clean_sender
-                            .send_async(CleanTag::RecoverClean { wal_id: gen })
+                            .send_async(CleanTag::RecoverClean {
+                                wal_id: gen,
+                                level: level as usize,
+                            })
                             .await
                             .map_err(VersionError::Send)?;
                     }
@@ -259,7 +265,10 @@ where
             let fs = self.manager.base_fs();
             let old_log_id = mem::replace(log_id, FileId::new());
             let new_log = fs
-                .open_options(&option.version_log_path(log_id), default_open_options())
+                .open_options(
+                    &option.version_log_path(log_id),
+                    FileType::Log.open_options(false),
+                )
                 .await?;
             let mut old_log = mem::replace(log, new_log);
             old_log.close().await?;
@@ -282,12 +291,13 @@ pub(crate) mod tests {
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
-    use fusio::{options::FsOptions, path::Path};
+    use fusio::path::Path;
+    use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
     use crate::{
-        fs::{default_open_options, manager::StoreManager, FileId},
+        fs::{manager::StoreManager, FileId, FileType},
         record::Record,
         scope::Scope,
         version::{
@@ -311,7 +321,10 @@ pub(crate) mod tests {
         let log_id = FileId::new();
         let log = manager
             .base_fs()
-            .open_options(&option.version_log_path(&log_id), default_open_options())
+            .open_options(
+                &option.version_log_path(&log_id),
+                FileType::Log.open_options(false),
+            )
             .await?;
         let timestamp = version.timestamp.clone();
 
@@ -374,6 +387,7 @@ pub(crate) mod tests {
 
         let option = Arc::new(option);
         manager
+            .base_fs()
             .create_dir_all(&option.version_log_dir_path())
             .await
             .unwrap();
@@ -468,7 +482,7 @@ pub(crate) mod tests {
 
         let mut log = manager
             .base_fs()
-            .open_options(&logs.pop().unwrap().path, default_open_options())
+            .open_options(&logs.pop().unwrap().path, FileType::Log.open_options(false))
             .await
             .unwrap();
         let edits = VersionEdit::<String>::recover(&mut log).await;

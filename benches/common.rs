@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use parquet::data_type::AsBytes;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB};
+use tokio::fs::create_dir_all;
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
@@ -221,6 +222,8 @@ impl BenchDatabase for TonboBenchDataBase {
     }
 
     async fn build(path: impl AsRef<Path>) -> Self {
+        create_dir_all(path.as_ref()).await.unwrap();
+
         let option =
             DbOption::from(fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap())
                 .disable_wal();
