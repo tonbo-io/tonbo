@@ -3,7 +3,8 @@ use std::{
     marker::PhantomData,
 };
 
-use fusio::{options::FsOptions, path::Path};
+use fusio::path::Path;
+use fusio_dispatch::FsOptions;
 use parquet::{
     basic::Compression,
     file::properties::{EnabledStatistics, WriterProperties},
@@ -237,8 +238,11 @@ impl<R> DbOption<R>
 where
     R: Record,
 {
-    pub(crate) fn table_path(&self, gen: &FileId) -> Path {
-        self.base_path
+    pub(crate) fn table_path(&self, gen: &FileId, level: usize) -> Path {
+        self.level_paths[level]
+            .as_ref()
+            .map(|(path, _)| path)
+            .unwrap_or(&self.base_path)
             .child(format!("{}.{}", gen, FileType::Parquet))
     }
 

@@ -31,7 +31,7 @@ where
         let size = DynRead::size(&file).await?;
 
         Ok(SsTable {
-            reader: AsyncReader::new(file, size),
+            reader: AsyncReader::new(file, size).await?,
             _marker: PhantomData,
         })
     }
@@ -102,7 +102,8 @@ pub(crate) mod tests {
     use std::{borrow::Borrow, fs::File, ops::Bound, sync::Arc};
 
     use arrow::array::RecordBatch;
-    use fusio::{dynamic::DynFile, options::FsOptions, path::Path, DynFs};
+    use fusio::{dynamic::DynFile, path::Path, DynFs};
+    use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
     use futures_util::StreamExt;
     use parquet::{
@@ -117,7 +118,7 @@ pub(crate) mod tests {
     use super::SsTable;
     use crate::{
         executor::tokio::TokioExecutor,
-        fs::{default_open_options, manager::StoreManager},
+        fs::{manager::StoreManager, FileType},
         record::Record,
         tests::{get_test_record_batch, Test},
         timestamp::Timestamped,
@@ -157,7 +158,7 @@ pub(crate) mod tests {
     {
         SsTable::open(
             store
-                .open_options(path, default_open_options())
+                .open_options(path, FileType::Parquet.open_options(true))
                 .await
                 .unwrap(),
         )
@@ -180,7 +181,7 @@ pub(crate) mod tests {
         let table_path = Path::from_filesystem_path(table_path).unwrap();
 
         let file = base_fs
-            .open_options(&table_path, default_open_options())
+            .open_options(&table_path, FileType::Parquet.open_options(false))
             .await
             .unwrap();
         write_record_batch(file, &record_batch).await.unwrap();
@@ -255,7 +256,7 @@ pub(crate) mod tests {
         let table_path = Path::from_filesystem_path(table_path).unwrap();
 
         let file = base_fs
-            .open_options(&table_path, default_open_options())
+            .open_options(&table_path, FileType::Parquet.open_options(false))
             .await
             .unwrap();
         write_record_batch(file, &record_batch).await.unwrap();
