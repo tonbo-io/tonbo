@@ -25,3 +25,7 @@ class WriteConflictError(Exception):
 class RepeatedCommitError(Exception):
     """Repeated commit the same transaction"""
     pass
+
+class PathParseError(Exception):
+    """Parse path error"""
+    pass
