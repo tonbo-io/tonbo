@@ -47,7 +47,7 @@ fn _tonbo(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     fs_module.add_function(wrap_pyfunction!(from_absolute_path, &fs_module)?)?;
     fs_module.add_function(wrap_pyfunction!(from_url_path, &fs_module)?)?;
 
-    fs_module.add_submodule(&fs_module)?;
+    m.add_submodule(&fs_module)?;
     py.import_bound("sys")?
         .getattr("modules")?
         .set_item("tonbo.fs", fs_module)?;
