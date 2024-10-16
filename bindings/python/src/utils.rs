@@ -16,6 +16,54 @@ pub(crate) fn to_dict(
     let dict = PyDict::new_bound(py);
     for (idx, col) in record.iter().enumerate() {
         match &col.datatype {
+            Datatype::UInt8 => {
+                if idx == primary_key_index {
+                    dict.set_item(
+                        col.name.clone(),
+                        col.value.as_ref().downcast_ref::<u8>().unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    let value = col.value.as_ref().downcast_ref::<Option<u8>>().unwrap();
+                    dict.set_item(col.name.clone(), value).unwrap();
+                }
+            }
+            Datatype::UInt16 => {
+                if idx == primary_key_index {
+                    dict.set_item(
+                        col.name.clone(),
+                        col.value.as_ref().downcast_ref::<u16>().unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    let value = col.value.as_ref().downcast_ref::<Option<u16>>().unwrap();
+                    dict.set_item(col.name.clone(), value).unwrap();
+                }
+            }
+            Datatype::UInt32 => {
+                if idx == primary_key_index {
+                    dict.set_item(
+                        col.name.clone(),
+                        col.value.as_ref().downcast_ref::<u32>().unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    let value = col.value.as_ref().downcast_ref::<Option<u32>>().unwrap();
+                    dict.set_item(col.name.clone(), value).unwrap();
+                }
+            }
+            Datatype::UInt64 => {
+                if idx == primary_key_index {
+                    dict.set_item(
+                        col.name.clone(),
+                        col.value.as_ref().downcast_ref::<u64>().unwrap(),
+                    )
+                    .unwrap();
+                } else {
+                    let value = col.value.as_ref().downcast_ref::<Option<u64>>().unwrap();
+                    dict.set_item(col.name.clone(), value).unwrap();
+                }
+            }
             Datatype::Int8 => {
                 if idx == primary_key_index {
                     dict.set_item(
@@ -113,6 +161,10 @@ pub(crate) fn to_dict(
 
 pub(crate) fn to_key(py: Python, datatype: &DataType, key: Py<PyAny>) -> Arc<dyn Any> {
     match datatype {
+        DataType::UInt8 => Arc::new(key.extract::<u8>(py).unwrap()) as Arc<dyn Any>,
+        DataType::UInt16 => Arc::new(key.extract::<u16>(py).unwrap()) as Arc<dyn Any>,
+        DataType::UInt32 => Arc::new(key.extract::<u32>(py).unwrap()) as Arc<dyn Any>,
+        DataType::UInt64 => Arc::new(key.extract::<u64>(py).unwrap()) as Arc<dyn Any>,
         DataType::Int8 => Arc::new(key.extract::<i8>(py).unwrap()) as Arc<dyn Any>,
         DataType::Int16 => Arc::new(key.extract::<i16>(py).unwrap()) as Arc<dyn Any>,
         DataType::Int32 => Arc::new(key.extract::<i32>(py).unwrap()) as Arc<dyn Any>,

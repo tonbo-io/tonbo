@@ -31,6 +31,34 @@ impl Record {
                 let col_bound = mapping_proxy.get_item(attr).expect("Unknown attr {attr}");
                 let mut col = col_bound.extract::<Column>().unwrap();
                 match col.datatype {
+                    DataType::UInt8 => {
+                        let value = v.extract::<u8>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
+                    DataType::UInt16 => {
+                        let value = v.extract::<u16>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
+                    DataType::UInt32 => {
+                        let value = v.extract::<u32>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
+                    DataType::UInt64 => {
+                        let value = v.extract::<u64>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(value)),
+                            false => col.value = Arc::new(value),
+                        }
+                    }
                     DataType::Int8 => {
                         let value = v.extract::<i8>()?;
                         match col.nullable {
