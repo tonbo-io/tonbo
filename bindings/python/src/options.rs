@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use fusio::path::Path;
 use pyo3::{pyclass, pymethods, PyResult};
 use tonbo::record::DynRecord;
@@ -44,11 +42,7 @@ pub struct DbOption {
 #[pymethods]
 impl DbOption {
     #[new]
-    fn new(path: PathBuf) -> Self {
-        if !path.exists() {
-            std::fs::create_dir_all(path.clone()).unwrap();
-        }
-        let path = Path::from_filesystem_path(path).unwrap();
+    fn new(path: String) -> Self {
         Self {
             clean_channel_buffer: 10,
             immutable_chunk_num: 3,
@@ -58,7 +52,7 @@ impl DbOption {
             max_sst_file_size: 256 * 1024 * 1024,
             version_log_snapshot_threshold: 200,
             use_wal: true,
-            path: String::from(path),
+            path,
             base_fs: FsOptions::Local {},
             level_paths: vec![None; MAX_LEVEL],
         }

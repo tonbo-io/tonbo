@@ -1,6 +1,10 @@
 # Tonbo Python Binding
 
-This package intends to build a native python binding for [Tonbo](https://github.com/tonbo-io/tonbo)
+This package intends to build a native python binding for [Tonbo](https://github.com/tonbo-io/tonbo).
+
+Tonbo's Python bindings can be used to build data-intensive applications, including other types of databases.
+
+
 
 ## Example
 
@@ -41,8 +45,12 @@ async def main():
 asyncio.run(main())
 ```
 
-## Development
+See [examples](example/README.md) for more information.
 
+## Development
+This assumes that you have Rust and cargo installed. We use the [pyo3](https://github.com/PyO3/pyo3) to generate a native Python module and use [maturin](https://github.com/PyO3/maturin) to build Rust-based Python packages.
+
+First, follow the commands below to build a new Python virtualenv, and install maturin into the virtualenv using Python's package manager, pip:
 ```bash
 # setup virtualenv
 python -m venv .env
@@ -52,6 +60,10 @@ source .env/bin/activate
 # install maturin
 pip install maturin
 # build bindings
+maturin develop
+```
+Whenever Rust code changes run:
+```bash
 maturin develop
 ```
 

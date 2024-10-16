@@ -3,6 +3,7 @@ import tempfile
 from tonbo import DbOption, Column, DataType, Record, TonboDB, Bound
 from tonbo.error import RepeatedCommitError, WriteConflictError
 
+
 @Record
 class User:
     age = Column(DataType.Int8, name="age", primary_key=True)
@@ -21,6 +22,7 @@ async def test_txn_write():
     txn = await db.transaction()
     for i in range(0, 100):
         txn.insert(User(age=i, height=i * 10, weight=i * 20))
+    await txn.commit()
 
 
 @pytest.mark.asyncio
@@ -123,3 +125,26 @@ async def test_txn_write_conflict():
     await txn2.commit()
     with pytest.raises(WriteConflictError):
         await txn.commit()
+
+
+@pytest.mark.asyncio
+async def test_txn_cannot_read_future():
+    db = build_db()
+    txn = await db.transaction()
+    txn2 = await db.transaction()
+    for i in range(0, 10):
+        txn.insert(User(age=i, height=i * 10, weight=i * 20))
+
+    for i in range(0, 10):
+        txn2.insert(User(age=i, height=i * 20, weight=i * 40))
+
+    await txn2.commit()
+    for i in range(0, 10):
+        user = await txn.get(i)
+        # can not read data in the future
+        assert user == { "age": i, "height": i * 10, "weight": i * 20 }
+
+    txn3 = await db.transaction()
+    for i in range(0, 10):
+        user = await txn3.get(i)
+        assert user == { "age": i, "height": i * 20, "weight": i * 40 }
