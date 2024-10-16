@@ -3,7 +3,7 @@ use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 use arrow::{
     array::{
         BooleanArray, GenericBinaryArray, Int16Array, Int32Array, Int64Array, Int8Array,
-        StringArray,
+        StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     },
     datatypes::{DataType, Field},
 };
@@ -53,8 +53,18 @@ impl Column {
         }
     }
 
-    pub fn with_none_value(datatype: Datatype, name: String, is_nullable: bool) -> Self {
+    pub(crate) fn with_none_value(datatype: Datatype, name: String, is_nullable: bool) -> Self {
         match datatype {
+            Datatype::UInt8 => Self::new(datatype, name, Arc::<Option<u8>>::new(None), is_nullable),
+            Datatype::UInt16 => {
+                Self::new(datatype, name, Arc::<Option<u16>>::new(None), is_nullable)
+            }
+            Datatype::UInt32 => {
+                Self::new(datatype, name, Arc::<Option<u32>>::new(None), is_nullable)
+            }
+            Datatype::UInt64 => {
+                Self::new(datatype, name, Arc::<Option<u64>>::new(None), is_nullable)
+            }
             Datatype::Int8 => Self::new(datatype, name, Arc::<Option<i8>>::new(None), is_nullable),
             Datatype::Int16 => {
                 Self::new(datatype, name, Arc::<Option<i16>>::new(None), is_nullable)
@@ -312,25 +322,33 @@ macro_rules! implement_encode_col {
 impl Column {
     fn tag(datatype: Datatype) -> u8 {
         match datatype {
-            Datatype::Int8 => 0,
-            Datatype::Int16 => 1,
-            Datatype::Int32 => 2,
-            Datatype::Int64 => 3,
-            Datatype::String => 4,
-            Datatype::Boolean => 5,
-            Datatype::Bytes => 6,
+            Datatype::UInt8 => 0,
+            Datatype::UInt16 => 1,
+            Datatype::UInt32 => 2,
+            Datatype::UInt64 => 3,
+            Datatype::Int8 => 4,
+            Datatype::Int16 => 5,
+            Datatype::Int32 => 6,
+            Datatype::Int64 => 7,
+            Datatype::String => 8,
+            Datatype::Boolean => 9,
+            Datatype::Bytes => 10,
         }
     }
 
     fn tag_to_datatype(tag: u8) -> Datatype {
         match tag {
-            0 => Datatype::Int8,
-            1 => Datatype::Int16,
-            2 => Datatype::Int32,
-            3 => Datatype::Int64,
-            4 => Datatype::String,
-            5 => Datatype::Boolean,
-            6 => Datatype::Bytes,
+            0 => Datatype::UInt8,
+            1 => Datatype::UInt16,
+            2 => Datatype::UInt32,
+            3 => Datatype::UInt64,
+            4 => Datatype::Int8,
+            5 => Datatype::Int16,
+            6 => Datatype::Int32,
+            7 => Datatype::Int64,
+            8 => Datatype::String,
+            9 => Datatype::Boolean,
+            10 => Datatype::Bytes,
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -339,6 +357,10 @@ impl Column {
 impl From<&Column> for Field {
     fn from(col: &Column) -> Self {
         match col.datatype {
+            Datatype::UInt8 => Field::new(&col.name, DataType::UInt8, col.is_nullable),
+            Datatype::UInt16 => Field::new(&col.name, DataType::UInt16, col.is_nullable),
+            Datatype::UInt32 => Field::new(&col.name, DataType::UInt32, col.is_nullable),
+            Datatype::UInt64 => Field::new(&col.name, DataType::UInt64, col.is_nullable),
             Datatype::Int8 => Field::new(&col.name, DataType::Int8, col.is_nullable),
             Datatype::Int16 => Field::new(&col.name, DataType::Int16, col.is_nullable),
             Datatype::Int32 => Field::new(&col.name, DataType::Int32, col.is_nullable),
@@ -355,6 +377,10 @@ macro_rules! for_datatype {
     ($macro:tt $(, $x:tt)*) => {
         $macro! {
             [$($x),*],
+                { u8, UInt8 },
+                { u16, UInt16 },
+                { u32, UInt32 },
+                { u64, UInt64 },
                 { i8, Int8 },
                 { i16, Int16 },
                 { i32, Int32 },
@@ -367,6 +393,7 @@ macro_rules! for_datatype {
 }
 
 implement_key_col!(
+    { u8, UInt8, UInt8Array }, { u16, UInt16, UInt16Array }, { u32, UInt32, UInt32Array }, { u64, UInt64, UInt64Array },
     { i8, Int8, Int8Array }, { i16, Int16, Int16Array }, { i32, Int32, Int32Array }, { i64, Int64, Int64Array }
 );
 for_datatype! { implement_col }
