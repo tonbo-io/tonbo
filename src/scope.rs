@@ -122,15 +122,14 @@ where
     type Error = <K as Decode>::Error;
 
     async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
-        let mut buf = vec![0u8; 16];
+        let mut buf = [0u8; 16];
         let min = K::decode(reader).await?;
         let max = K::decode(reader).await?;
 
         let gen = {
             let (result, _) = reader.read_exact(buf.as_mut_slice()).await;
             result?;
-            // SAFETY
-            FileId::from_bytes(buf.as_slice().try_into().unwrap())
+            FileId::from_bytes(buf)
         };
         let wal_ids = match u8::decode(reader).await? {
             0 => None,
@@ -141,8 +140,7 @@ where
                 for _ in 0..len {
                     let (result, _) = reader.read_exact(buf.as_mut_slice()).await;
                     result?;
-                    // SAFETY
-                    ids.push(FileId::from_bytes(buf.as_slice().try_into().unwrap()));
+                    ids.push(FileId::from_bytes(buf));
                 }
                 Some(ids)
             }

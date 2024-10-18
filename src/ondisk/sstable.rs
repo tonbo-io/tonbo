@@ -189,7 +189,7 @@ pub(crate) mod tests {
         let key = Timestamped::new("hello".to_owned(), 1.into());
 
         {
-            let test_ref_1 = open_sstable::<Test>(&base_fs, &table_path)
+            let test_ref_1 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .get(
                     key.borrow(),
@@ -206,7 +206,7 @@ pub(crate) mod tests {
             assert_eq!(test_ref_1.get().unwrap().vbool, None);
         }
         {
-            let test_ref_2 = open_sstable::<Test>(&base_fs, &table_path)
+            let test_ref_2 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .get(
                     key.borrow(),
@@ -223,7 +223,7 @@ pub(crate) mod tests {
             assert_eq!(test_ref_2.get().unwrap().vbool, Some(true));
         }
         {
-            let test_ref_3 = open_sstable::<Test>(&base_fs, &table_path)
+            let test_ref_3 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .get(
                     key.borrow(),
@@ -262,7 +262,7 @@ pub(crate) mod tests {
         write_record_batch(file, &record_batch).await.unwrap();
 
         {
-            let mut test_ref_1 = open_sstable::<Test>(&base_fs, &table_path)
+            let mut test_ref_1 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .scan(
                     (Bound::Unbounded, Bound::Unbounded),
@@ -287,7 +287,7 @@ pub(crate) mod tests {
             assert_eq!(entry_1.get().unwrap().vbool, None);
         }
         {
-            let mut test_ref_2 = open_sstable::<Test>(&base_fs, &table_path)
+            let mut test_ref_2 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .scan(
                     (Bound::Unbounded, Bound::Unbounded),
@@ -312,7 +312,7 @@ pub(crate) mod tests {
             assert_eq!(entry_1.get().unwrap().vbool, None);
         }
         {
-            let mut test_ref_3 = open_sstable::<Test>(&base_fs, &table_path)
+            let mut test_ref_3 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .scan(
                     (Bound::Unbounded, Bound::Unbounded),
