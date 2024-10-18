@@ -2,7 +2,7 @@
 
 Here are some examples that can help you use Python binding of [Tonbo](https://github.com/tonbo-io/tonbo)
 
-### Declare
+### Declaration
 
 - The [record.py](record.py) file shows how to define a `Tonbo` record
 - The [write_batch.py](write_batch.py) file shows how to insert records in batch
@@ -11,4 +11,5 @@ Here are some examples that can help you use Python binding of [Tonbo](https://g
 - The [multiple_instance.py](multiple_instance.py) file shows how to combine different `Tonbo` record with `TonboDB`s.
 
 ### Fusion storage
+
 The [fusion_storage.py](fusion_storage.py) file shows how to store data across different storage.
