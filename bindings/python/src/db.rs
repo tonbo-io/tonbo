@@ -76,6 +76,9 @@ impl TonboDB {
         })
     }
 
+    /// Insert record to `TonboDB`.
+    ///
+    /// * `record`: Primary key of record that is to be removed
     fn insert<'py>(&'py self, py: Python<'py>, record: Py<PyAny>) -> PyResult<Bound<PyAny>> {
         let mut cols = vec![];
         let dict = record.getattr(py, "__dict__")?;
@@ -112,6 +115,9 @@ impl TonboDB {
         })
     }
 
+    /// Get record from `TonboDB`.
+    ///
+    /// * `key`: Primary key of record
     fn get<'py>(&'py self, py: Python<'py>, key: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let col_desc = self.desc.get(self.primary_key_index).unwrap();
         let col = to_col(py, col_desc, key);
@@ -129,6 +135,9 @@ impl TonboDB {
         })
     }
 
+    /// Remove record from `TonboDB`.
+    ///
+    /// * `key`: Primary key of record that is to be removed
     fn remove<'py>(&'py self, py: Python<'py>, key: Py<PyAny>) -> PyResult<Bound<PyAny>> {
         let col_desc = self.desc.get(self.primary_key_index).unwrap();
         let col = to_col(py, col_desc, key);
@@ -139,7 +148,7 @@ impl TonboDB {
         })
     }
 
-    /// open an optimistic ACID transaction
+    /// Open an optimistic ACID `Transaction`.
     fn transaction<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<PyAny>> {
         let db = self.db.clone();
         let desc = self.desc.clone();

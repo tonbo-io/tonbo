@@ -62,6 +62,10 @@ impl Transaction {
 
 #[pymethods]
 impl Transaction {
+    /// Get record from `TonboDB`.
+    ///
+    /// * `key`: Primary key of record
+    /// * `projection`: Fields to projection, all fields by default.
     #[pyo3(signature= (key, projection=vec!["*".to_owned()]))]
     fn get<'py>(
         &'py self,
@@ -102,6 +106,9 @@ impl Transaction {
         })
     }
 
+    /// Insert record to `TonboDB`.
+    ///
+    /// * `record`: Primary key of record that is to be removed
     fn insert(&mut self, py: Python, record: Py<PyAny>) -> PyResult<()> {
         if self.txn.is_none() {
             return Err(repeated_commit_err());
@@ -126,6 +133,9 @@ impl Transaction {
         Ok(())
     }
 
+    /// Remove record from `TonboDB`.
+    ///
+    /// * `key`: Primary key of record that is to be removed
     fn remove(&mut self, py: Python, key: Py<PyAny>) -> PyResult<()> {
         if self.txn.is_none() {
             return Err(repeated_commit_err());
@@ -138,6 +148,12 @@ impl Transaction {
         Ok(())
     }
 
+    /// Create an async stream for scanning.
+    ///
+    /// * `lower`: - Lower bound of range. Use None represent unbounded.
+    /// * `high`: - High bound of range. Use None represent unbounded.
+    /// * `limit`: - Max number records to scan.
+    /// * `projection`: - Fields to projection in the record. Projection all by default.
     #[pyo3(signature= (lower, high, limit=None,  projection=vec!["*".to_string()]))]
     fn scan<'py>(
         &'py mut self,
@@ -190,6 +206,7 @@ impl Transaction {
         })
     }
 
+    /// Commit `Transaction`
     fn commit<'py>(&'py mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if self.txn.is_none() {
             return Err(repeated_commit_err());

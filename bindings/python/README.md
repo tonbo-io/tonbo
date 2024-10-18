@@ -4,14 +4,14 @@ This package intends to build a native python binding for [Tonbo](https://github
 
 Tonbo's Python bindings can be used to build data-intensive applications, including other types of databases.
 
-
-
 ## Example
 
 ```py
 from tonbo import DbOption, Column, DataType, Record, TonboDB, Bound
+from tonbo.fs import from_filesystem_path
 import asyncio
 
+# define a Tonbo record
 @Record
 class User:
     age = Column(DataType.INT8, name="age", primary_key=True)
@@ -20,7 +20,7 @@ class User:
 
 async def main():
 
-    db = TonboDB(DbOption("./db_path/users"), User())
+    db = TonboDB(DbOption(from_filesystem_path("./db_path/users")), User())
 
     await db.insert(User(age=18, height=175, weight=60))
     record = await db.get(18)
@@ -47,10 +47,17 @@ asyncio.run(main())
 
 See [examples](example/README.md) for more information.
 
+### Roadmap
+
+- Remote storage API mapping and test
+- Integrate with other Arrow analytical tools
+
 ## Development
+
 This assumes that you have Rust and cargo installed. We use the [pyo3](https://github.com/PyO3/pyo3) to generate a native Python module and use [maturin](https://github.com/PyO3/maturin) to build Rust-based Python packages.
 
 First, follow the commands below to build a new Python virtualenv, and install maturin into the virtualenv using Python's package manager, pip:
+
 ```bash
 # setup virtualenv
 python -m venv .env
@@ -62,12 +69,15 @@ pip install maturin
 # build bindings
 maturin develop
 ```
+
 Whenever Rust code changes run:
+
 ```bash
 maturin develop
 ```
 
 Run tests:
+
 ```bash
 maturin develop -E test
 python -m pytest

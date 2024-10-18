@@ -27,6 +27,36 @@ pub use transaction::*;
 
 use crate::error::{DecodeError, WriteConflictError};
 
+/// Tonbo Python binding
+///
+/// ## Usage
+/// ```python
+/// from tonbo import DbOption, Column, DataType, Record, TonboDB, Bound
+/// from tonbo.fs import from_filesystem_path
+/// import asyncio
+///
+/// @Record
+/// class User:
+///    id = Column(DataType.Int64, name="id", primary_key=True)
+///    age = Column(DataType.Int16, name="age", nullable=True)
+///    name = Column(DataType.String, name="name", nullable=False)
+///
+/// async def main():
+///     db = TonboDB(DbOption(from_filesystem_path("db_path/user")), User())
+///     await db.insert(User(id=18, age=175, name="Alice"))
+///     record = await db.get(18)
+///     print(record)
+///
+///     # use transcaction
+///     txn = await db.transaction()
+///     result = await txn.get(18)
+///     scan = await txn.scan(Bound.Included(18), None, limit=10, projection=["id", "name"])
+///
+///     async for record in scan:
+///         print(record)
+///
+/// asyncio.run(main())
+/// ````
 #[pymodule]
 fn _tonbo(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TonboDB>()?;
