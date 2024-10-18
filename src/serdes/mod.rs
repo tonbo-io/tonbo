@@ -1,6 +1,6 @@
 mod arc;
 mod boolean;
-#[cfg(feature = "type_bytes")]
+#[cfg(feature = "bytes")]
 mod bytes;
 mod list;
 mod num;

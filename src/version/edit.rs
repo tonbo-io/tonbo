@@ -97,10 +97,10 @@ where
             1 => {
                 let level = u8::decode(reader).await?;
                 let gen = {
-                    let (result, buf) = reader.read_exact(vec![0u8; 16]).await;
+                    let mut buf = [0u8; 16];
+                    let (result, _) = reader.read_exact(&mut buf[..]).await;
                     result?;
-                    // SAFETY
-                    FileId::from_bytes(buf.as_slice().try_into().unwrap())
+                    FileId::from_bytes(buf)
                 };
                 VersionEdit::Remove { level, gen }
             }
