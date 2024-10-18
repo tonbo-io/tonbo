@@ -1,8 +1,11 @@
 use std::{any::Any, marker::PhantomData, mem, sync::Arc};
 
 use arrow::{
-    array::{Array, AsArray},
-    datatypes::Schema,
+    array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
+    datatypes::{
+        Int16Type, Int32Type, Int64Type, Int8Type, Schema, UInt16Type, UInt32Type, UInt64Type,
+        UInt8Type,
+    },
 };
 use fusio::Write;
 
@@ -105,50 +108,62 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             let col = record_batch.column(batch_field.unwrap().0);
             let is_nullable = field.is_nullable();
             let value = match datatype {
-                Datatype::Int8 => {
-                    let v = col.as_primitive::<arrow::datatypes::Int8Type>();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(v.value(offset)) as Arc<dyn Any>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(v.value(offset));
-                        Arc::new(value) as Arc<dyn Any>
-                    }
-                }
-                Datatype::Int16 => {
-                    let v = col.as_primitive::<arrow::datatypes::Int16Type>();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(v.value(offset)) as Arc<dyn Any>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(v.value(offset));
-                        Arc::new(value) as Arc<dyn Any>
-                    }
-                }
-                Datatype::Int32 => {
-                    let v = col.as_primitive::<arrow::datatypes::Int32Type>();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(v.value(offset)) as Arc<dyn Any>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(v.value(offset));
-                        Arc::new(value) as Arc<dyn Any>
-                    }
-                }
-                Datatype::Int64 => {
-                    let v = col.as_primitive::<arrow::datatypes::Int64Type>();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(v.value(offset)) as Arc<dyn Any>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(v.value(offset));
-                        Arc::new(value) as Arc<dyn Any>
-                    }
-                }
+                Datatype::UInt8 => Self::primitive_value::<UInt8Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
+                Datatype::UInt16 => Self::primitive_value::<UInt16Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
+                Datatype::UInt32 => Self::primitive_value::<UInt32Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
+                Datatype::UInt64 => Self::primitive_value::<UInt64Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
+                Datatype::Int8 => Self::primitive_value::<Int8Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
+                Datatype::Int16 => Self::primitive_value::<Int16Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
+                Datatype::Int32 => Self::primitive_value::<Int32Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
+                Datatype::Int64 => Self::primitive_value::<Int64Type>(
+                    col,
+                    offset,
+                    idx,
+                    projection_mask,
+                    primary_index == idx - 2,
+                ),
                 Datatype::String => {
                     let v = col.as_string::<i32>();
 
@@ -202,6 +217,10 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         for (idx, col) in self.columns.iter_mut().enumerate() {
             if idx != self.primary_index && !projection_mask.leaf_included(idx + 2) {
                 match col.datatype {
+                    Datatype::UInt8 => col.value = Arc::<Option<u8>>::new(None),
+                    Datatype::UInt16 => col.value = Arc::<Option<u16>>::new(None),
+                    Datatype::UInt32 => col.value = Arc::<Option<u32>>::new(None),
+                    Datatype::UInt64 => col.value = Arc::<Option<u64>>::new(None),
                     Datatype::Int8 => col.value = Arc::<Option<i8>>::new(None),
                     Datatype::Int16 => col.value = Arc::<Option<i16>>::new(None),
                     Datatype::Int32 => col.value = Arc::<Option<i32>>::new(None),
@@ -211,6 +230,29 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     Datatype::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
                 };
             }
+        }
+    }
+}
+
+impl<'r> DynRecordRef<'r> {
+    fn primitive_value<T>(
+        col: &ArrayRef,
+        offset: usize,
+        idx: usize,
+        projection_mask: &'r parquet::arrow::ProjectionMask,
+        primary: bool,
+    ) -> Arc<dyn Any>
+    where
+        T: ArrowPrimitiveType,
+    {
+        let v = col.as_primitive::<T>();
+
+        if primary {
+            Arc::new(v.value(offset)) as Arc<dyn Any>
+        } else {
+            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                .then_some(v.value(offset));
+            Arc::new(value) as Arc<dyn Any>
         }
     }
 }
