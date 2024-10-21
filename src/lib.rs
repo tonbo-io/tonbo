@@ -1583,31 +1583,30 @@ pub(crate) mod tests {
         }
         drop(schema);
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
-
-        let schema: crate::Schema<Test> = crate::Schema {
-            mutable: Mutable::new(&option, trigger.clone(), &fs).await.unwrap(),
-            immutables: Default::default(),
-            compaction_tx: task_tx,
-            recover_wal_ids: None,
-            trigger,
-            record_instance: RecordInstance::Normal,
-        };
-        let range = schema
-            .mutable
-            .scan((Bound::Unbounded, Bound::Unbounded), u32::MAX.into());
+        let db: DB<Test, TokioExecutor> = DB::new(option.as_ref().to_owned(), TokioExecutor::new())
+            .await
+            .unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_items() {
             sort_items.insert(item.vstring.clone(), item);
         }
-        for entry in range {
-            let (_, test) = sort_items.pop_first().unwrap();
+        {
+            let tx = db.transaction().await;
+            let mut scan = tx
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .take()
+                .await
+                .unwrap();
 
-            assert_eq!(entry.key().value.as_str(), test.key());
-            assert_eq!(entry.value().as_ref().unwrap().vstring, test.vstring);
-            assert_eq!(entry.value().as_ref().unwrap().vu32, test.vu32);
-            assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let (_, test) = sort_items.pop_first().unwrap();
+
+                assert_eq!(entry.key().value, test.key());
+                assert_eq!(entry.value().as_ref().unwrap().vstring, test.vstring);
+                assert_eq!(entry.value().as_ref().unwrap().vu32, Some(test.vu32));
+                assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
+            }
         }
     }
 
