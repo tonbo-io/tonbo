@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use super::{Decode, Encode};
 
@@ -9,7 +9,7 @@ impl<'r> Encode for &'r str {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin,
+        W: Write,
     {
         (self.len() as u16).encode(writer).await?;
         let (result, _) = writer.write_all(self.as_bytes()).await;
@@ -28,7 +28,7 @@ impl Encode for String {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         self.as_str().encode(writer).await
     }
@@ -41,7 +41,7 @@ impl Encode for String {
 impl Decode for String {
     type Error = fusio::Error;
 
-    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
         let len = u16::decode(reader).await?;
         let (result, buf) = reader.read_exact(vec![0u8; len as usize]).await;
         result?;
@@ -54,7 +54,7 @@ impl Decode for String {
 mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::serdes::{Decode, Encode};
 
@@ -69,7 +69,7 @@ mod tests {
         source_0.encode(&mut cursor).await.unwrap();
         source_1.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded_0 = String::decode(&mut cursor).await.unwrap();
         let decoded_1 = String::decode(&mut cursor).await.unwrap();
 

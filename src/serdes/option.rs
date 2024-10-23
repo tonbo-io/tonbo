@@ -1,6 +1,6 @@
 use std::io;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 use thiserror::Error;
 
 use super::{Decode, Encode};
@@ -41,7 +41,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         match self {
             None => 0u8.encode(writer).await?,
@@ -67,7 +67,7 @@ where
 {
     type Error = DecodeError<V::Error>;
 
-    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
         match u8::decode(reader).await? {
             0 => Ok(None),
             1 => Ok(Some(V::decode(reader).await.map_err(DecodeError::Inner)?)),
@@ -80,7 +80,7 @@ where
 mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::serdes::{Decode, Encode};
 
@@ -97,7 +97,7 @@ mod tests {
         source_1.encode(&mut cursor).await.unwrap();
         source_2.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded_0 = Option::<u64>::decode(&mut cursor).await.unwrap();
         let decoded_1 = Option::<u64>::decode(&mut cursor).await.unwrap();
         let decoded_2 = Option::<String>::decode(&mut cursor).await.unwrap();

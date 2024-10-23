@@ -128,13 +128,14 @@ mod trigger;
 mod version;
 mod wal;
 
-use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
+use std::{
+    collections::HashMap, io, io::Cursor, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc,
+};
 
 pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
-use fusio::dynamic::DynFile;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
@@ -473,7 +474,7 @@ where
                 .await?;
             // SAFETY: wal_stream return only file name
             let wal_id = parse_file_id(&wal_path, FileType::Wal)?.unwrap();
-            let mut wal = WalFile::<Box<dyn DynFile>, R>::new(file, wal_id);
+            let mut wal = WalFile::new(Cursor::new(file), wal_id);
             wal_ids.push(wal_id);
 
             let mut recover_stream = pin!(wal.recover());
@@ -823,7 +824,7 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
-    use fusio::{disk::TokioFs, path::Path, DynFs, Read, Write};
+    use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
     use fusio_dispatch::FsOptions;
     use futures::StreamExt;
     use once_cell::sync::Lazy;
@@ -861,7 +862,7 @@ pub(crate) mod tests {
 
         async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
         where
-            R: Read + Unpin,
+            R: SeqRead,
         {
             let vstring =
                 String::decode(reader)
@@ -963,7 +964,7 @@ pub(crate) mod tests {
 
         async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
         where
-            W: Write + Unpin + Send,
+            W: Write,
         {
             self.vstring
                 .encode(writer)
@@ -1096,7 +1097,7 @@ pub(crate) mod tests {
         let trigger = schema.trigger.clone();
         let mutable = mem::replace(
             &mut schema.mutable,
-            Mutable::new(&option, trigger, &base_fs).await.unwrap(),
+            Mutable::new(&option, trigger, base_fs).await.unwrap(),
         );
 
         Immutable::<<Test as Record>::Columns>::from((mutable.data, &RecordInstance::Normal))

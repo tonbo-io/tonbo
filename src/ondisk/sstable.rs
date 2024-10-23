@@ -28,7 +28,7 @@ where
     R: Record,
 {
     pub(crate) async fn open(file: Box<dyn DynFile>) -> Result<Self, fusio::Error> {
-        let size = DynRead::size(&file).await?;
+        let size = file.size().await?;
 
         Ok(SsTable {
             reader: AsyncReader::new(file, size).await?,

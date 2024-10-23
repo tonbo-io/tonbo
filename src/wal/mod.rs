@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 use async_stream::stream;
 use checksum::{HashReader, HashWriter};
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 use futures_core::Stream;
 use log::Log;
 use thiserror::Error;
@@ -66,7 +66,7 @@ where
 
 impl<F, R> WalFile<F, R>
 where
-    F: Read + Unpin,
+    F: SeqRead,
     R: Record,
 {
     pub(crate) fn recover(
@@ -115,8 +115,8 @@ pub enum RecoverError<E: std::error::Error> {
 mod tests {
     use std::{io::Cursor, pin::pin};
 
-    use fusio::Seek;
     use futures_util::StreamExt;
+    use tokio::io::AsyncSeekExt;
 
     use super::{log::LogType, FileId, WalFile};
     use crate::timestamp::Timestamped;
@@ -137,7 +137,7 @@ mod tests {
             wal.flush().await.unwrap();
         }
         {
-            file.seek(0).await.unwrap();
+            file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
             let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
 
             {
@@ -159,7 +159,7 @@ mod tests {
         }
 
         {
-            file.seek(0).await.unwrap();
+            file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
             let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
 
             {

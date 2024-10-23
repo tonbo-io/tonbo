@@ -1,7 +1,7 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
-use fusio::Read;
+use fusio::SeqRead;
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
 
 use super::{array::DynRecordImmutableArrays, Column, ColumnDesc, Datatype, DynRecordRef};
@@ -102,7 +102,7 @@ impl Decode for DynRecord {
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: Read + Unpin,
+        R: SeqRead,
     {
         let len = u32::decode(reader).await? as usize;
         let primary_index = u32::decode(reader).await? as usize;

@@ -29,9 +29,7 @@ impl Display for FileType {
 impl FileType {
     pub(crate) fn open_options(&self, only_read: bool) -> OpenOptions {
         match self {
-            FileType::Wal | FileType::Log => {
-                OpenOptions::default().create(true).read(true).append(true)
-            }
+            FileType::Wal | FileType::Log => OpenOptions::default().create(true).read(true),
             FileType::Parquet => {
                 if only_read {
                     OpenOptions::default().read(true)
