@@ -13,12 +13,12 @@ mod tests {
     use std::{io::Cursor, sync::Arc};
 
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array, UInt8Array};
-    use fusio::Seek;
     use parquet::{
         arrow::{arrow_to_parquet_schema, ProjectionMask},
         format::SortingColumn,
         schema::types::ColumnPath,
     };
+    use tokio::io::AsyncSeekExt;
     use tonbo::{
         inmem::immutable::{ArrowArrays, Builder},
         record::{Record, RecordRef},
@@ -112,7 +112,7 @@ mod tests {
     async fn test_record_from_record_batch() {
         {
             let record_batch = RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&vec![0, 1, 2, 3, 4]).unwrap()),
+                Arc::new(User::arrow_schema().project(&[0, 1, 2, 3, 4]).unwrap()),
                 vec![
                     Arc::new(BooleanArray::from(vec![false])),
                     Arc::new(UInt32Array::from(vec![9])),
@@ -146,7 +146,7 @@ mod tests {
         }
         {
             let record_batch = RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&vec![0, 1, 3, 4]).unwrap()),
+                Arc::new(User::arrow_schema().project(&[0, 1, 3, 4]).unwrap()),
                 vec![
                     Arc::new(BooleanArray::from(vec![false])),
                     Arc::new(UInt32Array::from(vec![9])),
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(original_ref.size(), 26);
         original_ref.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded = User::decode(&mut cursor).await.unwrap();
         assert_eq!(original, decoded);
     }
@@ -237,12 +237,12 @@ mod tests {
 
         assert_eq!(builder.written_size(), 57);
 
-        let arrays = builder.finish(Some(&vec![0, 1, 2, 3, 4]));
+        let arrays = builder.finish(Some(&[0, 1, 2, 3, 4]));
 
         assert_eq!(
             arrays.as_record_batch(),
             &RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&vec![0, 1, 2, 3, 4]).unwrap(),),
+                Arc::new(User::arrow_schema().project(&[0, 1, 2, 3, 4]).unwrap(),),
                 vec![
                     Arc::new(BooleanArray::from(vec![false, false, true])),
                     Arc::new(UInt32Array::from(vec![0, 1, 2])),
@@ -298,12 +298,12 @@ mod tests {
 
         assert_eq!(builder.written_size(), 57);
 
-        let arrays = builder.finish(Some(&vec![0, 1, 3, 4]));
+        let arrays = builder.finish(Some(&[0, 1, 3, 4]));
 
         assert_eq!(
             arrays.as_record_batch(),
             &RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&vec![0, 1, 3, 4]).unwrap(),),
+                Arc::new(User::arrow_schema().project(&[0, 1, 3, 4]).unwrap(),),
                 vec![
                     Arc::new(BooleanArray::from(vec![false, false, true])),
                     Arc::new(UInt32Array::from(vec![0, 1, 2])),

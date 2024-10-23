@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use super::{Decode, Encode};
 
@@ -10,7 +10,7 @@ macro_rules! implement_encode_decode {
         impl Encode for $struct_name {
             type Error = fusio::Error;
 
-            async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+            async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
                 let (result, _) = writer.write_all(&self.to_le_bytes()[..]).await;
                 result?;
 
@@ -25,7 +25,7 @@ macro_rules! implement_encode_decode {
         impl Decode for $struct_name {
             type Error = fusio::Error;
 
-            async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+            async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
                 let mut bytes = [0u8; size_of::<Self>()];
                 let (result, _) = reader.read_exact(&mut bytes[..]).await;
                 result?;
@@ -49,7 +49,7 @@ implement_encode_decode!(u64);
 mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::serdes::{Decode, Encode};
 
@@ -76,7 +76,7 @@ mod tests {
         source_6.encode(&mut cursor).await.unwrap();
         source_7.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded_0 = u8::decode(&mut cursor).await.unwrap();
         let decoded_1 = u16::decode(&mut cursor).await.unwrap();
         let decoded_2 = u32::decode(&mut cursor).await.unwrap();

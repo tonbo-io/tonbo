@@ -1,4 +1,4 @@
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use crate::{
     record::{Key, Record},
@@ -22,7 +22,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         if let RecordEntry::Encode((key, recode_ref)) = self {
             key.encode(writer).await.unwrap();
@@ -49,7 +49,7 @@ where
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: Read + Unpin,
+        R: SeqRead,
     {
         let key = Timestamped::<Re::Key>::decode(reader).await.unwrap();
         let record = Option::<Re>::decode(reader).await.unwrap();
@@ -62,7 +62,7 @@ where
 mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::{
         serdes::{Decode, Encode},
@@ -79,8 +79,7 @@ mod tests {
         entry.encode(&mut cursor).await.unwrap();
 
         let decode_entry = {
-            cursor.seek(0).await.unwrap();
-
+            cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
             RecordEntry::<'static, String>::decode(&mut cursor)
                 .await
                 .unwrap()

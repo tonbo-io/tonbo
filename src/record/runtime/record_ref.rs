@@ -35,7 +35,7 @@ impl<'r> Encode for DynRecordRef<'r> {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         (self.columns.len() as u32).encode(writer).await?;
         (self.primary_index as u32).encode(writer).await?;

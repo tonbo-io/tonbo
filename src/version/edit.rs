@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use crate::{
     fs::FileId,
@@ -21,7 +21,7 @@ impl<K> VersionEdit<K>
 where
     K: Decode,
 {
-    pub(crate) async fn recover<R: Read + Unpin>(reader: &mut R) -> Vec<VersionEdit<K>> {
+    pub(crate) async fn recover<R: SeqRead>(reader: &mut R) -> Vec<VersionEdit<K>> {
         let mut edits = Vec::new();
 
         while let Ok(edit) = VersionEdit::decode(reader).await {
@@ -39,7 +39,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         match self {
             VersionEdit::Add { scope, level } => {
@@ -84,7 +84,7 @@ where
 {
     type Error = <K as Decode>::Error;
 
-    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
         let edit_type = u8::decode(reader).await?;
 
         Ok(match edit_type {
@@ -121,7 +121,7 @@ where
 mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::{fs::FileId, scope::Scope, serdes::Encode, version::edit::VersionEdit};
 
@@ -152,11 +152,8 @@ mod tests {
             edit.encode(&mut cursor).await.unwrap();
         }
 
-        let decode_edits = {
-            cursor.seek(0).await.unwrap();
-
-            VersionEdit::<String>::recover(&mut cursor).await
-        };
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        let decode_edits = { VersionEdit::<String>::recover(&mut cursor).await };
 
         assert_eq!(edits, decode_edits);
     }

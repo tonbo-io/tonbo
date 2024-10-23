@@ -1,6 +1,6 @@
 use std::{future::Future, hash::Hasher};
 
-use fusio::{Error, IoBuf, IoBufMut, MaybeSend, Read, Write};
+use fusio::{Error, IoBuf, IoBufMut, MaybeSend, SeqRead, Write};
 
 use crate::serdes::{Decode, Encode};
 
@@ -31,12 +31,8 @@ impl<W: Write> Write for HashWriter<W> {
         (result, buf)
     }
 
-    fn sync_data(&self) -> impl Future<Output = Result<(), fusio::Error>> + MaybeSend {
-        self.writer.sync_data()
-    }
-
-    fn sync_all(&self) -> impl Future<Output = Result<(), fusio::Error>> + MaybeSend {
-        self.writer.sync_all()
+    fn flush(&mut self) -> impl Future<Output = Result<(), Error>> + MaybeSend {
+        self.writer.flush()
     }
 
     fn close(&mut self) -> impl Future<Output = Result<(), fusio::Error>> + MaybeSend {
@@ -44,12 +40,12 @@ impl<W: Write> Write for HashWriter<W> {
     }
 }
 
-pub(crate) struct HashReader<R: Read> {
+pub(crate) struct HashReader<R: SeqRead> {
     hasher: crc32fast::Hasher,
     reader: R,
 }
 
-impl<R: Read + Unpin> HashReader<R> {
+impl<R: SeqRead> HashReader<R> {
     pub(crate) fn new(reader: R) -> Self {
         Self {
             hasher: crc32fast::Hasher::new(),
@@ -64,36 +60,13 @@ impl<R: Read + Unpin> HashReader<R> {
     }
 }
 
-impl<R: Read> Read for HashReader<R> {
-    async fn read<B: IoBufMut>(&mut self, buf: B) -> (Result<u64, Error>, B) {
-        let (result, bytes) = self.reader.read(buf).await;
-        if result.is_ok() {
-            self.hasher.write(bytes.as_slice());
-        }
-
-        (result, bytes)
-    }
-
+impl<R: SeqRead> SeqRead for HashReader<R> {
     async fn read_exact<B: IoBufMut>(&mut self, buf: B) -> (Result<(), Error>, B) {
-        let (result, bytes) = self.reader.read_exact(buf).await;
+        let (result, buf) = self.reader.read_exact(buf).await;
         if result.is_ok() {
-            self.hasher.write(bytes.as_slice());
+            self.hasher.write(buf.as_slice());
         }
-
-        (result, bytes)
-    }
-
-    async fn read_to_end(&mut self, buf: Vec<u8>) -> (Result<(), Error>, Vec<u8>) {
-        let (result, bytes) = self.reader.read_to_end(buf).await;
-        if result.is_ok() {
-            self.hasher.write(&bytes);
-        }
-
-        (result, bytes)
-    }
-
-    async fn size(&self) -> Result<u64, fusio::Error> {
-        self.reader.size().await
+        (result, buf)
     }
 }
 
@@ -101,7 +74,7 @@ impl<R: Read> Read for HashReader<R> {
 pub(crate) mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::{
         serdes::{Decode, Encode},
@@ -120,7 +93,7 @@ pub(crate) mod tests {
         1_u8.encode(&mut writer).await.unwrap();
         writer.eol().await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let mut reader = HashReader::new(&mut cursor);
         assert_eq!(u64::decode(&mut reader).await.unwrap(), 4);
         assert_eq!(u32::decode(&mut reader).await.unwrap(), 3);

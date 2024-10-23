@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use super::{Decode, Encode};
 
@@ -12,7 +12,7 @@ where
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: Read + Unpin,
+        R: SeqRead,
     {
         Ok(Arc::from(T::decode(reader).await?))
     }
@@ -26,7 +26,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write + Send,
     {
         self.as_ref().encode(writer).await
     }
@@ -40,7 +40,7 @@ where
 mod tests {
     use std::{io::Cursor, sync::Arc};
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::serdes::{Decode, Encode};
 
@@ -55,7 +55,7 @@ mod tests {
         source_0.encode(&mut cursor).await.unwrap();
         source_1.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded_0 = Arc::<u64>::decode(&mut cursor).await.unwrap();
         let decoded_1 = Arc::<String>::decode(&mut cursor).await.unwrap();
 
