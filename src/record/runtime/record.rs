@@ -56,6 +56,22 @@ impl DynRecord {
         let mut columns = vec![];
         for desc in column_descs.iter() {
             let value: Arc<dyn Any> = match desc.datatype {
+                Datatype::UInt8 => match desc.is_nullable {
+                    true => Arc::<Option<u8>>::new(None),
+                    false => Arc::new(u8::default()),
+                },
+                Datatype::UInt16 => match desc.is_nullable {
+                    true => Arc::<Option<u16>>::new(None),
+                    false => Arc::new(u16::default()),
+                },
+                Datatype::UInt32 => match desc.is_nullable {
+                    true => Arc::<Option<u32>>::new(None),
+                    false => Arc::new(u32::default()),
+                },
+                Datatype::UInt64 => match desc.is_nullable {
+                    true => Arc::<Option<u64>>::new(None),
+                    false => Arc::new(u64::default()),
+                },
                 Datatype::Int8 => match desc.is_nullable {
                     true => Arc::<Option<i8>>::new(None),
                     false => Arc::new(i8::default()),
@@ -112,6 +128,22 @@ impl Decode for DynRecord {
             let mut col = Column::decode(reader).await?;
             if i != primary_index && !col.is_nullable {
                 match col.datatype {
+                    Datatype::UInt8 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<u8>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::UInt16 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<u16>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::UInt32 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<u32>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
+                    Datatype::UInt64 => {
+                        let value = col.value.as_ref().downcast_ref::<Option<u64>>().unwrap();
+                        col.value = Arc::new(value.unwrap());
+                    }
                     Datatype::Int8 => {
                         let value = col.value.as_ref().downcast_ref::<Option<i8>>().unwrap();
                         col.value = Arc::new(value.unwrap());
@@ -179,6 +211,18 @@ impl Record for DynRecord {
             let mut value = col.value.clone();
             if idx != self.primary_index && !is_nullable {
                 value = match datatype {
+                    Datatype::UInt8 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<u8>().unwrap()))
+                    }
+                    Datatype::UInt16 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<u16>().unwrap()))
+                    }
+                    Datatype::UInt32 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<u32>().unwrap()))
+                    }
+                    Datatype::UInt64 => {
+                        Arc::new(Some(*col.value.as_ref().downcast_ref::<u64>().unwrap()))
+                    }
                     Datatype::Int8 => {
                         Arc::new(Some(*col.value.as_ref().downcast_ref::<i8>().unwrap()))
                     }
