@@ -1,3 +1,4 @@
+mod buffer;
 mod checksum;
 pub(crate) mod log;
 pub(crate) mod record_entry;
@@ -5,6 +6,7 @@ pub(crate) mod record_entry;
 use std::marker::PhantomData;
 
 use async_stream::stream;
+use buffer::BufferWriter;
 use checksum::{HashReader, HashWriter};
 use fusio::{Read, Write};
 use futures_core::Stream;
@@ -52,9 +54,12 @@ where
         value: Option<R::Ref<'r>>,
     ) -> Result<(), <R::Ref<'r> as Encode>::Error> {
         let mut writer = HashWriter::new(&mut self.file);
+        let mut buffer_writer = BufferWriter::new();
         Log::new(log_ty, RecordEntry::<R>::Encode((key, value)))
-            .encode(&mut writer)
+            .encode(&mut buffer_writer)
             .await?;
+        let (result, _) = writer.write_all(buffer_writer.as_slice()).await;
+        result?;
         writer.eol().await?;
         Ok(())
     }
