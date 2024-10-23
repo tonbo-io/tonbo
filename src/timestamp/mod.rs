@@ -4,7 +4,7 @@ use arrow::{
     array::{PrimitiveArray, Scalar},
     datatypes::UInt32Type,
 };
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 pub(crate) use self::timestamped::*;
 use crate::serdes::{Decode, Encode};
@@ -37,7 +37,7 @@ impl Encode for Timestamp {
     type Error = fusio::Error;
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         self.0.encode(writer).await
     }
@@ -49,7 +49,7 @@ impl Decode for Timestamp {
     type Error = fusio::Error;
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: Read + Unpin,
+        R: SeqRead,
     {
         u32::decode(reader).await.map(Timestamp)
     }

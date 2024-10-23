@@ -7,7 +7,7 @@ use arrow::{
     },
     datatypes::{DataType, Field},
 };
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use super::Datatype;
 use crate::{
@@ -232,7 +232,7 @@ macro_rules! implement_decode_col {
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
-                R: Read + Unpin,
+                R: SeqRead,
             {
                 let tag = u8::decode(reader).await?;
                 let datatype = Self::tag_to_datatype(tag);
@@ -272,7 +272,7 @@ macro_rules! implement_encode_col {
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: Write + Unpin + Send,
+                W: Write,
             {
                 Self::tag(self.datatype).encode(writer).await?;
                 self.is_nullable.encode(writer).await?;

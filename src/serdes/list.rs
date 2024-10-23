@@ -1,3 +1,5 @@
+use fusio::{SeqRead, Write};
+
 use super::{Decode, Encode};
 
 impl Decode for Vec<u8> {
@@ -5,7 +7,7 @@ impl Decode for Vec<u8> {
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: fusio::Read + Unpin,
+        R: SeqRead,
     {
         let len = u32::decode(reader).await?;
         let (result, buf) = reader
@@ -22,7 +24,7 @@ impl Encode for Vec<u8> {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: fusio::Write + Unpin + Send,
+        W: Write,
     {
         (self.len() as u32).encode(writer).await?;
         let (result, _) = writer.write_all(self.as_slice()).await;
@@ -40,7 +42,7 @@ impl Encode for Vec<u8> {
 mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::serdes::{Decode, Encode};
 
@@ -53,7 +55,7 @@ mod tests {
 
         source.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded = Vec::<u8>::decode(&mut cursor).await.unwrap();
 
         assert_eq!(source, decoded);

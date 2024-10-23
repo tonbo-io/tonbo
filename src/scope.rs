@@ -1,6 +1,6 @@
 use std::ops::Bound;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use crate::{
     fs::FileId,
@@ -85,7 +85,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         self.min.encode(writer).await?;
         self.max.encode(writer).await?;
@@ -121,7 +121,7 @@ where
 {
     type Error = <K as Decode>::Error;
 
-    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
         let mut buf = [0u8; 16];
         let min = K::decode(reader).await?;
         let max = K::decode(reader).await?;
