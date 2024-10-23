@@ -1,12 +1,12 @@
 use bytes::Bytes;
-use fusio::{IoBuf, Read, Write};
+use fusio::{IoBuf, SeqRead, Write};
 
 use crate::serdes::{Decode, Encode};
 
 impl Encode for &[u8] {
     type Error = fusio::Error;
 
-    async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+    async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
         (self.len() as u32).encode(writer).await?;
         let (result, _) = writer.write_all(*self).await;
         result?;
@@ -22,7 +22,7 @@ impl Encode for &[u8] {
 impl Encode for Bytes {
     type Error = fusio::Error;
 
-    async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+    async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
         (self.len() as u32).encode(writer).await?;
         let (result, _) = writer.write_all(self.as_slice()).await;
         result?;
@@ -38,7 +38,7 @@ impl Encode for Bytes {
 impl Decode for Bytes {
     type Error = fusio::Error;
 
-    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
         let len = u32::decode(reader).await?;
         let (result, buf) = reader.read_exact(vec![0u8; len as usize]).await;
         result?;
@@ -52,7 +52,7 @@ mod tests {
     use std::io::Cursor;
 
     use bytes::Bytes;
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::serdes::{Decode, Encode};
 
@@ -65,7 +65,7 @@ mod tests {
 
         source.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded = Bytes::decode(&mut cursor).await.unwrap();
 
         assert_eq!(source, decoded);

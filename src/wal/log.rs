@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use crate::serdes::{Decode, Encode};
 
@@ -45,7 +45,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         (self.log_type as u8).encode(writer).await?;
         self.record.encode(writer).await
@@ -64,7 +64,7 @@ where
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
-        R: Read + Unpin,
+        R: SeqRead,
     {
         let log_type = LogType::from(u8::decode(reader).await?);
         let log = Re::decode(reader).await?;

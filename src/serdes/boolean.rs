@@ -1,13 +1,13 @@
 use std::mem::size_of;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 use crate::serdes::{Decode, Encode};
 
 impl Encode for bool {
     type Error = fusio::Error;
 
-    async fn encode<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), Self::Error> {
+    async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
         if *self { 1u8 } else { 0u8 }.encode(writer).await
     }
 
@@ -19,7 +19,7 @@ impl Encode for bool {
 impl Decode for bool {
     type Error = fusio::Error;
 
-    async fn decode<R: Read + Unpin>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
         Ok(u8::decode(reader).await? == 1u8)
     }
 }
@@ -28,7 +28,7 @@ impl Decode for bool {
 mod tests {
     use std::io::Cursor;
 
-    use fusio::Seek;
+    use tokio::io::AsyncSeekExt;
 
     use crate::serdes::{Decode, Encode};
 
@@ -45,7 +45,8 @@ mod tests {
         source_1.encode(&mut cursor).await.unwrap();
         source_2.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+
         let decoded_0 = bool::decode(&mut cursor).await.unwrap();
         let decoded_1 = bool::decode(&mut cursor).await.unwrap();
         let decoded_2 = bool::decode(&mut cursor).await.unwrap();

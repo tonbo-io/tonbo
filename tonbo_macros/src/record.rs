@@ -310,7 +310,7 @@ fn trait_decode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
-                R: ::fusio::Read + Unpin,
+                R: ::fusio::SeqRead,
             {
                 #(#decode_method_fields)*
 
@@ -499,7 +499,7 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: ::fusio::Write + Unpin + Send,
+                W: ::fusio::Write,
             {
                 #(#encode_method_fields)*
 

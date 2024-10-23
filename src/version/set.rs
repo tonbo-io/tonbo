@@ -1,5 +1,6 @@
 use std::{
     collections::BinaryHeap,
+    io::Cursor,
     mem,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -9,7 +10,7 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
-use fusio::{dynamic::DynFile, fs::FileMeta, Seek};
+use fusio::{dynamic::DynFile, fs::FileMeta};
 use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
@@ -143,8 +144,7 @@ where
             )
             .await?;
 
-        log.seek(0).await.unwrap();
-        let edits = VersionEdit::recover(&mut log).await;
+        let edits = VersionEdit::recover(&mut Cursor::new(&mut log)).await;
 
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
@@ -260,7 +260,7 @@ where
                 .await
                 .map_err(VersionError::Send)?;
         }
-        log.sync_all().await?;
+        log.close().await?;
         if edit_len >= option.version_log_snapshot_threshold {
             let fs = self.manager.base_fs();
             let old_log_id = mem::replace(log_id, FileId::new());
@@ -270,14 +270,13 @@ where
                     FileType::Log.open_options(false),
                 )
                 .await?;
-            let mut old_log = mem::replace(log, new_log);
-            old_log.close().await?;
+            let _old_log = mem::replace(log, new_log);
 
             new_version.log_length = 0;
             for new_edit in new_version.to_edits() {
                 new_edit.encode(log).await.map_err(VersionError::Encode)?;
             }
-            log.sync_all().await?;
+            log.close().await?;
             fs.remove(&option.version_log_path(&old_log_id)).await?;
         }
         guard.current = Arc::new(new_version);
@@ -287,7 +286,7 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::Arc;
+    use std::{io::Cursor, sync::Arc};
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
@@ -448,8 +447,7 @@ pub(crate) mod tests {
         let mut guard = version_set.inner.write().await;
         let log = &mut guard.log_with_id.0;
 
-        log.seek(0).await.unwrap();
-        let edits = VersionEdit::<String>::recover(log).await;
+        let edits = VersionEdit::<String>::recover(&mut Cursor::new(log)).await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(
@@ -480,12 +478,12 @@ pub(crate) mod tests {
         }
         logs.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
 
-        let mut log = manager
+        let log = manager
             .base_fs()
             .open_options(&logs.pop().unwrap().path, FileType::Log.open_options(false))
             .await
             .unwrap();
-        let edits = VersionEdit::<String>::recover(&mut log).await;
+        let edits = VersionEdit::<String>::recover(&mut Cursor::new(log)).await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(

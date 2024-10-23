@@ -9,14 +9,14 @@ mod string;
 
 use std::future::Future;
 
-use fusio::{Read, Write};
+use fusio::{SeqRead, Write};
 
 pub trait Encode {
     type Error: From<fusio::Error> + std::error::Error + Send + Sync + 'static;
 
     fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>> + Send
     where
-        W: Write + Unpin + Send;
+        W: Write;
 
     fn size(&self) -> usize;
 }
@@ -26,7 +26,7 @@ impl<T: Encode + Sync> Encode for &T {
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Unpin + Send,
+        W: Write,
     {
         Encode::encode(*self, writer).await
     }
@@ -41,14 +41,14 @@ pub trait Decode: Sized {
 
     fn decode<R>(reader: &mut R) -> impl Future<Output = Result<Self, Self::Error>>
     where
-        R: Read + Unpin;
+        R: SeqRead;
 }
 
 #[cfg(test)]
 mod tests {
     use std::io;
 
-    use fusio::{Read, Seek};
+    use tokio::io::AsyncSeekExt;
 
     use super::*;
 
@@ -62,7 +62,7 @@ mod tests {
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: Write + Unpin + Send,
+                W: Write + Send,
             {
                 self.0.encode(writer).await?;
 
@@ -79,7 +79,7 @@ mod tests {
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
             where
-                R: Read + Unpin,
+                R: SeqRead,
             {
                 Ok(TestStruct(u32::decode(reader).await?))
             }
@@ -91,7 +91,7 @@ mod tests {
         let mut cursor = io::Cursor::new(&mut buf);
         original.encode(&mut cursor).await.unwrap();
 
-        cursor.seek(0).await.unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded = TestStruct::decode(&mut cursor).await.unwrap();
 
         assert_eq!(original.0, decoded.0);
