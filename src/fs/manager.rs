@@ -5,7 +5,7 @@ use fusio_dispatch::FsOptions;
 
 pub struct StoreManager {
     base_fs: Arc<dyn DynFs>,
-    fs_map: HashMap<Path, Arc<dyn DynFs>>,
+    fs_map: HashMap<Path, (Arc<dyn DynFs>, bool)>,
 }
 
 impl StoreManager {
@@ -16,7 +16,10 @@ impl StoreManager {
         let mut fs_map = HashMap::with_capacity(levels_fs.len());
 
         for (path, fs_options) in levels_fs.into_iter().flatten() {
-            fs_map.entry(path).or_insert(fs_options.parse()?);
+            let is_local = matches!(fs_options, FsOptions::Local);
+            fs_map
+                .entry(path)
+                .or_insert((fs_options.parse()?, is_local));
         }
         let base_fs = base_options.parse()?;
 
@@ -27,8 +30,11 @@ impl StoreManager {
         &self.base_fs
     }
 
-    pub fn get_fs(&self, path: &Path) -> &Arc<dyn DynFs> {
-        self.fs_map.get(path).unwrap_or(&self.base_fs)
+    pub fn get_fs(&self, path: &Path) -> (&Arc<dyn DynFs>, bool) {
+        self.fs_map
+            .get(path)
+            .map(|(fs, is_local)| (fs, *is_local))
+            .unwrap_or((&self.base_fs, false))
     }
 }
 

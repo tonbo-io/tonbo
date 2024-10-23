@@ -25,7 +25,8 @@ impl<R> CacheReader<R> {
         inner: R,
         meta_path: Path,
     ) -> Result<CacheReader<R>, CacheError> {
-        let path = path_to_local(&option.path)?;
+        // SAFETY: `meta_path` must be the path of a parquet file
+        let path = path_to_local(&option.path.child(meta_path.filename().unwrap()))?;
         let cache: HybridCache<Range<usize>, Bytes> = HybridCacheBuilder::new()
             .memory(option.memory)
             .storage(Engine::Large) // use large object disk cache engine only

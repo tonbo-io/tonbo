@@ -136,7 +136,7 @@ where
     ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
         if !batches.is_empty() {
             let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
-            let level_0_fs = manager.get_fs(level_0_path);
+            let (level_0_fs, _) = manager.get_fs(level_0_path);
 
             let mut min = None;
             let mut max = None;
@@ -207,7 +207,7 @@ where
                 Self::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
 
             let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
-            let level_fs = manager.get_fs(level_path);
+            let (level_fs, is_local) = manager.get_fs(level_path);
             let mut streams = Vec::with_capacity(meet_scopes_l.len() + meet_scopes_ll.len());
             // This Level
             if level == 0 {
@@ -218,7 +218,7 @@ where
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(option, file, path)
+                        inner: SsTable::open(option, file, path, is_local)
                             .await?
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
@@ -240,7 +240,7 @@ where
                     u32::MAX.into(),
                     None,
                     ProjectionMask::all(),
-                    level_fs.clone(),
+                    (level_fs.clone(), is_local),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -260,7 +260,7 @@ where
                     u32::MAX.into(),
                     None,
                     ProjectionMask::all(),
-                    level_fs.clone(),
+                    (level_fs.clone(), is_local),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -846,14 +846,14 @@ pub(crate) mod tests {
         option: &Arc<DbOption<Test>>,
         manager: &StoreManager,
     ) -> ((FileId, FileId, FileId, FileId, FileId), Version<Test>) {
-        let level_0_fs = option
+        let (level_0_fs, _) = option
             .level_fs_path(0)
             .map(|path| manager.get_fs(path))
-            .unwrap_or(manager.base_fs());
-        let level_1_fs = option
+            .unwrap_or((manager.base_fs(), true));
+        let (level_1_fs, _) = option
             .level_fs_path(1)
             .map(|path| manager.get_fs(path))
-            .unwrap_or(manager.base_fs());
+            .unwrap_or((manager.base_fs(), true));
 
         // level 0
         let table_gen_1 = FileId::new();
@@ -1121,14 +1121,14 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let level_0_fs = option
+        let (level_0_fs, _) = option
             .level_fs_path(0)
             .map(|path| manager.get_fs(path))
-            .unwrap_or(manager.base_fs());
-        let level_1_fs = option
+            .unwrap_or((manager.base_fs(), true));
+        let (level_1_fs, _) = option
             .level_fs_path(1)
             .map(|path| manager.get_fs(path))
-            .unwrap_or(manager.base_fs());
+            .unwrap_or((manager.base_fs(), true));
 
         let table_gen0 = FileId::new();
         let table_gen1 = FileId::new();

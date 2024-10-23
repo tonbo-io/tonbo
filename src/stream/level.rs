@@ -52,6 +52,7 @@ where
     projection_mask: ProjectionMask,
     status: FutureStatus<'level, R>,
     fs: Arc<dyn DynFs>,
+    is_local: bool,
     path: Option<Path>,
 }
 
@@ -70,7 +71,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-        fs: Arc<dyn DynFs>,
+        (fs, is_local): (Arc<dyn DynFs>, bool),
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -91,6 +92,7 @@ where
             projection_mask,
             status,
             fs,
+            is_local,
             path: None,
         })
     }
@@ -167,7 +169,9 @@ where
                     Poll::Ready(Ok(file)) => {
                         let option = self.option.clone();
                         let path = self.path.clone().unwrap();
-                        let future = async move { SsTable::open(&option, file, path).await };
+                        let is_local = self.is_local;
+                        let future =
+                            async move { SsTable::open(&option, file, path, is_local).await };
                         self.status = FutureStatus::OpenSst(Box::pin(future));
                         continue;
                     }
@@ -253,7 +257,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2, 3],
                 ),
-                manager.base_fs().clone(),
+                (manager.base_fs().clone(), true),
             )
             .unwrap();
 
@@ -289,7 +293,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2, 4],
                 ),
-                manager.base_fs().clone(),
+                (manager.base_fs().clone(), true),
             )
             .unwrap();
 
@@ -325,7 +329,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2],
                 ),
-                manager.base_fs().clone(),
+                (manager.base_fs().clone(), true),
             )
             .unwrap();
 
