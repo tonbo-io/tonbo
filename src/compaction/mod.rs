@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use ulid::Ulid;
 
 use crate::{
-    fs::{manager::StoreManager, FileId, FileType},
+    fs::{manager::StoreManager, CacheError, FileId, FileType},
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
         mutable::Mutable,
@@ -212,15 +212,13 @@ where
             // This Level
             if level == 0 {
                 for scope in meet_scopes_l.iter() {
+                    let path = option.table_path(&scope.gen, level);
                     let file = level_fs
-                        .open_options(
-                            &option.table_path(&scope.gen, level),
-                            FileType::Parquet.open_options(true),
-                        )
+                        .open_options(&path, FileType::Parquet.open_options(true))
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(file)
+                        inner: SsTable::open(option, file, path)
                             .await?
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
@@ -496,6 +494,8 @@ where
     Fusio(#[from] fusio::Error),
     #[error("compaction version error: {0}")]
     Version(#[from] VersionError<R>),
+    #[error("compaction cache error: {0}")]
+    Cache(#[from] CacheError),
     #[error("compaction channel is closed")]
     ChannelClose,
     #[error("database error: {0}")]

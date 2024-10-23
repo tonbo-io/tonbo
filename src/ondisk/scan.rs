@@ -12,6 +12,7 @@ use parquet::arrow::{async_reader::ParquetRecordBatchStream, ProjectionMask};
 use pin_project_lite::pin_project;
 
 use crate::{
+    fs::cache_reader::CacheReader,
     record::Record,
     stream::record_batch::{RecordBatchEntry, RecordBatchIterator},
 };
@@ -20,7 +21,7 @@ pin_project! {
     #[derive(Debug)]
     pub struct SsTableScan<'scan, R>{
         #[pin]
-        stream: ParquetRecordBatchStream<AsyncReader>,
+        stream: ParquetRecordBatchStream<CacheReader<AsyncReader>>,
         iter: Option<RecordBatchIterator<R>>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
@@ -29,8 +30,8 @@ pin_project! {
 }
 
 impl<R> SsTableScan<'_, R> {
-    pub fn new(
-        stream: ParquetRecordBatchStream<AsyncReader>,
+    pub(crate) fn new(
+        stream: ParquetRecordBatchStream<CacheReader<AsyncReader>>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
     ) -> Self {

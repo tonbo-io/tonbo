@@ -158,7 +158,7 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
-    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{manager::StoreManager, parse_file_id, CacheError, FileId, FileType},
     serdes::Decode,
     stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
@@ -811,6 +811,8 @@ where
     UlidDecode(#[from] ulid::DecodeError),
     #[error("write fusio error: {0}")]
     Fusio(#[from] fusio::Error),
+    #[error("write cache error: {0}")]
+    Cache(#[from] CacheError),
     // #[error("write encode error: {0}")]
     // Encode(<<R as Record>::Ref as Encode>::Error),
     #[error("write recover error: {0}")]

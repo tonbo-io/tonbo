@@ -15,7 +15,7 @@ use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
 
 use crate::{
-    fs::{FileId, FileType},
+    fs::{CacheError, FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
     record::Record,
     scope::Scope,
@@ -32,7 +32,7 @@ where
     Init(FileId),
     Ready(SsTableScan<'level, R>),
     OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
-    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, Error>> + Send + 'level>>),
+    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, CacheError>> + Send + 'level>>),
     LoadStream(
         Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
     ),
@@ -165,7 +165,10 @@ where
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file)));
+                        let option = self.option.clone();
+                        let path = self.path.clone().unwrap();
+                        let future = async move { SsTable::open(&option, file, path).await };
+                        self.status = FutureStatus::OpenSst(Box::pin(future));
                         continue;
                     }
                     Poll::Ready(Err(err)) => {

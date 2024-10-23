@@ -17,7 +17,7 @@ use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    fs::{manager::StoreManager, FileId, FileType},
+    fs::{manager::StoreManager, CacheError, FileId, FileType},
     ondisk::sstable::SsTable,
     record::Record,
     scope::Scope,
@@ -176,14 +176,12 @@ where
         gen: &FileId,
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+        let path = self.option.table_path(gen, level);
         let file = store
-            .open_options(
-                &self.option.table_path(gen, level),
-                FileType::Parquet.open_options(true),
-            )
+            .open_options(&path, FileType::Parquet.open_options(true))
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(file)
+        SsTable::<R>::open(&self.option, file, path)
             .await?
             .get(key, projection_mask)
             .await
@@ -218,14 +216,12 @@ where
             if !scope.meets_range(range) {
                 continue;
             }
+            let path = self.option.table_path(&scope.gen, 0);
             let file = level_0_fs
-                .open_options(
-                    &self.option.table_path(&scope.gen, 0),
-                    FileType::Parquet.open_options(true),
-                )
+                .open_options(&path, FileType::Parquet.open_options(true))
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(file).await?;
+            let table = SsTable::open(&self.option, file, path).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -318,6 +314,8 @@ where
     Parquet(#[from] parquet::errors::ParquetError),
     #[error("version fusio error: {0}")]
     Fusio(#[from] fusio::Error),
+    #[error("version cache error: {0}")]
+    Cache(#[from] CacheError),
     #[error("version ulid decode error: {0}")]
     UlidDecode(#[from] ulid::DecodeError),
     #[error("version send error: {0}")]
