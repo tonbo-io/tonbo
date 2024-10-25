@@ -20,6 +20,8 @@ use crate::{
     DbError,
 };
 
+const DEFAULT_WAL_BUFFER_SIZE: usize = 4 * 1024;
+
 /// configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Clone)]
 pub struct DbOption<R> {
@@ -38,6 +40,7 @@ pub struct DbOption<R> {
     pub(crate) version_log_snapshot_threshold: u32,
     pub(crate) trigger_type: TriggerType,
     pub(crate) use_wal: bool,
+    pub(crate) wal_buffer_size: usize,
     pub(crate) write_parquet_properties: WriterProperties,
     _p: PhantomData<R>,
 }
@@ -68,6 +71,7 @@ where
                 .build(),
 
             use_wal: true,
+            wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
             major_default_oldest_table_num: 3,
             major_l_selection_table_max_num: 4,
             trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
@@ -117,6 +121,7 @@ where
                 .build(),
 
             use_wal: true,
+            wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
             major_default_oldest_table_num: 3,
             major_l_selection_table_max_num: 4,
             trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
@@ -193,6 +198,14 @@ where
     pub fn disable_wal(self) -> Self {
         DbOption {
             use_wal: false,
+            ..self
+        }
+    }
+
+    /// Maximum size of WAL buffer, default value is 4KB
+    pub fn wal_buffer_size(self, wal_buffer_size: usize) -> Self {
+        DbOption {
+            wal_buffer_size,
             ..self
         }
     }

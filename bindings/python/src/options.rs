@@ -31,6 +31,9 @@ pub struct DbOption {
     version_log_snapshot_threshold: u32,
     #[pyo3(get, set)]
     use_wal: bool,
+    /// Maximum size of WAL buffer size
+    #[pyo3(get, set)]
+    wal_buffer_size: usize,
     /// build the `DB` storage directory based on the passed path
     #[pyo3(get, set)]
     path: String,
@@ -52,6 +55,7 @@ impl DbOption {
             max_sst_file_size: 256 * 1024 * 1024,
             version_log_snapshot_threshold: 200,
             use_wal: true,
+            wal_buffer_size: 4 * 1024,
             path,
             base_fs: FsOptions::Local {},
             level_paths: vec![None; MAX_LEVEL],

@@ -5,7 +5,7 @@ use crossbeam_skiplist::{
     map::{Entry, Range},
     SkipMap,
 };
-use fusio::{dynamic::DynFile, DynFs};
+use fusio::{buffered::BufWriter, dynamic::DynFile, DynFs};
 use ulid::Ulid;
 
 use crate::{
@@ -53,12 +53,15 @@ where
         let mut wal = None;
         if option.use_wal {
             let file_id = Ulid::new();
-            let file = fs
-                .open_options(
+
+            let file = Box::new(BufWriter::new(
+                fs.open_options(
                     &option.wal_path(&file_id),
                     FileType::Wal.open_options(false),
                 )
-                .await?;
+                .await?,
+                option.wal_buffer_size,
+            )) as Box<dyn DynFile>;
 
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
@@ -181,6 +184,14 @@ where
         }
 
         Ok((file_id, Immutable::from((self.data, instance))))
+    }
+
+    pub(crate) async fn flush_wal(&self) -> Result<(), DbError<R>> {
+        if let Some(wal) = self.wal.as_ref() {
+            let mut wal_guard = wal.lock().await;
+            wal_guard.flush().await?;
+        }
+        Ok(())
     }
 }
 
