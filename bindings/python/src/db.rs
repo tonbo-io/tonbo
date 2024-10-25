@@ -15,7 +15,7 @@ use tonbo::{
 
 use crate::{
     column::Column,
-    error::CommitError,
+    error::{CommitError, DbError},
     options::DbOption,
     record_batch::RecordBatch,
     transaction::Transaction,
@@ -163,6 +163,16 @@ impl TonboDB {
 
         future_into_py(py, async move {
             db.flush().await.map_err(CommitError::from)?;
+            Ok(Python::with_gil(|py| py.None()))
+        })
+    }
+
+    /// Flush wal manually
+    fn flush_wal<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<PyAny>> {
+        let db = self.db.clone();
+
+        future_into_py(py, async move {
+            db.flush_wal().await.map_err(DbError::from)?;
             Ok(Python::with_gil(|py| py.None()))
         })
     }
