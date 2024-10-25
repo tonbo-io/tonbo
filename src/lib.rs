@@ -323,7 +323,9 @@ where
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
         let (tx, rx) = oneshot::channel();
         let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
-        compaction_tx.send(CompactTask::Flush(Some(tx)))?;
+        compaction_tx
+            .send_async(CompactTask::Flush(Some(tx)))
+            .await?;
 
         rx.await.map_err(|_| CommitError::ChannelClose)?;
 
@@ -419,6 +421,11 @@ where
             }
         };
 
+        Ok(())
+    }
+
+    pub async fn flush_wal(&self) -> Result<(), DbError<R>> {
+        self.schema.write().await.flush_wal().await?;
         Ok(())
     }
 }
@@ -596,6 +603,11 @@ where
                 .iter()
                 .rev()
                 .any(|(_, immutable)| immutable.check_conflict(key, ts))
+    }
+
+    async fn flush_wal(&self) -> Result<(), DbError<R>> {
+        self.mutable.flush_wal().await?;
+        Ok(())
     }
 }
 
@@ -1544,11 +1556,15 @@ pub(crate) mod tests {
         option.level_sst_magnification = 10;
         option.max_sst_file_size = 2 * 1024 * 1024;
         option.major_default_oldest_table_num = 1;
-        option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
+        option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for item in &test_items()[0..10] {
+            db.write(item.clone(), 0.into()).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        for item in &test_items()[10..20] {
             db.write(item.clone(), 0.into()).await.unwrap();
         }
 
@@ -1588,6 +1604,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         }
+        schema.flush_wal().await.unwrap();
         drop(schema);
 
         let db: DB<Test, TokioExecutor> = DB::new(option.as_ref().to_owned(), TokioExecutor::new())
@@ -1654,6 +1671,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         }
+        schema.flush_wal().await.unwrap();
         drop(schema);
 
         let option = DbOption::with_path(

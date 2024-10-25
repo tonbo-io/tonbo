@@ -62,6 +62,7 @@ class DbOption:
     max_sst_file_size: int
     version_log_snapshot_threshold: int
     use_wal: bool
+    wal_buffer_size: int
     path: str
 
     def __init__(self, path: str) -> None:
@@ -83,7 +84,7 @@ class Transaction:
     """Tonbo transaction."""
 
     async def get(
-            self, key: Any, projection: list[str] = ["*"]
+        self, key: Any, projection: list[str] = ["*"]
     ) -> dict[str, Any] | None:
         """Get record from db.
 
@@ -102,11 +103,11 @@ class Transaction:
         """
         ...
     async def scan(
-            self,
-            lower: Bound | None,
-            high: Bound | None,
-            limit: int | None,
-            projection: list[str] = ["*"],
+        self,
+        lower: Bound | None,
+        high: Bound | None,
+        limit: int | None,
+        projection: list[str] = ["*"],
     ) -> AsyncIterable[dict[str, Any]]:
         """Create an async stream for scanning.
 
@@ -157,4 +158,6 @@ class TonboDB:
     async def flush(self) -> None:
         """Try to execute compaction."""
         ...
-
+    async def flush_wal(self) -> None:
+        """Flush wal manually."""
+        ...
