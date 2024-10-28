@@ -218,7 +218,7 @@ where
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(option, file, path, is_local)
+                        inner: SsTable::open(option, file, scope.gen, !is_local)
                             .await?
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
@@ -583,7 +583,9 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_dir_l0 = tempfile::tempdir().unwrap();
 
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap()
             .level_path(
                 0,
                 Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
@@ -697,7 +699,9 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "id".to_string(),
             0,
-        );
+        )
+        .await
+        .unwrap();
         manager
             .base_fs()
             .create_dir_all(&option.wal_dir_path())
@@ -765,7 +769,9 @@ pub(crate) mod tests {
         let temp_dir_l0 = TempDir::new().unwrap();
         let temp_dir_l1 = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
+        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap()
             .level_path(
                 0,
                 Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
@@ -1104,7 +1110,9 @@ pub(crate) mod tests {
     pub(crate) async fn major_panic() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
         option.major_threshold_with_sst_size = 1;
         option.level_sst_magnification = 1;
         let manager =
@@ -1211,7 +1219,9 @@ pub(crate) mod tests {
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 0;
         option.major_threshold_with_sst_size = 2;

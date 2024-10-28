@@ -55,13 +55,6 @@ pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<File
         .transpose()
 }
 
-#[derive(Debug, Clone)]
-pub struct CacheOption {
-    pub(crate) path: Path,
-    pub(crate) memory: usize,
-    pub(crate) local: usize,
-}
-
 #[derive(Debug, Error)]
 pub enum CacheError {
     #[error("cache io error: {0}")]

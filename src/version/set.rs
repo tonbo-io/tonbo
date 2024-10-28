@@ -344,9 +344,11 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
         manager
             .base_fs()
             .create_dir_all(&option.version_log_dir_path())
@@ -381,7 +383,9 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -508,9 +512,11 @@ pub(crate) mod tests {
     async fn version_level_sort() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
 
         let (sender, _) = bounded(1);
         manager

@@ -171,7 +171,9 @@ mod tests {
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
@@ -265,7 +267,9 @@ mod tests {
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
@@ -351,7 +355,9 @@ mod tests {
     async fn merge_mutable_limit() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 

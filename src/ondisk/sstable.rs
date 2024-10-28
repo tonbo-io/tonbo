@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, ops::Bound};
 
-use fusio::{dynamic::DynFile, path::Path, DynRead};
+use fusio::{dynamic::DynFile, DynRead};
 use fusio_parquet::reader::AsyncReader;
 use futures_util::StreamExt;
 use parquet::arrow::{
@@ -11,7 +11,7 @@ use parquet::arrow::{
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    fs::{cache_reader::CacheReader, CacheError},
+    fs::{cache_reader::CacheReader, CacheError, FileId},
     record::Record,
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TimestampedRef},
@@ -33,22 +33,19 @@ where
     pub(crate) async fn open(
         option: &DbOption<R>,
         file: Box<dyn DynFile>,
-        path: Path,
-        is_local: bool,
+        gen: FileId,
+        enable_cache: bool,
     ) -> Result<Self, CacheError> {
         let size = file.size().await?;
-        let reader = if is_local {
+        let reader = if !enable_cache {
             Box::new(AsyncReader::new(file, size).await?) as Box<dyn AsyncFileReader>
         } else {
-            Box::new(
-                CacheReader::new(
-                    &option.cache_option,
-                    option.meta_cache.clone(),
-                    AsyncReader::new(file, size).await?,
-                    path,
-                )
-                .await?,
-            )
+            Box::new(CacheReader::new(
+                option.meta_cache.clone(),
+                option.range_cache.clone(),
+                gen,
+                AsyncReader::new(file, size).await?,
+            ))
         };
 
         Ok(SsTable {
@@ -204,7 +201,9 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
             TokioExecutor::new(),
         )
         .await;
@@ -280,7 +279,9 @@ pub(crate) mod tests {
         let base_fs = manager.base_fs();
 
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
             TokioExecutor::new(),
         )
         .await;

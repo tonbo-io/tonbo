@@ -53,7 +53,7 @@ where
     status: FutureStatus<'level, R>,
     fs: Arc<dyn DynFs>,
     is_local: bool,
-    path: Option<Path>,
+    path: Option<(Path, FileId)>,
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -109,10 +109,10 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.path = Some(self.option.table_path(&gen, self.level));
+                    self.path = Some((self.option.table_path(&gen, self.level), gen));
 
                     let reader = self.fs.open_options(
-                        self.path.as_ref().unwrap(),
+                        &self.path.as_ref().unwrap().0,
                         FileType::Parquet.open_options(true),
                     );
                     #[allow(clippy::missing_transmute_annotations)]
@@ -134,10 +134,10 @@ where
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.path = Some(self.option.table_path(&gen, self.level));
+                            self.path = Some((self.option.table_path(&gen, self.level), gen));
 
                             let reader = self.fs.open_options(
-                                self.path.as_ref().unwrap(),
+                                &self.path.as_ref().unwrap().0,
                                 FileType::Parquet.open_options(true),
                             );
                             #[allow(clippy::missing_transmute_annotations)]
@@ -168,10 +168,10 @@ where
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
                         let option = self.option.clone();
-                        let path = self.path.clone().unwrap();
+                        let (_, gen) = self.path.clone().unwrap();
                         let is_local = self.is_local;
                         let future =
-                            async move { SsTable::open(&option, file, path, is_local).await };
+                            async move { SsTable::open(&option, file, gen, !is_local).await };
                         self.status = FutureStatus::OpenSst(Box::pin(future));
                         continue;
                     }
@@ -227,9 +227,11 @@ mod tests {
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
 
         manager
             .base_fs()

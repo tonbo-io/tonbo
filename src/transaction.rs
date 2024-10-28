@@ -277,7 +277,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let db = DB::<String, TokioExecutor>::new(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
             TokioExecutor::new(),
         )
         .await
@@ -312,9 +314,11 @@ mod tests {
     async fn transaction_get() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
 
         manager
             .base_fs()
@@ -402,7 +406,9 @@ mod tests {
     #[tokio::test]
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
 
         let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::new())
             .await
@@ -435,7 +441,9 @@ mod tests {
     #[tokio::test]
     async fn transaction_projection() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
 
         let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::new())
             .await
@@ -463,9 +471,11 @@ mod tests {
     async fn transaction_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
 
         manager
             .base_fs()
@@ -558,9 +568,11 @@ mod tests {
     async fn test_transaction_scan_bound() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
 
         manager
             .base_fs()
@@ -734,9 +746,11 @@ mod tests {
     async fn test_transaction_scan_limit() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
 
         manager
             .base_fs()
@@ -806,7 +820,9 @@ mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "age".to_string(),
             0,
-        );
+        )
+        .await
+        .unwrap();
         let db = DB::with_schema(option, TokioExecutor::default(), descs, 0)
             .await
             .unwrap();

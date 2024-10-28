@@ -187,7 +187,7 @@ where
             .open_options(&path, FileType::Parquet.open_options(true))
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(&self.option, file, path, is_local)
+        SsTable::<R>::open(&self.option, file, *gen, !is_local)
             .await?
             .get(key, projection_mask)
             .await
@@ -227,7 +227,7 @@ where
                 .open_options(&path, FileType::Parquet.open_options(true))
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(&self.option, file, path, is_local).await?;
+            let table = SsTable::open(&self.option, file, scope.gen, !is_local).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table

@@ -228,7 +228,9 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
@@ -276,7 +278,9 @@ mod tests {
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
@@ -363,7 +367,9 @@ mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "age".to_string(),
             0,
-        );
+        )
+        .await
+        .unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 

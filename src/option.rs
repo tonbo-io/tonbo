@@ -4,8 +4,8 @@ use std::{
     sync::Arc,
 };
 
-use foyer::{CacheBuilder, LruConfig};
-use fusio::path::Path;
+use foyer::{CacheBuilder, DirectFsDeviceOptions, Engine, HybridCacheBuilder, LruConfig};
+use fusio::path::{path_to_local, Path};
 use fusio_dispatch::FsOptions;
 use parquet::{
     basic::Compression,
@@ -15,7 +15,10 @@ use parquet::{
 };
 
 use crate::{
-    fs::{cache_reader::MetaCache, CacheOption, FileId, FileType},
+    fs::{
+        cache_reader::{MetaCache, RangeCache},
+        CacheError, FileId, FileType,
+    },
     record::Record,
     trigger::TriggerType,
     version::{Version, MAX_LEVEL},
@@ -30,7 +33,6 @@ pub struct DbOption<R> {
     pub(crate) clean_channel_buffer: usize,
     pub(crate) base_path: Path,
     pub(crate) base_fs: FsOptions,
-    pub(crate) cache_option: CacheOption,
     // TODO: DEBUG
     pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
     pub(crate) immutable_chunk_num: usize,
@@ -41,6 +43,7 @@ pub struct DbOption<R> {
     pub(crate) major_threshold_with_sst_size: usize,
     pub(crate) max_sst_file_size: usize,
     pub(crate) meta_cache: MetaCache,
+    pub(crate) range_cache: RangeCache,
     pub(crate) version_log_snapshot_threshold: u32,
     pub(crate) trigger_type: TriggerType,
     pub(crate) use_wal: bool,
@@ -53,23 +56,33 @@ impl<R> DbOption<R>
 where
     R: Record,
 {
+    pub async fn from_path(base_path: Path) -> Result<Self, DbError<R>> {
+        let (column_paths, sorting_columns) = R::primary_key_path();
+
+        DbOption::fn_new(base_path, column_paths, sorting_columns).await
+    }
+
     /// build the default configured [`DbOption`] with base path and primary key
-    pub fn with_path(base_path: Path, primary_key_name: String, primary_key_index: usize) -> Self {
+    pub async fn with_path(
+        base_path: Path,
+        primary_key_name: String,
+        primary_key_index: usize,
+    ) -> Result<Self, DbError<R>> {
         let (column_paths, sorting_columns) =
             Self::primary_key_path(primary_key_name, primary_key_index);
 
-        Self::fn_new(base_path, column_paths, sorting_columns)
+        Self::fn_new(base_path, column_paths, sorting_columns).await
     }
 
-    fn fn_new(
+    async fn fn_new(
         base_path: Path,
         column_paths: ColumnPath,
         sorting_columns: Vec<SortingColumn>,
-    ) -> Self {
+    ) -> Result<Self, DbError<R>> {
         let cache_path = base_path.child("cache");
         let memory = 64 * 1024 * 1024;
 
-        DbOption {
+        Ok(DbOption {
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
@@ -94,11 +107,6 @@ where
             version_log_snapshot_threshold: 200,
             level_paths: vec![None; MAX_LEVEL],
             base_fs: FsOptions::Local,
-            cache_option: CacheOption {
-                path: cache_path,
-                memory,
-                local: 8 * memory,
-            },
             meta_cache: Arc::new(
                 CacheBuilder::new(32)
                     .with_shards(4)
@@ -107,7 +115,17 @@ where
                     })
                     .build(),
             ),
-        }
+            range_cache: HybridCacheBuilder::new()
+                .memory(memory)
+                .storage(Engine::Large) // use large object disk cache engine only
+                .with_device_options(
+                    DirectFsDeviceOptions::new(path_to_local(&cache_path).unwrap())
+                        .with_capacity(8 * memory),
+                )
+                .build()
+                .await
+                .map_err(CacheError::from)?,
+        })
     }
 
     fn primary_key_path(
@@ -121,18 +139,6 @@ where
                 SortingColumn::new(primary_key_index as i32, false, true),
             ],
         )
-    }
-}
-
-impl<R> From<Path> for DbOption<R>
-where
-    R: Record,
-{
-    /// build the default configured [`DbOption`] based on the passed path
-    fn from(base_path: Path) -> Self {
-        let (column_paths, sorting_columns) = R::primary_key_path();
-
-        DbOption::fn_new(base_path, column_paths, sorting_columns)
     }
 }
 
@@ -296,7 +302,6 @@ impl<R> Debug for DbOption<R> {
         f.debug_struct("DbOption")
             .field("clean_channel_buffer", &self.clean_channel_buffer)
             .field("base_path", &self.base_path)
-            .field("cache_option", &self.cache_option)
             // TODO
             // .field("level_paths", &self.level_paths)
             .field("immutable_chunk_num", &self.immutable_chunk_num)
@@ -316,6 +321,7 @@ impl<R> Debug for DbOption<R> {
             )
             .field("max_sst_file_size", &self.max_sst_file_size)
             .field("meta_cache", &self.meta_cache)
+            .field("range_cache", &self.range_cache)
             .field(
                 "version_log_snapshot_threshold",
                 &self.version_log_snapshot_threshold,

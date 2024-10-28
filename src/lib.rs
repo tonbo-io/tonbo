@@ -54,7 +54,7 @@
 //!     // make sure the path exists
 //!     let _ = fs::create_dir_all("./db_path/users").await;
 //!
-//!     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
+//!     let options = DbOption::from_path(Path::from_filesystem_path("./db_path/users").unwrap()).await.unwrap();
 //!     // pluggable async runtime and I/O
 //!     let db = DB::new(options, TokioExecutor::default()).await.unwrap();
 //!     // insert with owned value
@@ -1513,7 +1513,9 @@ pub(crate) mod tests {
         let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
         let path_l0 = Path::from_filesystem_path(temp_dir_l0.path()).unwrap();
 
-        let mut option = DbOption::from(path)
+        let mut option = DbOption::from_path(path)
+            .await
+            .unwrap()
             .level_path(0, path_l0, FsOptions::Local)
             .unwrap();
         option.immutable_chunk_num = 1;
@@ -1551,7 +1553,9 @@ pub(crate) mod tests {
     async fn test_flush() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1583,9 +1587,11 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
 
-        let option = Arc::new(DbOption::from(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+        let option = Arc::new(
+            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+                .await
+                .unwrap(),
+        );
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let (task_tx, _task_rx) = bounded(1);
@@ -1642,11 +1648,15 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
 
         let (desc, primary_key_index) = test_dyn_item_schema();
-        let option = Arc::new(DbOption::with_path(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "id".to_owned(),
-            primary_key_index,
-        ));
+        let option = Arc::new(
+            DbOption::with_path(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                "id".to_owned(),
+                primary_key_index,
+            )
+            .await
+            .unwrap(),
+        );
         manager
             .base_fs()
             .create_dir_all(&option.wal_dir_path())
@@ -1680,7 +1690,9 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "id".to_owned(),
             primary_key_index,
-        );
+        )
+        .await
+        .unwrap();
         let db: DB<DynRecord, TokioExecutor> =
             DB::with_schema(option, TokioExecutor::new(), desc, primary_key_index)
                 .await
@@ -1715,7 +1727,9 @@ pub(crate) mod tests {
     async fn test_get_removed() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .await
+            .unwrap();
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1754,7 +1768,9 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "id".to_string(),
             primary_key_index,
-        );
+        )
+        .await
+        .unwrap();
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1962,7 +1978,9 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir1.path()).unwrap(),
             "id".to_string(),
             primary_key_index,
-        );
+        )
+        .await
+        .unwrap();
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1974,7 +1992,9 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir2.path()).unwrap(),
             "id".to_string(),
             primary_key_index,
-        );
+        )
+        .await
+        .unwrap();
         option2.immutable_chunk_num = 1;
         option2.immutable_chunk_max_num = 1;
         option2.major_threshold_with_sst_size = 3;
@@ -1986,7 +2006,9 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir3.path()).unwrap(),
             "id".to_string(),
             primary_key_index,
-        );
+        )
+        .await
+        .unwrap();
         option3.immutable_chunk_num = 1;
         option3.immutable_chunk_max_num = 1;
         option3.major_threshold_with_sst_size = 3;
