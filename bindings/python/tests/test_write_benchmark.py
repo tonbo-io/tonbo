@@ -39,11 +39,13 @@ def duckdb_write():
     con.sql(
         "CREATE TABLE user (id INTEGER, name VARCHAR(20), email VARCHAR(20), age INTEGER, data VARCHAR(200))"
     )
+    txn = con.begin()
     for i in range(0, WRITE_TIMEs):
-        con.execute(
+        txn.execute(
             "INSERT INTO user VALUES (?, ?, ?, ?, ?)",
             [i, gen_string(20), gen_string(20), gen_int(0, 0xffff), gen_bytes(200)],
         )
+    txn.commit()
     con.close()
 
 
@@ -79,6 +81,8 @@ def sqlite_write():
             "INSERT INTO user VALUES (?, ?, ?, ?, ?)",
             [i, gen_string(20), gen_string(20), gen_int(0, 0xffff), gen_bytes(200)],
         )
+    con.commit()
+    con.close()
 
 
 @pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
