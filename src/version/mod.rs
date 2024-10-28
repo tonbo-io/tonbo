@@ -145,19 +145,13 @@ where
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
-        let (level_0_fs, is_local) = manager.get_fs(level_0_path);
+        let level_0_fs = manager.get_fs(level_0_path);
         for scope in self.level_slice[0].iter().rev() {
             if !scope.contains(key.value()) {
                 continue;
             }
             if let Some(entry) = self
-                .table_query(
-                    (level_0_fs, is_local),
-                    key,
-                    0,
-                    &scope.gen,
-                    projection_mask.clone(),
-                )
+                .table_query(level_0_fs, key, 0, &scope.gen, projection_mask.clone())
                 .await?
             {
                 return Ok(Some(entry));
@@ -169,7 +163,7 @@ where
                 .option
                 .level_fs_path(leve)
                 .unwrap_or(&self.option.base_path);
-            let (level_fs, is_local) = manager.get_fs(level_path);
+            let level_fs = manager.get_fs(level_path);
             if sort_runs.is_empty() {
                 continue;
             }
@@ -179,7 +173,7 @@ where
             }
             if let Some(entry) = self
                 .table_query(
-                    (level_fs, is_local),
+                    level_fs,
                     key,
                     leve,
                     &sort_runs[index].gen,
@@ -196,7 +190,7 @@ where
 
     async fn table_query(
         &self,
-        (store, is_local): (&Arc<dyn DynFs>, bool),
+        store: &Arc<dyn DynFs>,
         key: &TimestampedRef<<R as Record>::Key>,
         level: usize,
         gen: &FileId,
@@ -207,7 +201,7 @@ where
             .open_options(&path, FileType::Parquet.open_options(true))
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(file, *gen, !is_local, self.range_cache(), self.meta_cache())
+        SsTable::<R>::open(file, *gen, self.range_cache(), self.meta_cache())
             .await?
             .get(key, projection_mask)
             .await
@@ -237,7 +231,7 @@ where
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
-        let (level_0_fs, is_local) = manager.get_fs(level_0_path);
+        let level_0_fs = manager.get_fs(level_0_path);
         for scope in self.level_slice[0].iter() {
             if !scope.meets_range(range) {
                 continue;
@@ -247,14 +241,8 @@ where
                 .open_options(&path, FileType::Parquet.open_options(true))
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(
-                file,
-                scope.gen,
-                !is_local,
-                self.range_cache(),
-                self.meta_cache(),
-            )
-            .await?;
+            let table =
+                SsTable::open(file, scope.gen, self.range_cache(), self.meta_cache()).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -271,7 +259,7 @@ where
                 .option
                 .level_fs_path(i + 1)
                 .unwrap_or(&self.option.base_path);
-            let (level_fs, is_local) = manager.get_fs(level_path);
+            let level_fs = manager.get_fs(level_path);
 
             let (mut start, mut end) = (None, None);
 
@@ -298,7 +286,7 @@ where
                     ts,
                     limit,
                     projection_mask.clone(),
-                    (level_fs.clone(), is_local),
+                    level_fs.clone(),
                 )
                 .unwrap(),
             });

@@ -35,21 +35,16 @@ where
     pub(crate) async fn open(
         file: Box<dyn DynFile>,
         gen: FileId,
-        enable_cache: bool,
         range_cache: RangeCache,
         meta_cache: MetaCache,
     ) -> Result<Self, CacheError> {
         let size = file.size().await?;
-        let reader = if !enable_cache {
-            Box::new(AsyncReader::new(file, size).await?) as Box<dyn AsyncFileReader>
-        } else {
-            Box::new(CacheReader::new(
-                meta_cache,
-                range_cache,
-                gen,
-                AsyncReader::new(file, size).await?,
-            ))
-        };
+        let reader = Box::new(CacheReader::new(
+            meta_cache,
+            range_cache,
+            gen,
+            AsyncReader::new(file, size).await?,
+        ));
 
         Ok(SsTable {
             reader,

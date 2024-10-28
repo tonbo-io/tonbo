@@ -199,7 +199,6 @@ pub(crate) mod tests {
                     read_count: read_count.clone(),
                 }),
                 table_gen,
-                true,
                 range_cache.clone(),
                 meta_cache.clone(),
             )

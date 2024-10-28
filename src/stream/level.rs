@@ -57,7 +57,6 @@ where
     projection_mask: ProjectionMask,
     status: FutureStatus<'level, R>,
     fs: Arc<dyn DynFs>,
-    is_local: bool,
     path: Option<(Path, FileId)>,
 }
 
@@ -76,7 +75,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-        (fs, is_local): (Arc<dyn DynFs>, bool),
+        fs: Arc<dyn DynFs>,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -99,7 +98,6 @@ where
             projection_mask,
             status,
             fs,
-            is_local,
             path: None,
         })
     }
@@ -177,10 +175,8 @@ where
                         let meta_cache = self.meta_cache.clone();
                         let range_cache = self.range_cache.clone();
                         let (_, gen) = self.path.clone().unwrap();
-                        let is_local = self.is_local;
-                        let future = async move {
-                            SsTable::open(file, gen, !is_local, range_cache, meta_cache).await
-                        };
+                        let future =
+                            async move { SsTable::open(file, gen, range_cache, meta_cache).await };
                         self.status = FutureStatus::OpenSst(Box::pin(future));
                         continue;
                     }
@@ -266,7 +262,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2, 3],
                 ),
-                (manager.base_fs().clone(), true),
+                manager.base_fs().clone(),
             )
             .unwrap();
 
@@ -302,7 +298,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2, 4],
                 ),
-                (manager.base_fs().clone(), true),
+                manager.base_fs().clone(),
             )
             .unwrap();
 
@@ -338,7 +334,7 @@ mod tests {
                     &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
                     [0, 1, 2],
                 ),
-                (manager.base_fs().clone(), true),
+                manager.base_fs().clone(),
             )
             .unwrap();
 

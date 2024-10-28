@@ -70,21 +70,21 @@ where
                             break;
                         }
                         for (gen, level) in gens {
-                            let (fs, _) = self
+                            let fs = self
                                 .option
                                 .level_fs_path(level)
                                 .map(|path| self.manager.get_fs(path))
-                                .unwrap_or((self.manager.base_fs(), true));
+                                .unwrap_or(self.manager.base_fs());
                             fs.remove(&self.option.table_path(&gen, level)).await?;
                         }
                     }
                 }
                 CleanTag::RecoverClean { wal_id: gen, level } => {
-                    let (fs, _) = self
+                    let fs = self
                         .option
                         .level_fs_path(level)
                         .map(|path| self.manager.get_fs(path))
-                        .unwrap_or((self.manager.base_fs(), true));
+                        .unwrap_or(self.manager.base_fs());
                     fs.remove(&self.option.table_path(&gen, level)).await?;
                 }
             }
@@ -124,10 +124,10 @@ pub(crate) mod tests {
         let gen_1 = FileId::new();
         let gen_2 = FileId::new();
         let gen_3 = FileId::new();
-        let (fs, _) = option
+        let fs = option
             .level_fs_path(0)
             .map(|path| manager.get_fs(path))
-            .unwrap_or((manager.base_fs(), true));
+            .unwrap_or(manager.base_fs());
         {
             fs.open_options(
                 &option.table_path(&gen_0, 0),
