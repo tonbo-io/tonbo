@@ -70,9 +70,7 @@ mod tests {
         let mut write_hasher = crc32fast::Hasher::new();
 
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .await
-            .unwrap();
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         let db: DB<Customer, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 

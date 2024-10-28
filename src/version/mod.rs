@@ -17,7 +17,11 @@ use thiserror::Error;
 use tracing::error;
 
 use crate::{
-    fs::{manager::StoreManager, CacheError, FileId, FileType},
+    fs::{
+        cache_reader::{MetaCache, RangeCache},
+        manager::StoreManager,
+        CacheError, FileId, FileType,
+    },
     ondisk::sstable::SsTable,
     record::Record,
     scope::Scope,
@@ -49,6 +53,9 @@ where
     option: Arc<DbOption<R>>,
     timestamp: Arc<AtomicU32>,
     log_length: u32,
+
+    range_cache: RangeCache,
+    meta_cache: MetaCache,
 }
 
 impl<R> Version<R>
@@ -60,6 +67,8 @@ where
         option: Arc<DbOption<R>>,
         clean_sender: Sender<CleanTag>,
         timestamp: Arc<AtomicU32>,
+        range_cache: RangeCache,
+        meta_cache: MetaCache,
     ) -> Self {
         Version {
             ts: Timestamp::from(0),
@@ -68,11 +77,20 @@ where
             option: option.clone(),
             timestamp,
             log_length: 0,
+            range_cache,
+            meta_cache,
         }
     }
 
     pub(crate) fn option(&self) -> &Arc<DbOption<R>> {
         &self.option
+    }
+
+    pub(crate) fn meta_cache(&self) -> MetaCache {
+        self.meta_cache.clone()
+    }
+    pub(crate) fn range_cache(&self) -> RangeCache {
+        self.range_cache.clone()
     }
 }
 
@@ -107,6 +125,8 @@ where
             option: self.option.clone(),
             timestamp: self.timestamp.clone(),
             log_length: self.log_length,
+            range_cache: self.range_cache.clone(),
+            meta_cache: self.meta_cache.clone(),
         }
     }
 }
@@ -187,7 +207,7 @@ where
             .open_options(&path, FileType::Parquet.open_options(true))
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(&self.option, file, *gen, !is_local)
+        SsTable::<R>::open(file, *gen, !is_local, self.range_cache(), self.meta_cache())
             .await?
             .get(key, projection_mask)
             .await
@@ -227,7 +247,14 @@ where
                 .open_options(&path, FileType::Parquet.open_options(true))
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(&self.option, file, scope.gen, !is_local).await?;
+            let table = SsTable::open(
+                file,
+                scope.gen,
+                !is_local,
+                self.range_cache(),
+                self.meta_cache(),
+            )
+            .await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table

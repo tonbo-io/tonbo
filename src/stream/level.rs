@@ -15,7 +15,10 @@ use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
 
 use crate::{
-    fs::{CacheError, FileId, FileType},
+    fs::{
+        cache_reader::{MetaCache, RangeCache},
+        CacheError, FileId, FileType,
+    },
     ondisk::{scan::SsTableScan, sstable::SsTable},
     record::Record,
     scope::Scope,
@@ -47,6 +50,8 @@ where
     ts: Timestamp,
     level: usize,
     option: Arc<DbOption<R>>,
+    meta_cache: MetaCache,
+    range_cache: RangeCache,
     gens: VecDeque<FileId>,
     limit: Option<usize>,
     projection_mask: ProjectionMask,
@@ -87,6 +92,8 @@ where
             ts,
             level,
             option: version.option().clone(),
+            meta_cache: version.meta_cache(),
+            range_cache: version.range_cache(),
             gens,
             limit,
             projection_mask,
@@ -167,11 +174,13 @@ where
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        let option = self.option.clone();
+                        let meta_cache = self.meta_cache.clone();
+                        let range_cache = self.range_cache.clone();
                         let (_, gen) = self.path.clone().unwrap();
                         let is_local = self.is_local;
-                        let future =
-                            async move { SsTable::open(&option, file, gen, !is_local).await };
+                        let future = async move {
+                            SsTable::open(file, gen, !is_local, range_cache, meta_cache).await
+                        };
                         self.status = FutureStatus::OpenSst(Box::pin(future));
                         continue;
                     }
@@ -227,11 +236,9 @@ mod tests {
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let option = Arc::new(
-            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-                .await
-                .unwrap(),
-        );
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
         manager
             .base_fs()

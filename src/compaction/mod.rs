@@ -218,15 +218,21 @@ where
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(option, file, scope.gen, !is_local)
-                            .await?
-                            .scan(
-                                (Bound::Unbounded, Bound::Unbounded),
-                                u32::MAX.into(),
-                                None,
-                                ProjectionMask::all(),
-                            )
-                            .await?,
+                        inner: SsTable::open(
+                            file,
+                            scope.gen,
+                            !is_local,
+                            version.range_cache(),
+                            version.meta_cache(),
+                        )
+                        .await?
+                        .scan(
+                            (Bound::Unbounded, Bound::Unbounded),
+                            u32::MAX.into(),
+                            None,
+                            ProjectionMask::all(),
+                        )
+                        .await?,
                     });
                 }
             } else {
@@ -525,7 +531,7 @@ pub(crate) mod tests {
         tests::Test,
         timestamp::Timestamp,
         trigger::{TriggerFactory, TriggerType},
-        version::{edit::VersionEdit, Version, MAX_LEVEL},
+        version::{edit::VersionEdit, set::VersionSet, Version, MAX_LEVEL},
         wal::log::LogType,
         DbError, DbOption, DB,
     };
@@ -583,9 +589,7 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_dir_l0 = tempfile::tempdir().unwrap();
 
-        let option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .await
-            .unwrap()
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
             .level_path(
                 0,
                 Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
@@ -699,9 +703,7 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "id".to_string(),
             0,
-        )
-        .await
-        .unwrap();
+        );
         manager
             .base_fs()
             .create_dir_all(&option.wal_dir_path())
@@ -769,9 +771,7 @@ pub(crate) mod tests {
         let temp_dir_l0 = TempDir::new().unwrap();
         let temp_dir_l1 = TempDir::new().unwrap();
 
-        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .await
-            .unwrap()
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
             .level_path(
                 0,
                 Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
@@ -1061,8 +1061,14 @@ pub(crate) mod tests {
         .unwrap();
 
         let (sender, _) = bounded(1);
-        let mut version =
-            Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
+        let (meta_cache, range_cache) = VersionSet::build_cache(&option).await.unwrap();
+        let mut version = Version::<Test>::new(
+            option.clone(),
+            sender,
+            Arc::new(AtomicU32::default()),
+            range_cache,
+            meta_cache,
+        );
         version.level_slice[0].push(Scope {
             min: 1.to_string(),
             max: 3.to_string(),
@@ -1110,9 +1116,7 @@ pub(crate) mod tests {
     pub(crate) async fn major_panic() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .await
-            .unwrap();
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.major_threshold_with_sst_size = 1;
         option.level_sst_magnification = 1;
         let manager =
@@ -1181,8 +1185,14 @@ pub(crate) mod tests {
 
         let option = Arc::new(option);
         let (sender, _) = bounded(1);
-        let mut version =
-            Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
+        let (meta_cache, range_cache) = VersionSet::build_cache(&option).await.unwrap();
+        let mut version = Version::<Test>::new(
+            option.clone(),
+            sender,
+            Arc::new(AtomicU32::default()),
+            range_cache,
+            meta_cache,
+        );
         version.level_slice[0].push(Scope {
             min: 0.to_string(),
             max: 4.to_string(),
@@ -1219,9 +1229,7 @@ pub(crate) mod tests {
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .await
-            .unwrap();
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 0;
         option.major_threshold_with_sst_size = 2;

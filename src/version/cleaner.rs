@@ -116,11 +116,9 @@ pub(crate) mod tests {
     async fn test_cleaner() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(
-            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-                .await
-                .unwrap(),
-        );
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
         let gen_0 = FileId::new();
         let gen_1 = FileId::new();

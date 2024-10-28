@@ -10,12 +10,17 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
-use fusio::{dynamic::DynFile, fs::FileMeta};
+use foyer::{CacheBuilder, DirectFsDeviceOptions, Engine, HybridCacheBuilder, LruConfig};
+use fusio::{dynamic::DynFile, fs::FileMeta, path::path_to_local};
 use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{
+        cache_reader::{MetaCache, RangeCache},
+        manager::StoreManager,
+        parse_file_id, CacheError, FileId, FileType,
+    },
     record::Record,
     serdes::Encode,
     timestamp::Timestamp,
@@ -62,6 +67,9 @@ where
     timestamp: Arc<AtomicU32>,
     option: Arc<DbOption<R>>,
     manager: Arc<StoreManager>,
+
+    range_cache: RangeCache,
+    meta_cache: MetaCache,
 }
 
 impl<R> Clone for VersionSet<R>
@@ -75,6 +83,8 @@ where
             timestamp: self.timestamp.clone(),
             option: self.option.clone(),
             manager: self.manager.clone(),
+            range_cache: self.range_cache.clone(),
+            meta_cache: self.meta_cache.clone(),
         }
     }
 }
@@ -148,6 +158,9 @@ where
 
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
+
+        let (meta_cache, range_cache) = Self::build_cache(&option).await?;
+
         let set = VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(Version::<R> {
@@ -157,6 +170,8 @@ where
                     option: option.clone(),
                     timestamp: timestamp.clone(),
                     log_length: 0,
+                    range_cache: range_cache.clone(),
+                    meta_cache: meta_cache.clone(),
                 }),
                 log_with_id: (log, log_id),
             })),
@@ -164,10 +179,36 @@ where
             timestamp,
             option,
             manager,
+            range_cache,
+            meta_cache,
         };
         set.apply_edits(edits, None, true).await?;
 
         Ok(set)
+    }
+
+    pub(crate) async fn build_cache(
+        option: &DbOption<R>,
+    ) -> Result<(MetaCache, RangeCache), VersionError<R>> {
+        let meta_cache = Arc::new(
+            CacheBuilder::new(option.cache_meta_capacity)
+                .with_shards(option.cache_meta_shards)
+                .with_eviction_config(LruConfig {
+                    high_priority_pool_ratio: option.cache_meta_ratio,
+                })
+                .build(),
+        );
+        let range_cache = HybridCacheBuilder::new()
+            .memory(option.cache_range_memory)
+            .storage(Engine::Large)
+            .with_device_options(
+                DirectFsDeviceOptions::new(path_to_local(&option.cache_path).unwrap())
+                    .with_capacity(option.cache_range_memory),
+            )
+            .build()
+            .await
+            .map_err(CacheError::from)?;
+        Ok((meta_cache, range_cache))
     }
 
     pub(crate) async fn current(&self) -> VersionRef<R> {
@@ -326,6 +367,7 @@ pub(crate) mod tests {
             )
             .await?;
         let timestamp = version.timestamp.clone();
+        let (meta_cache, range_cache) = VersionSet::build_cache(&option).await?;
 
         Ok(VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
@@ -336,6 +378,8 @@ pub(crate) mod tests {
             timestamp,
             option,
             manager,
+            range_cache,
+            meta_cache,
         })
     }
 
@@ -344,11 +388,9 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let option = Arc::new(
-            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-                .await
-                .unwrap(),
-        );
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
         manager
             .base_fs()
             .create_dir_all(&option.version_log_dir_path())
@@ -383,9 +425,7 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .await
-            .unwrap();
+        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -512,11 +552,9 @@ pub(crate) mod tests {
     async fn version_level_sort() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(
-            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-                .await
-                .unwrap(),
-        );
+        let option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        ));
 
         let (sender, _) = bounded(1);
         manager

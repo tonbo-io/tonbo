@@ -95,6 +95,7 @@ pub(crate) mod tests {
         ondisk::sstable::SsTable,
         record::{Record, RecordInstance},
         tests::Test,
+        version::set::VersionSet,
         wal::log::LogType,
         DbOption,
     };
@@ -137,10 +138,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_cache_read() {
         let temp_dir = TempDir::new().unwrap();
-        let option =
-            DbOption::<Test>::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-                .await
-                .unwrap();
+        let option = DbOption::<Test>::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         let fs = option.base_fs.clone().parse().unwrap();
         fs.create_dir_all(&option.version_log_dir_path())
             .await
@@ -189,9 +187,10 @@ pub(crate) mod tests {
 
         let read_count = Arc::new(AtomicUsize::new(0));
         let table_path = option.table_path(&table_gen, 0);
+        let (meta_cache, range_cache) = VersionSet::build_cache(&option).await.unwrap();
+
         for _ in 0..1000 {
             let mut scan = SsTable::<Test>::open(
-                &option,
                 Box::new(CountFile {
                     inner: fs
                         .open_options(&table_path, FileType::Parquet.open_options(true))
@@ -201,6 +200,8 @@ pub(crate) mod tests {
                 }),
                 table_gen,
                 true,
+                range_cache.clone(),
+                meta_cache.clone(),
             )
             .await
             .unwrap()

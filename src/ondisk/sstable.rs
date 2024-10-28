@@ -11,11 +11,13 @@ use parquet::arrow::{
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    fs::{cache_reader::CacheReader, CacheError, FileId},
+    fs::{
+        cache_reader::{CacheReader, MetaCache, RangeCache},
+        CacheError, FileId,
+    },
     record::Record,
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TimestampedRef},
-    DbOption,
 };
 
 pub(crate) struct SsTable<R>
@@ -31,18 +33,19 @@ where
     R: Record,
 {
     pub(crate) async fn open(
-        option: &DbOption<R>,
         file: Box<dyn DynFile>,
         gen: FileId,
         enable_cache: bool,
+        range_cache: RangeCache,
+        meta_cache: MetaCache,
     ) -> Result<Self, CacheError> {
         let size = file.size().await?;
         let reader = if !enable_cache {
             Box::new(AsyncReader::new(file, size).await?) as Box<dyn AsyncFileReader>
         } else {
             Box::new(CacheReader::new(
-                option.meta_cache.clone(),
-                option.range_cache.clone(),
+                meta_cache,
+                range_cache,
                 gen,
                 AsyncReader::new(file, size).await?,
             ))
@@ -201,9 +204,7 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-                .await
-                .unwrap(),
+            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::new(),
         )
         .await;
@@ -279,9 +280,7 @@ pub(crate) mod tests {
         let base_fs = manager.base_fs();
 
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from_path(Path::from_filesystem_path(temp_dir.path()).unwrap())
-                .await
-                .unwrap(),
+            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::new(),
         )
         .await;
