@@ -87,8 +87,8 @@ def test_duckdb(benchmark):
 
 
 @pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
-def test_tonbo(benchmark):
-    benchmark(tonbo_write)
+def test_tonbo(aio_benchmark):
+    aio_benchmark(tonbo_write)
 
 
 @pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
