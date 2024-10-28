@@ -15,6 +15,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio"]
+bench = ["pytest", "pytest-asyncio", "pytest-benchmark", "duckdb"]
 docs = ["pdoc"]
 
 [tool.maturin]
