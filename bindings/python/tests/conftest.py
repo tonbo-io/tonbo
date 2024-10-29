@@ -1,5 +1,21 @@
 import asyncio
+import random
+
 import pytest_asyncio
+
+
+def gen_string(max_size):
+    size = gen_int(0, max_size)
+    charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return ''.join(random.choices(charset, k=size))
+
+
+def gen_bytes(max_size):
+    return gen_string(max_size).encode("utf-8")
+
+
+def gen_int(lower, high):
+    return random.randint(lower, high)
 
 
 # async support for pytest-benchmark
