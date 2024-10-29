@@ -10,17 +10,13 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
-use foyer::{CacheBuilder, DirectFsDeviceOptions, Engine, HybridCacheBuilder, LruConfig};
 use fusio::{dynamic::DynFile, fs::FileMeta, path::path_to_local};
 use futures_util::StreamExt;
+use tonbo_ext_reader::{foyer_reader::build_cache, MetaCache, RangeCache};
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{
-        cache_reader::{MetaCache, RangeCache},
-        manager::StoreManager,
-        parse_file_id, CacheError, FileId, FileType,
-    },
+    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
     record::Record,
     serdes::Encode,
     timestamp::Timestamp,
@@ -159,7 +155,15 @@ where
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
 
-        let (meta_cache, range_cache) = Self::build_cache(&option).await?;
+        let (meta_cache, range_cache) = build_cache(
+            path_to_local(&option.cache_path).unwrap(),
+            option.cache_meta_capacity,
+            option.cache_meta_shards,
+            option.cache_meta_ratio,
+            option.cache_range_memory,
+            option.cache_range_disk,
+        )
+        .await?;
 
         let set = VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
@@ -185,30 +189,6 @@ where
         set.apply_edits(edits, None, true).await?;
 
         Ok(set)
-    }
-
-    pub(crate) async fn build_cache(
-        option: &DbOption<R>,
-    ) -> Result<(MetaCache, RangeCache), VersionError<R>> {
-        let meta_cache = Arc::new(
-            CacheBuilder::new(option.cache_meta_capacity)
-                .with_shards(option.cache_meta_shards)
-                .with_eviction_config(LruConfig {
-                    high_priority_pool_ratio: option.cache_meta_ratio,
-                })
-                .build(),
-        );
-        let range_cache = HybridCacheBuilder::new()
-            .memory(option.cache_range_memory)
-            .storage(Engine::Large)
-            .with_device_options(
-                DirectFsDeviceOptions::new(path_to_local(&option.cache_path).unwrap())
-                    .with_capacity(option.cache_range_memory),
-            )
-            .build()
-            .await
-            .map_err(CacheError::from)?;
-        Ok((meta_cache, range_cache))
     }
 
     pub(crate) async fn current(&self) -> VersionRef<R> {
@@ -331,10 +311,11 @@ pub(crate) mod tests {
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
-    use fusio::path::Path;
+    use fusio::path::{path_to_local, Path};
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;
+    use tonbo_ext_reader::foyer_reader::build_cache;
 
     use crate::{
         fs::{manager::StoreManager, FileId, FileType},
@@ -367,7 +348,15 @@ pub(crate) mod tests {
             )
             .await?;
         let timestamp = version.timestamp.clone();
-        let (meta_cache, range_cache) = VersionSet::build_cache(&option).await?;
+        let (meta_cache, range_cache) = build_cache(
+            path_to_local(&option.cache_path).unwrap(),
+            option.cache_meta_capacity,
+            option.cache_meta_shards,
+            option.cache_meta_ratio,
+            option.cache_range_memory,
+            option.cache_range_disk,
+        )
+        .await?;
 
         Ok(VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {

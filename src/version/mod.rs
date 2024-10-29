@@ -14,14 +14,11 @@ use flume::{SendError, Sender};
 use fusio::DynFs;
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
+use tonbo_ext_reader::{CacheError, MetaCache, RangeCache};
 use tracing::error;
 
 use crate::{
-    fs::{
-        cache_reader::{MetaCache, RangeCache},
-        manager::StoreManager,
-        CacheError, FileId, FileType,
-    },
+    fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
     record::Record,
     scope::Scope,

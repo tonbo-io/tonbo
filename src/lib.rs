@@ -150,6 +150,7 @@ use record::{ColumnDesc, DynRecord, Record, RecordInstance};
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
+use tonbo_ext_reader::CacheError;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
@@ -158,7 +159,7 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
-    fs::{manager::StoreManager, parse_file_id, CacheError, FileId, FileType},
+    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
     serdes::Decode,
     stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,

@@ -8,13 +8,11 @@ use parquet::arrow::{
     async_reader::AsyncFileReader,
     ParquetRecordBatchStreamBuilder, ProjectionMask,
 };
+use tonbo_ext_reader::{foyer_reader::CacheReader, MetaCache, RangeCache};
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    fs::{
-        cache_reader::{CacheReader, MetaCache, RangeCache},
-        CacheError, FileId,
-    },
+    fs::FileId,
     record::Record,
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TimestampedRef},
@@ -37,7 +35,7 @@ where
         gen: FileId,
         range_cache: RangeCache,
         meta_cache: MetaCache,
-    ) -> Result<Self, CacheError> {
+    ) -> Result<Self, fusio::Error> {
         let size = file.size().await?;
         let reader = Box::new(CacheReader::new(
             meta_cache,
@@ -53,7 +51,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) async fn open_local(file: Box<dyn DynFile>) -> Result<Self, CacheError> {
+    pub(crate) async fn open_local(file: Box<dyn DynFile>) -> Result<Self, fusio::Error> {
         let size = file.size().await?;
 
         Ok(SsTable {

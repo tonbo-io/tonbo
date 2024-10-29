@@ -1,4 +1,4 @@
-workspace = { members = ["tonbo_macros"] }
+workspace = { members = [ "tonbo_ext_reader","tonbo_macros"] }
 
 [package]
 description = "An embedded persistent KV database in Rust."
@@ -49,17 +49,15 @@ path = "benches/criterion/writes.rs"
 required-features = ["sled"]
 
 [dependencies]
-anyhow = "1"
 arrow = "53"
 async-lock = "3"
 async-stream = "0.3"
 async-trait = { version = "0.1", optional = true }
-bytes = { version = "1.7", features = ["serde"], optional = true }
+bytes = { version = "1.7", optional = true }
 crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "42", optional = true }
 flume = { version = "0.11", features = ["async"] }
-foyer = { version = "0.12.2" }
 fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "d2a5e7c0d17d173b1f67af25b7ff133e93244160", package = "fusio", version = "0.2.1", features = [
     "aws",
     "dyn",
@@ -85,8 +83,9 @@ thiserror = "1"
 tokio = { version = "1", features = ["io-util"], default-features = false }
 tokio-util = { version = "0.7" }
 tonbo_macros = { version = "0.1.0", path = "tonbo_macros" }
+tonbo_ext_reader = { version = "0.1.0", path = "tonbo_ext_reader" }
 tracing = "0.1"
-ulid = { version = "1", features = ["serde"] }
+ulid = "1"
 
 # Only used for benchmarks
 log = "0.4.22"

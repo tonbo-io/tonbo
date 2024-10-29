@@ -7,10 +7,11 @@ use futures_util::StreamExt;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tonbo_ext_reader::CacheError;
 use ulid::Ulid;
 
 use crate::{
-    fs::{manager::StoreManager, CacheError, FileId, FileType},
+    fs::{manager::StoreManager, FileId, FileType},
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
         mutable::Mutable,
@@ -514,11 +515,15 @@ pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
     use flume::bounded;
-    use fusio::{path::Path, DynFs};
+    use fusio::{
+        path::{path_to_local, Path},
+        DynFs,
+    };
     use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;
+    use tonbo_ext_reader::foyer_reader::build_cache;
 
     use crate::{
         compaction::Compactor,
@@ -530,7 +535,7 @@ pub(crate) mod tests {
         tests::Test,
         timestamp::Timestamp,
         trigger::{TriggerFactory, TriggerType},
-        version::{edit::VersionEdit, set::VersionSet, Version, MAX_LEVEL},
+        version::{edit::VersionEdit, Version, MAX_LEVEL},
         wal::log::LogType,
         DbError, DbOption, DB,
     };
@@ -1060,7 +1065,16 @@ pub(crate) mod tests {
         .unwrap();
 
         let (sender, _) = bounded(1);
-        let (meta_cache, range_cache) = VersionSet::build_cache(&option).await.unwrap();
+        let (meta_cache, range_cache) = build_cache(
+            path_to_local(&option.cache_path).unwrap(),
+            option.cache_meta_capacity,
+            option.cache_meta_shards,
+            option.cache_meta_ratio,
+            option.cache_range_memory,
+            option.cache_range_disk,
+        )
+        .await
+        .unwrap();
         let mut version = Version::<Test>::new(
             option.clone(),
             sender,
@@ -1184,7 +1198,16 @@ pub(crate) mod tests {
 
         let option = Arc::new(option);
         let (sender, _) = bounded(1);
-        let (meta_cache, range_cache) = VersionSet::build_cache(&option).await.unwrap();
+        let (meta_cache, range_cache) = build_cache(
+            path_to_local(&option.cache_path).unwrap(),
+            option.cache_meta_capacity,
+            option.cache_meta_shards,
+            option.cache_meta_ratio,
+            option.cache_range_memory,
+            option.cache_range_disk,
+        )
+        .await
+        .unwrap();
         let mut version = Version::<Test>::new(
             option.clone(),
             sender,
