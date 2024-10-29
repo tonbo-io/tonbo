@@ -68,10 +68,39 @@ async def tonbo_write(threads: int):
         await txn.commit()
 
     for i in range(0, threads):
-        tasks.append(insert_task((i + 1) * WRITE_TIME // threads, (i + 1) * WRITE_TIME // threads))
+        tasks.append(insert_task(i * WRITE_TIME // threads, (i + 1) * WRITE_TIME // threads))
 
     await asyncio.gather(*tasks)
     await db.flush_wal()
+
+
+async def tonbo_write_disable_wal(threads: int):
+    temp_dir = tempfile.TemporaryDirectory()
+
+    option = DbOption(from_filesystem_path(temp_dir.name))
+    option.use_wal = False
+
+    db = TonboDB(option, User())
+    tasks = []
+
+    async def insert_task(start: int, end: int):
+        txn = await db.transaction()
+        for j in range(start, end):
+            txn.insert(
+                User(
+                    id=j,
+                    age=gen_int(0, 0xffff),
+                    name=gen_string(20),
+                    email=gen_string(20),
+                    data=gen_bytes(200),
+                )
+            )
+        await txn.commit()
+
+    for i in range(0, threads):
+        tasks.append(insert_task(i * WRITE_TIME // threads, (i + 1) * WRITE_TIME // threads))
+
+    await asyncio.gather(*tasks)
 
 
 async def sqlite_write(threads: int):
@@ -114,6 +143,13 @@ def test_tonbo_one_task(aio_benchmark, threads):
 @pytest.mark.parametrize("threads", [1])
 @pytest.mark.benchmark(group="1 async task")
 @pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
+def test_tonbo_disable_wal_one_task(aio_benchmark, threads):
+    aio_benchmark(tonbo_write_disable_wal, threads)
+
+
+@pytest.mark.parametrize("threads", [1])
+@pytest.mark.benchmark(group="1 async task")
+@pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
 def test_sqlite_one_task(aio_benchmark, threads):
     aio_benchmark(sqlite_write, threads)
 
@@ -135,6 +171,13 @@ def test_tonbo_four_task(aio_benchmark, threads):
 @pytest.mark.parametrize("threads", [4])
 @pytest.mark.benchmark(group="4 async task")
 @pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
+def test_tonbo_disable_wal_four_task(aio_benchmark, threads):
+    aio_benchmark(tonbo_write_disable_wal, threads)
+
+
+@pytest.mark.parametrize("threads", [4])
+@pytest.mark.benchmark(group="4 async task")
+@pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
 def test_sqlite_four_task(aio_benchmark, threads):
     aio_benchmark(sqlite_write, threads)
 
@@ -151,6 +194,13 @@ def test_duckdb_eight_task(aio_benchmark, threads):
 @pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
 def test_tonbo_eight_task(aio_benchmark, threads):
     aio_benchmark(tonbo_write, threads)
+
+
+@pytest.mark.parametrize("threads", [8])
+@pytest.mark.benchmark(group="8 async task")
+@pytest.mark.skipif("BENCH" not in os.environ, reason="benchmark")
+def test_tonbo_disable_wal_eight_task(aio_benchmark, threads):
+    aio_benchmark(tonbo_write_disable_wal, threads)
 
 
 @pytest.mark.parametrize("threads", [8])
