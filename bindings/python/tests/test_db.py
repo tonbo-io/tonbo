@@ -52,13 +52,31 @@ async def test_db_remove():
     for i in range(0, 100):
         if i % 2 == 0:
             await db.insert(User(age=i, height=i * 10, weight=i * 20))
-        # else:
-        #     await db.remove(i)
+        else:
+            await db.remove(i)
 
     for i in range(0, 100):
-        print(i)
         user = await db.get(i)
         if i % 2 == 0:
             assert user == {"age": i, "height": i * 10, "weight": i * 20}
         else:
             assert user is None
+
+
+@pytest.mark.asyncio
+async def test_db_recover():
+    temp_dir = tempfile.TemporaryDirectory()
+    db = TonboDB(DbOption(temp_dir.name), User())
+    for i in range(0, 100):
+        await db.insert(User(age=i, height=i * 10, weight=i * 20))
+
+    for i in range(0, 100):
+        user = await db.get(i)
+        assert user == {"age": i, "height": i * 10, "weight": i * 20}
+
+    await db.flush_wal()
+
+    db = TonboDB(DbOption(temp_dir.name), User())
+    for i in range(0, 100):
+        user = await db.get(i)
+        assert user == {"age": i, "height": i * 10, "weight": i * 20}

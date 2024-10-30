@@ -253,10 +253,11 @@ macro_rules! implement_decode_col {
                             },
                         )*
                     };
+                let name = String::decode(reader).await?;
                 Ok(Column {
                     datatype,
                     is_nullable,
-                    name: "".to_owned(),
+                    name,
                     value,
                 })
             }
@@ -295,11 +296,12 @@ macro_rules! implement_encode_col {
                             }
                         )*
                 };
+                self.name.encode(writer).await?;
                 Ok(())
             }
 
             fn size(&self) -> usize {
-                3 + match self.datatype {
+                3 + self.name.size() + match self.datatype {
                     $(
                         Datatype::$Datatype => {
                             if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {

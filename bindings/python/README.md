@@ -10,17 +10,20 @@ Tonbo's Python bindings can be used to build data-intensive applications, includ
 from tonbo import DbOption, Column, DataType, Record, TonboDB, Bound
 from tonbo.fs import from_filesystem_path
 import asyncio
+import os
 
 # define a Tonbo record
 @Record
 class User:
-    age = Column(DataType.INT8, name="age", primary_key=True)
-    height = Column(DataType.INT16, name="height", nullable=True)
-    weight = Column(DataType.INT8, name="weight", nullable=False)
+    age = Column(DataType.Int8, name="age", primary_key=True)
+    height = Column(DataType.Int16, name="height", nullable=True)
+    weight = Column(DataType.Int8, name="weight", nullable=False)
 
 async def main():
 
-    db = TonboDB(DbOption(from_filesystem_path("./db_path/users")), User())
+    if not os.path.exists("db_path/users"):
+        os.makedirs("db_path/users")
+    db = TonboDB(DbOption(from_filesystem_path("db_path/users")), User())
 
     await db.insert(User(age=18, height=175, weight=60))
     record = await db.get(18)
