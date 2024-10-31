@@ -16,6 +16,7 @@ use tokio::fs::create_dir_all;
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
+use tonbo_ext_reader::foyer_reader::FoyerReader;
 use tonbo_macros::Record;
 
 const RNG_SEED: u64 = 3;
@@ -185,12 +186,12 @@ pub trait BenchReader {
 }
 
 pub struct TonboBenchDataBase {
-    db: tonbo::DB<Customer, TokioExecutor>,
+    db: tonbo::DB<Customer, TokioExecutor, FoyerReader>,
 }
 
 impl TonboBenchDataBase {
     #[allow(dead_code)]
-    pub fn new(db: tonbo::DB<Customer, TokioExecutor>) -> Self {
+    pub fn new(db: tonbo::DB<Customer, TokioExecutor, FoyerReader>) -> Self {
         TonboBenchDataBase { db }
     }
 }
@@ -234,7 +235,7 @@ impl BenchDatabase for TonboBenchDataBase {
 }
 
 pub struct TonboBenchReadTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer>,
+    txn: tonbo::transaction::Transaction<'a, Customer, FoyerReader>,
 }
 
 impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
@@ -249,7 +250,7 @@ impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
 }
 
 pub struct TonboBenchReader<'db, 'txn> {
-    txn: &'txn tonbo::transaction::Transaction<'db, Customer>,
+    txn: &'txn tonbo::transaction::Transaction<'db, Customer, FoyerReader>,
 }
 
 impl BenchReader for TonboBenchReader<'_, '_> {
@@ -289,7 +290,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
 }
 
 pub struct TonboBenchWriteTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer>,
+    txn: tonbo::transaction::Transaction<'a, Customer, FoyerReader>,
 }
 
 impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
@@ -309,7 +310,7 @@ impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
 }
 
 pub struct TonboBenchInserter<'db, 'txn> {
-    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer>,
+    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer, FoyerReader>,
 }
 
 impl BenchInserter for TonboBenchInserter<'_, '_> {
