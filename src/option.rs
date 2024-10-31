@@ -11,6 +11,7 @@ use parquet::{
     format::SortingColumn,
     schema::types::ColumnPath,
 };
+use tonbo_ext_reader::CacheReader;
 
 use crate::{
     fs::{FileId, FileType},
@@ -281,8 +282,12 @@ where
         self.level_paths[level].as_ref().map(|(path, _)| path)
     }
 
-    pub(crate) fn is_threshold_exceeded_major(&self, version: &Version<R>, level: usize) -> bool {
-        Version::<R>::tables_len(version, level)
+    pub(crate) fn is_threshold_exceeded_major<C: CacheReader + 'static>(
+        &self,
+        version: &Version<R, C>,
+        level: usize,
+    ) -> bool {
+        Version::<R, C>::tables_len(version, level)
             >= (self.major_threshold_with_sst_size * self.level_sst_magnification.pow(level as u32))
     }
 }

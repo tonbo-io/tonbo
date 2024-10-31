@@ -5,6 +5,7 @@ use std::{
 
 use futures_core::Stream;
 use pin_project_lite::pin_project;
+use tonbo_ext_reader::CacheReader;
 
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
@@ -13,25 +14,27 @@ use crate::{
 };
 
 pin_project! {
-    pub struct PackageStream<'package, R>
+    pub struct PackageStream<'package, R, C>
     where
         R: Record,
+        C: CacheReader,
     {
         row_count: usize,
         batch_size: usize,
-        inner: MergeStream<'package, R>,
+        inner: MergeStream<'package, R, C>,
         builder: <R::Columns as ArrowArrays>::Builder,
         projection_indices: Option<Vec<usize>>,
     }
 }
 
-impl<'package, R> PackageStream<'package, R>
+impl<'package, R, C> PackageStream<'package, R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     pub(crate) fn new(
         batch_size: usize,
-        merge: MergeStream<'package, R>,
+        merge: MergeStream<'package, R, C>,
         projection_indices: Option<Vec<usize>>,
         instance: &RecordInstance,
     ) -> Self {
@@ -45,9 +48,10 @@ where
     }
 }
 
-impl<'package, R> Stream for PackageStream<'package, R>
+impl<'package, R, C> Stream for PackageStream<'package, R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     type Item = Result<R::Columns, parquet::errors::ParquetError>;
 
@@ -85,6 +89,7 @@ mod tests {
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use tempfile::TempDir;
+    use tonbo_ext_reader::foyer_reader::FoyerReader;
 
     use crate::{
         inmem::{
@@ -177,7 +182,7 @@ mod tests {
         .await
         .unwrap();
 
-        let merge = MergeStream::<Test>::from_vec(
+        let merge = MergeStream::<Test, FoyerReader>::from_vec(
             vec![m1
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into()],

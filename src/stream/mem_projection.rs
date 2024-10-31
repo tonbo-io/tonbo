@@ -7,6 +7,7 @@ use std::{
 use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
 use pin_project_lite::pin_project;
+use tonbo_ext_reader::CacheReader;
 
 use crate::{
     record::Record,
@@ -14,20 +15,25 @@ use crate::{
 };
 
 pin_project! {
-    pub struct MemProjectionStream<'projection, R>
+    pub struct MemProjectionStream<'projection, R, C>
     where
         R: Record,
+        C: CacheReader
     {
-        stream: Box<ScanStream<'projection, R>>,
+        stream: Box<ScanStream<'projection, R, C>>,
         projection_mask: Arc<ProjectionMask>,
     }
 }
 
-impl<'projection, R> MemProjectionStream<'projection, R>
+impl<'projection, R, C> MemProjectionStream<'projection, R, C>
 where
     R: Record,
+    C: CacheReader,
 {
-    pub(crate) fn new(stream: ScanStream<'projection, R>, projection_mask: ProjectionMask) -> Self {
+    pub(crate) fn new(
+        stream: ScanStream<'projection, R, C>,
+        projection_mask: ProjectionMask,
+    ) -> Self {
         Self {
             stream: Box::new(stream),
             projection_mask: Arc::new(projection_mask),
@@ -35,9 +41,10 @@ where
     }
 }
 
-impl<'projection, R> Stream for MemProjectionStream<'projection, R>
+impl<'projection, R, C> Stream for MemProjectionStream<'projection, R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     type Item = Result<Entry<'projection, R>, ParquetError>;
 
@@ -61,6 +68,7 @@ mod tests {
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
+    use tonbo_ext_reader::foyer_reader::FoyerReader;
 
     use crate::{
         inmem::mutable::Mutable, record::Record, stream::mem_projection::MemProjectionStream,
@@ -121,7 +129,7 @@ mod tests {
             vec![0, 1, 2, 4],
         );
 
-        let mut stream = MemProjectionStream::<Test>::new(
+        let mut stream = MemProjectionStream::<Test, FoyerReader>::new(
             mutable
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into(),

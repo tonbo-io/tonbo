@@ -13,7 +13,8 @@ use fusio::{
 };
 use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
-use tonbo_ext_reader::{MetaCache, RangeCache};
+use pin_project_lite::pin_project;
+use tonbo_ext_reader::CacheReader;
 
 use crate::{
     fs::{FileId, FileType},
@@ -26,46 +27,57 @@ use crate::{
     DbOption,
 };
 
-enum FutureStatus<'level, R>
+enum FutureStatus<'level, R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     Init(FileId),
-    Ready(SsTableScan<'level, R>),
+    Ready(SsTableScan<'level, R, C>),
     OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
-    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, Error>> + Send + 'level>>),
+    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R, C>, Error>> + Send + 'level>>),
     LoadStream(
-        Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
+        Pin<
+            Box<
+                dyn Future<Output = Result<SsTableScan<'level, R, C>, ParquetError>>
+                    + Send
+                    + 'level,
+            >,
+        >,
     ),
 }
 
-pub(crate) struct LevelStream<'level, R>
-where
-    R: Record,
-{
-    lower: Bound<&'level R::Key>,
-    upper: Bound<&'level R::Key>,
-    ts: Timestamp,
-    level: usize,
-    option: Arc<DbOption<R>>,
-    meta_cache: MetaCache,
-    range_cache: RangeCache,
-    gens: VecDeque<FileId>,
-    limit: Option<usize>,
-    projection_mask: ProjectionMask,
-    status: FutureStatus<'level, R>,
-    fs: Arc<dyn DynFs>,
-    path: Option<(Path, FileId)>,
+pin_project! {
+    pub(crate) struct LevelStream<'level, R, C>
+    where
+        R: Record,
+        C: CacheReader,
+    {
+        lower: Bound<&'level R::Key>,
+        upper: Bound<&'level R::Key>,
+        ts: Timestamp,
+        level: usize,
+        option: Arc<DbOption<R>>,
+        meta_cache: C::MetaCache,
+        range_cache: C::RangeCache,
+        gens: VecDeque<FileId>,
+        limit: Option<usize>,
+        projection_mask: ProjectionMask,
+        status: FutureStatus<'level, R, C>,
+        fs: Arc<dyn DynFs>,
+        path: Option<(Path, FileId)>,
+    }
 }
 
-impl<'level, R> LevelStream<'level, R>
+impl<'level, R, C> LevelStream<'level, R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     // Kould: only used by Compaction now, and the start and end of the sstables range are known
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        version: &Version<R>,
+        version: &Version<R, C>,
         level: usize,
         start: usize,
         end: usize,
@@ -101,21 +113,24 @@ where
     }
 }
 
-impl<'level, R> Stream for LevelStream<'level, R>
+impl<'level, R, C> Stream for LevelStream<'level, R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     type Item = Result<RecordBatchEntry<R>, ParquetError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
         loop {
-            return match &mut self.status {
+            return match &mut this.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.path = Some((self.option.table_path(&gen, self.level), gen));
+                    *this.path = Some((this.option.table_path(&gen, *this.level), gen));
 
-                    let reader = self.fs.open_options(
-                        &self.path.as_ref().unwrap().0,
+                    let reader = this.fs.open_options(
+                        &this.path.as_ref().unwrap().0,
                         FileType::Parquet.open_options(true),
                     );
                     #[allow(clippy::missing_transmute_annotations)]
@@ -130,17 +145,17 @@ where
                             >,
                         >(reader)
                     };
-                    self.status = FutureStatus::OpenFile(reader);
+                    *this.status = FutureStatus::OpenFile(reader);
                     continue;
                 }
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
-                    Poll::Ready(None) => match self.gens.pop_front() {
+                    Poll::Ready(None) => match this.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.path = Some((self.option.table_path(&gen, self.level), gen));
+                            *this.path = Some((this.option.table_path(&gen, *this.level), gen));
 
-                            let reader = self.fs.open_options(
-                                &self.path.as_ref().unwrap().0,
+                            let reader = this.fs.open_options(
+                                &this.path.as_ref().unwrap().0,
                                 FileType::Parquet.open_options(true),
                             );
                             #[allow(clippy::missing_transmute_annotations)]
@@ -156,12 +171,12 @@ where
                                     >,
                                 >(reader)
                             };
-                            self.status = FutureStatus::OpenFile(reader);
+                            *this.status = FutureStatus::OpenFile(reader);
                             continue;
                         }
                     },
                     Poll::Ready(Some(result)) => {
-                        if let Some(limit) = &mut self.limit {
+                        if let Some(limit) = &mut this.limit {
                             *limit -= 1;
                         }
                         Poll::Ready(Some(result))
@@ -170,12 +185,12 @@ where
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        let meta_cache = self.meta_cache.clone();
-                        let range_cache = self.range_cache.clone();
-                        let (_, gen) = self.path.clone().unwrap();
+                        let meta_cache = this.meta_cache.clone();
+                        let range_cache = this.range_cache.clone();
+                        let (_, gen) = this.path.clone().unwrap();
                         let future =
                             async move { SsTable::open(file, gen, range_cache, meta_cache).await };
-                        self.status = FutureStatus::OpenSst(Box::pin(future));
+                        *this.status = FutureStatus::OpenSst(Box::pin(future));
                         continue;
                     }
                     Poll::Ready(Err(err)) => {
@@ -185,11 +200,11 @@ where
                 },
                 FutureStatus::OpenSst(sst_future) => match Pin::new(sst_future).poll(cx) {
                     Poll::Ready(Ok(sst)) => {
-                        self.status = FutureStatus::LoadStream(Box::pin(sst.scan(
-                            (self.lower, self.upper),
-                            self.ts,
-                            self.limit,
-                            self.projection_mask.clone(),
+                        *this.status = FutureStatus::LoadStream(Box::pin(sst.scan(
+                            (*this.lower, *this.upper),
+                            *this.ts,
+                            *this.limit,
+                            this.projection_mask.clone(),
                         )));
                         continue;
                     }
@@ -200,7 +215,7 @@ where
                 },
                 FutureStatus::LoadStream(stream_future) => match Pin::new(stream_future).poll(cx) {
                     Poll::Ready(Ok(scan)) => {
-                        self.status = FutureStatus::Ready(scan);
+                        *this.status = FutureStatus::Ready(scan);
                         continue;
                     }
                     Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),

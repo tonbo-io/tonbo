@@ -38,6 +38,7 @@
 //! use tokio::fs;
 //! use tokio_util::bytes::Bytes;
 //! use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
+//! use tonbo_ext_reader::foyer_reader::FoyerReader;
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
@@ -56,7 +57,8 @@
 //!
 //!     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new(options, TokioExecutor::default()).await.unwrap();
+//!     let db: DB<User, TokioExecutor, FoyerReader> =
+//!         DB::new(options, TokioExecutor::default()).await.unwrap();
 //!     // insert with owned value
 //!     db.insert(User {
 //!         name: "Alice".into(),
@@ -150,7 +152,7 @@ use record::{ColumnDesc, DynRecord, Record, RecordInstance};
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
-use tonbo_ext_reader::CacheError;
+use tonbo_ext_reader::{CacheError, CacheReader};
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
@@ -171,21 +173,23 @@ use crate::{
     wal::{log::LogType, RecoverError, WalFile},
 };
 
-pub struct DB<R, E>
+pub struct DB<R, E, C>
 where
     R: Record,
     E: Executor,
+    C: CacheReader,
 {
     schema: Arc<RwLock<Schema<R>>>,
-    version_set: VersionSet<R>,
+    version_set: VersionSet<R, C>,
     lock_map: LockMap<R::Key>,
     manager: Arc<StoreManager>,
     _p: PhantomData<E>,
 }
 
-impl<E: Executor> DB<DynRecord, E>
+impl<E, C> DB<DynRecord, E, C>
 where
     E: Executor + Send + Sync + 'static,
+    C: CacheReader + 'static,
 {
     /// Open [`DB`] with schema which determined by [`ColumnDesc`].
     pub async fn with_schema(
@@ -203,11 +207,12 @@ where
     }
 }
 
-impl<R, E> DB<R, E>
+impl<R, E, C> DB<R, E, C>
 where
     R: Record + Send + Sync,
     R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
+    C: CacheReader + 'static,
 {
     /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
     /// path specified in [`DbOption`] (if it does not exist before) and run it
@@ -247,7 +252,7 @@ where
         let schema = Arc::new(RwLock::new(
             Schema::new(option.clone(), task_tx, &version_set, instance, &manager).await?,
         ));
-        let mut compactor = Compactor::<R>::new(
+        let mut compactor = Compactor::<R, C>::new(
             schema.clone(),
             option.clone(),
             version_set.clone(),
@@ -287,7 +292,7 @@ where
     }
 
     /// open an optimistic ACID transaction
-    pub async fn transaction(&self) -> Transaction<'_, R> {
+    pub async fn transaction(&self) -> Transaction<'_, R, C> {
         Transaction::new(
             self.version_set.current().await,
             self.schema.read().await,
@@ -447,10 +452,10 @@ impl<R> Schema<R>
 where
     R: Record + Send,
 {
-    async fn new(
+    async fn new<C: CacheReader + 'static>(
         option: Arc<DbOption<R>>,
         compaction_tx: Sender<CompactTask>,
-        version_set: &VersionSet<R>,
+        version_set: &VersionSet<R, C>,
         record_instance: RecordInstance,
         manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
@@ -556,9 +561,9 @@ where
         self.mutable.append(None, key, ts, value).await
     }
 
-    async fn get<'get>(
+    async fn get<'get, C: CacheReader + 'static>(
         &'get self,
-        version: &'get Version<R>,
+        version: &'get Version<R, C>,
         manager: &StoreManager,
         key: &'get R::Key,
         ts: Timestamp,
@@ -613,9 +618,10 @@ where
 }
 
 /// scan configuration intermediate structure
-pub struct Scan<'scan, R>
+pub struct Scan<'scan, R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     schema: &'scan Schema<R>,
     manager: &'scan StoreManager,
@@ -623,27 +629,28 @@ where
     upper: Bound<&'scan R::Key>,
     ts: Timestamp,
 
-    version: &'scan Version<R>,
+    version: &'scan Version<R, C>,
     fn_pre_stream:
-        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
+        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, C>> + Send + 'scan>,
 
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
 }
 
-impl<'scan, R> Scan<'scan, R>
+impl<'scan, R, C> Scan<'scan, R, C>
 where
     R: Record + Send,
+    C: CacheReader + 'static,
 {
     fn new(
         schema: &'scan Schema<R>,
         manager: &'scan StoreManager,
         (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
-        version: &'scan Version<R>,
+        version: &'scan Version<R, C>,
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, C>> + Send + 'scan,
         >,
     ) -> Self {
         Self {
@@ -851,6 +858,7 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
+    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
     use tracing::error;
 
     use crate::{
@@ -1089,7 +1097,7 @@ pub(crate) mod tests {
         option: DbOption<Test>,
         executor: E,
     ) -> RecordBatch {
-        let db: DB<Test, E> = DB::new(option.clone(), executor).await.unwrap();
+        let db: DB<Test, E, FoyerReader> = DB::new(option.clone(), executor).await.unwrap();
         let base_fs = db.manager.base_fs();
 
         db.write(
@@ -1234,18 +1242,19 @@ pub(crate) mod tests {
         ))
     }
 
-    pub(crate) async fn build_db<R, E>(
+    pub(crate) async fn build_db<R, E, C>(
         option: Arc<DbOption<R>>,
         compaction_rx: Receiver<CompactTask>,
         executor: E,
         schema: crate::Schema<R>,
-        version: Version<R>,
+        version: Version<R, C>,
         manager: Arc<StoreManager>,
-    ) -> Result<DB<R, E>, DbError<R>>
+    ) -> Result<DB<R, E, C>, DbError<R>>
     where
         R: Record + Send + Sync,
         R::Columns: Send + Sync,
         E: Executor + Send + Sync + 'static,
+        C: CacheReader + 'static,
     {
         {
             let base_fs = manager.base_fs();
@@ -1259,7 +1268,7 @@ pub(crate) mod tests {
         let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
         let version_set =
             build_version_set(version, clean_sender, option.clone(), manager.clone()).await?;
-        let mut compactor = Compactor::<R>::new(
+        let mut compactor = Compactor::<R, C>::new(
             schema.clone(),
             option.clone(),
             version_set.clone(),
@@ -1525,7 +1534,8 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor, FoyerReader> =
+            DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (i, item) in test_items().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
@@ -1561,7 +1571,8 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor, FoyerReader> =
+            DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for item in &test_items()[0..10] {
             db.write(item.clone(), 0.into()).await.unwrap();
@@ -1610,9 +1621,10 @@ pub(crate) mod tests {
         schema.flush_wal().await.unwrap();
         drop(schema);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option.as_ref().to_owned(), TokioExecutor::new())
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor, FoyerReader> =
+            DB::new(option.as_ref().to_owned(), TokioExecutor::new())
+                .await
+                .unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_items() {
@@ -1682,7 +1694,7 @@ pub(crate) mod tests {
             "id".to_owned(),
             primary_key_index,
         );
-        let db: DB<DynRecord, TokioExecutor> =
+        let db: DB<DynRecord, TokioExecutor, FoyerReader> =
             DB::with_schema(option, TokioExecutor::new(), desc, primary_key_index)
                 .await
                 .unwrap();
@@ -1722,7 +1734,8 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor, FoyerReader> =
+            DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (idx, item) in test_items().into_iter().enumerate() {
             if idx % 2 == 0 {
@@ -1764,7 +1777,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<DynRecord, TokioExecutor> =
+        let db: DB<DynRecord, TokioExecutor, FoyerReader> =
             DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
                 .await
                 .unwrap();
@@ -1994,7 +2007,7 @@ pub(crate) mod tests {
         option3.major_default_oldest_table_num = 1;
         option3.trigger_type = TriggerType::Length(5);
 
-        let db1: DB<DynRecord, TokioExecutor> = DB::with_schema(
+        let db1: DB<DynRecord, TokioExecutor, FoyerReader> = DB::with_schema(
             option,
             TokioExecutor::new(),
             cols_desc.clone(),
@@ -2002,7 +2015,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let db2: DB<DynRecord, TokioExecutor> = DB::with_schema(
+        let db2: DB<DynRecord, TokioExecutor, FoyerReader> = DB::with_schema(
             option2,
             TokioExecutor::new(),
             cols_desc.clone(),
@@ -2010,7 +2023,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let db3: DB<DynRecord, TokioExecutor> =
+        let db3: DB<DynRecord, TokioExecutor, FoyerReader> =
             DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
                 .await
                 .unwrap();

@@ -8,16 +8,18 @@ use std::{
 use futures_core::{ready, Stream};
 use futures_util::stream::StreamExt;
 use pin_project_lite::pin_project;
+use tonbo_ext_reader::CacheReader;
 
 use super::{Entry, ScanStream};
 use crate::{record::Record, timestamp::Timestamp};
 
 pin_project! {
-    pub struct MergeStream<'merge, R>
+    pub struct MergeStream<'merge, R, C>
     where
         R: Record,
+        C: CacheReader,
     {
-        streams: Vec<ScanStream<'merge, R>>,
+        streams: Vec<ScanStream<'merge, R, C>>,
         peeked: BinaryHeap<CmpEntry<'merge, R>>,
         buf: Option<Entry<'merge, R>>,
         ts: Timestamp,
@@ -25,12 +27,13 @@ pin_project! {
     }
 }
 
-impl<'merge, R> MergeStream<'merge, R>
+impl<'merge, R, C> MergeStream<'merge, R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     pub(crate) async fn from_vec(
-        mut streams: Vec<ScanStream<'merge, R>>,
+        mut streams: Vec<ScanStream<'merge, R, C>>,
         ts: Timestamp,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
@@ -62,9 +65,10 @@ where
     }
 }
 
-impl<'merge, R> Stream for MergeStream<'merge, R>
+impl<'merge, R, C> Stream for MergeStream<'merge, R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     type Item = Result<Entry<'merge, R>, parquet::errors::ParquetError>;
 
@@ -160,6 +164,7 @@ mod tests {
 
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
+    use tonbo_ext_reader::foyer_reader::FoyerReader;
 
     use super::MergeStream;
     use crate::{
@@ -212,7 +217,7 @@ mod tests {
         let lower = "a".to_string();
         let upper = "e".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String>::from_vec(
+        let mut merge = MergeStream::<String, FoyerReader>::from_vec(
             vec![
                 m1.scan(bound, 6.into()).into(),
                 m2.scan(bound, 6.into()).into(),
@@ -291,10 +296,12 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge =
-            MergeStream::<String>::from_vec(vec![m1.scan(bound, 0.into()).into()], 0.into())
-                .await
-                .unwrap();
+        let mut merge = MergeStream::<String, FoyerReader>::from_vec(
+            vec![m1.scan(bound, 0.into()).into()],
+            0.into(),
+        )
+        .await
+        .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
             assert_eq!(entry.key().value, "1");
@@ -319,10 +326,12 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge =
-            MergeStream::<String>::from_vec(vec![m1.scan(bound, 1.into()).into()], 1.into())
-                .await
-                .unwrap();
+        let mut merge = MergeStream::<String, FoyerReader>::from_vec(
+            vec![m1.scan(bound, 1.into()).into()],
+            1.into(),
+        )
+        .await
+        .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
             assert_eq!(entry.key().value, "1");
@@ -371,7 +380,7 @@ mod tests {
         let lower = "1".to_string();
         let upper = "3".to_string();
         {
-            let mut merge = MergeStream::<String>::from_vec(
+            let mut merge = MergeStream::<String, FoyerReader>::from_vec(
                 vec![m1
                     .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
                     .into()],
@@ -391,7 +400,7 @@ mod tests {
             assert!(merge.next().await.is_none());
         }
         {
-            let mut merge = MergeStream::<String>::from_vec(
+            let mut merge = MergeStream::<String, FoyerReader>::from_vec(
                 vec![m1
                     .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
                     .into()],

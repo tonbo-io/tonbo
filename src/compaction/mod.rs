@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use thiserror::Error;
 use tokio::sync::oneshot;
-use tonbo_ext_reader::CacheError;
+use tonbo_ext_reader::{CacheError, CacheReader};
 use ulid::Ulid;
 
 use crate::{
@@ -33,27 +33,29 @@ pub enum CompactTask {
     Flush(Option<oneshot::Sender<()>>),
 }
 
-pub(crate) struct Compactor<R>
+pub(crate) struct Compactor<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     pub(crate) option: Arc<DbOption<R>>,
     pub(crate) schema: Arc<RwLock<Schema<R>>>,
-    pub(crate) version_set: VersionSet<R>,
+    pub(crate) version_set: VersionSet<R, C>,
     pub(crate) manager: Arc<StoreManager>,
 }
 
-impl<R> Compactor<R>
+impl<R, C> Compactor<R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     pub(crate) fn new(
         schema: Arc<RwLock<Schema<R>>>,
         option: Arc<DbOption<R>>,
-        version_set: VersionSet<R>,
+        version_set: VersionSet<R, C>,
         manager: Arc<StoreManager>,
     ) -> Self {
-        Compactor::<R> {
+        Compactor::<R, C> {
             option,
             schema,
             version_set,
@@ -188,7 +190,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn major_compaction(
-        version: &Version<R>,
+        version: &Version<R, C>,
         option: &DbOption<R>,
         mut min: &R::Key,
         mut max: &R::Key,
@@ -305,7 +307,7 @@ where
     }
 
     fn next_level_scopes<'a>(
-        version: &'a Version<R>,
+        version: &'a Version<R, C>,
         min: &mut &'a <R as Record>::Key,
         max: &mut &'a <R as Record>::Key,
         level: usize,
@@ -328,8 +330,8 @@ where
                 .max()
                 .ok_or(CompactionError::EmptyLevel)?;
 
-            start_ll = Version::<R>::scope_search(min, &version.level_slice[level + 1]);
-            end_ll = Version::<R>::scope_search(max, &version.level_slice[level + 1]);
+            start_ll = Version::<R, C>::scope_search(min, &version.level_slice[level + 1]);
+            end_ll = Version::<R, C>::scope_search(max, &version.level_slice[level + 1]);
 
             let next_level_len = version.level_slice[level + 1].len();
             for scope in version.level_slice[level + 1]
@@ -345,13 +347,13 @@ where
     }
 
     fn this_level_scopes<'a>(
-        version: &'a Version<R>,
+        version: &'a Version<R, C>,
         min: &<R as Record>::Key,
         max: &<R as Record>::Key,
         level: usize,
     ) -> (Vec<&'a Scope<<R as Record>::Key>>, usize, usize) {
         let mut meet_scopes_l = Vec::new();
-        let mut start_l = Version::<R>::scope_search(min, &version.level_slice[level]);
+        let mut start_l = Version::<R, C>::scope_search(min, &version.level_slice[level]);
         let mut end_l = start_l;
         let option = version.option();
 
@@ -386,11 +388,11 @@ where
         option: &DbOption<R>,
         version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
         level: usize,
-        streams: Vec<ScanStream<'scan, R>>,
+        streams: Vec<ScanStream<'scan, R, C>>,
         instance: &RecordInstance,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
-        let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
+        let mut stream = MergeStream::<R, C>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
         let mut builder = R::Columns::builder(&instance.arrow_schema::<R>(), 8192);
@@ -523,7 +525,7 @@ pub(crate) mod tests {
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;
-    use tonbo_ext_reader::foyer_reader::build_cache;
+    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
 
     use crate::{
         compaction::Compactor,
@@ -682,7 +684,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let scope = Compactor::<Test>::minor_compaction(
+        let scope = Compactor::<Test, FoyerReader>::minor_compaction(
             &option,
             None,
             &vec![
@@ -746,7 +748,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-        let scope = Compactor::<DynRecord>::minor_compaction(
+        let scope = Compactor::<DynRecord, FoyerReader>::minor_compaction(
             &option,
             None,
             &vec![
@@ -811,7 +813,7 @@ pub(crate) mod tests {
         let max = 5.to_string();
         let mut version_edits = Vec::new();
 
-        Compactor::<Test>::major_compaction(
+        Compactor::<Test, FoyerReader>::major_compaction(
             &version,
             &option,
             &min,
@@ -855,7 +857,10 @@ pub(crate) mod tests {
     pub(crate) async fn build_version(
         option: &Arc<DbOption<Test>>,
         manager: &StoreManager,
-    ) -> ((FileId, FileId, FileId, FileId, FileId), Version<Test>) {
+    ) -> (
+        (FileId, FileId, FileId, FileId, FileId),
+        Version<Test, FoyerReader>,
+    ) {
         let level_0_fs = option
             .level_fs_path(0)
             .map(|path| manager.get_fs(path))
@@ -1065,7 +1070,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let (sender, _) = bounded(1);
-        let (meta_cache, range_cache) = build_cache(
+        let (meta_cache, range_cache) = FoyerReader::build_caches(
             path_to_local(&option.cache_path).unwrap(),
             option.cache_meta_capacity,
             option.cache_meta_shards,
@@ -1075,7 +1080,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let mut version = Version::<Test>::new(
+        let mut version = Version::<Test, FoyerReader>::new(
             option.clone(),
             sender,
             Arc::new(AtomicU32::default()),
@@ -1198,7 +1203,7 @@ pub(crate) mod tests {
 
         let option = Arc::new(option);
         let (sender, _) = bounded(1);
-        let (meta_cache, range_cache) = build_cache(
+        let (meta_cache, range_cache) = FoyerReader::build_caches(
             path_to_local(&option.cache_path).unwrap(),
             option.cache_meta_capacity,
             option.cache_meta_shards,
@@ -1208,7 +1213,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let mut version = Version::<Test>::new(
+        let mut version = Version::<Test, FoyerReader>::new(
             option.clone(),
             sender,
             Arc::new(AtomicU32::default()),
@@ -1232,7 +1237,7 @@ pub(crate) mod tests {
         let min = 6.to_string();
         let max = 9.to_string();
 
-        Compactor::<Test>::major_compaction(
+        Compactor::<Test, FoyerReader>::major_compaction(
             &version,
             &option,
             &min,
@@ -1261,7 +1266,8 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor, FoyerReader> =
+            DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for i in 5..9 {
             let item = Test {

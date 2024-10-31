@@ -5,6 +5,7 @@ use fusio::path::Path;
 use futures_util::stream::StreamExt;
 use tokio::fs;
 use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
+use tonbo_ext_reader::foyer_reader::FoyerReader;
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
@@ -24,7 +25,9 @@ async fn main() {
 
     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
     // pluggable async runtime and I/O
-    let db = DB::new(options, TokioExecutor::default()).await.unwrap();
+    let db = DB::<_, _, FoyerReader>::new(options, TokioExecutor::default())
+        .await
+        .unwrap();
 
     // insert with owned value
     db.insert(User {

@@ -25,3 +25,4 @@ pyo3-asyncio = { package = "pyo3-asyncio-0-21", version = "0.21", features = [
 ] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tonbo = { version = "0.2.0", path = "../../" }
+tonbo_ext_reader = { path = "../../tonbo_ext_reader" }

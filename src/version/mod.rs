@@ -3,6 +3,7 @@ pub(crate) mod edit;
 pub(crate) mod set;
 
 use std::{
+    fmt::{Debug, Formatter},
     ops::Bound,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -14,7 +15,7 @@ use flume::{SendError, Sender};
 use fusio::DynFs;
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
-use tonbo_ext_reader::{CacheError, MetaCache, RangeCache};
+use tonbo_ext_reader::{CacheError, CacheReader};
 use tracing::error;
 
 use crate::{
@@ -31,7 +32,7 @@ use crate::{
 
 pub(crate) const MAX_LEVEL: usize = 7;
 
-pub(crate) type VersionRef<R> = Arc<Version<R>>;
+pub(crate) type VersionRef<R, C> = Arc<Version<R, C>>;
 
 pub(crate) trait TransactionTs {
     fn load_ts(&self) -> Timestamp;
@@ -39,10 +40,10 @@ pub(crate) trait TransactionTs {
     fn increase_ts(&self) -> Timestamp;
 }
 
-#[derive(Debug)]
-pub(crate) struct Version<R>
+pub(crate) struct Version<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     ts: Timestamp,
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
@@ -51,21 +52,41 @@ where
     timestamp: Arc<AtomicU32>,
     log_length: u32,
 
-    range_cache: RangeCache,
-    meta_cache: MetaCache,
+    range_cache: C::RangeCache,
+    meta_cache: C::MetaCache,
 }
 
-impl<R> Version<R>
+impl<R, C> Debug for Version<R, C>
 where
     R: Record,
+    C: CacheReader,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Version")
+            .field("ts", &self.ts)
+            .field("level_slice", &self.level_slice)
+            .field("clean_sender", &format_args!("{:?}", self.clean_sender))
+            .field("option", &format_args!("{:?}", self.option))
+            .field("timestamp", &format_args!("{:?}", self.timestamp))
+            .field("log_length", &format_args!("{}", self.log_length))
+            .field("range_cache", &format_args!("{:?}", self.range_cache))
+            .field("meta_cache", &format_args!("{:?}", self.meta_cache))
+            .finish()
+    }
+}
+
+impl<R, C> Version<R, C>
+where
+    R: Record,
+    C: CacheReader,
 {
     #[cfg(test)]
     pub(crate) fn new(
         option: Arc<DbOption<R>>,
         clean_sender: Sender<CleanTag>,
         timestamp: Arc<AtomicU32>,
-        range_cache: RangeCache,
-        meta_cache: MetaCache,
+        range_cache: C::RangeCache,
+        meta_cache: C::MetaCache,
     ) -> Self {
         Version {
             ts: Timestamp::from(0),
@@ -83,17 +104,18 @@ where
         &self.option
     }
 
-    pub(crate) fn meta_cache(&self) -> MetaCache {
+    pub(crate) fn meta_cache(&self) -> C::MetaCache {
         self.meta_cache.clone()
     }
-    pub(crate) fn range_cache(&self) -> RangeCache {
+    pub(crate) fn range_cache(&self) -> C::RangeCache {
         self.range_cache.clone()
     }
 }
 
-impl<R> TransactionTs for Version<R>
+impl<R, C> TransactionTs for Version<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     fn load_ts(&self) -> Timestamp {
         self.timestamp.load(Ordering::Acquire).into()
@@ -104,9 +126,10 @@ where
     }
 }
 
-impl<R> Clone for Version<R>
+impl<R, C> Clone for Version<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     fn clone(&self) -> Self {
         let mut level_slice = [const { Vec::new() }; MAX_LEVEL];
@@ -128,9 +151,10 @@ where
     }
 }
 
-impl<R> Version<R>
+impl<R, C> Version<R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     pub(crate) async fn query(
         &self,
@@ -198,7 +222,7 @@ where
             .open_options(&path, FileType::Parquet.open_options(true))
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(file, *gen, self.range_cache(), self.meta_cache())
+        SsTable::<R, C>::open(file, *gen, self.range_cache(), self.meta_cache())
             .await?
             .get(key, projection_mask)
             .await
@@ -218,7 +242,7 @@ where
     pub(crate) async fn streams<'streams>(
         &self,
         manager: &StoreManager,
-        streams: &mut Vec<ScanStream<'streams, R>>,
+        streams: &mut Vec<ScanStream<'streams, R, C>>,
         range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
@@ -308,9 +332,10 @@ where
     }
 }
 
-impl<R> Drop for Version<R>
+impl<R, C> Drop for Version<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     fn drop(&mut self) {
         if let Err(err) = self.clean_sender.send(CleanTag::Clean { ts: self.ts }) {

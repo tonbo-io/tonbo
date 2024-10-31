@@ -13,6 +13,7 @@ use flume::SendError;
 use lockable::AsyncLimit;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
 use thiserror::Error;
+use tonbo_ext_reader::CacheReader;
 
 use crate::{
     compaction::CompactTask,
@@ -45,24 +46,26 @@ where
 }
 /// optimistic ACID transaction, open with
 /// [`DB::transaction`](crate::DB::transaction) method
-pub struct Transaction<'txn, R>
+pub struct Transaction<'txn, R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     ts: Timestamp,
     local: BTreeMap<R::Key, Option<R>>,
     share: RwLockReadGuard<'txn, Schema<R>>,
-    version: VersionRef<R>,
+    version: VersionRef<R, C>,
     lock_map: LockMap<R::Key>,
     manager: Arc<StoreManager>,
 }
 
-impl<'txn, R> Transaction<'txn, R>
+impl<'txn, R, C> Transaction<'txn, R, C>
 where
     R: Record + Send,
+    C: CacheReader + 'static,
 {
     pub(crate) fn new(
-        version: VersionRef<R>,
+        version: VersionRef<R, C>,
         share: RwLockReadGuard<'txn, Schema<R>>,
         lock_map: LockMap<R::Key>,
         manager: Arc<StoreManager>,
@@ -104,7 +107,7 @@ where
     pub fn scan<'scan>(
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R> {
+    ) -> Scan<'scan, R, C> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -257,6 +260,7 @@ mod tests {
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;
+    use tonbo_ext_reader::foyer_reader::FoyerReader;
 
     use crate::{
         compaction::tests::build_version,
@@ -276,7 +280,7 @@ mod tests {
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
 
-        let db = DB::<String, TokioExecutor>::new(
+        let db = DB::<String, TokioExecutor, FoyerReader>::new(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::new(),
         )
@@ -404,7 +408,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::new())
+        let db = DB::<String, TokioExecutor, FoyerReader>::new(option, TokioExecutor::new())
             .await
             .unwrap();
 
@@ -437,7 +441,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::new())
+        let db = DB::<Test, TokioExecutor, FoyerReader>::new(option, TokioExecutor::new())
             .await
             .unwrap();
 
@@ -807,7 +811,7 @@ mod tests {
             "age".to_string(),
             0,
         );
-        let db = DB::with_schema(option, TokioExecutor::default(), descs, 0)
+        let db = DB::<_, _, FoyerReader>::with_schema(option, TokioExecutor::default(), descs, 0)
             .await
             .unwrap();
 
