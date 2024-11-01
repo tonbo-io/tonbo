@@ -4,7 +4,7 @@ documentation = "https://docs.rs/tonbo_macros"
 edition = "2021"
 license = "Apache-2.0"
 name = "tonbo_macros"
-version = "0.1.0"
+version = "0.2.0"
 
 [dependencies]
 darling = "0.20"
