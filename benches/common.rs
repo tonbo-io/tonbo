@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_stream::stream;
+use fusio_dispatch::FsOptions;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use parquet::data_type::AsBytes;
@@ -183,6 +184,97 @@ pub trait BenchReader {
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = ProjectionResult> + 'a;
+}
+
+pub struct TonboS3BenchDataBase {
+    db: tonbo::DB<Customer, TokioExecutor, FoyerReader>,
+}
+
+impl TonboS3BenchDataBase {
+    #[allow(dead_code)]
+    pub fn new(db: tonbo::DB<Customer, TokioExecutor, FoyerReader>) -> Self {
+        TonboS3BenchDataBase { db }
+    }
+}
+
+impl BenchDatabase for TonboS3BenchDataBase {
+    type W<'db>
+        = TonboBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = TonboBenchReadTransaction<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "tonbo on s3"
+    }
+
+    async fn write_transaction(&self) -> Self::W<'_> {
+        TonboBenchWriteTransaction {
+            txn: self.db.transaction().await,
+        }
+    }
+
+    async fn read_transaction(&self) -> Self::R<'_> {
+        TonboBenchReadTransaction {
+            txn: self.db.transaction().await,
+        }
+    }
+
+    async fn build(path: impl AsRef<Path>) -> Self {
+        create_dir_all(path.as_ref()).await.unwrap();
+
+        let fs_options = FsOptions::S3 {
+            bucket: "data".to_string(),
+            credential: Some(fusio::remotes::aws::credential::AwsCredential {
+                key_id: "user".to_string(),
+                secret_key: "password".to_string(),
+                token: None,
+            }),
+            endpoint: Some("http://localhost:9000".to_string()),
+            sign_payload: None,
+            checksum: None,
+            region: None,
+        };
+
+        let path = fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap();
+        let option = DbOption::from(path.clone())
+            .level_path(
+                0,
+                fusio::path::Path::from_url_path("/l0").unwrap(),
+                fs_options.clone(),
+            )
+            .unwrap()
+            .level_path(
+                1,
+                fusio::path::Path::from_url_path("/l1").unwrap(),
+                fs_options.clone(),
+            )
+            .unwrap()
+            .level_path(
+                2,
+                fusio::path::Path::from_url_path("/l2").unwrap(),
+                fs_options.clone(),
+            )
+            .unwrap()
+            .level_path(
+                3,
+                fusio::path::Path::from_url_path("/l3").unwrap(),
+                fs_options.clone(),
+            )
+            .unwrap()
+            .level_path(
+                4,
+                fusio::path::Path::from_url_path("/l4").unwrap(),
+                fs_options.clone(),
+            )
+            .unwrap()
+            .disable_wal();
+
+        TonboS3BenchDataBase::new(tonbo::DB::new(option, TokioExecutor::new()).await.unwrap())
+    }
 }
 
 pub struct TonboBenchDataBase {
