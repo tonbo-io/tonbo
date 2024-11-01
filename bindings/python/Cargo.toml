@@ -1,7 +1,7 @@
 [package]
+edition = "2021"
 name = "tonbo-python"
 version = "0.1.0"
-edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
@@ -9,22 +9,19 @@ crate-type = ["cdylib"]
 [workspace]
 
 [dependencies]
-fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "d2a5e7c0d17d173b1f67af25b7ff133e93244160", package = "fusio", version = "0.2.1", features = [
-    "aws",
-    "tokio",
-] }
-fusio-dispatch = { git = "https://github.com/tonbo-io/fusio.git", rev = "d2a5e7c0d17d173b1f67af25b7ff133e93244160", package = "fusio-dispatch", version = "0.2.0", features = [
+fusio = { package = "fusio", version = "0.3.1", features = ["aws", "tokio"] }
+fusio-dispatch = { package = "fusio-dispatch", version = "0.2.0", features = [
     "aws",
     "tokio",
 ] }
 futures = { version = "0.3" }
 pyo3 = { version = "0.21.2", features = [
-    "extension-module",
     "abi3",
     "abi3-py310",
+    "extension-module",
 ] }
 pyo3-asyncio = { package = "pyo3-asyncio-0-21", version = "0.21", features = [
     "tokio-runtime",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
-tonbo = { version = ">=0", path = "../../" }
+tonbo = { version = "0.2.0", path = "../../" }
