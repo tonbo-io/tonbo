@@ -63,8 +63,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
     #[ignore]
+    #[tokio::test]
     async fn test_data_integrity() {
         let mut rng = fastrand::Rng::with_seed(42);
         let mut primary_key_count = 0;
