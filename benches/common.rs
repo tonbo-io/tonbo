@@ -17,7 +17,7 @@ use tokio::fs::create_dir_all;
 use tonbo::{
     executor::tokio::TokioExecutor, stream, transaction::TransactionEntry, DbOption, Projection,
 };
-use tonbo_ext_reader::foyer_reader::FoyerReader;
+use tonbo_ext_reader::{foyer_reader::FoyerReader, lru_reader::LruReader, CacheReader};
 use tonbo_macros::Record;
 
 const RNG_SEED: u64 = 3;
@@ -199,11 +199,11 @@ impl TonboS3BenchDataBase {
 
 impl BenchDatabase for TonboS3BenchDataBase {
     type W<'db>
-        = TonboBenchWriteTransaction<'db>
+        = TonboBenchWriteTransaction<'db, FoyerReader>
     where
         Self: 'db;
     type R<'db>
-        = TonboBenchReadTransaction<'db>
+        = TonboBenchReadTransaction<'db, FoyerReader>
     where
         Self: 'db;
 
@@ -277,24 +277,73 @@ impl BenchDatabase for TonboS3BenchDataBase {
     }
 }
 
-pub struct TonboBenchDataBase {
+pub struct TonboFoyerBenchDataBase {
     db: tonbo::DB<Customer, TokioExecutor, FoyerReader>,
+}
+
+impl TonboFoyerBenchDataBase {
+    #[allow(dead_code)]
+    pub fn new(db: tonbo::DB<Customer, TokioExecutor, FoyerReader>) -> Self {
+        TonboFoyerBenchDataBase { db }
+    }
+}
+
+impl BenchDatabase for TonboFoyerBenchDataBase {
+    type W<'db>
+        = TonboBenchWriteTransaction<'db, FoyerReader>
+    where
+        Self: 'db;
+    type R<'db>
+        = TonboBenchReadTransaction<'db, FoyerReader>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "tonbo"
+    }
+
+    async fn write_transaction(&self) -> Self::W<'_> {
+        TonboBenchWriteTransaction {
+            txn: self.db.transaction().await,
+        }
+    }
+
+    async fn read_transaction(&self) -> Self::R<'_> {
+        TonboBenchReadTransaction {
+            txn: self.db.transaction().await,
+        }
+    }
+
+    async fn build(path: impl AsRef<Path>) -> Self {
+        create_dir_all(path.as_ref()).await.unwrap();
+
+        let option =
+            DbOption::from(fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap())
+                .disable_wal();
+
+        let db = tonbo::DB::new(option, TokioExecutor::new()).await.unwrap();
+        TonboFoyerBenchDataBase::new(db)
+    }
+}
+
+pub struct TonboBenchDataBase {
+    db: tonbo::DB<Customer, TokioExecutor, LruReader>,
 }
 
 impl TonboBenchDataBase {
     #[allow(dead_code)]
-    pub fn new(db: tonbo::DB<Customer, TokioExecutor, FoyerReader>) -> Self {
+    pub fn new(db: tonbo::DB<Customer, TokioExecutor, LruReader>) -> Self {
         TonboBenchDataBase { db }
     }
 }
 
 impl BenchDatabase for TonboBenchDataBase {
     type W<'db>
-        = TonboBenchWriteTransaction<'db>
+        = TonboBenchWriteTransaction<'db, LruReader>
     where
         Self: 'db;
     type R<'db>
-        = TonboBenchReadTransaction<'db>
+        = TonboBenchReadTransaction<'db, LruReader>
     where
         Self: 'db;
 
@@ -326,13 +375,13 @@ impl BenchDatabase for TonboBenchDataBase {
     }
 }
 
-pub struct TonboBenchReadTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer, FoyerReader>,
+pub struct TonboBenchReadTransaction<'a, R: CacheReader> {
+    txn: tonbo::transaction::Transaction<'a, Customer, R>,
 }
 
-impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
+impl<'db, R: CacheReader + 'static> BenchReadTransaction for TonboBenchReadTransaction<'db, R> {
     type T<'txn>
-        = TonboBenchReader<'db, 'txn>
+        = TonboBenchReader<'db, 'txn, R>
     where
         Self: 'txn;
 
@@ -341,11 +390,11 @@ impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
     }
 }
 
-pub struct TonboBenchReader<'db, 'txn> {
-    txn: &'txn tonbo::transaction::Transaction<'db, Customer, FoyerReader>,
+pub struct TonboBenchReader<'db, 'txn, R: CacheReader> {
+    txn: &'txn tonbo::transaction::Transaction<'db, Customer, R>,
 }
 
-impl BenchReader for TonboBenchReader<'_, '_> {
+impl<R: CacheReader + 'static> BenchReader for TonboBenchReader<'_, '_, R> {
     async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
         self.txn
             .get(key, Projection::All)
@@ -381,13 +430,13 @@ impl BenchReader for TonboBenchReader<'_, '_> {
     }
 }
 
-pub struct TonboBenchWriteTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer, FoyerReader>,
+pub struct TonboBenchWriteTransaction<'a, R: CacheReader> {
+    txn: tonbo::transaction::Transaction<'a, Customer, R>,
 }
 
-impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
+impl<'db, R: CacheReader + 'static> BenchWriteTransaction for TonboBenchWriteTransaction<'db, R> {
     type W<'txn>
-        = TonboBenchInserter<'db, 'txn>
+        = TonboBenchInserter<'db, 'txn, R>
     where
         Self: 'txn;
 
@@ -401,11 +450,11 @@ impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
     }
 }
 
-pub struct TonboBenchInserter<'db, 'txn> {
-    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer, FoyerReader>,
+pub struct TonboBenchInserter<'db, 'txn, R: CacheReader> {
+    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer, R>,
 }
 
-impl BenchInserter for TonboBenchInserter<'_, '_> {
+impl<R: CacheReader + 'static> BenchInserter for TonboBenchInserter<'_, '_, R> {
     fn insert(&mut self, record: Customer) -> Result<(), ()> {
         self.txn.insert(record);
         Ok(())

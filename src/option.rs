@@ -32,6 +32,8 @@ pub struct DbOption<R> {
     pub(crate) cache_meta_ratio: f64,
     pub(crate) cache_range_memory: usize,
     pub(crate) cache_range_disk: usize,
+    pub(crate) cache_range_capacity: usize,
+    pub(crate) cache_range_shards: usize,
 
     pub(crate) clean_channel_buffer: usize,
     pub(crate) base_path: Path,
@@ -80,6 +82,8 @@ where
             cache_meta_ratio: 0.1,
             cache_range_memory: memory,
             cache_range_disk: 8 * memory,
+            cache_range_capacity: 1024,
+            cache_range_shards: 32,
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,

@@ -193,6 +193,8 @@ pub(crate) mod tests {
             option.cache_meta_ratio,
             option.cache_range_memory,
             option.cache_range_disk,
+            option.cache_range_capacity,
+            option.cache_range_shards,
         )
         .await
         .unwrap();
