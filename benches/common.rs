@@ -299,7 +299,7 @@ impl BenchDatabase for TonboFoyerBenchDataBase {
         Self: 'db;
 
     fn db_type_name() -> &'static str {
-        "tonbo"
+        "tonbo_foyer"
     }
 
     async fn write_transaction(&self) -> Self::W<'_> {
