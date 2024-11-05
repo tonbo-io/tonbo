@@ -1,0 +1,34 @@
+[package]
+description = "ExtReader for Tonbo."
+name = "tonbo_ext_reader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+arrow = "53"
+bytes = { version = "1.7", features = ["serde"] }
+foyer = { version = "0.12" }
+futures-core = "0.3"
+futures-util = "0.3"
+fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", rev = "db305599ae88c7a934ab1ab235d8b3efda95a242", package = "fusio-parquet", version = "0.2.1" }
+lru = "0.12"
+parking_lot = "0.12"
+parquet = { version = "53", features = ["async"] }
+thiserror = "1"
+ulid = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "db305599ae88c7a934ab1ab235d8b3efda95a242", package = "fusio", version = "0.3.1", features = [
+    "aws",
+    "dyn",
+    "fs",
+    "object_store",
+    "tokio",
+    "tokio-http",
+] }
+fusio-dispatch = { git = "https://github.com/tonbo-io/fusio.git", rev = "db305599ae88c7a934ab1ab235d8b3efda95a242", package = "fusio-dispatch", version = "0.2.1", features = [
+    "tokio",
+] }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

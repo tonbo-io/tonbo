@@ -30,6 +30,7 @@ use tokio::fs;
 use tonbo::{
     executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DbOption, DB,
 };
+use tonbo_ext_reader::foyer_reader::FoyerReader;
 use tonbo_macros::Record;
 
 #[derive(Record, Debug)]
@@ -41,12 +42,12 @@ pub struct Music {
 }
 
 struct MusicProvider {
-    db: Arc<DB<Music, TokioExecutor>>,
+    db: Arc<DB<Music, TokioExecutor, FoyerReader>>,
 }
 
 struct MusicExec {
     cache: PlanProperties,
-    db: Arc<DB<Music, TokioExecutor>>,
+    db: Arc<DB<Music, TokioExecutor, FoyerReader>>,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
     range: (Bound<<Music as Record>::Key>, Bound<<Music as Record>::Key>),
@@ -95,7 +96,10 @@ impl TableProvider for MusicProvider {
 }
 
 impl MusicExec {
-    fn new(db: Arc<DB<Music, TokioExecutor>>, projection: Option<&Vec<usize>>) -> Self {
+    fn new(
+        db: Arc<DB<Music, TokioExecutor, FoyerReader>>,
+        projection: Option<&Vec<usize>>,
+    ) -> Self {
         let schema = Music::arrow_schema();
         let schema = if let Some(projection) = &projection {
             Arc::new(schema.project(projection).unwrap())

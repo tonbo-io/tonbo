@@ -7,31 +7,46 @@ use parquet::arrow::{
     arrow_reader::{ArrowReaderBuilder, ArrowReaderOptions},
     ParquetRecordBatchStreamBuilder, ProjectionMask,
 };
+use tonbo_ext_reader::CacheReader;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
+    fs::FileId,
     record::Record,
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TimestampedRef},
 };
 
-pub(crate) struct SsTable<R>
+pub(crate) struct SsTable<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
-    reader: AsyncReader,
+    reader: C,
     _marker: PhantomData<R>,
 }
 
-impl<R> SsTable<R>
+impl<R, C> SsTable<R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
-    pub(crate) async fn open(file: Box<dyn DynFile>) -> Result<Self, fusio::Error> {
+    pub(crate) async fn open(
+        file: Box<dyn DynFile>,
+        gen: FileId,
+        range_cache: C::RangeCache,
+        meta_cache: C::MetaCache,
+    ) -> Result<Self, fusio::Error> {
         let size = file.size().await?;
+        let reader = C::new(
+            meta_cache,
+            range_cache,
+            gen,
+            AsyncReader::new(file, size).await?,
+        );
 
         Ok(SsTable {
-            reader: AsyncReader::new(file, size).await?,
+            reader,
             _marker: PhantomData,
         })
     }
@@ -40,9 +55,8 @@ where
         self,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> parquet::errors::Result<
-        ArrowReaderBuilder<parquet::arrow::async_reader::AsyncReader<AsyncReader>>,
-    > {
+    ) -> parquet::errors::Result<ArrowReaderBuilder<parquet::arrow::async_reader::AsyncReader<C>>>
+    {
         let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(
             self.reader,
             ArrowReaderOptions::default().with_page_index(true),
@@ -77,7 +91,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> Result<SsTableScan<R>, parquet::errors::ParquetError> {
+    ) -> Result<SsTableScan<R, C>, parquet::errors::ParquetError> {
         let builder = self
             .into_parquet_builder(limit, projection_mask.clone())
             .await?;
@@ -99,12 +113,16 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{borrow::Borrow, fs::File, ops::Bound, sync::Arc};
+    use std::{borrow::Borrow, fs::File, marker::PhantomData, ops::Bound, sync::Arc};
 
     use arrow::array::RecordBatch;
-    use fusio::{dynamic::DynFile, path::Path, DynFs};
+    use fusio::{
+        dynamic::DynFile,
+        path::{path_to_local, Path},
+        DynFs,
+    };
     use fusio_dispatch::FsOptions;
-    use fusio_parquet::writer::AsyncWriter;
+    use fusio_parquet::{reader::AsyncReader, writer::AsyncWriter};
     use futures_util::StreamExt;
     use parquet::{
         arrow::{
@@ -114,11 +132,12 @@ pub(crate) mod tests {
         basic::{Compression, ZstdLevel},
         file::properties::WriterProperties,
     };
+    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
 
     use super::SsTable;
     use crate::{
         executor::tokio::TokioExecutor,
-        fs::{manager::StoreManager, FileType},
+        fs::{manager::StoreManager, FileId, FileType},
         record::Record,
         tests::{get_test_record_batch, Test},
         timestamp::Timestamped,
@@ -152,33 +171,58 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    pub(crate) async fn open_sstable<R>(store: &Arc<dyn DynFs>, path: &Path) -> SsTable<R>
+    pub(crate) async fn open_sstable<R, C>(
+        store: &Arc<dyn DynFs>,
+        path: Path,
+        gen: FileId,
+        option: &DbOption<R>,
+    ) -> SsTable<R, C>
     where
         R: Record,
+        C: CacheReader,
     {
-        SsTable::open(
-            store
-                .open_options(path, FileType::Parquet.open_options(true))
-                .await
-                .unwrap(),
+        let file = store
+            .open_options(&path, FileType::Parquet.open_options(true))
+            .await
+            .unwrap();
+        let size = file.size().await.unwrap();
+        let (meta_cache, range_cache) = C::build_caches(
+            path_to_local(&option.cache_path).unwrap(),
+            option.cache_meta_capacity,
+            option.cache_meta_shards,
+            option.cache_meta_ratio,
+            option.cache_range_memory,
+            option.cache_range_disk,
+            option.cache_range_capacity,
+            option.cache_range_shards,
         )
         .await
-        .unwrap()
+        .unwrap();
+
+        SsTable {
+            reader: C::new(
+                meta_cache,
+                range_cache,
+                gen,
+                AsyncReader::new(file, size).await.unwrap(),
+            ),
+            _marker: PhantomData,
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn projection_query() {
         let temp_dir = tempfile::tempdir().unwrap();
+
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
-        let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-            TokioExecutor::new(),
-        )
-        .await;
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let record_batch =
+            get_test_record_batch::<TokioExecutor>(option.clone(), TokioExecutor::new()).await;
         let table_path = temp_dir.path().join("projection_query_test.parquet");
         let _ = File::create(&table_path).unwrap();
         let table_path = Path::from_filesystem_path(table_path).unwrap();
+        let table_gen = FileId::new();
 
         let file = base_fs
             .open_options(&table_path, FileType::Parquet.open_options(false))
@@ -189,52 +233,55 @@ pub(crate) mod tests {
         let key = Timestamped::new("hello".to_owned(), 1.into());
 
         {
-            let test_ref_1 = open_sstable::<Test>(base_fs, &table_path)
-                .await
-                .get(
-                    key.borrow(),
-                    ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
-                        [0, 1, 2, 3],
-                    ),
-                )
-                .await
-                .unwrap()
-                .unwrap();
+            let test_ref_1 =
+                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                    .await
+                    .get(
+                        key.borrow(),
+                        ProjectionMask::roots(
+                            &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                            [0, 1, 2, 3],
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
             assert_eq!(test_ref_1.get().unwrap().vstring, "hello");
             assert_eq!(test_ref_1.get().unwrap().vu32, Some(12));
             assert_eq!(test_ref_1.get().unwrap().vbool, None);
         }
         {
-            let test_ref_2 = open_sstable::<Test>(base_fs, &table_path)
-                .await
-                .get(
-                    key.borrow(),
-                    ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
-                        [0, 1, 2, 4],
-                    ),
-                )
-                .await
-                .unwrap()
-                .unwrap();
+            let test_ref_2 =
+                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                    .await
+                    .get(
+                        key.borrow(),
+                        ProjectionMask::roots(
+                            &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                            [0, 1, 2, 4],
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
             assert_eq!(test_ref_2.get().unwrap().vstring, "hello");
             assert_eq!(test_ref_2.get().unwrap().vu32, None);
             assert_eq!(test_ref_2.get().unwrap().vbool, Some(true));
         }
         {
-            let test_ref_3 = open_sstable::<Test>(base_fs, &table_path)
-                .await
-                .get(
-                    key.borrow(),
-                    ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
-                        [0, 1, 2],
-                    ),
-                )
-                .await
-                .unwrap()
-                .unwrap();
+            let test_ref_3 =
+                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                    .await
+                    .get(
+                        key.borrow(),
+                        ProjectionMask::roots(
+                            &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                            [0, 1, 2],
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
             assert_eq!(test_ref_3.get().unwrap().vstring, "hello");
             assert_eq!(test_ref_3.get().unwrap().vu32, None);
             assert_eq!(test_ref_3.get().unwrap().vbool, None);
@@ -246,14 +293,14 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
-        let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-            TokioExecutor::new(),
-        )
-        .await;
+
+        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let record_batch =
+            get_test_record_batch::<TokioExecutor>(option.clone(), TokioExecutor::new()).await;
         let table_path = temp_dir.path().join("projection_scan_test.parquet");
         let _ = File::create(&table_path).unwrap();
         let table_path = Path::from_filesystem_path(table_path).unwrap();
+        let table_gen = FileId::new();
 
         let file = base_fs
             .open_options(&table_path, FileType::Parquet.open_options(false))
@@ -262,19 +309,20 @@ pub(crate) mod tests {
         write_record_batch(file, &record_batch).await.unwrap();
 
         {
-            let mut test_ref_1 = open_sstable::<Test>(base_fs, &table_path)
-                .await
-                .scan(
-                    (Bound::Unbounded, Bound::Unbounded),
-                    1_u32.into(),
-                    None,
-                    ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
-                        [0, 1, 2, 3],
-                    ),
-                )
-                .await
-                .unwrap();
+            let mut test_ref_1 =
+                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                    .await
+                    .scan(
+                        (Bound::Unbounded, Bound::Unbounded),
+                        1_u32.into(),
+                        None,
+                        ProjectionMask::roots(
+                            &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                            [0, 1, 2, 3],
+                        ),
+                    )
+                    .await
+                    .unwrap();
 
             let entry_0 = test_ref_1.next().await.unwrap().unwrap();
             assert_eq!(entry_0.get().unwrap().vstring, "hello");
@@ -287,19 +335,20 @@ pub(crate) mod tests {
             assert_eq!(entry_1.get().unwrap().vbool, None);
         }
         {
-            let mut test_ref_2 = open_sstable::<Test>(base_fs, &table_path)
-                .await
-                .scan(
-                    (Bound::Unbounded, Bound::Unbounded),
-                    1_u32.into(),
-                    None,
-                    ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
-                        [0, 1, 2, 4],
-                    ),
-                )
-                .await
-                .unwrap();
+            let mut test_ref_2 =
+                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                    .await
+                    .scan(
+                        (Bound::Unbounded, Bound::Unbounded),
+                        1_u32.into(),
+                        None,
+                        ProjectionMask::roots(
+                            &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                            [0, 1, 2, 4],
+                        ),
+                    )
+                    .await
+                    .unwrap();
 
             let entry_0 = test_ref_2.next().await.unwrap().unwrap();
             assert_eq!(entry_0.get().unwrap().vstring, "hello");
@@ -312,19 +361,20 @@ pub(crate) mod tests {
             assert_eq!(entry_1.get().unwrap().vbool, None);
         }
         {
-            let mut test_ref_3 = open_sstable::<Test>(base_fs, &table_path)
-                .await
-                .scan(
-                    (Bound::Unbounded, Bound::Unbounded),
-                    1_u32.into(),
-                    None,
-                    ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
-                        [0, 1, 2],
-                    ),
-                )
-                .await
-                .unwrap();
+            let mut test_ref_3 =
+                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                    .await
+                    .scan(
+                        (Bound::Unbounded, Bound::Unbounded),
+                        1_u32.into(),
+                        None,
+                        ProjectionMask::roots(
+                            &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                            [0, 1, 2],
+                        ),
+                    )
+                    .await
+                    .unwrap();
 
             let entry_0 = test_ref_3.next().await.unwrap().unwrap();
             assert_eq!(entry_0.get().unwrap().vstring, "hello");

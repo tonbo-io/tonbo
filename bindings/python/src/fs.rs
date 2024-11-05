@@ -59,6 +59,7 @@ impl From<FsOptions> for fusio_dispatch::FsOptions {
             } => fusio_dispatch::FsOptions::S3 {
                 bucket,
                 credential: credential.map(fusio::remotes::aws::AwsCredential::from),
+                endpoint: None,
                 region,
                 sign_payload,
                 checksum,

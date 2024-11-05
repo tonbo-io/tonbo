@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use pyo3::{
     prelude::*,
     pyclass, pymethods,
@@ -12,7 +11,7 @@ use tonbo::{
     record::{ColumnDesc, DynRecord},
     DB,
 };
-
+use tonbo_ext_reader::foyer_reader::FoyerReader;
 use crate::{
     column::Column,
     error::{CommitError, DbError},
@@ -28,7 +27,7 @@ type PyExecutor = TokioExecutor;
 pub struct TonboDB {
     desc: Arc<Vec<Column>>,
     primary_key_index: usize,
-    db: Arc<DB<DynRecord, PyExecutor>>,
+    db: Arc<DB<DynRecord, PyExecutor, FoyerReader>>,
 }
 
 #[pymethods]

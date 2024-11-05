@@ -201,6 +201,10 @@ async fn main() {
         let tmp_file: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         benchmark::<RocksdbBenchDatabase>(tmp_file.path()).await
     };
+    let tonbo_s3_latency_results = {
+        let tmp_file: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
+        benchmark::<TonboS3BenchDataBase>(tmp_file.path()).await
+    };
 
     let _ = fs::remove_dir_all(&tmpdir);
 
@@ -210,7 +214,11 @@ async fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [tonbo_latency_results, rocksdb_results] {
+    for results in [
+        tonbo_latency_results,
+        rocksdb_results,
+        tonbo_s3_latency_results,
+    ] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -218,7 +226,7 @@ async fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "tonbo", "rocksdb"]);
+    table.set_header(["", "tonbo", "rocksdb", "tonbo_s3"]);
     for row in rows {
         table.add_row(row);
     }

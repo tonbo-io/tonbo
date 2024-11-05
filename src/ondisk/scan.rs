@@ -6,10 +6,10 @@ use std::{
 };
 
 use arrow::datatypes::Schema;
-use fusio_parquet::reader::AsyncReader;
 use futures_core::{ready, Stream};
 use parquet::arrow::{async_reader::ParquetRecordBatchStream, ProjectionMask};
 use pin_project_lite::pin_project;
+use tonbo_ext_reader::CacheReader;
 
 use crate::{
     record::Record,
@@ -18,9 +18,9 @@ use crate::{
 
 pin_project! {
     #[derive(Debug)]
-    pub struct SsTableScan<'scan, R>{
+    pub struct SsTableScan<'scan, R, C>{
         #[pin]
-        stream: ParquetRecordBatchStream<AsyncReader>,
+        stream: ParquetRecordBatchStream<C>,
         iter: Option<RecordBatchIterator<R>>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
@@ -28,9 +28,9 @@ pin_project! {
     }
 }
 
-impl<R> SsTableScan<'_, R> {
-    pub fn new(
-        stream: ParquetRecordBatchStream<AsyncReader>,
+impl<R, C> SsTableScan<'_, R, C> {
+    pub(crate) fn new(
+        stream: ParquetRecordBatchStream<C>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
     ) -> Self {
@@ -44,9 +44,10 @@ impl<R> SsTableScan<'_, R> {
     }
 }
 
-impl<'scan, R> Stream for SsTableScan<'scan, R>
+impl<'scan, R, C> Stream for SsTableScan<'scan, R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     type Item = Result<RecordBatchEntry<R>, parquet::errors::ParquetError>;
 

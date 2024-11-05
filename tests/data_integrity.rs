@@ -6,6 +6,7 @@ mod tests {
     use futures_util::StreamExt;
     use tempfile::TempDir;
     use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
+    use tonbo_ext_reader::foyer_reader::FoyerReader;
 
     const WRITE_TIMES: usize = 500_000;
     const STRING_SIZE: usize = 50;
@@ -62,8 +63,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
     #[ignore]
+    #[tokio::test]
     async fn test_data_integrity() {
         let mut rng = fastrand::Rng::with_seed(42);
         let mut primary_key_count = 0;
@@ -72,7 +73,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db: DB<Customer, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Customer, TokioExecutor, FoyerReader> =
+            DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for _ in 0..WRITE_TIMES {
             let customer = gen_record(&mut rng, &mut primary_key_count);

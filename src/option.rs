@@ -11,6 +11,7 @@ use parquet::{
     format::SortingColumn,
     schema::types::ColumnPath,
 };
+use tonbo_ext_reader::CacheReader;
 
 use crate::{
     fs::{FileId, FileType},
@@ -25,6 +26,15 @@ const DEFAULT_WAL_BUFFER_SIZE: usize = 4 * 1024;
 /// configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Clone)]
 pub struct DbOption<R> {
+    pub(crate) cache_path: Path,
+    pub(crate) cache_meta_capacity: usize,
+    pub(crate) cache_meta_shards: usize,
+    pub(crate) cache_meta_ratio: f64,
+    pub(crate) cache_range_memory: usize,
+    pub(crate) cache_range_disk: usize,
+    pub(crate) cache_range_capacity: usize,
+    pub(crate) cache_range_shards: usize,
+
     pub(crate) clean_channel_buffer: usize,
     pub(crate) base_path: Path,
     pub(crate) base_fs: FsOptions,
@@ -54,7 +64,26 @@ where
         let (column_paths, sorting_columns) =
             Self::primary_key_path(primary_key_name, primary_key_index);
 
+        Self::fn_new(base_path, column_paths, sorting_columns)
+    }
+
+    fn fn_new(
+        base_path: Path,
+        column_paths: ColumnPath,
+        sorting_columns: Vec<SortingColumn>,
+    ) -> Self {
+        let cache_path = base_path.child("cache");
+        let memory = 64 * 1024 * 1024;
+
         DbOption {
+            cache_path,
+            cache_meta_capacity: 32,
+            cache_meta_shards: 4,
+            cache_meta_ratio: 0.1,
+            cache_range_memory: memory,
+            cache_range_disk: 8 * memory,
+            cache_range_capacity: 1024,
+            cache_range_shards: 32,
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
             major_threshold_with_sst_size: 4,
@@ -103,32 +132,8 @@ where
     /// build the default configured [`DbOption`] based on the passed path
     fn from(base_path: Path) -> Self {
         let (column_paths, sorting_columns) = R::primary_key_path();
-        DbOption {
-            immutable_chunk_num: 3,
-            immutable_chunk_max_num: 5,
-            major_threshold_with_sst_size: 4,
-            level_sst_magnification: 10,
-            max_sst_file_size: 256 * 1024 * 1024,
-            clean_channel_buffer: 10,
-            base_path,
-            base_fs: FsOptions::Local,
-            write_parquet_properties: WriterProperties::builder()
-                .set_compression(Compression::LZ4)
-                .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
-                .set_column_bloom_filter_enabled(column_paths.clone(), true)
-                .set_sorting_columns(Some(sorting_columns))
-                .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
-                .build(),
 
-            use_wal: true,
-            wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
-            major_default_oldest_table_num: 3,
-            major_l_selection_table_max_num: 4,
-            trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
-            _p: Default::default(),
-            version_log_snapshot_threshold: 200,
-            level_paths: vec![None; MAX_LEVEL],
-        }
+        DbOption::fn_new(base_path, column_paths, sorting_columns)
     }
 }
 
@@ -281,8 +286,12 @@ where
         self.level_paths[level].as_ref().map(|(path, _)| path)
     }
 
-    pub(crate) fn is_threshold_exceeded_major(&self, version: &Version<R>, level: usize) -> bool {
-        Version::<R>::tables_len(version, level)
+    pub(crate) fn is_threshold_exceeded_major<C: CacheReader + 'static>(
+        &self,
+        version: &Version<R, C>,
+        level: usize,
+    ) -> bool {
+        Version::<R, C>::tables_len(version, level)
             >= (self.major_threshold_with_sst_size * self.level_sst_magnification.pow(level as u32))
     }
 }
@@ -290,6 +299,12 @@ where
 impl<R> Debug for DbOption<R> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbOption")
+            .field("cache_path", &self.cache_path)
+            .field("cache_meta_shards", &self.cache_meta_shards)
+            .field("cache_meta_capacity", &self.cache_meta_capacity)
+            .field("cache_meta_ratio", &self.cache_meta_ratio)
+            .field("cache_range_memory", &self.cache_range_memory)
+            .field("cache_range_disk", &self.cache_range_disk)
             .field("clean_channel_buffer", &self.clean_channel_buffer)
             .field("base_path", &self.base_path)
             // TODO

@@ -3,6 +3,7 @@ use std::{iter::repeat_with, sync::Arc};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use mimalloc::MiMalloc;
 use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
+use tonbo_ext_reader::foyer_reader::FoyerReader;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -15,7 +16,7 @@ pub struct KV {
 }
 
 #[inline(never)]
-async fn tonbo_write(db: &DB<KV, TokioExecutor>, batch_size: usize) {
+async fn tonbo_write(db: &DB<KV, TokioExecutor, FoyerReader>, batch_size: usize) {
     let mut kvs = Vec::with_capacity(128);
     for _ in 0..batch_size {
         let key = repeat_with(fastrand::alphanumeric).take(256).collect();

@@ -10,8 +10,9 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
-use fusio::{dynamic::DynFile, fs::FileMeta};
+use fusio::{dynamic::DynFile, fs::FileMeta, path::path_to_local};
 use futures_util::StreamExt;
+use tonbo_ext_reader::CacheReader;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
@@ -45,28 +46,34 @@ impl Ord for CmpMeta {
     }
 }
 
-pub(crate) struct VersionSetInner<R>
+pub(crate) struct VersionSetInner<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
-    current: VersionRef<R>,
+    current: VersionRef<R, C>,
     log_with_id: (Box<dyn DynFile>, FileId),
 }
 
-pub(crate) struct VersionSet<R>
+pub(crate) struct VersionSet<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
-    inner: Arc<RwLock<VersionSetInner<R>>>,
+    inner: Arc<RwLock<VersionSetInner<R, C>>>,
     clean_sender: Sender<CleanTag>,
     timestamp: Arc<AtomicU32>,
     option: Arc<DbOption<R>>,
     manager: Arc<StoreManager>,
+
+    range_cache: C::RangeCache,
+    meta_cache: C::MetaCache,
 }
 
-impl<R> Clone for VersionSet<R>
+impl<R, C> Clone for VersionSet<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     fn clone(&self) -> Self {
         VersionSet {
@@ -75,13 +82,16 @@ where
             timestamp: self.timestamp.clone(),
             option: self.option.clone(),
             manager: self.manager.clone(),
+            range_cache: self.range_cache.clone(),
+            meta_cache: self.meta_cache.clone(),
         }
     }
 }
 
-impl<R> TransactionTs for VersionSet<R>
+impl<R, C> TransactionTs for VersionSet<R, C>
 where
     R: Record,
+    C: CacheReader,
 {
     fn load_ts(&self) -> Timestamp {
         self.timestamp.load(Ordering::Acquire).into()
@@ -92,9 +102,10 @@ where
     }
 }
 
-impl<R> VersionSet<R>
+impl<R, C> VersionSet<R, C>
 where
     R: Record,
+    C: CacheReader + 'static,
 {
     pub(crate) async fn new(
         clean_sender: Sender<CleanTag>,
@@ -148,15 +159,30 @@ where
 
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
-        let set = VersionSet::<R> {
+
+        let (meta_cache, range_cache) = C::build_caches(
+            path_to_local(&option.cache_path).unwrap(),
+            option.cache_meta_capacity,
+            option.cache_meta_shards,
+            option.cache_meta_ratio,
+            option.cache_range_memory,
+            option.cache_range_disk,
+            option.cache_range_capacity,
+            option.cache_range_shards,
+        )
+        .await?;
+
+        let set = VersionSet::<R, C> {
             inner: Arc::new(RwLock::new(VersionSetInner {
-                current: Arc::new(Version::<R> {
+                current: Arc::new(Version::<R, C> {
                     ts: Timestamp::from(0),
                     level_slice: [const { Vec::new() }; MAX_LEVEL],
                     clean_sender: clean_sender.clone(),
                     option: option.clone(),
                     timestamp: timestamp.clone(),
                     log_length: 0,
+                    range_cache: range_cache.clone(),
+                    meta_cache: meta_cache.clone(),
                 }),
                 log_with_id: (log, log_id),
             })),
@@ -164,13 +190,15 @@ where
             timestamp,
             option,
             manager,
+            range_cache,
+            meta_cache,
         };
         set.apply_edits(edits, None, true).await?;
 
         Ok(set)
     }
 
-    pub(crate) async fn current(&self) -> VersionRef<R> {
+    pub(crate) async fn current(&self) -> VersionRef<R, C> {
         self.inner.read().await.current.clone()
     }
 
@@ -290,10 +318,11 @@ pub(crate) mod tests {
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
-    use fusio::path::Path;
+    use fusio::path::{path_to_local, Path};
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;
+    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
 
     use crate::{
         fs::{manager::StoreManager, FileId, FileType},
@@ -308,14 +337,15 @@ pub(crate) mod tests {
         DbOption,
     };
 
-    pub(crate) async fn build_version_set<R>(
-        version: Version<R>,
+    pub(crate) async fn build_version_set<R, C>(
+        version: Version<R, C>,
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption<R>>,
         manager: Arc<StoreManager>,
-    ) -> Result<VersionSet<R>, VersionError<R>>
+    ) -> Result<VersionSet<R, C>, VersionError<R>>
     where
         R: Record,
+        C: CacheReader,
     {
         let log_id = FileId::new();
         let log = manager
@@ -326,8 +356,19 @@ pub(crate) mod tests {
             )
             .await?;
         let timestamp = version.timestamp.clone();
+        let (meta_cache, range_cache) = C::build_caches(
+            path_to_local(&option.cache_path).unwrap(),
+            option.cache_meta_capacity,
+            option.cache_meta_shards,
+            option.cache_meta_ratio,
+            option.cache_range_memory,
+            option.cache_range_disk,
+            option.cache_range_capacity,
+            option.cache_range_shards,
+        )
+        .await?;
 
-        Ok(VersionSet::<R> {
+        Ok(VersionSet::<R, C> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
                 log_with_id: (log, log_id),
@@ -336,6 +377,8 @@ pub(crate) mod tests {
             timestamp,
             option,
             manager,
+            range_cache,
+            meta_cache,
         })
     }
 
@@ -353,7 +396,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, FoyerReader> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -369,7 +412,7 @@ pub(crate) mod tests {
 
         drop(version_set);
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, FoyerReader> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
@@ -391,7 +434,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, FoyerReader> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -519,7 +562,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, FoyerReader> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
