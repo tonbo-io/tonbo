@@ -5,10 +5,8 @@ use std::{
     },
     io,
     mem::transmute,
-    sync::Arc,
 };
 
-use async_lock::RwLockReadGuard;
 use flume::SendError;
 use lockable::AsyncLimit;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
@@ -16,12 +14,11 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
-    fs::manager::StoreManager,
     record::{Key, KeyRef},
+    snapshot::Snapshot,
     stream,
     stream::mem_projection::MemProjectionStream,
     timestamp::{Timestamp, Timestamped},
-    version::{TransactionTs, VersionRef},
     wal::log::LogType,
     DbError, LockMap, Projection, Record, Scan, Schema,
 };
@@ -49,31 +46,20 @@ pub struct Transaction<'txn, R>
 where
     R: Record,
 {
-    ts: Timestamp,
     local: BTreeMap<R::Key, Option<R>>,
-    share: RwLockReadGuard<'txn, Schema<R>>,
-    version: VersionRef<R>,
+    snapshot: Snapshot<'txn, R>,
     lock_map: LockMap<R::Key>,
-    manager: Arc<StoreManager>,
 }
 
 impl<'txn, R> Transaction<'txn, R>
 where
     R: Record + Send,
 {
-    pub(crate) fn new(
-        version: VersionRef<R>,
-        share: RwLockReadGuard<'txn, Schema<R>>,
-        lock_map: LockMap<R::Key>,
-        manager: Arc<StoreManager>,
-    ) -> Self {
+    pub(crate) fn new(snapshot: Snapshot<'txn, R>, lock_map: LockMap<R::Key>) -> Self {
         Self {
-            ts: version.load_ts(),
             local: BTreeMap::new(),
-            share,
-            version,
+            snapshot,
             lock_map,
-            manager,
         }
     }
 
@@ -87,16 +73,10 @@ where
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
             Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
             None => self
-                .share
-                .get(&self.version, &self.manager, key, self.ts, projection)
+                .snapshot
+                .get(key, projection)
                 .await?
-                .and_then(|entry| {
-                    if entry.value().is_none() {
-                        None
-                    } else {
-                        Some(TransactionEntry::Stream(entry))
-                    }
-                }),
+                .map(TransactionEntry::Stream),
         })
     }
 
@@ -105,16 +85,12 @@ where
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
     ) -> Scan<'scan, R> {
-        Scan::new(
-            &self.share,
-            &self.manager,
+        self.snapshot._scan(
             range,
-            self.ts,
-            &self.version,
             Box::new(move |projection_mask: Option<ProjectionMask>| {
                 let mut transaction_scan = TransactionScan {
                     inner: self.local.range(range),
-                    ts: self.ts,
+                    ts: self.snapshot.ts(),
                 }
                 .into();
                 if let Some(mask) = projection_mask {
@@ -159,7 +135,11 @@ where
             );
         }
         for (key, _) in self.local.iter() {
-            if self.share.check_conflict(key, self.ts) {
+            if self
+                .snapshot
+                .schema()
+                .check_conflict(key, self.snapshot.ts())
+            {
                 return Err(CommitError::WriteConflict(key.clone()));
             }
         }
@@ -168,27 +148,32 @@ where
         let is_excess = match len {
             0 => false,
             1 => {
-                let new_ts = self.version.increase_ts();
+                let new_ts = self.snapshot.increase_ts();
                 let (key, record) = self.local.pop_first().unwrap();
-                Self::append(&self.share, LogType::Full, key, record, new_ts).await?
+                Self::append(self.snapshot.schema(), LogType::Full, key, record, new_ts).await?
             }
             _ => {
-                let new_ts = self.version.increase_ts();
+                let new_ts = self.snapshot.increase_ts();
                 let mut iter = self.local.into_iter();
 
                 let (key, record) = iter.next().unwrap();
-                Self::append(&self.share, LogType::First, key, record, new_ts).await?;
+                Self::append(self.snapshot.schema(), LogType::First, key, record, new_ts).await?;
 
                 for (key, record) in (&mut iter).take(len - 2) {
-                    Self::append(&self.share, LogType::Middle, key, record, new_ts).await?;
+                    Self::append(self.snapshot.schema(), LogType::Middle, key, record, new_ts)
+                        .await?;
                 }
 
                 let (key, record) = iter.next().unwrap();
-                Self::append(&self.share, LogType::Last, key, record, new_ts).await?
+                Self::append(self.snapshot.schema(), LogType::Last, key, record, new_ts).await?
             }
         };
         if is_excess {
-            let _ = self.share.compaction_tx.try_send(CompactTask::Freeze);
+            let _ = self
+                .snapshot
+                .schema()
+                .compaction_tx
+                .try_send(CompactTask::Freeze);
         }
         Ok(())
     }
