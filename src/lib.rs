@@ -121,6 +121,7 @@ pub mod option;
 pub mod record;
 mod scope;
 pub mod serdes;
+pub mod snapshot;
 pub mod stream;
 pub mod timestamp;
 pub mod transaction;
@@ -160,6 +161,7 @@ use crate::{
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileId, FileType},
     serdes::Decode,
+    snapshot::Snapshot,
     stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
         ScanStream,
@@ -287,10 +289,13 @@ where
 
     /// open an optimistic ACID transaction
     pub async fn transaction(&self) -> Transaction<'_, R> {
-        Transaction::new(
-            self.version_set.current().await,
+        Transaction::new(self.snapshot().await, self.lock_map.clone())
+    }
+
+    pub async fn snapshot(&self) -> Snapshot<'_, R> {
+        Snapshot::new(
             self.schema.read().await,
-            self.lock_map.clone(),
+            self.version_set.current().await,
             self.manager.clone(),
         )
     }
