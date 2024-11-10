@@ -42,7 +42,7 @@ impl<F, R> WalFile<F, R> {
 
 impl<F, R> WalFile<F, R>
 where
-    F: Write + Unpin + Send,
+    F: Write + Send,
     R: Record,
 {
     pub(crate) async fn write<'r>(

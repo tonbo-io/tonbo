@@ -43,6 +43,7 @@ pub enum FsOptions {
         region: Option<String>,
         sign_payload: Option<bool>,
         checksum: Option<bool>,
+        endpoint: Option<String>,
     },
 }
 
@@ -56,12 +57,14 @@ impl From<FsOptions> for fusio_dispatch::FsOptions {
                 region,
                 sign_payload,
                 checksum,
+                endpoint,
             } => fusio_dispatch::FsOptions::S3 {
                 bucket,
                 credential: credential.map(fusio::remotes::aws::AwsCredential::from),
                 region,
                 sign_payload,
                 checksum,
+                endpoint,
             },
         }
     }
