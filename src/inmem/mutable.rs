@@ -5,7 +5,7 @@ use crossbeam_skiplist::{
     map::{Entry, Range},
     SkipMap,
 };
-use fusio::{buffered::BufWriter, dynamic::DynFile, DynFs};
+use fusio::{buffered::BufWriter, DynFs, DynWrite};
 use ulid::Ulid;
 
 use crate::{
@@ -37,7 +37,7 @@ where
     R: Record,
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
-    wal: Option<Mutex<WalFile<Box<dyn DynFile>, R>>>,
+    wal: Option<Mutex<WalFile<Box<dyn DynWrite>, R>>>,
     pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
@@ -61,7 +61,7 @@ where
                 )
                 .await?,
                 option.wal_buffer_size,
-            )) as Box<dyn DynFile>;
+            )) as Box<dyn DynWrite>;
 
             wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
