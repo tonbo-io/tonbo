@@ -260,7 +260,7 @@ mod tests {
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo_ext_reader::foyer_reader::FoyerReader;
+    use tonbo_ext_reader::lru_reader::LruReader;
 
     use crate::{
         compaction::tests::build_version,
@@ -280,7 +280,7 @@ mod tests {
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
 
-        let db = DB::<String, TokioExecutor, FoyerReader>::new(
+        let db = DB::<String, TokioExecutor, LruReader>::new(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::new(),
         )
@@ -408,7 +408,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<String, TokioExecutor, FoyerReader>::new(option, TokioExecutor::new())
+        let db = DB::<String, TokioExecutor, LruReader>::new(option, TokioExecutor::new())
             .await
             .unwrap();
 
@@ -441,7 +441,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<Test, TokioExecutor, FoyerReader>::new(option, TokioExecutor::new())
+        let db = DB::<Test, TokioExecutor, LruReader>::new(option, TokioExecutor::new())
             .await
             .unwrap();
 
@@ -811,7 +811,7 @@ mod tests {
             "age".to_string(),
             0,
         );
-        let db = DB::<_, _, FoyerReader>::with_schema(option, TokioExecutor::default(), descs, 0)
+        let db = DB::<_, _, LruReader>::with_schema(option, TokioExecutor::default(), descs, 0)
             .await
             .unwrap();
 

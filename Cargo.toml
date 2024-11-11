@@ -11,13 +11,14 @@ resolver = "2"
 version = "0.2.0"
 
 [package.metadata]
-msrv = "1.81.0"
+msrv = "1.82.0"
 
 [features]
-bench = ["redb", "rocksdb", "sled"]
+bench = ["redb", "rocksdb", "sled", "foyer"]
 bytes = ["dep:bytes"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
 default = ["bytes", "tokio"]
+foyer = ["tonbo_ext_reader/foyer"]
 load_tbl = []
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]
@@ -58,7 +59,7 @@ crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "42", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "db305599ae88c7a934ab1ab235d8b3efda95a242", package = "fusio", version = "0.3.1", features = [
+fusio = { package = "fusio", version = "0.3.3", features = [
     "aws",
     "dyn",
     "fs",
@@ -66,11 +67,11 @@ fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "db305599ae88c7a9
     "tokio",
     "tokio-http",
 ] }
-fusio-dispatch = { git = "https://github.com/tonbo-io/fusio.git", rev = "db305599ae88c7a934ab1ab235d8b3efda95a242", package = "fusio-dispatch", version = "0.2.1", features = [
+fusio-dispatch = { package = "fusio-dispatch", version = "0.2.2", features = [
     "aws",
     "tokio",
 ] }
-fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", rev = "db305599ae88c7a934ab1ab235d8b3efda95a242", package = "fusio-parquet", version = "0.2.1" }
+fusio-parquet = { package = "fusio-parquet", version = "0.2.2" }
 futures-core = "0.3"
 futures-io = "0.3"
 futures-util = "0.3"

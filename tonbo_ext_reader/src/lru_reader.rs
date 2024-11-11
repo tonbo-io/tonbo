@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use parquet::{arrow::async_reader::AsyncFileReader, file::metadata::ParquetMetaData};
 use ulid::Ulid;
 
-use crate::{CacheError, CacheReader, MetaCache, RangeCache};
+use crate::{CacheError, CacheReader, TonboCache};
 
 pub(crate) trait SharedKey<S: BuildHasher>: Hash + PartialEq + Eq {
     fn shared(&self, hash_builder: &S, shared: usize) -> usize;
@@ -96,9 +96,9 @@ pub struct LruReader {
     meta_cache: LruMetaCache,
 }
 
-impl MetaCache for LruMetaCache {
-    fn get(&self, gen: &Ulid) -> Option<Arc<ParquetMetaData>> {
-        self.0.get(gen, |v| v.map(Arc::clone))
+impl TonboCache<Ulid, Arc<ParquetMetaData>> for LruMetaCache {
+    async fn get(&self, gen: &Ulid) -> Result<Option<Arc<ParquetMetaData>>, CacheError> {
+        Ok(self.0.get(gen, |v| v.map(Arc::clone)))
     }
 
     fn insert(&self, gen: Ulid, data: Arc<ParquetMetaData>) -> Arc<ParquetMetaData> {
@@ -107,7 +107,7 @@ impl MetaCache for LruMetaCache {
     }
 }
 
-impl RangeCache for LruRangeCache {
+impl TonboCache<(Ulid, Range<usize>), Bytes> for LruRangeCache {
     async fn get(&self, key: &(Ulid, Range<usize>)) -> Result<Option<Bytes>, CacheError> {
         Ok(self.0.get(key, |v| v.cloned()))
     }
@@ -139,7 +139,12 @@ impl AsyncFileReader for LruReader {
 
     fn get_metadata(&mut self) -> BoxFuture<'_, parquet::errors::Result<Arc<ParquetMetaData>>> {
         async move {
-            if let Some(meta) = self.meta_cache.get(&self.gen) {
+            if let Some(meta) = self
+                .meta_cache
+                .get(&self.gen)
+                .await
+                .map_err(|e| parquet::errors::ParquetError::External(From::from(e)))?
+            {
                 return Ok(meta);
             }
 

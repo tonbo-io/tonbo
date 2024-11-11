@@ -525,7 +525,7 @@ pub(crate) mod tests {
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
     use tempfile::TempDir;
-    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
+    use tonbo_ext_reader::{lru_reader::LruReader, CacheReader};
 
     use crate::{
         compaction::Compactor,
@@ -684,7 +684,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let scope = Compactor::<Test, FoyerReader>::minor_compaction(
+        let scope = Compactor::<Test, LruReader>::minor_compaction(
             &option,
             None,
             &vec![
@@ -748,7 +748,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-        let scope = Compactor::<DynRecord, FoyerReader>::minor_compaction(
+        let scope = Compactor::<DynRecord, LruReader>::minor_compaction(
             &option,
             None,
             &vec![
@@ -813,7 +813,7 @@ pub(crate) mod tests {
         let max = 5.to_string();
         let mut version_edits = Vec::new();
 
-        Compactor::<Test, FoyerReader>::major_compaction(
+        Compactor::<Test, LruReader>::major_compaction(
             &version,
             &option,
             &min,
@@ -859,7 +859,7 @@ pub(crate) mod tests {
         manager: &StoreManager,
     ) -> (
         (FileId, FileId, FileId, FileId, FileId),
-        Version<Test, FoyerReader>,
+        Version<Test, LruReader>,
     ) {
         let level_0_fs = option
             .level_fs_path(0)
@@ -1070,7 +1070,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let (sender, _) = bounded(1);
-        let (meta_cache, range_cache) = FoyerReader::build_caches(
+        let (meta_cache, range_cache) = LruReader::build_caches(
             path_to_local(&option.cache_path).unwrap(),
             option.cache_meta_capacity,
             option.cache_meta_shards,
@@ -1082,7 +1082,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let mut version = Version::<Test, FoyerReader>::new(
+        let mut version = Version::<Test, LruReader>::new(
             option.clone(),
             sender,
             Arc::new(AtomicU32::default()),
@@ -1205,7 +1205,7 @@ pub(crate) mod tests {
 
         let option = Arc::new(option);
         let (sender, _) = bounded(1);
-        let (meta_cache, range_cache) = FoyerReader::build_caches(
+        let (meta_cache, range_cache) = LruReader::build_caches(
             path_to_local(&option.cache_path).unwrap(),
             option.cache_meta_capacity,
             option.cache_meta_shards,
@@ -1217,7 +1217,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let mut version = Version::<Test, FoyerReader>::new(
+        let mut version = Version::<Test, LruReader>::new(
             option.clone(),
             sender,
             Arc::new(AtomicU32::default()),
@@ -1241,7 +1241,7 @@ pub(crate) mod tests {
         let min = 6.to_string();
         let max = 9.to_string();
 
-        Compactor::<Test, FoyerReader>::major_compaction(
+        Compactor::<Test, LruReader>::major_compaction(
             &version,
             &option,
             &min,
@@ -1270,7 +1270,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor, FoyerReader> =
+        let db: DB<Test, TokioExecutor, LruReader> =
             DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for i in 5..9 {

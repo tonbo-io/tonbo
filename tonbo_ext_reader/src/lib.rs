@@ -6,27 +6,22 @@ use parquet::{arrow::async_reader::AsyncFileReader, file::metadata::ParquetMetaD
 use thiserror::Error;
 use ulid::Ulid;
 
+#[cfg(feature = "foyer")]
 pub mod foyer_reader;
 pub mod lru_reader;
 
-pub trait MetaCache: Sync + Send + Clone + Debug {
-    fn get(&self, gen: &Ulid) -> Option<Arc<ParquetMetaData>>;
-
-    fn insert(&self, gen: Ulid, data: Arc<ParquetMetaData>) -> Arc<ParquetMetaData>;
-}
-
-pub trait RangeCache: Sync + Send + Clone + Debug {
+pub trait TonboCache<K, V>: Sync + Send + Clone + Debug {
     fn get(
         &self,
-        key: &(Ulid, Range<usize>),
-    ) -> impl std::future::Future<Output = Result<Option<Bytes>, CacheError>> + Send;
+        key: &K,
+    ) -> impl std::future::Future<Output = Result<Option<V>, CacheError>> + Send;
 
-    fn insert(&self, key: (Ulid, Range<usize>), bytes: Bytes) -> Bytes;
+    fn insert(&self, key: K, value: V) -> V;
 }
 
 pub trait CacheReader: AsyncFileReader + Unpin {
-    type MetaCache: MetaCache;
-    type RangeCache: RangeCache;
+    type MetaCache: TonboCache<Ulid, Arc<ParquetMetaData>>;
+    type RangeCache: TonboCache<(Ulid, Range<usize>), Bytes>;
 
     fn new(
         meta_cache: Self::MetaCache,
@@ -37,14 +32,14 @@ pub trait CacheReader: AsyncFileReader + Unpin {
 
     #[allow(clippy::too_many_arguments)]
     fn build_caches(
-        cache_path: impl AsRef<std::path::Path> + Send,
-        cache_meta_capacity: usize,
-        cache_meta_shards: usize,
-        cache_meta_ratio: f64,
-        cache_range_memory: usize,
-        cache_range_disk: usize,
-        cache_range_capacity: usize,
-        cache_range_shards: usize,
+        path: impl AsRef<std::path::Path> + Send,
+        meta_capacity: usize,
+        meta_shards: usize,
+        meta_ratio: f64,
+        range_memory: usize,
+        range_disk: usize,
+        range_capacity: usize,
+        range_shards: usize,
     ) -> impl std::future::Future<Output = Result<(Self::MetaCache, Self::RangeCache), CacheError>> + Send;
 }
 
@@ -80,7 +75,7 @@ pub(crate) mod tests {
     use tempfile::TempDir;
     use ulid::Ulid;
 
-    use crate::{foyer_reader::FoyerReader, lru_reader::LruReader, CacheReader};
+    use crate::{lru_reader::LruReader, CacheReader};
 
     struct CountFile {
         inner: Box<dyn DynFile>,
@@ -213,7 +208,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_cache_read() {
-        inner_test_cache_read::<FoyerReader>().await;
+        #[cfg(feature = "foyer")]
+        inner_test_cache_read::<crate::foyer_reader::FoyerReader>().await;
         inner_test_cache_read::<LruReader>().await;
     }
 }

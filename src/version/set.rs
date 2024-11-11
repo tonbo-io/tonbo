@@ -322,7 +322,7 @@ pub(crate) mod tests {
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
+    use tonbo_ext_reader::{lru_reader::LruReader, CacheReader};
 
     use crate::{
         fs::{manager::StoreManager, FileId, FileType},
@@ -396,7 +396,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String, FoyerReader> =
+        let version_set: VersionSet<String, LruReader> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -412,7 +412,7 @@ pub(crate) mod tests {
 
         drop(version_set);
 
-        let version_set: VersionSet<String, FoyerReader> =
+        let version_set: VersionSet<String, LruReader> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
@@ -434,7 +434,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String, FoyerReader> =
+        let version_set: VersionSet<String, LruReader> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -562,7 +562,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String, FoyerReader> =
+        let version_set: VersionSet<String, LruReader> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();

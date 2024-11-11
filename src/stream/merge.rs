@@ -164,7 +164,7 @@ mod tests {
 
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
-    use tonbo_ext_reader::foyer_reader::FoyerReader;
+    use tonbo_ext_reader::lru_reader::LruReader;
 
     use super::MergeStream;
     use crate::{
@@ -217,7 +217,7 @@ mod tests {
         let lower = "a".to_string();
         let upper = "e".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String, FoyerReader>::from_vec(
+        let mut merge = MergeStream::<String, LruReader>::from_vec(
             vec![
                 m1.scan(bound, 6.into()).into(),
                 m2.scan(bound, 6.into()).into(),
@@ -296,7 +296,7 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String, FoyerReader>::from_vec(
+        let mut merge = MergeStream::<String, LruReader>::from_vec(
             vec![m1.scan(bound, 0.into()).into()],
             0.into(),
         )
@@ -326,7 +326,7 @@ mod tests {
         let lower = "1".to_string();
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
-        let mut merge = MergeStream::<String, FoyerReader>::from_vec(
+        let mut merge = MergeStream::<String, LruReader>::from_vec(
             vec![m1.scan(bound, 1.into()).into()],
             1.into(),
         )
@@ -380,7 +380,7 @@ mod tests {
         let lower = "1".to_string();
         let upper = "3".to_string();
         {
-            let mut merge = MergeStream::<String, FoyerReader>::from_vec(
+            let mut merge = MergeStream::<String, LruReader>::from_vec(
                 vec![m1
                     .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
                     .into()],
@@ -400,7 +400,7 @@ mod tests {
             assert!(merge.next().await.is_none());
         }
         {
-            let mut merge = MergeStream::<String, FoyerReader>::from_vec(
+            let mut merge = MergeStream::<String, LruReader>::from_vec(
                 vec![m1
                     .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
                     .into()],

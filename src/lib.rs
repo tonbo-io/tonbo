@@ -38,7 +38,7 @@
 //! use tokio::fs;
 //! use tokio_util::bytes::Bytes;
 //! use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
-//! use tonbo_ext_reader::foyer_reader::FoyerReader;
+//! use tonbo_ext_reader::lru_reader::LruReader;
 //!
 //! // use macro to define schema of column family just like ORM
 //! // it provides type safety read & write API
@@ -57,7 +57,7 @@
 //!
 //!     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
 //!     // pluggable async runtime and I/O
-//!     let db: DB<User, TokioExecutor, FoyerReader> =
+//!     let db: DB<User, TokioExecutor, LruReader> =
 //!         DB::new(options, TokioExecutor::default()).await.unwrap();
 //!     // insert with owned value
 //!     db.insert(User {
@@ -858,7 +858,7 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
     use tempfile::TempDir;
-    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
+    use tonbo_ext_reader::{lru_reader::LruReader, CacheReader};
     use tracing::error;
 
     use crate::{
@@ -1097,7 +1097,7 @@ pub(crate) mod tests {
         option: DbOption<Test>,
         executor: E,
     ) -> RecordBatch {
-        let db: DB<Test, E, FoyerReader> = DB::new(option.clone(), executor).await.unwrap();
+        let db: DB<Test, E, LruReader> = DB::new(option.clone(), executor).await.unwrap();
         let base_fs = db.manager.base_fs();
 
         db.write(
@@ -1534,7 +1534,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor, FoyerReader> =
+        let db: DB<Test, TokioExecutor, LruReader> =
             DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (i, item) in test_items().into_iter().enumerate() {
@@ -1571,7 +1571,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor, FoyerReader> =
+        let db: DB<Test, TokioExecutor, LruReader> =
             DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for item in &test_items()[0..10] {
@@ -1621,7 +1621,7 @@ pub(crate) mod tests {
         schema.flush_wal().await.unwrap();
         drop(schema);
 
-        let db: DB<Test, TokioExecutor, FoyerReader> =
+        let db: DB<Test, TokioExecutor, LruReader> =
             DB::new(option.as_ref().to_owned(), TokioExecutor::new())
                 .await
                 .unwrap();
@@ -1694,7 +1694,7 @@ pub(crate) mod tests {
             "id".to_owned(),
             primary_key_index,
         );
-        let db: DB<DynRecord, TokioExecutor, FoyerReader> =
+        let db: DB<DynRecord, TokioExecutor, LruReader> =
             DB::with_schema(option, TokioExecutor::new(), desc, primary_key_index)
                 .await
                 .unwrap();
@@ -1734,7 +1734,7 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor, FoyerReader> =
+        let db: DB<Test, TokioExecutor, LruReader> =
             DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (idx, item) in test_items().into_iter().enumerate() {
@@ -1777,7 +1777,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<DynRecord, TokioExecutor, FoyerReader> =
+        let db: DB<DynRecord, TokioExecutor, LruReader> =
             DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
                 .await
                 .unwrap();
@@ -2007,7 +2007,7 @@ pub(crate) mod tests {
         option3.major_default_oldest_table_num = 1;
         option3.trigger_type = TriggerType::Length(5);
 
-        let db1: DB<DynRecord, TokioExecutor, FoyerReader> = DB::with_schema(
+        let db1: DB<DynRecord, TokioExecutor, LruReader> = DB::with_schema(
             option,
             TokioExecutor::new(),
             cols_desc.clone(),
@@ -2015,7 +2015,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let db2: DB<DynRecord, TokioExecutor, FoyerReader> = DB::with_schema(
+        let db2: DB<DynRecord, TokioExecutor, LruReader> = DB::with_schema(
             option2,
             TokioExecutor::new(),
             cols_desc.clone(),
@@ -2023,7 +2023,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let db3: DB<DynRecord, TokioExecutor, FoyerReader> =
+        let db3: DB<DynRecord, TokioExecutor, LruReader> =
             DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
                 .await
                 .unwrap();

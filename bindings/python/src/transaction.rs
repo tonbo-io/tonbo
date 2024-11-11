@@ -7,7 +7,7 @@ use pyo3::{
 };
 use pyo3_asyncio::tokio::future_into_py;
 use tonbo::{record::DynRecord, transaction, Projection};
-use tonbo_ext_reader::foyer_reader::FoyerReader;
+use tonbo_ext_reader::lru_reader::LruReader;
 use crate::{
     column::Column,
     error::{repeated_commit_err, CommitError, DbError},
@@ -18,14 +18,14 @@ use crate::{
 
 #[pyclass]
 pub struct Transaction {
-    txn: Option<transaction::Transaction<'static, DynRecord, FoyerReader>>,
+    txn: Option<transaction::Transaction<'static, DynRecord, LruReader>>,
     desc: Arc<Vec<Column>>,
     primary_key_index: usize,
 }
 
 impl Transaction {
     pub(crate) fn new<'txn>(
-        txn: transaction::Transaction<'txn, DynRecord, FoyerReader>,
+        txn: transaction::Transaction<'txn, DynRecord, LruReader>,
         desc: Arc<Vec<Column>>,
     ) -> Self {
         let primary_key_index = desc
@@ -37,8 +37,8 @@ impl Transaction {
         Transaction {
             txn: Some(unsafe {
                 transmute::<
-                    transaction::Transaction<'txn, DynRecord, FoyerReader>,
-                    transaction::Transaction<'static, DynRecord, FoyerReader>,
+                    transaction::Transaction<'txn, DynRecord, LruReader>,
+                    transaction::Transaction<'static, DynRecord, LruReader>,
                 >(txn)
             }),
             desc,
@@ -84,8 +84,8 @@ impl Transaction {
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
             transmute::<
-                &transaction::Transaction<'_, DynRecord, FoyerReader>,
-                &'static transaction::Transaction<'_, DynRecord, FoyerReader>,
+                &transaction::Transaction<'_, DynRecord, LruReader>,
+                &'static transaction::Transaction<'_, DynRecord, LruReader>,
             >(txn)
         };
 
@@ -169,8 +169,8 @@ impl Transaction {
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
             transmute::<
-                &transaction::Transaction<'_, DynRecord, FoyerReader>,
-                &'static transaction::Transaction<'_, DynRecord, FoyerReader>,
+                &transaction::Transaction<'_, DynRecord, LruReader>,
+                &'static transaction::Transaction<'_, DynRecord, LruReader>,
             >(txn)
         };
         let col_desc = self.desc.get(self.primary_key_index).unwrap();

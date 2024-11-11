@@ -89,7 +89,7 @@ mod tests {
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo_ext_reader::foyer_reader::FoyerReader;
+    use tonbo_ext_reader::lru_reader::LruReader;
 
     use crate::{
         inmem::{
@@ -182,7 +182,7 @@ mod tests {
         .await
         .unwrap();
 
-        let merge = MergeStream::<Test, FoyerReader>::from_vec(
+        let merge = MergeStream::<Test, LruReader>::from_vec(
             vec![m1
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into()],

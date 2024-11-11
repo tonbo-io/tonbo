@@ -132,7 +132,7 @@ pub(crate) mod tests {
         basic::{Compression, ZstdLevel},
         file::properties::WriterProperties,
     };
-    use tonbo_ext_reader::{foyer_reader::FoyerReader, CacheReader};
+    use tonbo_ext_reader::{lru_reader::LruReader, CacheReader};
 
     use super::SsTable;
     use crate::{
@@ -234,7 +234,7 @@ pub(crate) mod tests {
 
         {
             let test_ref_1 =
-                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                open_sstable::<Test, LruReader>(base_fs, table_path.clone(), table_gen, &option)
                     .await
                     .get(
                         key.borrow(),
@@ -252,7 +252,7 @@ pub(crate) mod tests {
         }
         {
             let test_ref_2 =
-                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                open_sstable::<Test, LruReader>(base_fs, table_path.clone(), table_gen, &option)
                     .await
                     .get(
                         key.borrow(),
@@ -270,7 +270,7 @@ pub(crate) mod tests {
         }
         {
             let test_ref_3 =
-                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                open_sstable::<Test, LruReader>(base_fs, table_path.clone(), table_gen, &option)
                     .await
                     .get(
                         key.borrow(),
@@ -310,7 +310,7 @@ pub(crate) mod tests {
 
         {
             let mut test_ref_1 =
-                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                open_sstable::<Test, LruReader>(base_fs, table_path.clone(), table_gen, &option)
                     .await
                     .scan(
                         (Bound::Unbounded, Bound::Unbounded),
@@ -336,7 +336,7 @@ pub(crate) mod tests {
         }
         {
             let mut test_ref_2 =
-                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                open_sstable::<Test, LruReader>(base_fs, table_path.clone(), table_gen, &option)
                     .await
                     .scan(
                         (Bound::Unbounded, Bound::Unbounded),
@@ -362,7 +362,7 @@ pub(crate) mod tests {
         }
         {
             let mut test_ref_3 =
-                open_sstable::<Test, FoyerReader>(base_fs, table_path.clone(), table_gen, &option)
+                open_sstable::<Test, LruReader>(base_fs, table_path.clone(), table_gen, &option)
                     .await
                     .scan(
                         (Bound::Unbounded, Bound::Unbounded),

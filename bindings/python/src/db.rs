@@ -11,7 +11,7 @@ use tonbo::{
     record::{ColumnDesc, DynRecord},
     DB,
 };
-use tonbo_ext_reader::foyer_reader::FoyerReader;
+use tonbo_ext_reader::lru_reader::LruReader;
 use crate::{
     column::Column,
     error::{CommitError, DbError},
@@ -27,7 +27,7 @@ type PyExecutor = TokioExecutor;
 pub struct TonboDB {
     desc: Arc<Vec<Column>>,
     primary_key_index: usize,
-    db: Arc<DB<DynRecord, PyExecutor, FoyerReader>>,
+    db: Arc<DB<DynRecord, PyExecutor, LruReader>>,
 }
 
 #[pymethods]

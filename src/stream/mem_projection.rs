@@ -68,7 +68,7 @@ mod tests {
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
-    use tonbo_ext_reader::foyer_reader::FoyerReader;
+    use tonbo_ext_reader::lru_reader::LruReader;
 
     use crate::{
         inmem::mutable::Mutable, record::Record, stream::mem_projection::MemProjectionStream,
@@ -129,7 +129,7 @@ mod tests {
             vec![0, 1, 2, 4],
         );
 
-        let mut stream = MemProjectionStream::<Test, FoyerReader>::new(
+        let mut stream = MemProjectionStream::<Test, LruReader>::new(
             mutable
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into(),
