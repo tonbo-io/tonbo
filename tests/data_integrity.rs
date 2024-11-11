@@ -6,7 +6,7 @@ mod tests {
     use futures_util::StreamExt;
     use tempfile::TempDir;
     use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
-    use tonbo_ext_reader::foyer_reader::FoyerReader;
+    use tonbo_ext_reader::lru_reader::LruReader;
 
     const WRITE_TIMES: usize = 500_000;
     const STRING_SIZE: usize = 50;
@@ -73,7 +73,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db: DB<Customer, TokioExecutor, FoyerReader> =
+        let db: DB<Customer, TokioExecutor, LruReader> =
             DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for _ in 0..WRITE_TIMES {
