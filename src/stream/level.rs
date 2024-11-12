@@ -55,6 +55,8 @@ where
     path: Option<Path>,
 }
 
+unsafe impl<'level, R: Record> Send for LevelStream<'level, R> {}
+
 impl<'level, R> LevelStream<'level, R>
 where
     R: Record,
@@ -165,7 +167,7 @@ where
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file)));
+                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file.into())));
                         continue;
                     }
                     Poll::Ready(Err(err)) => {
@@ -201,7 +203,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{collections::Bound, sync::Arc};
 

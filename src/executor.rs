@@ -42,3 +42,37 @@ pub mod tokio {
         }
     }
 }
+
+#[cfg(all(feature = "opfs", target_arch = "wasm32"))]
+pub mod opfs {
+    use std::future::Future;
+
+    use wasm_bindgen::prelude::*;
+
+    use super::Executor;
+
+    #[derive(Debug)]
+    #[wasm_bindgen]
+    pub struct OpfsExecutor {}
+
+    impl Default for OpfsExecutor {
+        fn default() -> Self {
+            Self {}
+        }
+    }
+
+    impl OpfsExecutor {
+        pub fn new() -> Self {
+            Self {}
+        }
+    }
+
+    impl Executor for OpfsExecutor {
+        fn spawn<F>(&self, future: F)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            wasm_bindgen_futures::spawn_local(future);
+        }
+    }
+}

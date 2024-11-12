@@ -8,6 +8,9 @@ pub struct StoreManager {
     fs_map: HashMap<Path, Arc<dyn DynFs>>,
 }
 
+unsafe impl Send for StoreManager {}
+unsafe impl Sync for StoreManager {}
+
 impl StoreManager {
     pub fn new(
         base_options: FsOptions,

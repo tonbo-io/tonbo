@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, ops::Bound};
 
-use fusio::{dynamic::DynFile, DynRead};
+use fusio::DynRead;
 use fusio_parquet::reader::AsyncReader;
 use futures_util::StreamExt;
 use parquet::arrow::{
@@ -10,6 +10,7 @@ use parquet::arrow::{
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
+    fs::DynFileWrapper,
     record::Record,
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TimestampedRef},
@@ -27,13 +28,42 @@ impl<R> SsTable<R>
 where
     R: Record,
 {
-    pub(crate) async fn open(file: Box<dyn DynFile>) -> Result<Self, fusio::Error> {
-        let size = file.size().await?;
-
-        Ok(SsTable {
-            reader: AsyncReader::new(file, size).await?,
-            _marker: PhantomData,
-        })
+    pub(crate) async fn open(file: DynFileWrapper) -> Result<Self, fusio::Error> {
+        #[cfg(feature = "opfs")]
+        {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            wasm_bindgen_futures::spawn_local(async move {
+                let size = match file.size().await {
+                    Ok(size) => size,
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
+                        return;
+                    }
+                };
+                let file = file.file();
+                match AsyncReader::new(file, size).await {
+                    Ok(file) => {
+                        let _ = tx.send(Ok(SsTable {
+                            reader: file,
+                            _marker: PhantomData,
+                        }));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
+                    }
+                }
+            });
+            rx.await.unwrap()
+        }
+        #[cfg(not(feature = "opfs"))]
+        {
+            let size = file.size().await?;
+            let file = file.file();
+            Ok(SsTable {
+                reader: AsyncReader::new(file, size).await?,
+                _marker: PhantomData,
+            })
+        }
     }
 
     async fn into_parquet_builder(
@@ -97,7 +127,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{borrow::Borrow, fs::File, ops::Bound, sync::Arc};
 
@@ -160,7 +190,8 @@ pub(crate) mod tests {
             store
                 .open_options(path, FileType::Parquet.open_options(true))
                 .await
-                .unwrap(),
+                .unwrap()
+                .into(),
         )
         .await
         .unwrap()

@@ -86,7 +86,7 @@ impl<R: Record> TriggerFactory<R> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use super::*;
     use crate::tests::Test;

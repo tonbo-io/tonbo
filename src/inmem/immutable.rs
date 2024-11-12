@@ -212,7 +212,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{mem, sync::Arc};
 

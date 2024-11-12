@@ -56,6 +56,7 @@ where
     R: Record,
 {
     #[cfg(test)]
+    #[allow(unused)]
     pub(crate) fn new(
         option: Arc<DbOption<R>>,
         clean_sender: Sender<CleanTag>,
@@ -183,7 +184,7 @@ where
             )
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(file)
+        SsTable::<R>::open(file.into())
             .await?
             .get(key, projection_mask)
             .await
@@ -225,7 +226,7 @@ where
                 )
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(file).await?;
+            let table = SsTable::open(file.into()).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table

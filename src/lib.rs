@@ -176,7 +176,7 @@ where
     E: Executor,
 {
     schema: Arc<RwLock<Schema<R>>>,
-    version_set: VersionSet<R>,
+    version_set: Arc<VersionSet<R>>,
     lock_map: LockMap<R::Key>,
     manager: Arc<StoreManager>,
     _p: PhantomData<E>,
@@ -242,7 +242,8 @@ where
 
         let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
 
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
+        let version_set =
+            Arc::new(VersionSet::new(clean_sender, option.clone(), manager.clone()).await?);
         let schema = Arc::new(RwLock::new(
             Schema::new(option.clone(), task_tx, &version_set, instance, &manager).await?,
         ));
@@ -367,7 +368,7 @@ where
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
-            let manager = &self.manager;
+            let manager = self.manager.clone();
             let current = self.version_set.current().await;
             let mut scan = Scan::new(
                 &schema,
@@ -617,7 +618,7 @@ where
     R: Record,
 {
     schema: &'scan Schema<R>,
-    manager: &'scan StoreManager,
+    manager: Arc<StoreManager>,
     lower: Bound<&'scan R::Key>,
     upper: Bound<&'scan R::Key>,
     ts: Timestamp,
@@ -637,7 +638,7 @@ where
 {
     fn new(
         schema: &'scan Schema<R>,
-        manager: &'scan StoreManager,
+        manager: Arc<StoreManager>,
         (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
         version: &'scan Version<R>,
@@ -725,7 +726,7 @@ where
         }
         self.version
             .streams(
-                self.manager,
+                &self.manager,
                 &mut streams,
                 (self.lower, self.upper),
                 self.ts,
@@ -777,7 +778,7 @@ where
         }
         self.version
             .streams(
-                self.manager,
+                &self.manager,
                 &mut streams,
                 (self.lower, self.upper),
                 self.ts,
@@ -828,7 +829,7 @@ pub enum Projection {
     Parts(Vec<usize>),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{
         collections::{BTreeMap, Bound},
@@ -1254,8 +1255,9 @@ pub(crate) mod tests {
         let schema = Arc::new(RwLock::new(schema));
 
         let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
-        let version_set =
-            build_version_set(version, clean_sender, option.clone(), manager.clone()).await?;
+        let version_set = Arc::new(
+            build_version_set(version, clean_sender, option.clone(), manager.clone()).await?,
+        );
         let mut compactor = Compactor::<R>::new(
             schema.clone(),
             option.clone(),

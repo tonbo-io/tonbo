@@ -107,7 +107,7 @@ where
     ) -> Scan<'scan, R> {
         Scan::new(
             &self.share,
-            &self.manager,
+            self.manager.clone(),
             range,
             self.ts,
             &self.version,
@@ -249,7 +249,7 @@ where
     ChannelClose,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{collections::Bound, sync::Arc};
 

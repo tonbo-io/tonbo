@@ -33,6 +33,8 @@ where
     manager: Arc<StoreManager>,
 }
 
+unsafe impl<R: Record> Send for Cleaner<R> {}
+
 impl<R> Cleaner<R>
 where
     R: Record,
@@ -70,31 +72,49 @@ where
                             break;
                         }
                         for (gen, level) in gens {
-                            let fs = self
-                                .option
-                                .level_fs_path(level)
-                                .map(|path| self.manager.get_fs(path))
-                                .unwrap_or(self.manager.base_fs());
-                            fs.remove(&self.option.table_path(&gen, level)).await?;
+                            self.remove(gen, level).await?;
                         }
                     }
                 }
                 CleanTag::RecoverClean { wal_id: gen, level } => {
-                    let fs = self
-                        .option
-                        .level_fs_path(level)
-                        .map(|path| self.manager.get_fs(path))
-                        .unwrap_or(self.manager.base_fs());
-                    fs.remove(&self.option.table_path(&gen, level)).await?;
+                    self.remove(gen, level).await?;
                 }
             }
         }
 
         Ok(())
     }
+
+    async fn remove(&self, gen: FileId, level: usize) -> Result<(), DbError<R>> {
+        #[cfg(feature = "opfs")]
+        {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let manager = self.manager.clone();
+            let path = self.option.table_path(&gen, level);
+            let option = self.option.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let fs = option
+                    .level_fs_path(level)
+                    .map(|path| manager.get_fs(path))
+                    .unwrap_or(manager.base_fs());
+                sender.send(fs.remove(&path).await).unwrap();
+            });
+            receiver.await.unwrap()?;
+        }
+        #[cfg(not(feature = "opfs"))]
+        {
+            let fs = self
+                .option
+                .level_fs_path(level)
+                .map(|path| self.manager.get_fs(path))
+                .unwrap_or(self.manager.base_fs());
+            fs.remove(&self.option.table_path(&gen, level)).await?;
+        }
+        Ok(())
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{sync::Arc, time::Duration};
 

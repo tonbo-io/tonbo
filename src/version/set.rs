@@ -10,12 +10,12 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
-use fusio::{dynamic::DynFile, fs::FileMeta};
+use fusio::{fs::FileMeta, Write};
 use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{manager::StoreManager, parse_file_id, DynFileWrapper, FileId, FileType},
     record::Record,
     serdes::Encode,
     timestamp::Timestamp,
@@ -50,8 +50,10 @@ where
     R: Record,
 {
     current: VersionRef<R>,
-    log_with_id: (Box<dyn DynFile>, FileId),
+    log_with_id: (DynFileWrapper, FileId),
 }
+
+unsafe impl<R: Record> Send for VersionSetInner<R> {}
 
 pub(crate) struct VersionSet<R>
 where
@@ -158,7 +160,7 @@ where
                     timestamp: timestamp.clone(),
                     log_length: 0,
                 }),
-                log_with_id: (log, log_id),
+                log_with_id: (log.into(), log_id),
             })),
             clean_sender,
             timestamp,
@@ -171,6 +173,17 @@ where
     }
 
     pub(crate) async fn current(&self) -> VersionRef<R> {
+        #[cfg(feature = "opfs")]
+        {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let inner = self.inner.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let version = inner.read().await.current.clone();
+                let _ = tx.send(version);
+            });
+            rx.await.unwrap()
+        }
+        #[cfg(not(feature = "opfs"))]
         self.inner.read().await.current.clone()
     }
 
@@ -270,7 +283,7 @@ where
                     FileType::Log.open_options(false),
                 )
                 .await?;
-            let _old_log = mem::replace(log, new_log);
+            let _old_log = mem::replace(log, new_log.into());
 
             new_version.log_length = 0;
             for new_edit in new_version.to_edits() {
@@ -284,7 +297,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{io::Cursor, sync::Arc};
 
@@ -330,7 +343,7 @@ pub(crate) mod tests {
         Ok(VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
-                log_with_id: (log, log_id),
+                log_with_id: (log.into(), log_id),
             })),
             clean_sender,
             timestamp,

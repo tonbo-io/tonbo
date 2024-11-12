@@ -9,7 +9,7 @@ use fusio::{buffered::BufWriter, DynFs, DynWrite};
 use ulid::Ulid;
 
 use crate::{
-    fs::{FileId, FileType},
+    fs::{DynWriteWrapper, FileId, FileType},
     inmem::immutable::Immutable,
     record::{Key, KeyRef, Record, RecordInstance},
     timestamp::{
@@ -37,7 +37,7 @@ where
     R: Record,
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
-    wal: Option<Mutex<WalFile<Box<dyn DynWrite>, R>>>,
+    wal: Option<Mutex<WalFile<DynWriteWrapper, R>>>,
     pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
@@ -63,7 +63,10 @@ where
                 option.wal_buffer_size,
             )) as Box<dyn DynWrite>;
 
-            wal = Some(Mutex::new(WalFile::new(file, file_id)));
+            wal = Some(Mutex::new(WalFile::new(
+                DynWriteWrapper::from(file),
+                file_id,
+            )));
         };
 
         Ok(Self {
@@ -178,9 +181,23 @@ where
         let mut file_id = None;
 
         if let Some(wal) = self.wal {
-            let mut wal_guard = wal.lock().await;
-            wal_guard.flush().await?;
-            file_id = Some(wal_guard.file_id());
+            #[cfg(feature = "opfs")]
+            {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let mut wal_guard = wal.lock().await;
+                    wal_guard.flush().await.unwrap();
+
+                    let _ = tx.send(Some(wal_guard.file_id()));
+                });
+                file_id = rx.await.unwrap()
+            };
+            #[cfg(not(feature = "opfs"))]
+            {
+                let mut wal_guard = wal.lock().await;
+                wal_guard.flush().await?;
+                file_id = Some(wal_guard.file_id())
+            };
         }
 
         Ok((file_id, Immutable::from((self.data, instance))))
@@ -205,7 +222,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{ops::Bound, sync::Arc};
 

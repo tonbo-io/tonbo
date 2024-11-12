@@ -28,6 +28,8 @@ pin_project! {
     }
 }
 
+unsafe impl<'scan, R> Send for SsTableScan<'scan, R> {}
+
 impl<R> SsTableScan<'_, R> {
     pub fn new(
         stream: ParquetRecordBatchStream<AsyncReader>,
