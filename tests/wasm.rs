@@ -60,12 +60,18 @@ mod tests {
         items
     }
 
+    async fn remove(path: &str) {
+        let path = Path::from_opfs_path(path).unwrap();
+        let fs = fusio::disk::LocalFs {};
+
+        fs.remove(&path).await.unwrap();
+    }
+
     #[wasm_bindgen_test]
     async fn test_wasm_read_write() {
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
         let path = Path::from_opfs_path("opfs_dir_rw").unwrap();
         let fs = fusio::disk::LocalFs {};
-        fs.remove(&path).await.unwrap();
         fs.create_dir_all(&path).await.unwrap();
 
         let option = DbOption::with_path(
@@ -140,6 +146,10 @@ mod tests {
             }
             tx.commit().await.unwrap();
         }
+        db.flush_wal().await.unwrap();
+        drop(db);
+
+        remove("opfs_dir_rw").await;
     }
 
     #[wasm_bindgen_test]
@@ -148,7 +158,6 @@ mod tests {
 
         let fs = fusio::disk::LocalFs {};
         let path = Path::from_opfs_path("opfs_dir_txn").unwrap();
-        fs.remove(&path).await.unwrap();
         fs.create_dir_all(&path).await.unwrap();
 
         let option = DbOption::with_path(
@@ -222,6 +231,10 @@ mod tests {
             }
             assert_eq!(i, 48);
         }
+        db.flush_wal().await.unwrap();
+        drop(db);
+
+        remove(&"opfs_dir_txn").await;
     }
 
     #[wasm_bindgen_test]
@@ -229,7 +242,6 @@ mod tests {
         let (cols_desc, primary_key_index) = test_dyn_item_schema();
         let path = Path::from_opfs_path("opfs_dir").unwrap();
         let fs = fusio::disk::LocalFs {};
-        fs.remove(&path).await.unwrap();
         fs.create_dir_all(&path).await.unwrap();
 
         let option = DbOption::with_path(
@@ -287,5 +299,7 @@ mod tests {
                 }
             }
         }
+        drop(db);
+        remove("opfs_dir").await;
     }
 }

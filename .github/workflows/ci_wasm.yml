@@ -59,4 +59,4 @@ jobs:
       - name: Run wasm-pack test
         run: |
           export PATH=$PATH:/tmp/chrome/chrome-linux64/:/tmp/chrome/chromedriver-linux64/
-           wasm-pack test --chrome --headless --test wasm --no-default-features --features aws,bytes,opfs
+          wasm-pack test --chrome --headless --test wasm --no-default-features --features aws,bytes,opfs
