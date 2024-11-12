@@ -13,8 +13,10 @@ use std::{
 use flume::{SendError, Sender};
 use fusio::DynFs;
 use parquet::arrow::ProjectionMask;
+use parquet_lru::LruCache;
 use thiserror::Error;
 use tracing::error;
+use ulid::Ulid;
 
 use crate::{
     fs::{manager::StoreManager, FileId, FileType},
@@ -115,12 +117,16 @@ impl<R> Version<R>
 where
     R: Record,
 {
-    pub(crate) async fn query(
+    pub(crate) async fn query<C>(
         &self,
         manager: &StoreManager,
         key: &TimestampedRef<R::Key>,
         projection_mask: ProjectionMask,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+        parquet_cache: C,
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>>
+    where
+        C: LruCache<Ulid>,
+    {
         let level_0_path = self
             .option
             .level_fs_path(0)
@@ -131,7 +137,14 @@ where
                 continue;
             }
             if let Some(entry) = self
-                .table_query(level_0_fs, key, 0, &scope.gen, projection_mask.clone())
+                .table_query(
+                    level_0_fs,
+                    key,
+                    0,
+                    &scope.gen,
+                    projection_mask.clone(),
+                    parquet_cache.clone(),
+                )
                 .await?
             {
                 return Ok(Some(entry));
@@ -158,6 +171,7 @@ where
                     leve,
                     &sort_runs[index].gen,
                     projection_mask.clone(),
+                    parquet_cache.clone(),
                 )
                 .await?
             {
@@ -168,14 +182,18 @@ where
         Ok(None)
     }
 
-    async fn table_query(
+    async fn table_query<C>(
         &self,
         store: &Arc<dyn DynFs>,
         key: &TimestampedRef<<R as Record>::Key>,
         level: usize,
         gen: &FileId,
         projection_mask: ProjectionMask,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+        parquet_cache: C,
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>>
+    where
+        C: LruCache<Ulid>,
+    {
         let file = store
             .open_options(
                 &self.option.table_path(gen, level),
@@ -183,7 +201,7 @@ where
             )
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(file)
+        SsTable::<R, C>::open(parquet_cache, *gen, file)
             .await?
             .get(key, projection_mask)
             .await
@@ -200,15 +218,20 @@ where
         self.level_slice[level].len()
     }
 
-    pub(crate) async fn streams<'streams>(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn streams<'streams, C>(
         &self,
         manager: &StoreManager,
-        streams: &mut Vec<ScanStream<'streams, R>>,
+        streams: &mut Vec<ScanStream<'streams, R, C>>,
         range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> Result<(), VersionError<R>> {
+        parquet_cache: C,
+    ) -> Result<(), VersionError<R>>
+    where
+        C: LruCache<Ulid>,
+    {
         let level_0_path = self
             .option
             .level_fs_path(0)
@@ -225,7 +248,7 @@ where
                 )
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(file).await?;
+            let table = SsTable::open(parquet_cache.clone(), scope.gen, file).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -270,6 +293,7 @@ where
                     limit,
                     projection_mask.clone(),
                     level_fs.clone(),
+                    parquet_cache.clone(),
                 )
                 .unwrap(),
             });

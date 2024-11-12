@@ -5,6 +5,7 @@ use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
+use parquet_lru::LruCache;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use ulid::Ulid;
@@ -60,7 +61,13 @@ where
         }
     }
 
-    pub(crate) async fn check_then_compaction(&mut self) -> Result<(), CompactionError<R>> {
+    pub(crate) async fn check_then_compaction<C>(
+        &mut self,
+        parquet_lru_cache: C,
+    ) -> Result<(), CompactionError<R>>
+    where
+        C: LruCache<Ulid> + Unpin,
+    {
         let mut guard = self.schema.write().await;
 
         guard.trigger.reset();
@@ -108,6 +115,7 @@ where
                         &mut delete_gens,
                         &guard.record_instance,
                         &self.manager,
+                        &parquet_lru_cache,
                     )
                     .await?;
                 }
@@ -186,7 +194,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn major_compaction(
+    pub(crate) async fn major_compaction<C>(
         version: &Version<R>,
         option: &DbOption<R>,
         mut min: &R::Key,
@@ -195,7 +203,11 @@ where
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &RecordInstance,
         manager: &StoreManager,
-    ) -> Result<(), CompactionError<R>> {
+        parquet_cache: &C,
+    ) -> Result<(), CompactionError<R>>
+    where
+        C: LruCache<Ulid> + Unpin,
+    {
         let mut level = 0;
 
         while level < MAX_LEVEL - 2 {
@@ -220,7 +232,7 @@ where
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(file)
+                        inner: SsTable::open(parquet_cache.clone(), scope.gen, file)
                             .await?
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
@@ -243,6 +255,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
+                    parquet_cache.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -263,6 +276,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
+                    parquet_cache.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -378,15 +392,18 @@ where
         (meet_scopes_l, start_l, end_l - 1)
     }
 
-    async fn build_tables<'scan>(
+    async fn build_tables<'scan, C>(
         option: &DbOption<R>,
         version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
         level: usize,
-        streams: Vec<ScanStream<'scan, R>>,
+        streams: Vec<ScanStream<'scan, R, C>>,
         instance: &RecordInstance,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
-        let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
+    ) -> Result<(), CompactionError<R>>
+    where
+        C: LruCache<Ulid> + Unpin,
+    {
+        let mut stream = MergeStream::<R, C>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
         let mut builder = R::Columns::builder(&instance.arrow_schema::<R>(), 8192);
@@ -513,6 +530,7 @@ pub(crate) mod tests {
     use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
+    use parquet_lru::NoopCache;
     use tempfile::TempDir;
 
     use crate::{
@@ -810,6 +828,7 @@ pub(crate) mod tests {
             &mut vec![],
             &RecordInstance::Normal,
             &manager,
+            &NoopCache::default(),
         )
         .await
         .unwrap();
@@ -1201,6 +1220,7 @@ pub(crate) mod tests {
             &mut vec![],
             &RecordInstance::Normal,
             &manager,
+            &NoopCache::default(),
         )
         .await
         .unwrap();
@@ -1221,7 +1241,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor, _> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for i in 5..9 {
             let item = Test {

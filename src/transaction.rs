@@ -10,7 +10,9 @@ use std::{
 use flume::SendError;
 use lockable::AsyncLimit;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
+use parquet_lru::LruCache;
 use thiserror::Error;
+use ulid::Ulid;
 
 use crate::{
     compaction::CompactTask,
@@ -42,20 +44,22 @@ where
 }
 /// optimistic ACID transaction, open with
 /// [`DB::transaction`](crate::DB::transaction) method
-pub struct Transaction<'txn, R>
+pub struct Transaction<'txn, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     local: BTreeMap<R::Key, Option<R>>,
-    snapshot: Snapshot<'txn, R>,
+    snapshot: Snapshot<'txn, R, C>,
     lock_map: LockMap<R::Key>,
 }
 
-impl<'txn, R> Transaction<'txn, R>
+impl<'txn, R, C> Transaction<'txn, R, C>
 where
     R: Record + Send,
+    C: LruCache<Ulid> + Unpin,
 {
-    pub(crate) fn new(snapshot: Snapshot<'txn, R>, lock_map: LockMap<R::Key>) -> Self {
+    pub(crate) fn new(snapshot: Snapshot<'txn, R, C>, lock_map: LockMap<R::Key>) -> Self {
         Self {
             local: BTreeMap::new(),
             snapshot,
@@ -84,7 +88,7 @@ where
     pub fn scan<'scan>(
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R> {
+    ) -> Scan<'scan, R, C> {
         self.snapshot._scan(
             range,
             Box::new(move |projection_mask: Option<ProjectionMask>| {
@@ -261,7 +265,7 @@ mod tests {
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
 
-        let db = DB::<String, TokioExecutor>::new(
+        let db = DB::<String, TokioExecutor, _>::new(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::new(),
         )
@@ -389,7 +393,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::new())
+        let db = DB::<String, TokioExecutor, _>::new(option, TokioExecutor::new())
             .await
             .unwrap();
 
@@ -422,7 +426,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::new())
+        let db = DB::<Test, TokioExecutor, _>::new(option, TokioExecutor::new())
             .await
             .unwrap();
 

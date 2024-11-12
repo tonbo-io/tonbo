@@ -6,9 +6,11 @@ use std::{
 };
 
 use arrow::datatypes::Schema;
-use fusio_parquet::reader::AsyncReader;
 use futures_core::{ready, Stream};
-use parquet::arrow::{async_reader::ParquetRecordBatchStream, ProjectionMask};
+use parquet::arrow::{
+    async_reader::{AsyncFileReader, ParquetRecordBatchStream},
+    ProjectionMask,
+};
 use pin_project_lite::pin_project;
 
 use crate::{
@@ -18,9 +20,9 @@ use crate::{
 
 pin_project! {
     #[derive(Debug)]
-    pub struct SsTableScan<'scan, R>{
+    pub struct SsTableScan<'scan, R> {
         #[pin]
-        stream: ParquetRecordBatchStream<AsyncReader>,
+        stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
         iter: Option<RecordBatchIterator<R>>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
@@ -30,7 +32,7 @@ pin_project! {
 
 impl<R> SsTableScan<'_, R> {
     pub fn new(
-        stream: ParquetRecordBatchStream<AsyncReader>,
+        stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
     ) -> Self {

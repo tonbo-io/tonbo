@@ -26,9 +26,11 @@ use datafusion::{
 use fusio::path::Path;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use parquet_lru::NoopCache;
 use tokio::fs;
 use tonbo::{
-    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DbOption, DB,
+    executor::tokio::TokioExecutor, fs::FileId, inmem::immutable::ArrowArrays, record::Record,
+    DbOption, DB,
 };
 use tonbo_macros::Record;
 
@@ -41,12 +43,12 @@ pub struct Music {
 }
 
 struct MusicProvider {
-    db: Arc<DB<Music, TokioExecutor>>,
+    db: Arc<DB<Music, TokioExecutor, NoopCache<FileId>>>,
 }
 
 struct MusicExec {
     cache: PlanProperties,
-    db: Arc<DB<Music, TokioExecutor>>,
+    db: Arc<DB<Music, TokioExecutor, NoopCache<FileId>>>,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
     range: (Bound<<Music as Record>::Key>, Bound<<Music as Record>::Key>),
@@ -95,7 +97,10 @@ impl TableProvider for MusicProvider {
 }
 
 impl MusicExec {
-    fn new(db: Arc<DB<Music, TokioExecutor>>, projection: Option<&Vec<usize>>) -> Self {
+    fn new(
+        db: Arc<DB<Music, TokioExecutor, NoopCache<FileId>>>,
+        projection: Option<&Vec<usize>>,
+    ) -> Self {
         let schema = Music::arrow_schema();
         let schema = if let Some(projection) = &projection {
             Arc::new(schema.project(projection).unwrap())

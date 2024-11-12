@@ -13,6 +13,8 @@ use fusio::{
 };
 use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
+use parquet_lru::LruCache;
+use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileType},
@@ -25,22 +27,27 @@ use crate::{
     DbOption,
 };
 
-enum FutureStatus<'level, R>
+enum FutureStatus<'level, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     Init(FileId),
     Ready(SsTableScan<'level, R>),
-    OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
-    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, Error>> + Send + 'level>>),
+    OpenFile(
+        Ulid,
+        Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>,
+    ),
+    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R, C>, Error>> + Send + 'level>>),
     LoadStream(
         Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
     ),
 }
 
-pub(crate) struct LevelStream<'level, R>
+pub(crate) struct LevelStream<'level, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     lower: Bound<&'level R::Key>,
     upper: Bound<&'level R::Key>,
@@ -50,14 +57,16 @@ where
     gens: VecDeque<FileId>,
     limit: Option<usize>,
     projection_mask: ProjectionMask,
-    status: FutureStatus<'level, R>,
+    status: FutureStatus<'level, R, C>,
     fs: Arc<dyn DynFs>,
     path: Option<Path>,
+    parquet_cache: C,
 }
 
-impl<'level, R> LevelStream<'level, R>
+impl<'level, R, C> LevelStream<'level, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     // Kould: only used by Compaction now, and the start and end of the sstables range are known
     #[allow(clippy::too_many_arguments)]
@@ -71,6 +80,7 @@ where
         limit: Option<usize>,
         projection_mask: ProjectionMask,
         fs: Arc<dyn DynFs>,
+        parquet_cache: C,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -92,13 +102,15 @@ where
             status,
             fs,
             path: None,
+            parquet_cache,
         })
     }
 }
 
-impl<'level, R> Stream for LevelStream<'level, R>
+impl<'level, R, C> Stream for LevelStream<'level, R, C>
 where
     R: Record,
+    C: LruCache<Ulid> + Unpin,
 {
     type Item = Result<RecordBatchEntry<R>, ParquetError>;
 
@@ -125,7 +137,7 @@ where
                             >,
                         >(reader)
                     };
-                    self.status = FutureStatus::OpenFile(reader);
+                    self.status = FutureStatus::OpenFile(gen, reader);
                     continue;
                 }
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
@@ -151,7 +163,7 @@ where
                                     >,
                                 >(reader)
                             };
-                            self.status = FutureStatus::OpenFile(reader);
+                            self.status = FutureStatus::OpenFile(gen, reader);
                             continue;
                         }
                     },
@@ -163,9 +175,14 @@ where
                     }
                     Poll::Pending => Poll::Pending,
                 },
-                FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
+                FutureStatus::OpenFile(id, file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file)));
+                        let id = *id;
+                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(
+                            self.parquet_cache.clone(),
+                            id,
+                            file,
+                        )));
                         continue;
                     }
                     Poll::Ready(Err(err)) => {
@@ -209,6 +226,7 @@ mod tests {
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
+    use parquet_lru::NoopCache;
     use tempfile::TempDir;
 
     use crate::{
@@ -251,6 +269,7 @@ mod tests {
                     [0, 1, 2, 3],
                 ),
                 manager.base_fs().clone(),
+                NoopCache::default(),
             )
             .unwrap();
 
@@ -287,6 +306,7 @@ mod tests {
                     [0, 1, 2, 4],
                 ),
                 manager.base_fs().clone(),
+                NoopCache::default(),
             )
             .unwrap();
 
@@ -323,6 +343,7 @@ mod tests {
                     [0, 1, 2],
                 ),
                 manager.base_fs().clone(),
+                NoopCache::default(),
             )
             .unwrap();
 

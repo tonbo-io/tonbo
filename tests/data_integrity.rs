@@ -72,7 +72,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db: DB<Customer, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Customer, TokioExecutor, _> =
+            DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for _ in 0..WRITE_TIMES {
             let customer = gen_record(&mut rng, &mut primary_key_count);
@@ -112,5 +113,3 @@ mod tests {
         assert_eq!(write_hasher.finish(), read_hasher.finish());
     }
 }
-
-fn main() {}

@@ -15,8 +15,10 @@ use std::{
 use futures_core::Stream;
 use futures_util::{ready, stream};
 use parquet::arrow::ProjectionMask;
+use parquet_lru::LruCache;
 use pin_project_lite::pin_project;
 use record_batch::RecordBatchEntry;
+use ulid::Ulid;
 
 use crate::{
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
@@ -100,9 +102,10 @@ where
 
 pin_project! {
     #[project = ScanStreamProject]
-    pub enum ScanStream<'scan, R>
+    pub enum ScanStream<'scan, R, C>
     where
         R: Record,
+        C: LruCache<Ulid>,
     {
         Transaction {
             #[pin]
@@ -122,18 +125,19 @@ pin_project! {
         },
         Level {
             #[pin]
-            inner: LevelStream<'scan, R>,
+            inner: LevelStream<'scan, R, C>,
         },
         MemProjection {
             #[pin]
-            inner: MemProjectionStream<'scan, R>,
+            inner: MemProjectionStream<'scan, R, C>,
         }
     }
 }
 
-impl<'scan, R> From<TransactionScan<'scan, R>> for ScanStream<'scan, R>
+impl<'scan, R, C> From<TransactionScan<'scan, R>> for ScanStream<'scan, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     fn from(inner: TransactionScan<'scan, R>) -> Self {
         ScanStream::Transaction {
@@ -142,9 +146,10 @@ where
     }
 }
 
-impl<'scan, R> From<MutableScan<'scan, R>> for ScanStream<'scan, R>
+impl<'scan, R, C> From<MutableScan<'scan, R>> for ScanStream<'scan, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     fn from(inner: MutableScan<'scan, R>) -> Self {
         ScanStream::Mutable {
@@ -153,9 +158,10 @@ where
     }
 }
 
-impl<'scan, R> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R>
+impl<'scan, R, C> From<ImmutableScan<'scan, R>> for ScanStream<'scan, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     fn from(inner: ImmutableScan<'scan, R>) -> Self {
         ScanStream::Immutable {
@@ -164,27 +170,30 @@ where
     }
 }
 
-impl<'scan, R> From<SsTableScan<'scan, R>> for ScanStream<'scan, R>
+impl<'scan, R, C> From<SsTableScan<'scan, R>> for ScanStream<'scan, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     fn from(inner: SsTableScan<'scan, R>) -> Self {
         ScanStream::SsTable { inner }
     }
 }
 
-impl<'scan, R> From<MemProjectionStream<'scan, R>> for ScanStream<'scan, R>
+impl<'scan, R, C> From<MemProjectionStream<'scan, R, C>> for ScanStream<'scan, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
-    fn from(inner: MemProjectionStream<'scan, R>) -> Self {
+    fn from(inner: MemProjectionStream<'scan, R, C>) -> Self {
         ScanStream::MemProjection { inner }
     }
 }
 
-impl<R> fmt::Debug for ScanStream<'_, R>
+impl<R, C> fmt::Debug for ScanStream<'_, R, C>
 where
     R: Record,
+    C: LruCache<Ulid>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -198,9 +207,10 @@ where
     }
 }
 
-impl<'scan, R> Stream for ScanStream<'scan, R>
+impl<'scan, R, C> Stream for ScanStream<'scan, R, C>
 where
     R: Record,
+    C: LruCache<Ulid> + Unpin,
 {
     type Item = Result<Entry<'scan, R>, parquet::errors::ParquetError>;
 

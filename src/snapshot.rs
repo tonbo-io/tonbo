@@ -2,9 +2,10 @@ use std::{collections::Bound, sync::Arc};
 
 use async_lock::RwLockReadGuard;
 use parquet::arrow::ProjectionMask;
+use parquet_lru::LruCache;
 
 use crate::{
-    fs::manager::StoreManager,
+    fs::{manager::StoreManager, FileId},
     record::Record,
     stream,
     stream::ScanStream,
@@ -13,14 +14,22 @@ use crate::{
     DbError, Projection, Scan, Schema,
 };
 
-pub struct Snapshot<'s, R: Record> {
+pub struct Snapshot<'s, R, C>
+where
+    R: Record,
+{
     ts: Timestamp,
     share: RwLockReadGuard<'s, Schema<R>>,
     version: VersionRef<R>,
     manager: Arc<StoreManager>,
+    parquet_cache: C,
 }
 
-impl<'s, R: Record> Snapshot<'s, R> {
+impl<'s, R, C> Snapshot<'s, R, C>
+where
+    R: Record,
+    C: LruCache<FileId> + Unpin,
+{
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
@@ -28,7 +37,14 @@ impl<'s, R: Record> Snapshot<'s, R> {
     ) -> Result<Option<stream::Entry<'get, R>>, DbError<R>> {
         Ok(self
             .share
-            .get(&self.version, &self.manager, key, self.ts, projection)
+            .get(
+                &self.version,
+                &self.manager,
+                key,
+                self.ts,
+                projection,
+                self.parquet_cache.clone(),
+            )
             .await?
             .and_then(|entry| {
                 if entry.value().is_none() {
@@ -42,7 +58,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
     pub fn scan<'scan>(
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R> {
+    ) -> Scan<'scan, R, C> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -50,6 +66,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
             self.ts,
             &self.version,
             Box::new(move |_: Option<ProjectionMask>| None),
+            self.parquet_cache.clone(),
         )
     }
 
@@ -57,12 +74,14 @@ impl<'s, R: Record> Snapshot<'s, R> {
         share: RwLockReadGuard<'s, Schema<R>>,
         version: VersionRef<R>,
         manager: Arc<StoreManager>,
+        parquet_cache: C,
     ) -> Self {
         Self {
             ts: version.load_ts(),
             share,
             version,
             manager,
+            parquet_cache,
         }
     }
 
@@ -82,9 +101,9 @@ impl<'s, R: Record> Snapshot<'s, R> {
         &'scan self,
         range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, C>> + Send + 'scan,
         >,
-    ) -> Scan<'scan, R> {
+    ) -> Scan<'scan, R, C> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -92,6 +111,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
             self.ts,
             &self.version,
             fn_pre_stream,
+            self.parquet_cache.clone(),
         )
     }
 }
@@ -152,7 +172,7 @@ mod tests {
             // to increase timestamps to 1 because the data ts built in advance is 1
             db.version_set.increase_ts();
         }
-        let mut snapshot = db.snapshot().await;
+        let snapshot = db.snapshot().await;
 
         let mut stream = snapshot
             .scan((Bound::Unbounded, Bound::Unbounded))
