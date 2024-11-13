@@ -28,6 +28,7 @@ pin_project! {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 unsafe impl<'scan, R> Send for SsTableScan<'scan, R> {}
 
 impl<R> SsTableScan<'_, R> {

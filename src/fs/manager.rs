@@ -8,7 +8,9 @@ pub struct StoreManager {
     fs_map: HashMap<Path, Arc<dyn DynFs>>,
 }
 
+#[cfg(target_arch = "wasm32")]
 unsafe impl Send for StoreManager {}
+#[cfg(target_arch = "wasm32")]
 unsafe impl Sync for StoreManager {}
 
 impl StoreManager {

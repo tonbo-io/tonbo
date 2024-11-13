@@ -41,6 +41,7 @@ where
     pub(crate) manager: Arc<StoreManager>,
 }
 
+#[cfg(target_arch = "wasm32")]
 unsafe impl<R: Record> Send for Compactor<R> {}
 
 impl<R> Compactor<R>
