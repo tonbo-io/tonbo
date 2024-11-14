@@ -2,7 +2,10 @@ use std::{
     fmt,
     fmt::Debug,
     marker::PhantomData,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use crate::record::Record;
@@ -78,10 +81,10 @@ pub(crate) struct TriggerFactory<R> {
 }
 
 impl<R: Record> TriggerFactory<R> {
-    pub fn create(trigger_type: TriggerType) -> Box<dyn Trigger<R> + Send + Sync> {
+    pub fn create(trigger_type: TriggerType) -> Arc<dyn Trigger<R> + Send + Sync> {
         match trigger_type {
-            TriggerType::SizeOfMem(threshold) => Box::new(SizeOfMemTrigger::new(threshold)),
-            TriggerType::Length(threshold) => Box::new(LengthTrigger::new(threshold)),
+            TriggerType::SizeOfMem(threshold) => Arc::new(SizeOfMemTrigger::new(threshold)),
+            TriggerType::Length(threshold) => Arc::new(LengthTrigger::new(threshold)),
         }
     }
 }

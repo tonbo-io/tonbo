@@ -168,12 +168,8 @@ where
                 Self::append(self.snapshot.schema(), LogType::Last, key, record, new_ts).await?
             }
         };
-        if is_excess {
-            let _ = self
-                .snapshot
-                .schema()
-                .compaction_tx
-                .try_send(CompactTask::Freeze);
+        if let (Some(compaction_tx), true) = (&self.snapshot.schema().compaction_tx, is_excess) {
+            let _ = compaction_tx.try_send(CompactTask::Freeze);
         }
         Ok(())
     }

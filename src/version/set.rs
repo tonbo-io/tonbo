@@ -58,7 +58,7 @@ where
     R: Record,
 {
     inner: Arc<RwLock<VersionSetInner<R>>>,
-    clean_sender: Sender<CleanTag>,
+    clean_sender: Option<Sender<CleanTag>>,
     timestamp: Arc<AtomicU32>,
     option: Arc<DbOption<R>>,
     manager: Arc<StoreManager>,
@@ -153,14 +153,14 @@ where
                 current: Arc::new(Version::<R> {
                     ts: Timestamp::from(0),
                     level_slice: [const { Vec::new() }; MAX_LEVEL],
-                    clean_sender: clean_sender.clone(),
+                    clean_sender: Some(clean_sender.clone()),
                     option: option.clone(),
                     timestamp: timestamp.clone(),
                     log_length: 0,
                 }),
                 log_with_id: (log, log_id),
             })),
-            clean_sender,
+            clean_sender: Some(clean_sender),
             timestamp,
             option,
             manager,
@@ -172,6 +172,50 @@ where
 
     pub(crate) async fn current(&self) -> VersionRef<R> {
         self.inner.read().await.current.clone()
+    }
+
+    pub(crate) fn options(&self) -> &Arc<DbOption<R>> {
+        &self.option
+    }
+
+    pub(crate) async fn from_checkpoint(
+        option: Arc<DbOption<R>>,
+        manager: Arc<StoreManager>,
+    ) -> Result<VersionSet<R>, VersionError<R>> {
+        let fs = manager.base_fs();
+        let version_dir = option.version_log_dir_path();
+        let mut log_stream = fs.list(&version_dir).await?;
+        let log_id = log_stream
+            .next()
+            .await
+            .transpose()?
+            .map(|meta| parse_file_id(&meta.path, FileType::Log))
+            .transpose()?
+            .flatten()
+            .ok_or(VersionError::CheckpointNotFound)?;
+        drop(log_stream);
+        let mut log = manager
+            .base_fs()
+            .open_options(
+                &option.version_log_path(&log_id),
+                FileType::Log.open_options(false),
+            )
+            .await?;
+
+        let edits = VersionEdit::recover(&mut Cursor::new(&mut log)).await;
+        let set = VersionSet::<R> {
+            inner: Arc::new(RwLock::new(VersionSetInner {
+                current: Arc::new(Version::<R>::empty(option.clone())),
+                log_with_id: (log, log_id),
+            })),
+            clean_sender: None,
+            timestamp: Arc::new(AtomicU32::default()),
+            option,
+            manager,
+        };
+        set.apply_edits(edits, None, true).await?;
+
+        Ok(set)
     }
 
     pub(crate) async fn apply_edits(
@@ -229,14 +273,15 @@ where
                     }
                     if is_recover {
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
-                        new_version
-                            .clean_sender
-                            .send_async(CleanTag::RecoverClean {
-                                wal_id: gen,
-                                level: level as usize,
-                            })
-                            .await
-                            .map_err(VersionError::Send)?;
+                        if let Some(clean_sender) = &new_version.clean_sender {
+                            clean_sender
+                                .send_async(CleanTag::RecoverClean {
+                                    wal_id: gen,
+                                    level: level as usize,
+                                })
+                                .await
+                                .map_err(VersionError::Send)?;
+                        }
                     }
                 }
                 VersionEdit::LatestTimeStamp { ts } => {
@@ -251,14 +296,15 @@ where
             }
         }
         if let Some(delete_gens) = delete_gens {
-            new_version
-                .clean_sender
-                .send_async(CleanTag::Add {
-                    ts: new_version.ts,
-                    gens: delete_gens,
-                })
-                .await
-                .map_err(VersionError::Send)?;
+            if let Some(clean_sender) = &new_version.clean_sender {
+                clean_sender
+                    .send_async(CleanTag::Add {
+                        ts: new_version.ts,
+                        gens: delete_gens,
+                    })
+                    .await
+                    .map_err(VersionError::Send)?;
+            }
         }
         log.close().await?;
         if edit_len >= option.version_log_snapshot_threshold {
@@ -332,7 +378,7 @@ pub(crate) mod tests {
                 current: Arc::new(version),
                 log_with_id: (log, log_id),
             })),
-            clean_sender,
+            clean_sender: Some(clean_sender),
             timestamp,
             option,
             manager,

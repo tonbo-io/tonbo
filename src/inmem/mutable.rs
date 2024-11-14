@@ -37,7 +37,7 @@ where
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<Box<dyn DynWrite>, R>>>,
-    pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+    pub(crate) trigger: Arc<dyn Trigger<R> + Send + Sync>,
 }
 
 impl<R> Mutable<R>
@@ -46,7 +46,7 @@ where
 {
     pub async fn new(
         option: &DbOption<R>,
-        trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+        trigger: Arc<dyn Trigger<R> + Send + Sync>,
         fs: &Arc<dyn DynFs>,
     ) -> Result<Self, fusio::Error> {
         let mut wal = None;
@@ -192,6 +192,14 @@ where
         }
         Ok(())
     }
+
+    pub(crate) async fn wal_id(&self) -> Option<FileId> {
+        if let Some(wal) = self.wal.as_ref() {
+            let wal_guard = wal.lock().await;
+            return Some(wal_guard.file_id());
+        }
+        None
+    }
 }
 
 impl<R> Mutable<R>
@@ -230,7 +238,7 @@ mod tests {
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let mem_table = Mutable::<Test>::new(&option, trigger, &fs).await.unwrap();
 
         mem_table
@@ -278,7 +286,7 @@ mod tests {
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable = Mutable::<String>::new(&option, trigger, &fs).await.unwrap();
 
@@ -366,7 +374,7 @@ mod tests {
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable = Mutable::<DynRecord>::new(&option, trigger, &fs)
             .await
