@@ -45,7 +45,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
     ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
-            self.manager.clone(),
+            &self.manager,
             range,
             self.ts,
             &self.version,
@@ -87,7 +87,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
     ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
-            self.manager.clone(),
+            &self.manager,
             range,
             self.ts,
             &self.version,

@@ -14,7 +14,7 @@ version = "0.2.0"
 msrv = "1.79.0"
 
 [features]
-aws = ["fusio/aws", "fusio-dispatch/aws"]
+aws = ["fusio-dispatch/aws", "fusio/aws"]
 bench = ["redb", "rocksdb", "sled"]
 bytes = ["dep:bytes"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
@@ -24,8 +24,8 @@ object-store = ["fusio/object_store"]
 opfs = [
     "dep:wasm-bindgen-futures",
     "fusio-dispatch/opfs",
-    "fusio/opfs",
     "fusio-parquet/opfs",
+    "fusio/opfs",
 ]
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]
@@ -38,6 +38,7 @@ tokio = [
     "tokio/fs",
 ]
 tokio-http = ["fusio/tokio-http"]
+wasm = ["aws", "bytes", "opfs"]
 
 [[example]]
 name = "declare"

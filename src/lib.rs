@@ -373,11 +373,10 @@ where
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
-            let manager = self.manager.clone();
             let current = self.version_set.current().await;
             let mut scan = Scan::new(
                 &schema,
-                manager,
+                &self.manager,
                 range,
                 self.version_set.load_ts(),
                 &*current,
@@ -624,7 +623,7 @@ where
     'range: 'scan,
 {
     schema: &'scan Schema<R>,
-    manager: Arc<StoreManager>,
+    manager: &'scan StoreManager,
     lower: Bound<&'range R::Key>,
     upper: Bound<&'range R::Key>,
     ts: Timestamp,
@@ -644,7 +643,7 @@ where
 {
     fn new(
         schema: &'scan Schema<R>,
-        manager: Arc<StoreManager>,
+        manager: &'scan StoreManager,
         (lower, upper): (Bound<&'range R::Key>, Bound<&'range R::Key>),
         ts: Timestamp,
         version: &'scan Version<R>,
