@@ -372,11 +372,10 @@ where
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
-            let manager = &self.manager;
             let current = self.version_set.current().await;
             let mut scan = Scan::new(
                 &schema,
-                manager,
+                &self.manager,
                 range,
                 self.version_set.load_ts(),
                 &*current,
@@ -834,7 +833,7 @@ pub enum Projection {
     Parts(Vec<usize>),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{
         collections::{BTreeMap, Bound},

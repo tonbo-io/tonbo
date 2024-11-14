@@ -56,6 +56,7 @@ where
     R: Record,
 {
     #[cfg(test)]
+    #[allow(unused)]
     pub(crate) fn new(
         option: Arc<DbOption<R>>,
         clean_sender: Sender<CleanTag>,

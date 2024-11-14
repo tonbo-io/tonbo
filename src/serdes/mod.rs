@@ -9,12 +9,15 @@ mod string;
 
 use std::future::Future;
 
-use fusio::{SeqRead, Write};
+use fusio::{MaybeSend, SeqRead, Write};
 
 pub trait Encode {
     type Error: From<fusio::Error> + std::error::Error + Send + Sync + 'static;
 
-    fn encode<W>(&self, writer: &mut W) -> impl Future<Output = Result<(), Self::Error>> + Send
+    fn encode<W>(
+        &self,
+        writer: &mut W,
+    ) -> impl Future<Output = Result<(), Self::Error>> + MaybeSend
     where
         W: Write;
 
@@ -62,7 +65,7 @@ mod tests {
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
-                W: Write + Send,
+                W: Write,
             {
                 self.0.encode(writer).await?;
 

@@ -503,7 +503,7 @@ where
     EmptyLevel,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 

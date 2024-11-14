@@ -284,6 +284,7 @@ pub(crate) mod test {
     use super::DynRecord;
     use crate::record::{Column, ColumnDesc, Datatype};
 
+    #[allow(unused)]
     pub(crate) fn test_dyn_item_schema() -> (Vec<ColumnDesc>, usize) {
         let descs = vec![
             ColumnDesc::new("id".to_string(), Datatype::Int64, false),
@@ -298,6 +299,7 @@ pub(crate) mod test {
         (descs, 0)
     }
 
+    #[allow(unused)]
     pub(crate) fn test_dyn_items() -> Vec<DynRecord> {
         let mut items = vec![];
         for i in 0..50 {
