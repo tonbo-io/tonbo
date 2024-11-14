@@ -81,10 +81,10 @@ where
     }
 
     /// scan records with primary keys in the `range`
-    pub fn scan<'scan>(
+    pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R> {
+        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+    ) -> Scan<'scan, 'range, R> {
         self.snapshot._scan(
             range,
             Box::new(move |projection_mask: Option<ProjectionMask>| {
