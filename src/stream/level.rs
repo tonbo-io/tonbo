@@ -32,7 +32,7 @@ where
     Init(FileId),
     Ready(SsTableScan<'level, R>),
     OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
-    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, Error>> + Send + 'level>>),
+    OpenSst(Pin<Box<dyn MaybeSendFuture<Output = Result<SsTable<R>, Error>> + 'level>>),
     LoadStream(
         Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
     ),
@@ -165,7 +165,7 @@ where
                 },
                 FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file.into())));
+                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file)));
                         continue;
                     }
                     Poll::Ready(Err(err)) => {

@@ -1,6 +1,7 @@
 use std::{cmp, collections::Bound, mem, pin::Pin, sync::Arc};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
@@ -36,7 +37,7 @@ where
 {
     pub(crate) option: Arc<DbOption<R>>,
     pub(crate) schema: Arc<RwLock<Schema<R>>>,
-    pub(crate) version_set: Arc<VersionSet<R>>,
+    pub(crate) version_set: VersionSet<R>,
     pub(crate) manager: Arc<StoreManager>,
 }
 
@@ -47,7 +48,7 @@ where
     pub(crate) fn new(
         schema: Arc<RwLock<Schema<R>>>,
         option: Arc<DbOption<R>>,
-        version_set: Arc<VersionSet<R>>,
+        version_set: VersionSet<R>,
         manager: Arc<StoreManager>,
     ) -> Self {
         Compactor::<R> {
@@ -68,20 +69,10 @@ where
         }
 
         let trigger_clone = guard.trigger.clone();
-        #[cfg(feature = "opfs")]
-        let new_mutable = {
-            let option = self.option.clone();
-            let manager = self.manager.clone();
-            let (sender, receiver) = oneshot::channel();
-            wasm_bindgen_futures::spawn_local(async move {
-                let _ = sender.send(Mutable::new(&option, trigger_clone, manager.base_fs()).await);
-            });
-            receiver.await.unwrap()?
-        };
-        #[cfg(not(feature = "opfs"))]
-        let new_mutable =
-            { Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await? };
-        let mutable = mem::replace(&mut guard.mutable, new_mutable);
+        let mutable = mem::replace(
+            &mut guard.mutable,
+            Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await?,
+        );
         let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
 
         guard.immutables.push((file_id, immutable));
@@ -94,11 +85,11 @@ where
             let excess = &guard.immutables[0..chunk_num];
 
             if let Some(scope) = Self::minor_compaction(
-                self.option.clone(),
+                &self.option,
                 recover_wal_ids,
                 excess,
                 &guard.record_instance,
-                self.manager.clone(),
+                &self.manager,
             )
             .await?
             {
@@ -109,13 +100,13 @@ where
                 if self.option.is_threshold_exceeded_major(&version_ref, 0) {
                     Self::major_compaction(
                         &version_ref,
-                        self.option.clone(),
+                        &self.option,
                         &scope.min,
                         &scope.max,
                         &mut version_edits,
                         &mut delete_gens,
                         &guard.record_instance,
-                        self.manager.clone(),
+                        &self.manager,
                     )
                     .await?;
                 }
@@ -124,20 +115,6 @@ where
                     ts: version_ref.increase_ts(),
                 });
 
-                #[cfg(feature = "opfs")]
-                {
-                    let (tx, rx) = oneshot::channel();
-                    let version_set = self.version_set.clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let _ = tx.send(
-                            version_set
-                                .apply_edits(version_edits, Some(delete_gens), false)
-                                .await,
-                        );
-                    });
-                    rx.await.unwrap()?;
-                }
-                #[cfg(not(feature = "opfs"))]
                 self.version_set
                     .apply_edits(version_edits, Some(delete_gens), false)
                     .await?;
@@ -150,69 +127,34 @@ where
     }
 
     pub(crate) async fn minor_compaction(
-        option: Arc<DbOption<R>>,
+        option: &DbOption<R>,
         recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(Option<FileId>, Immutable<R::Columns>)],
         instance: &RecordInstance,
-        manager: Arc<StoreManager>,
+        manager: &StoreManager,
     ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
         if !batches.is_empty() {
+            let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
+            let level_0_fs = manager.get_fs(level_0_path);
+
             let mut min = None;
             let mut max = None;
 
             let gen = FileId::new();
             let mut wal_ids = Vec::with_capacity(batches.len());
-            let schema = instance.arrow_schema::<R>().clone();
 
-            #[cfg(feature = "opfs")]
-            let mut writer = {
-                let (tx, rx) = oneshot::channel();
-                wasm_bindgen_futures::spawn_local(async move {
-                    let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
-                    let level_0_fs = manager.get_fs(level_0_path);
-
-                    match level_0_fs
+            let mut writer = AsyncArrowWriter::try_new(
+                AsyncWriter::new(
+                    level_0_fs
                         .open_options(
                             &option.table_path(&gen, 0),
                             FileType::Parquet.open_options(false),
                         )
-                        .await
-                    {
-                        Ok(file) => {
-                            let _ = tx.send(
-                                AsyncArrowWriter::try_new(
-                                    AsyncWriter::new(file),
-                                    schema,
-                                    Some(option.write_parquet_properties.clone()),
-                                )
-                                .map_err(CompactionError::Parquet),
-                            );
-                        }
-                        Err(err) => {
-                            let _ = tx.send(Err(CompactionError::Fusio(err)));
-                            return;
-                        }
-                    };
-                });
-                rx.await.map_err(|_| CompactionError::ChannelClose)??
-            };
-            #[cfg(not(feature = "opfs"))]
-            let mut writer = {
-                let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
-                let level_0_fs = manager.get_fs(level_0_path);
-                AsyncArrowWriter::try_new(
-                    AsyncWriter::new(
-                        level_0_fs
-                            .open_options(
-                                &option.table_path(&gen, 0),
-                                FileType::Parquet.open_options(false),
-                            )
-                            .await?,
-                    ),
-                    schema,
-                    Some(option.write_parquet_properties.clone()),
-                )?
-            };
+                        .await?,
+                ),
+                instance.arrow_schema::<R>().clone(),
+                Some(option.write_parquet_properties.clone()),
+            )?;
 
             if let Some(mut recover_wal_ids) = recover_wal_ids {
                 wal_ids.append(&mut recover_wal_ids);
@@ -245,13 +187,13 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn major_compaction(
         version: &Version<R>,
-        option: Arc<DbOption<R>>,
+        option: &DbOption<R>,
         mut min: &R::Key,
         mut max: &R::Key,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &RecordInstance,
-        manager: Arc<StoreManager>,
+        manager: &StoreManager,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
@@ -269,43 +211,12 @@ where
             // This Level
             if level == 0 {
                 for scope in meet_scopes_l.iter() {
-                    #[cfg(feature = "opfs")]
-                    let file = {
-                        let (tx, rx) = oneshot::channel();
-                        let manager = manager.clone();
-                        let option = option.clone();
-                        let gen = scope.gen;
-                        wasm_bindgen_futures::spawn_local(async move {
-                            let level_path =
-                                option.level_fs_path(level).unwrap_or(&option.base_path);
-                            let level_fs = manager.get_fs(level_path);
-                            match level_fs
-                                .open_options(
-                                    &option.table_path(&gen, level),
-                                    FileType::Parquet.open_options(true),
-                                )
-                                .await
-                            {
-                                Ok(file) => {
-                                    let _ = tx.send(Ok(file.into()));
-                                }
-                                Err(err) => {
-                                    let _ = tx.send(Err(err));
-                                }
-                            };
-                        });
-                        rx.await.unwrap()?
-                    };
-                    #[cfg(not(feature = "opfs"))]
-                    let file = {
-                        level_fs
-                            .open_options(
-                                &option.table_path(&scope.gen, level),
-                                FileType::Parquet.open_options(true),
-                            )
-                            .await?
-                            .into()
-                    };
+                    let file = level_fs
+                        .open_options(
+                            &option.table_path(&scope.gen, level),
+                            FileType::Parquet.open_options(true),
+                        )
+                        .await?;
 
                     streams.push(ScanStream::SsTable {
                         inner: SsTable::open(file)
@@ -339,8 +250,6 @@ where
                 });
             }
             if !meet_scopes_ll.is_empty() {
-                let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
-                let level_fs = manager.get_fs(level_path);
                 // Next Level
                 let (lower, upper) = Self::full_scope(&meet_scopes_ll)?;
                 let level_scan_ll = LevelStream::new(
@@ -361,12 +270,12 @@ where
                 });
             }
             Self::build_tables(
-                option.clone(),
+                option,
                 version_edits,
                 level + 1,
                 streams,
                 instance,
-                manager.clone(),
+                level_fs,
             )
             .await?;
 
@@ -469,12 +378,12 @@ where
     }
 
     async fn build_tables<'scan>(
-        option: Arc<DbOption<R>>,
+        option: &DbOption<R>,
         version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'scan, R>>,
         instance: &RecordInstance,
-        manager: Arc<StoreManager>,
+        fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
@@ -495,28 +404,28 @@ where
 
             if builder.written_size() >= option.max_sst_file_size {
                 Self::build_table(
-                    option.clone(),
+                    option,
                     version_edits,
                     level,
                     &mut builder,
                     &mut min,
                     &mut max,
                     instance,
-                    manager.clone(),
+                    fs,
                 )
                 .await?;
             }
         }
         if builder.written_size() > 0 {
             Self::build_table(
-                option.clone(),
+                option,
                 version_edits,
                 level,
                 &mut builder,
                 &mut min,
                 &mut max,
                 instance,
-                manager.clone(),
+                fs,
             )
             .await?;
         }
@@ -533,69 +442,31 @@ where
 
     #[allow(clippy::too_many_arguments)]
     async fn build_table(
-        option: Arc<DbOption<R>>,
+        option: &DbOption<R>,
         version_edits: &mut Vec<VersionEdit<R::Key>>,
         level: usize,
         builder: &mut <R::Columns as ArrowArrays>::Builder,
         min: &mut Option<R::Key>,
         max: &mut Option<R::Key>,
         instance: &RecordInstance,
-        manager: Arc<StoreManager>,
+        fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
         let gen = FileId::new();
         let columns = builder.finish(None);
-        let schema = instance.arrow_schema::<R>().clone();
-        #[cfg(feature = "opfs")]
-        let mut writer = {
-            let (tx, rx) = oneshot::channel();
-            wasm_bindgen_futures::spawn_local(async move {
-                let level_path = option.level_fs_path(level - 1).unwrap_or(&option.base_path);
-                let fs = manager.get_fs(level_path);
-
-                match fs
-                    .open_options(
-                        &option.table_path(&gen, level - 1),
-                        FileType::Parquet.open_options(false),
-                    )
-                    .await
-                {
-                    Ok(writer) => {
-                        let _ = tx.send(
-                            AsyncArrowWriter::try_new(
-                                AsyncWriter::new(writer),
-                                schema,
-                                Some(option.write_parquet_properties.clone()),
-                            )
-                            .map_err(CompactionError::Parquet),
-                        );
-                    }
-                    Err(err) => {
-                        let _ = tx.send(Err(CompactionError::Fusio(err)));
-                    }
-                }
-            });
-
-            rx.await.unwrap()?
-        };
-        #[cfg(not(feature = "opfs"))]
-        let mut writer = {
-            let level_path = option.level_fs_path(level - 1).unwrap_or(&option.base_path);
-            let fs = manager.get_fs(level_path);
-            AsyncArrowWriter::try_new(
-                AsyncWriter::new(
-                    fs.open_options(
-                        &option.table_path(&gen, level),
-                        FileType::Parquet.open_options(false),
-                    )
-                    .await?,
-                ),
-                schema,
-                Some(option.write_parquet_properties.clone()),
-            )?
-        };
+        let mut writer = AsyncArrowWriter::try_new(
+            AsyncWriter::new(
+                fs.open_options(
+                    &option.table_path(&gen, level),
+                    FileType::Parquet.open_options(false),
+                )
+                .await?,
+            ),
+            instance.arrow_schema::<R>().clone(),
+            Some(option.write_parquet_properties.clone()),
+        )?;
         writer.write(columns.as_record_batch()).await?;
         writer.close().await?;
         version_edits.push(VersionEdit::Add {
@@ -801,14 +672,14 @@ pub(crate) mod tests {
         .unwrap();
 
         let scope = Compactor::<Test>::minor_compaction(
-            Arc::new(option),
+            &option,
             None,
             &vec![
                 (Some(FileId::new()), batch_1),
                 (Some(FileId::new()), batch_2),
             ],
             &RecordInstance::Normal,
-            Arc::new(manager),
+            &manager,
         )
         .await
         .unwrap()
@@ -865,14 +736,14 @@ pub(crate) mod tests {
                 .unwrap();
 
         let scope = Compactor::<DynRecord>::minor_compaction(
-            Arc::new(option),
+            &option,
             None,
             &vec![
                 (Some(FileId::new()), batch_1),
                 (Some(FileId::new()), batch_2),
             ],
             &instance,
-            Arc::new(manager),
+            &manager,
         )
         .await
         .unwrap()
@@ -931,13 +802,13 @@ pub(crate) mod tests {
 
         Compactor::<Test>::major_compaction(
             &version,
-            option.clone(),
+            &option,
             &min,
             &max,
             &mut version_edits,
             &mut vec![],
             &RecordInstance::Normal,
-            Arc::new(manager),
+            &manager,
         )
         .await
         .unwrap();
@@ -1322,13 +1193,13 @@ pub(crate) mod tests {
 
         Compactor::<Test>::major_compaction(
             &version,
-            option.clone(),
+            &option,
             &min,
             &max,
             &mut version_edits,
             &mut vec![],
             &RecordInstance::Normal,
-            Arc::new(manager),
+            &manager,
         )
         .await
         .unwrap();

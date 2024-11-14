@@ -55,9 +55,8 @@ pub mod opfs {
 
     use super::Executor;
 
-    #[derive(Debug)]
     #[wasm_bindgen]
-    pub struct OpfsExecutor {}
+    pub struct OpfsExecutor();
 
     impl Default for OpfsExecutor {
         fn default() -> Self {

@@ -8,7 +8,7 @@ use crossbeam_skiplist::{
 use fusio::{buffered::BufWriter, DynFs, DynWrite};
 
 use crate::{
-    fs::{DynWriteWrapper, FileId, FileType},
+    fs::{FileId, FileType},
     inmem::immutable::Immutable,
     record::{Key, KeyRef, Record, RecordInstance},
     timestamp::{
@@ -36,7 +36,7 @@ where
     R: Record,
 {
     pub(crate) data: SkipMap<Timestamped<R::Key>, Option<R>>,
-    wal: Option<Mutex<WalFile<DynWriteWrapper, R>>>,
+    wal: Option<Mutex<WalFile<Box<dyn DynWrite>, R>>>,
     pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 }
 
@@ -62,10 +62,7 @@ where
                 option.wal_buffer_size,
             )) as Box<dyn DynWrite>;
 
-            wal = Some(Mutex::new(WalFile::new(
-                DynWriteWrapper::from(file),
-                file_id,
-            )));
+            wal = Some(Mutex::new(WalFile::new(file, file_id)));
         };
 
         Ok(Self {
@@ -180,23 +177,9 @@ where
         let mut file_id = None;
 
         if let Some(wal) = self.wal {
-            #[cfg(feature = "opfs")]
-            {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                wasm_bindgen_futures::spawn_local(async move {
-                    let mut wal_guard = wal.lock().await;
-                    wal_guard.flush().await.unwrap();
-
-                    let _ = tx.send(Some(wal_guard.file_id()));
-                });
-                file_id = rx.await.unwrap()
-            };
-            #[cfg(not(feature = "opfs"))]
-            {
-                let mut wal_guard = wal.lock().await;
-                wal_guard.flush().await?;
-                file_id = Some(wal_guard.file_id())
-            };
+            let mut wal_guard = wal.lock().await;
+            wal_guard.flush().await?;
+            file_id = Some(wal_guard.file_id());
         }
 
         Ok((file_id, Immutable::from((self.data, instance))))

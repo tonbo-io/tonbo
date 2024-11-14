@@ -184,7 +184,7 @@ where
             )
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(file.into())
+        SsTable::<R>::open(file)
             .await?
             .get(key, projection_mask)
             .await
@@ -226,7 +226,7 @@ where
                 )
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(file.into()).await?;
+            let table = SsTable::open(file).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
