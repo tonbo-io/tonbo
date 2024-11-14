@@ -6,7 +6,6 @@ use crossbeam_skiplist::{
     SkipMap,
 };
 use fusio::{buffered::BufWriter, DynFs, DynWrite};
-use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileType},
@@ -52,7 +51,7 @@ where
     ) -> Result<Self, fusio::Error> {
         let mut wal = None;
         if option.use_wal {
-            let file_id = Ulid::new();
+            let file_id = FileId::new();
 
             let file = Box::new(BufWriter::new(
                 fs.open_options(
