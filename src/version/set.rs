@@ -53,9 +53,6 @@ where
     log_with_id: (DynFileWrapper, FileId),
 }
 
-#[cfg(target_arch = "wasm32")]
-unsafe impl<R: Record> Send for VersionSetInner<R> {}
-
 pub(crate) struct VersionSet<R>
 where
     R: Record,

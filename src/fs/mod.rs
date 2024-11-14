@@ -58,8 +58,6 @@ pub struct DynFileWrapper {
 
 #[cfg(target_arch = "wasm32")]
 unsafe impl Send for DynFileWrapper {}
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for DynFileWrapper {}
 
 pub struct DynWriteWrapper {
     inner: Box<dyn fusio::DynWrite>,
@@ -67,8 +65,6 @@ pub struct DynWriteWrapper {
 
 #[cfg(target_arch = "wasm32")]
 unsafe impl Send for DynWriteWrapper {}
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for DynWriteWrapper {}
 
 impl DynWriteWrapper {
     #[allow(unused)]

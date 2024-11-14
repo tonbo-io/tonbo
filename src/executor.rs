@@ -1,15 +1,18 @@
 use std::future::Future;
 
+use fusio::MaybeSend;
+
 pub trait Executor {
     fn spawn<F>(&self, future: F)
     where
-        F: Future<Output = ()> + Send + 'static;
+        F: Future<Output = ()> + MaybeSend + 'static;
 }
 
-#[cfg(any(test, feature = "tokio"))]
+#[cfg(feature = "tokio")]
 pub mod tokio {
     use std::future::Future;
 
+    use fusio::MaybeSend;
     use tokio::runtime::Handle;
 
     use super::Executor;
@@ -36,7 +39,7 @@ pub mod tokio {
     impl Executor for TokioExecutor {
         fn spawn<F>(&self, future: F)
         where
-            F: Future<Output = ()> + Send + 'static,
+            F: Future<Output = ()> + MaybeSend + 'static,
         {
             self.handle.spawn(future);
         }
@@ -47,6 +50,7 @@ pub mod tokio {
 pub mod opfs {
     use std::future::Future;
 
+    use fusio::MaybeSend;
     use wasm_bindgen::prelude::*;
 
     use super::Executor;
@@ -70,7 +74,7 @@ pub mod opfs {
     impl Executor for OpfsExecutor {
         fn spawn<F>(&self, future: F)
         where
-            F: Future<Output = ()> + Send + 'static,
+            F: Future<Output = ()> + MaybeSend + 'static,
         {
             wasm_bindgen_futures::spawn_local(future);
         }

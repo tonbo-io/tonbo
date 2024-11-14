@@ -55,9 +55,6 @@ where
     path: Option<Path>,
 }
 
-#[cfg(target_arch = "wasm32")]
-unsafe impl<'level, R: Record> Send for LevelStream<'level, R> {}
-
 impl<'level, R> LevelStream<'level, R>
 where
     R: Record,

@@ -131,9 +131,6 @@ pin_project! {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-unsafe impl<'scan, R: Record> Send for ScanStream<'scan, R> {}
-
 impl<'scan, R> From<TransactionScan<'scan, R>> for ScanStream<'scan, R>
 where
     R: Record,

@@ -33,9 +33,6 @@ where
     manager: Arc<StoreManager>,
 }
 
-#[cfg(target_arch = "wasm32")]
-unsafe impl<R: Record> Send for Cleaner<R> {}
-
 impl<R> Cleaner<R>
 where
     R: Record,
