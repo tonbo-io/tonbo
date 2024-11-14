@@ -6,7 +6,6 @@ use futures_util::StreamExt;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use thiserror::Error;
 use tokio::sync::oneshot;
-use ulid::Ulid;
 
 use crate::{
     fs::{manager::StoreManager, FileId, FileType},
@@ -546,7 +545,7 @@ where
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
-        let gen = Ulid::new();
+        let gen = FileId::new();
         let columns = builder.finish(None);
         let schema = instance.arrow_schema::<R>().clone();
         #[cfg(feature = "opfs")]

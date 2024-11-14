@@ -618,14 +618,15 @@ where
 }
 
 /// scan configuration intermediate structure
-pub struct Scan<'scan, R>
+pub struct Scan<'scan, 'range, R>
 where
     R: Record,
+    'range: 'scan,
 {
     schema: &'scan Schema<R>,
     manager: Arc<StoreManager>,
-    lower: Bound<&'scan R::Key>,
-    upper: Bound<&'scan R::Key>,
+    lower: Bound<&'range R::Key>,
+    upper: Bound<&'range R::Key>,
     ts: Timestamp,
 
     version: &'scan Version<R>,
@@ -637,14 +638,14 @@ where
     projection: ProjectionMask,
 }
 
-impl<'scan, R> Scan<'scan, R>
+impl<'scan, 'range, R> Scan<'scan, 'range, R>
 where
     R: Record + Send,
 {
     fn new(
         schema: &'scan Schema<R>,
         manager: Arc<StoreManager>,
-        (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        (lower, upper): (Bound<&'range R::Key>, Bound<&'range R::Key>),
         ts: Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
