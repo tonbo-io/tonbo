@@ -39,10 +39,10 @@ impl<'s, R: Record> Snapshot<'s, R> {
             }))
     }
 
-    pub fn scan<'scan>(
+    pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R> {
+        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+    ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -78,13 +78,13 @@ impl<'s, R: Record> Snapshot<'s, R> {
         &self.share
     }
 
-    pub(crate) fn _scan<'scan>(
+    pub(crate) fn _scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
-    ) -> Scan<'scan, R> {
+    ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -152,7 +152,7 @@ mod tests {
             // to increase timestamps to 1 because the data ts built in advance is 1
             db.version_set.increase_ts();
         }
-        let mut snapshot = db.snapshot().await;
+        let snapshot = db.snapshot().await;
 
         let mut stream = snapshot
             .scan((Bound::Unbounded, Bound::Unbounded))
