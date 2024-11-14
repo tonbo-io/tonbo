@@ -160,9 +160,8 @@ where
 mod test {
     use std::ops::Bound;
 
-    use crate::fs::FileId;
-
     use super::Scope;
+    use crate::fs::FileId;
 
     #[tokio::test]
     async fn test_meets_range() {
