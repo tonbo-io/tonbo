@@ -160,7 +160,7 @@ where
 mod test {
     use std::ops::Bound;
 
-    use ulid::Ulid;
+    use crate::fs::FileId;
 
     use super::Scope;
 
@@ -169,7 +169,7 @@ mod test {
         let scope = Scope {
             min: 100,
             max: 200,
-            gen: Ulid::new(),
+            gen: FileId::new(),
             wal_ids: None,
         };
 
