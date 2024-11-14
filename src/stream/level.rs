@@ -32,7 +32,7 @@ where
     Init(FileId),
     Ready(SsTableScan<'level, R>),
     OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
-    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R>, Error>> + Send + 'level>>),
+    OpenSst(Pin<Box<dyn MaybeSendFuture<Output = Result<SsTable<R>, Error>> + 'level>>),
     LoadStream(
         Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
     ),
@@ -201,7 +201,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{collections::Bound, sync::Arc};
 

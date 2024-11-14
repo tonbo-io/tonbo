@@ -26,7 +26,7 @@ where
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
-        W: Write + Send,
+        W: Write,
     {
         self.as_ref().encode(writer).await
     }
