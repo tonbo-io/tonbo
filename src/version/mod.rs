@@ -11,7 +11,7 @@ use std::{
 };
 
 use flume::{SendError, Sender};
-use fusio::DynFs;
+use fusio::{path::Path, DynFs, Write};
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
@@ -25,7 +25,7 @@ use crate::{
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TimestampedRef},
     version::{cleaner::CleanTag, edit::VersionEdit},
-    DbOption,
+    DbError, DbOption,
 };
 
 pub(crate) const MAX_LEVEL: usize = 7;
@@ -45,7 +45,7 @@ where
 {
     ts: Timestamp,
     pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
-    clean_sender: Sender<CleanTag>,
+    clean_sender: Option<Sender<CleanTag>>,
     option: Arc<DbOption<R>>,
     timestamp: Arc<AtomicU32>,
     log_length: u32,
@@ -64,9 +64,20 @@ where
         Version {
             ts: Timestamp::from(0),
             level_slice: [const { Vec::new() }; MAX_LEVEL],
-            clean_sender,
+            clean_sender: Some(clean_sender),
             option: option.clone(),
             timestamp,
+            log_length: 0,
+        }
+    }
+
+    pub(crate) fn empty(option: Arc<DbOption<R>>) -> Self {
+        Version {
+            ts: Timestamp::from(0),
+            level_slice: [const { Vec::new() }; MAX_LEVEL],
+            clean_sender: None,
+            option: option.clone(),
+            timestamp: Default::default(),
             log_length: 0,
         }
     }
@@ -292,6 +303,46 @@ where
         edits.push(VersionEdit::NewLogLength { len: 0 });
         edits
     }
+
+    pub(crate) async fn checkpoint<T: Fn(&FileId, usize) -> Path, L: Fn(&FileId) -> Path>(
+        &self,
+        manager: &StoreManager,
+        option: &DbOption<R>,
+        fn_copy_table: T,
+        fn_copy_log: L,
+    ) -> Result<(), DbError<R>> {
+        for level in 0..MAX_LEVEL {
+            let level_fs = option
+                .level_fs_path(level)
+                .map(|path| manager.get_fs(path))
+                .unwrap_or(manager.base_fs());
+
+            for scope in self.level_slice[level].iter() {
+                let gen = &scope.gen;
+                let from_path = option.table_path(gen, level);
+                let to_path = fn_copy_table(gen, level);
+
+                level_fs.copy(&from_path, &to_path).await?;
+            }
+        }
+        let mut new_log = manager
+            .base_fs()
+            .open_options(
+                &fn_copy_log(&FileId::new()),
+                FileType::Log.open_options(false),
+            )
+            .await?;
+        for new_edit in self.to_edits() {
+            new_edit
+                .encode(&mut new_log)
+                .await
+                .map_err(VersionError::Encode)?;
+        }
+        new_log.flush().await?;
+        new_log.close().await?;
+
+        Ok(())
+    }
 }
 
 impl<R> Drop for Version<R>
@@ -299,8 +350,10 @@ where
     R: Record,
 {
     fn drop(&mut self) {
-        if let Err(err) = self.clean_sender.send(CleanTag::Clean { ts: self.ts }) {
-            error!("[Version Drop Error]: {}", err)
+        if let Some(clean_sender) = &self.clean_sender {
+            if let Err(err) = clean_sender.send(CleanTag::Clean { ts: self.ts }) {
+                error!("[Version Drop Error]: {}", err)
+            }
         }
     }
 }
@@ -322,4 +375,6 @@ where
     UlidDecode(#[from] ulid::DecodeError),
     #[error("version send error: {0}")]
     Send(#[from] SendError<CleanTag>),
+    #[error("checkpoint not found")]
+    CheckpointNotFound,
 }

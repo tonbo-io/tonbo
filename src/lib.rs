@@ -137,6 +137,7 @@ pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
+use fusio::path::Path;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
@@ -167,7 +168,7 @@ use crate::{
         ScanStream,
     },
     timestamp::Timestamped,
-    trigger::{Trigger, TriggerFactory},
+    trigger::{LengthTrigger, Trigger, TriggerFactory},
     version::{cleaner::Cleaner, set::VersionSet, TransactionTs, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
 };
@@ -246,7 +247,14 @@ where
 
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let schema = Arc::new(RwLock::new(
-            Schema::new(option.clone(), task_tx, &version_set, instance, &manager).await?,
+            Schema::new(
+                option.clone(),
+                Some(task_tx),
+                || version_set.increase_ts(),
+                instance,
+                &manager,
+            )
+            .await?,
         ));
         let mut compactor = Compactor::<R>::new(
             schema.clone(),
@@ -296,6 +304,7 @@ where
         Snapshot::new(
             self.schema.read().await,
             self.version_set.current().await,
+            self.version_set.options().clone(),
             self.manager.clone(),
         )
     }
@@ -327,10 +336,11 @@ where
 
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
         let (tx, rx) = oneshot::channel();
-        let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
-        compaction_tx
-            .send_async(CompactTask::Flush(Some(tx)))
-            .await?;
+        if let Some(compaction_tx) = self.schema.read().await.compaction_tx.clone() {
+            compaction_tx
+                .send_async(CompactTask::Flush(Some(tx)))
+                .await?;
+        }
 
         rx.await.map_err(|_| CommitError::ChannelClose)?;
 
@@ -393,7 +403,9 @@ where
         let schema = self.schema.read().await;
 
         if schema.write(LogType::Full, record, ts).await? {
-            let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
+            if let Some(compaction_tx) = &schema.compaction_tx {
+                let _ = compaction_tx.try_send(CompactTask::Freeze);
+            }
         }
 
         Ok(())
@@ -421,8 +433,8 @@ where
             } else {
                 schema.write(LogType::Full, first, ts).await?
             };
-            if is_excess {
-                let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
+            if let (Some(compaction_tx), true) = (&schema.compaction_tx, is_excess) {
+                let _ = compaction_tx.try_send(CompactTask::Freeze);
             }
         };
 
@@ -441,9 +453,9 @@ where
 {
     pub mutable: Mutable<R>,
     pub immutables: Vec<(Option<FileId>, Immutable<R::Columns>)>,
-    compaction_tx: Sender<CompactTask>,
+    compaction_tx: Option<Sender<CompactTask>>,
     recover_wal_ids: Option<Vec<FileId>>,
-    trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+    trigger: Arc<dyn Trigger<R> + Send + Sync>,
     record_instance: RecordInstance,
 }
 
@@ -451,14 +463,14 @@ impl<R> Schema<R>
 where
     R: Record + Send,
 {
-    async fn new(
+    async fn new<F: Fn() -> Timestamp>(
         option: Arc<DbOption<R>>,
-        compaction_tx: Sender<CompactTask>,
-        version_set: &VersionSet<R>,
+        compaction_tx: Option<Sender<CompactTask>>,
+        fn_increase_ts: F,
         record_instance: RecordInstance,
         manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let mut schema = Schema {
             mutable: Mutable::new(&option, trigger.clone(), manager.base_fs()).await?,
             immutables: Default::default(),
@@ -468,6 +480,18 @@ where
             record_instance,
         };
 
+        schema.recover_wal_ids =
+            Some(Self::recover(option, fn_increase_ts, manager, &mut schema).await?);
+
+        Ok(schema)
+    }
+
+    async fn recover<F: Fn() -> Timestamp>(
+        option: Arc<DbOption<R>>,
+        fn_increase_ts: F,
+        manager: &StoreManager,
+        schema: &mut Schema<R>,
+    ) -> Result<Vec<FileId>, DbError<R>> {
         let base_fs = manager.base_fs();
         let wal_dir_path = option.wal_dir_path();
         let mut transaction_map = HashMap::new();
@@ -502,7 +526,7 @@ where
                 let is_excess = match log_type {
                     LogType::Full => {
                         schema
-                            .recover_append(key, version_set.increase_ts(), value_option)
+                            .recover_append(key, fn_increase_ts(), value_option)
                             .await?
                     }
                     LogType::First => {
@@ -521,7 +545,7 @@ where
                         let mut records = transaction_map.remove(&ts).unwrap();
                         records.push((key, value_option));
 
-                        let ts = version_set.increase_ts();
+                        let ts = fn_increase_ts();
                         for (key, value_option) in records {
                             is_excess = schema.recover_append(key, ts, value_option).await?;
                         }
@@ -529,13 +553,13 @@ where
                     }
                 };
                 if is_excess {
-                    let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
+                    if let (Some(compaction_tx), true) = (&schema.compaction_tx, is_excess) {
+                        let _ = compaction_tx.try_send(CompactTask::Freeze);
+                    }
                 }
             }
         }
-        schema.recover_wal_ids = Some(wal_ids);
-
-        Ok(schema)
+        Ok(wal_ids)
     }
 
     async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
@@ -612,6 +636,56 @@ where
 
     async fn flush_wal(&self) -> Result<(), DbError<R>> {
         self.mutable.flush_wal().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn checkpoint<F: Fn(&FileId) -> Path>(
+        &self,
+        manager: &StoreManager,
+        option: &DbOption<R>,
+        fn_copy: F,
+    ) -> Result<(), DbError<R>> {
+        if let Some(wal_id) = self.mutable.wal_id().await {
+            Self::copy_wal(manager, option, &fn_copy, &wal_id).await?;
+        }
+        for wal_id in self.immutables.iter().flat_map(|(wal_id, _)| wal_id) {
+            Self::copy_wal(manager, option, &fn_copy, wal_id).await?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn from_checkpoint<F: Fn() -> Timestamp>(
+        option: Arc<DbOption<R>>,
+        manager: Arc<StoreManager>,
+        fn_increase_ts: F,
+        record_instance: RecordInstance,
+    ) -> Result<Schema<R>, DbError<R>> {
+        // The Schema restored from checkpoint does not trigger compaction.
+        let trigger = Arc::new(LengthTrigger::new(usize::MAX));
+        let mut schema = Schema {
+            mutable: Mutable::new(&option, trigger.clone(), manager.base_fs()).await?,
+            immutables: Default::default(),
+            compaction_tx: None,
+            recover_wal_ids: None,
+            trigger,
+            record_instance,
+        };
+        let _ = Self::recover(option, fn_increase_ts, &manager, &mut schema).await?;
+
+        Ok(schema)
+    }
+
+    async fn copy_wal<F: Fn(&FileId) -> Path>(
+        manager: &StoreManager,
+        option: &DbOption<R>,
+        fn_copy: &F,
+        wal_id: &FileId,
+    ) -> Result<(), DbError<R>> {
+        let from_path = option.wal_path(wal_id);
+        let to_path = fn_copy(wal_id);
+
+        manager.base_fs().copy(&from_path, &to_path).await?;
         Ok(())
     }
 }
@@ -858,7 +932,7 @@ pub(crate) mod tests {
     use crate::{
         compaction::{CompactTask, CompactionError, Compactor},
         executor::{tokio::TokioExecutor, Executor},
-        fs::{manager::StoreManager, FileId},
+        fs::manager::StoreManager,
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
         record::{
             internal::InternalRecordRef,
@@ -1132,7 +1206,7 @@ pub(crate) mod tests {
         option: Arc<DbOption<Test>>,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(crate::Schema<Test>, Receiver<CompactTask>), fusio::Error> {
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable = Mutable::new(&option, trigger.clone(), fs).await?;
 
@@ -1174,7 +1248,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let immutables = {
-            let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+            let trigger = TriggerFactory::create(option.trigger_type);
 
             let mutable: Mutable<Test> = Mutable::new(&option, trigger.clone(), fs).await?;
 
@@ -1215,11 +1289,13 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
+            mutable.flush_wal().await.unwrap();
             vec![(
-                Some(FileId::new()),
+                mutable.wal_id().await,
                 Immutable::from((mutable.data, &RecordInstance::Normal)),
             )]
         };
+        mutable.flush_wal().await.unwrap();
 
         let (compaction_tx, compaction_rx) = bounded(1);
 
@@ -1227,7 +1303,7 @@ pub(crate) mod tests {
             crate::Schema {
                 mutable,
                 immutables,
-                compaction_tx,
+                compaction_tx: Some(compaction_tx),
                 recover_wal_ids: None,
                 trigger,
                 record_instance: RecordInstance::Normal,
@@ -1593,11 +1669,11 @@ pub(crate) mod tests {
 
         let (task_tx, _task_rx) = bounded(1);
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::Schema<Test> = crate::Schema {
             mutable: Mutable::new(&option, trigger.clone(), &fs).await.unwrap(),
             immutables: Default::default(),
-            compaction_tx: task_tx.clone(),
+            compaction_tx: Some(task_tx.clone()),
             recover_wal_ids: None,
             trigger,
             record_instance: RecordInstance::Normal,
@@ -1658,13 +1734,13 @@ pub(crate) mod tests {
 
         let (task_tx, _task_rx) = bounded(1);
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::Schema<DynRecord> = crate::Schema {
             mutable: Mutable::new(&option, trigger.clone(), manager.base_fs())
                 .await
                 .unwrap(),
             immutables: Default::default(),
-            compaction_tx: task_tx.clone(),
+            compaction_tx: Some(task_tx.clone()),
             recover_wal_ids: None,
             trigger,
             record_instance: RecordInstance::Normal,

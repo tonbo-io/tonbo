@@ -1,22 +1,39 @@
-use std::{collections::Bound, sync::Arc};
+use std::{collections::Bound, ops::Deref, sync::Arc};
 
 use async_lock::RwLockReadGuard;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
     fs::manager::StoreManager,
-    record::Record,
+    record::{Record, RecordInstance},
     stream,
     stream::ScanStream,
     timestamp::Timestamp,
-    version::{TransactionTs, VersionRef},
-    DbError, Projection, Scan, Schema,
+    version::{set::VersionSet, TransactionTs, VersionRef},
+    DbError, DbOption, Projection, Scan, Schema,
 };
+
+pub(crate) enum Share<'s, R: Record> {
+    ReadLock(RwLockReadGuard<'s, Schema<R>>),
+    Arc(Arc<Schema<R>>),
+}
+
+impl<'s, R: Record> Deref for Share<'s, R> {
+    type Target = Schema<R>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Share::ReadLock(schema) => schema.deref(),
+            Share::Arc(schema) => schema,
+        }
+    }
+}
 
 pub struct Snapshot<'s, R: Record> {
     ts: Timestamp,
-    share: RwLockReadGuard<'s, Schema<R>>,
+    share: Share<'s, R>,
     version: VersionRef<R>,
+    option: Arc<DbOption<R>>,
     manager: Arc<StoreManager>,
 }
 
@@ -53,15 +70,89 @@ impl<'s, R: Record> Snapshot<'s, R> {
         )
     }
 
+    #[allow(dead_code)]
+    pub async fn checkpoint(&self, option: &Arc<DbOption<R>>) -> Result<(), DbError<R>> {
+        {
+            self.manager
+                .base_fs()
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+            self.manager
+                .base_fs()
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+        }
+
+        self.share
+            .checkpoint(&self.manager, &self.option, |wal_id| {
+                option.wal_path(wal_id)
+            })
+            .await?;
+        self.version
+            .checkpoint(
+                &self.manager,
+                &self.option,
+                |table_gen, level| option.table_path(table_gen, level),
+                |table_log_id| option.version_log_path(table_log_id),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn from_checkpoint(option: Arc<DbOption<R>>) -> Result<Self, DbError<R>> {
+        let manager = Arc::new(StoreManager::new(
+            option.base_fs.clone(),
+            option.level_paths.clone(),
+        )?);
+        {
+            manager
+                .base_fs()
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+            manager
+                .base_fs()
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+        }
+
+        // FIXME: move to Version
+        let version_set = VersionSet::from_checkpoint(option.clone(), manager.clone()).await?;
+        let schema = Schema::from_checkpoint(
+            option.clone(),
+            manager.clone(),
+            || version_set.increase_ts(),
+            RecordInstance::Normal,
+        )
+        .await?;
+        let version = version_set.current().await;
+
+        let ts = version.load_ts();
+        Ok(Snapshot {
+            ts,
+            share: Share::Arc(Arc::new(schema)),
+            version,
+            option,
+            manager,
+        })
+    }
+
     pub(crate) fn new(
         share: RwLockReadGuard<'s, Schema<R>>,
         version: VersionRef<R>,
+        option: Arc<DbOption<R>>,
         manager: Arc<StoreManager>,
     ) -> Self {
         Self {
             ts: version.load_ts(),
-            share,
+            share: Share::ReadLock(share),
             version,
+            option,
             manager,
         }
     }
@@ -109,7 +200,8 @@ mod tests {
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
-        tests::{build_db, build_schema},
+        snapshot::Snapshot,
+        tests::{build_db, build_schema, Test},
         version::TransactionTs,
         DbOption,
     };
@@ -152,8 +244,12 @@ mod tests {
             // to increase timestamps to 1 because the data ts built in advance is 1
             db.version_set.increase_ts();
         }
-        let mut snapshot = db.snapshot().await;
+        let snapshot = db.snapshot().await;
 
+        test_snapshot_scan(snapshot).await;
+    }
+
+    async fn test_snapshot_scan<'a>(snapshot: Snapshot<'a, Test>) {
         let mut stream = snapshot
             .scan((Bound::Unbounded, Bound::Unbounded))
             .projection(vec![1])
@@ -200,5 +296,56 @@ mod tests {
         assert_eq!(entry_13.key().value, "erika");
         let entry_14 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_14.key().value, "funk");
+    }
+
+    #[tokio::test]
+    async fn snapshot_checkpoint() {
+        let source_dir = TempDir::new().unwrap();
+        let checkpoint_dir = TempDir::new().unwrap();
+        let checkpoint_option = Arc::new(DbOption::from(
+            Path::from_filesystem_path(checkpoint_dir.path()).unwrap(),
+        ));
+        {
+            let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+            let option = Arc::new(DbOption::from(
+                Path::from_filesystem_path(source_dir.path()).unwrap(),
+            ));
+
+            manager
+                .base_fs()
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .unwrap();
+            manager
+                .base_fs()
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .unwrap();
+
+            let (_, version) = build_version(&option, &manager).await;
+            let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
+                .await
+                .unwrap();
+            let db = build_db(
+                option,
+                compaction_rx,
+                TokioExecutor::new(),
+                schema,
+                version,
+                manager,
+            )
+            .await
+            .unwrap();
+
+            let snapshot = db.snapshot().await;
+            snapshot.checkpoint(&checkpoint_option).await.unwrap();
+        }
+        let mut snapshot = Snapshot::from_checkpoint(checkpoint_option).await.unwrap();
+        {
+            // to increase timestamps to 1 because the data ts built in advance is 1
+            snapshot.ts = 6.into();
+        }
+
+        test_snapshot_scan(snapshot).await;
     }
 }
