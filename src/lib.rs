@@ -137,7 +137,7 @@ pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
-use fusio::path::Path;
+use fusio::{path::Path, DynFs};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
@@ -160,7 +160,10 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
-    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{
+        manager::{copy, StoreManager},
+        parse_file_id, FileId, FileType,
+    },
     serdes::Decode,
     snapshot::Snapshot,
     stream::{
@@ -481,7 +484,7 @@ where
         };
 
         schema.recover_wal_ids =
-            Some(Self::recover(option, fn_increase_ts, manager, &mut schema).await?);
+            Some(Self::recover(option, fn_increase_ts, manager.base_fs(), &mut schema).await?);
 
         Ok(schema)
     }
@@ -489,17 +492,16 @@ where
     async fn recover<F: Fn() -> Timestamp>(
         option: Arc<DbOption<R>>,
         fn_increase_ts: F,
-        manager: &StoreManager,
+        fs: &Arc<dyn DynFs>,
         schema: &mut Schema<R>,
     ) -> Result<Vec<FileId>, DbError<R>> {
-        let base_fs = manager.base_fs();
         let wal_dir_path = option.wal_dir_path();
         let mut transaction_map = HashMap::new();
         let mut wal_ids = Vec::new();
 
         let wal_metas = {
             let mut wal_metas = Vec::new();
-            let mut wal_stream = base_fs.list(&wal_dir_path).await?;
+            let mut wal_stream = fs.list(&wal_dir_path).await?;
 
             while let Some(file_meta) = wal_stream.next().await {
                 wal_metas.push(file_meta?);
@@ -511,7 +513,7 @@ where
         for wal_meta in wal_metas {
             let wal_path = wal_meta.path;
 
-            let file = base_fs
+            let file = fs
                 .open_options(&wal_path, FileType::Wal.open_options(false))
                 .await?;
             // SAFETY: wal_stream return only file name
@@ -641,15 +643,16 @@ where
 
     pub(crate) async fn checkpoint<F: Fn(&FileId) -> Path>(
         &self,
-        manager: &StoreManager,
+        from_fs: &Arc<dyn DynFs>,
+        to_fs: &Arc<dyn DynFs>,
         option: &DbOption<R>,
         fn_copy: F,
     ) -> Result<(), DbError<R>> {
         if let Some(wal_id) = self.mutable.wal_id().await {
-            Self::copy_wal(manager, option, &fn_copy, &wal_id).await?;
+            Self::copy_wal(from_fs, to_fs, option, &fn_copy, &wal_id).await?;
         }
         for wal_id in self.immutables.iter().flat_map(|(wal_id, _)| wal_id) {
-            Self::copy_wal(manager, option, &fn_copy, wal_id).await?;
+            Self::copy_wal(from_fs, to_fs, option, &fn_copy, wal_id).await?;
         }
 
         Ok(())
@@ -657,27 +660,28 @@ where
 
     pub(crate) async fn from_checkpoint<F: Fn() -> Timestamp>(
         option: Arc<DbOption<R>>,
-        manager: Arc<StoreManager>,
+        fs: &Arc<dyn DynFs>,
         fn_increase_ts: F,
         record_instance: RecordInstance,
     ) -> Result<Schema<R>, DbError<R>> {
         // The Schema restored from checkpoint does not trigger compaction.
         let trigger = Arc::new(LengthTrigger::new(usize::MAX));
         let mut schema = Schema {
-            mutable: Mutable::new(&option, trigger.clone(), manager.base_fs()).await?,
+            mutable: Mutable::new(&option, trigger.clone(), fs).await?,
             immutables: Default::default(),
             compaction_tx: None,
             recover_wal_ids: None,
             trigger,
             record_instance,
         };
-        let _ = Self::recover(option, fn_increase_ts, &manager, &mut schema).await?;
+        let _ = Self::recover(option, fn_increase_ts, fs, &mut schema).await?;
 
         Ok(schema)
     }
 
     async fn copy_wal<F: Fn(&FileId) -> Path>(
-        manager: &StoreManager,
+        from_fs: &Arc<dyn DynFs>,
+        to_fs: &Arc<dyn DynFs>,
         option: &DbOption<R>,
         fn_copy: &F,
         wal_id: &FileId,
@@ -685,7 +689,8 @@ where
         let from_path = option.wal_path(wal_id);
         let to_path = fn_copy(wal_id);
 
-        manager.base_fs().copy(&from_path, &to_path).await?;
+        copy(from_fs, &from_path, to_fs, &to_path).await?;
+
         Ok(())
     }
 }

@@ -11,7 +11,7 @@ use std::{
 };
 
 use flume::{SendError, Sender};
-use fusio::{path::Path, DynFs, Write};
+use fusio::{dynamic::fs::copy, DynFs, Write};
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
@@ -304,31 +304,40 @@ where
         edits
     }
 
-    pub(crate) async fn checkpoint<T: Fn(&FileId, usize) -> Path, L: Fn(&FileId) -> Path>(
+    pub(crate) async fn checkpoint(
         &self,
-        manager: &StoreManager,
-        option: &DbOption<R>,
-        fn_copy_table: T,
-        fn_copy_log: L,
+        from_manager: &StoreManager,
+        from_option: &DbOption<R>,
+        to_manager: &StoreManager,
+        to_option: &DbOption<R>,
     ) -> Result<(), DbError<R>> {
-        for level in 0..MAX_LEVEL {
-            let level_fs = option
+        fn level_fs<'a, R: Record>(
+            store_manager: &'a StoreManager,
+            option: &DbOption<R>,
+            level: usize,
+        ) -> &'a Arc<dyn DynFs> {
+            option
                 .level_fs_path(level)
-                .map(|path| manager.get_fs(path))
-                .unwrap_or(manager.base_fs());
+                .map(|path| store_manager.get_fs(path))
+                .unwrap_or(store_manager.base_fs())
+        }
+
+        for level in 0..MAX_LEVEL {
+            let from_level_fs = level_fs(from_manager, from_option, level);
+            let to_level_fs = level_fs(to_manager, to_option, level);
 
             for scope in self.level_slice[level].iter() {
                 let gen = &scope.gen;
-                let from_path = option.table_path(gen, level);
-                let to_path = fn_copy_table(gen, level);
+                let from_path = from_option.table_path(gen, level);
+                let to_path = to_option.table_path(gen, level);
 
-                level_fs.copy(&from_path, &to_path).await?;
+                copy(from_level_fs, &from_path, to_level_fs, &to_path).await?;
             }
         }
-        let mut new_log = manager
+        let mut new_log = from_manager
             .base_fs()
             .open_options(
-                &fn_copy_log(&FileId::new()),
+                &to_option.version_log_path(&FileId::new()),
                 FileType::Log.open_options(false),
             )
             .await?;

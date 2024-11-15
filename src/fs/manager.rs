@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use fusio::{dynamic::DynFs, path::Path, Error};
+use fusio::{dynamic, dynamic::DynFs, path::Path, Error};
 use fusio_dispatch::FsOptions;
 
 pub struct StoreManager {
@@ -30,6 +30,23 @@ impl StoreManager {
     pub fn get_fs(&self, path: &Path) -> &Arc<dyn DynFs> {
         self.fs_map.get(path).unwrap_or(&self.base_fs)
     }
+}
+
+pub async fn copy(
+    from_fs: &Arc<dyn DynFs>,
+    from_path: &Path,
+    to_fs: &Arc<dyn DynFs>,
+    to_path: &Path,
+) -> Result<(), Error> {
+    if from_fs.file_system() == to_fs.file_system() {
+        match from_fs.link(from_path, to_path).await {
+            Err(Error::Unsupported { .. }) => (),
+            result => return result,
+        }
+    }
+    dynamic::fs::copy(from_fs, from_path, to_fs, to_path).await?;
+
+    Ok(())
 }
 
 // TODO: TestCases

@@ -71,32 +71,32 @@ impl<'s, R: Record> Snapshot<'s, R> {
     }
 
     #[allow(dead_code)]
-    pub async fn checkpoint(&self, option: &Arc<DbOption<R>>) -> Result<(), DbError<R>> {
+    pub async fn checkpoint(&self, to_option: &Arc<DbOption<R>>) -> Result<(), DbError<R>> {
+        let to_manager =
+            StoreManager::new(to_option.base_fs.clone(), to_option.level_paths.clone())?;
         {
             self.manager
                 .base_fs()
-                .create_dir_all(&option.wal_dir_path())
+                .create_dir_all(&to_option.wal_dir_path())
                 .await
                 .map_err(DbError::Fusio)?;
             self.manager
                 .base_fs()
-                .create_dir_all(&option.version_log_dir_path())
+                .create_dir_all(&to_option.version_log_dir_path())
                 .await
                 .map_err(DbError::Fusio)?;
         }
 
         self.share
-            .checkpoint(&self.manager, &self.option, |wal_id| {
-                option.wal_path(wal_id)
-            })
+            .checkpoint(
+                self.manager.base_fs(),
+                to_manager.base_fs(),
+                &self.option,
+                |wal_id| to_option.wal_path(wal_id),
+            )
             .await?;
         self.version
-            .checkpoint(
-                &self.manager,
-                &self.option,
-                |table_gen, level| option.table_path(table_gen, level),
-                |table_log_id| option.version_log_path(table_log_id),
-            )
+            .checkpoint(&self.manager, &self.option, &to_manager, to_option)
             .await?;
 
         Ok(())
@@ -125,7 +125,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
         let version_set = VersionSet::from_checkpoint(option.clone(), manager.clone()).await?;
         let schema = Schema::from_checkpoint(
             option.clone(),
-            manager.clone(),
+            manager.base_fs(),
             || version_set.increase_ts(),
             RecordInstance::Normal,
         )
