@@ -251,7 +251,7 @@ impl<R> DbOption<R>
 where
     R: Record,
 {
-    pub(crate) fn table_path(&self, gen: &FileId, level: usize) -> Path {
+    pub(crate) fn table_path(&self, gen: FileId, level: usize) -> Path {
         self.level_paths[level]
             .as_ref()
             .map(|(path, _)| path)
@@ -263,7 +263,7 @@ where
         self.base_path.child("wal")
     }
 
-    pub(crate) fn wal_path(&self, gen: &FileId) -> Path {
+    pub(crate) fn wal_path(&self, gen: FileId) -> Path {
         self.wal_dir_path()
             .child(format!("{}.{}", gen, FileType::Wal))
     }
@@ -272,7 +272,7 @@ where
         self.base_path.child("version")
     }
 
-    pub(crate) fn version_log_path(&self, gen: &FileId) -> Path {
+    pub(crate) fn version_log_path(&self, gen: FileId) -> Path {
         self.version_log_dir_path()
             .child(format!("{}.{}", gen, FileType::Log))
     }

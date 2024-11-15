@@ -107,7 +107,7 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.path = Some(self.option.table_path(&gen, self.level));
+                    self.path = Some(self.option.table_path(gen, self.level));
 
                     let reader = self.fs.open_options(
                         self.path.as_ref().unwrap(),
@@ -132,7 +132,7 @@ where
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.path = Some(self.option.table_path(&gen, self.level));
+                            self.path = Some(self.option.table_path(gen, self.level));
 
                             let reader = self.fs.open_options(
                                 self.path.as_ref().unwrap(),

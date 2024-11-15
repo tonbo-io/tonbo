@@ -147,7 +147,7 @@ where
                 AsyncWriter::new(
                     level_0_fs
                         .open_options(
-                            &option.table_path(&gen, 0),
+                            &option.table_path(gen, 0),
                             FileType::Parquet.open_options(false),
                         )
                         .await?,
@@ -213,7 +213,7 @@ where
                 for scope in meet_scopes_l.iter() {
                     let file = level_fs
                         .open_options(
-                            &option.table_path(&scope.gen, level),
+                            &option.table_path(scope.gen, level),
                             FileType::Parquet.open_options(true),
                         )
                         .await?;
@@ -459,7 +459,7 @@ where
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
                 fs.open_options(
-                    &option.table_path(&gen, level),
+                    &option.table_path(gen, level),
                     FileType::Parquet.open_options(false),
                 )
                 .await?,
@@ -563,7 +563,7 @@ pub(crate) mod tests {
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
                 fs.open_options(
-                    &option.table_path(&gen, level),
+                    &option.table_path(gen, level),
                     FileType::Parquet.open_options(false),
                 )
                 .await?,
