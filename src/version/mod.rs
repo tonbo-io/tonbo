@@ -132,7 +132,7 @@ where
                 continue;
             }
             if let Some(entry) = self
-                .table_query(level_0_fs, key, 0, &scope.gen, projection_mask.clone())
+                .table_query(level_0_fs, key, 0, scope.gen, projection_mask.clone())
                 .await?
             {
                 return Ok(Some(entry));
@@ -157,7 +157,7 @@ where
                     level_fs,
                     key,
                     leve,
-                    &sort_runs[index].gen,
+                    sort_runs[index].gen,
                     projection_mask.clone(),
                 )
                 .await?
@@ -174,7 +174,7 @@ where
         store: &Arc<dyn DynFs>,
         key: &TimestampedRef<<R as Record>::Key>,
         level: usize,
-        gen: &FileId,
+        gen: FileId,
         projection_mask: ProjectionMask,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = store
@@ -221,7 +221,7 @@ where
             }
             let file = level_0_fs
                 .open_options(
-                    &self.option.table_path(&scope.gen, 0),
+                    &self.option.table_path(scope.gen, 0),
                     FileType::Parquet.open_options(true),
                 )
                 .await

@@ -139,7 +139,7 @@ where
 
         let mut log = fs
             .open_options(
-                &option.version_log_path(&log_id),
+                &option.version_log_path(log_id),
                 FileType::Log.open_options(false),
             )
             .await?;
@@ -205,7 +205,7 @@ where
                             let _ = self
                                 .manager
                                 .base_fs()
-                                .remove(&option.wal_path(&wal_id))
+                                .remove(&option.wal_path(wal_id))
                                 .await;
                         }
                     }
@@ -266,7 +266,7 @@ where
             let old_log_id = mem::replace(log_id, FileId::new());
             let new_log = fs
                 .open_options(
-                    &option.version_log_path(log_id),
+                    &option.version_log_path(*log_id),
                     FileType::Log.open_options(false),
                 )
                 .await?;
@@ -277,7 +277,7 @@ where
                 new_edit.encode(log).await.map_err(VersionError::Encode)?;
             }
             log.close().await?;
-            fs.remove(&option.version_log_path(&old_log_id)).await?;
+            fs.remove(&option.version_log_path(old_log_id)).await?;
         }
         guard.current = Arc::new(new_version);
         Ok(())
@@ -321,7 +321,7 @@ pub(crate) mod tests {
         let log = manager
             .base_fs()
             .open_options(
-                &option.version_log_path(&log_id),
+                &option.version_log_path(log_id),
                 FileType::Log.open_options(false),
             )
             .await?;

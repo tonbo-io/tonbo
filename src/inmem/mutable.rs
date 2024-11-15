@@ -55,7 +55,7 @@ where
 
             let file = Box::new(BufWriter::new(
                 fs.open_options(
-                    &option.wal_path(&file_id),
+                    &option.wal_path(file_id),
                     FileType::Wal.open_options(false),
                 )
                 .await?,
