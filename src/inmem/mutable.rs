@@ -54,11 +54,8 @@ where
             let file_id = FileId::new();
 
             let file = Box::new(BufWriter::new(
-                fs.open_options(
-                    &option.wal_path(file_id),
-                    FileType::Wal.open_options(false),
-                )
-                .await?,
+                fs.open_options(&option.wal_path(file_id), FileType::Wal.open_options(false))
+                    .await?,
                 option.wal_buffer_size,
             )) as Box<dyn DynWrite>;
 
