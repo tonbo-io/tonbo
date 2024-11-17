@@ -58,6 +58,7 @@ where
     R: Record,
 {
     #[cfg(test)]
+    #[allow(unused)]
     pub(crate) fn new(
         option: Arc<DbOption<R>>,
         clean_sender: Sender<CleanTag>,
@@ -141,7 +142,7 @@ where
                     level_0_fs,
                     key,
                     0,
-                    &scope.gen,
+                    scope.gen,
                     projection_mask.clone(),
                     parquet_cache.clone(),
                 )
@@ -169,7 +170,7 @@ where
                     level_fs,
                     key,
                     leve,
-                    &sort_runs[index].gen,
+                    sort_runs[index].gen,
                     projection_mask.clone(),
                     parquet_cache.clone(),
                 )
@@ -187,7 +188,7 @@ where
         store: &Arc<dyn DynFs>,
         key: &TimestampedRef<<R as Record>::Key>,
         level: usize,
-        gen: &FileId,
+        gen: FileId,
         projection_mask: ProjectionMask,
         parquet_cache: C,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>>
@@ -201,7 +202,7 @@ where
             )
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R, C>::open(parquet_cache, *gen, file)
+        SsTable::<R, C>::open(parquet_cache, gen, file)
             .await?
             .get(key, projection_mask)
             .await
@@ -243,7 +244,7 @@ where
             }
             let file = level_0_fs
                 .open_options(
-                    &self.option.table_path(&scope.gen, 0),
+                    &self.option.table_path(scope.gen, 0),
                     FileType::Parquet.open_options(true),
                 )
                 .await

@@ -6,7 +6,6 @@ use crossbeam_skiplist::{
     SkipMap,
 };
 use fusio::{buffered::BufWriter, DynFs, DynWrite};
-use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileType},
@@ -52,14 +51,11 @@ where
     ) -> Result<Self, fusio::Error> {
         let mut wal = None;
         if option.use_wal {
-            let file_id = Ulid::new();
+            let file_id = FileId::new();
 
             let file = Box::new(BufWriter::new(
-                fs.open_options(
-                    &option.wal_path(&file_id),
-                    FileType::Wal.open_options(false),
-                )
-                .await?,
+                fs.open_options(&option.wal_path(file_id), FileType::Wal.open_options(false))
+                    .await?,
                 option.wal_buffer_size,
             )) as Box<dyn DynWrite>;
 
@@ -205,7 +201,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{ops::Bound, sync::Arc};
 

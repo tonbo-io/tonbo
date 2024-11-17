@@ -75,7 +75,7 @@ where
                                 .level_fs_path(level)
                                 .map(|path| self.manager.get_fs(path))
                                 .unwrap_or(self.manager.base_fs());
-                            fs.remove(&self.option.table_path(&gen, level)).await?;
+                            fs.remove(&self.option.table_path(gen, level)).await?;
                         }
                     }
                 }
@@ -85,7 +85,7 @@ where
                         .level_fs_path(level)
                         .map(|path| self.manager.get_fs(path))
                         .unwrap_or(self.manager.base_fs());
-                    fs.remove(&self.option.table_path(&gen, level)).await?;
+                    fs.remove(&self.option.table_path(gen, level)).await?;
                 }
             }
         }
@@ -94,7 +94,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{sync::Arc, time::Duration};
 
@@ -130,25 +130,25 @@ pub(crate) mod tests {
             .unwrap_or(manager.base_fs());
         {
             fs.open_options(
-                &option.table_path(&gen_0, 0),
+                &option.table_path(gen_0, 0),
                 FileType::Parquet.open_options(false),
             )
             .await
             .unwrap();
             fs.open_options(
-                &option.table_path(&gen_1, 0),
+                &option.table_path(gen_1, 0),
                 FileType::Parquet.open_options(false),
             )
             .await
             .unwrap();
             fs.open_options(
-                &option.table_path(&gen_2, 0),
+                &option.table_path(gen_2, 0),
                 FileType::Parquet.open_options(false),
             )
             .await
             .unwrap();
             fs.open_options(
-                &option.table_path(&gen_3, 0),
+                &option.table_path(gen_3, 0),
                 FileType::Parquet.open_options(false),
             )
             .await
@@ -189,16 +189,16 @@ pub(crate) mod tests {
             .unwrap();
 
         // FIXME
-        assert!(path_to_local(&option.table_path(&gen_0, 0))
+        assert!(path_to_local(&option.table_path(gen_0, 0))
             .unwrap()
             .exists());
-        assert!(path_to_local(&option.table_path(&gen_1, 0))
+        assert!(path_to_local(&option.table_path(gen_1, 0))
             .unwrap()
             .exists());
-        assert!(path_to_local(&option.table_path(&gen_2, 0))
+        assert!(path_to_local(&option.table_path(gen_2, 0))
             .unwrap()
             .exists());
-        assert!(path_to_local(&option.table_path(&gen_3, 0))
+        assert!(path_to_local(&option.table_path(gen_3, 0))
             .unwrap()
             .exists());
 
@@ -206,16 +206,16 @@ pub(crate) mod tests {
             .await
             .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_0, 0))
+        assert!(!path_to_local(&option.table_path(gen_0, 0))
             .unwrap()
             .exists());
-        assert!(path_to_local(&option.table_path(&gen_1, 0))
+        assert!(path_to_local(&option.table_path(gen_1, 0))
             .unwrap()
             .exists());
-        assert!(path_to_local(&option.table_path(&gen_2, 0))
+        assert!(path_to_local(&option.table_path(gen_2, 0))
             .unwrap()
             .exists());
-        assert!(path_to_local(&option.table_path(&gen_3, 0))
+        assert!(path_to_local(&option.table_path(gen_3, 0))
             .unwrap()
             .exists());
 
@@ -223,13 +223,13 @@ pub(crate) mod tests {
             .await
             .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_1, 0))
+        assert!(!path_to_local(&option.table_path(gen_1, 0))
             .unwrap()
             .exists());
-        assert!(!path_to_local(&option.table_path(&gen_2, 0))
+        assert!(!path_to_local(&option.table_path(gen_2, 0))
             .unwrap()
             .exists());
-        assert!(path_to_local(&option.table_path(&gen_3, 0))
+        assert!(path_to_local(&option.table_path(gen_3, 0))
             .unwrap()
             .exists());
 
@@ -240,7 +240,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         sleep(Duration::from_millis(10)).await;
-        assert!(!path_to_local(&option.table_path(&gen_3, 0))
+        assert!(!path_to_local(&option.table_path(gen_3, 0))
             .unwrap()
             .exists());
     }

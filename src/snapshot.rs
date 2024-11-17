@@ -55,10 +55,10 @@ where
             }))
     }
 
-    pub fn scan<'scan>(
+    pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R, C> {
+        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+    ) -> Scan<'scan, 'range, R, C> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -97,13 +97,13 @@ where
         &self.share
     }
 
-    pub(crate) fn _scan<'scan>(
+    pub(crate) fn _scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, C>> + Send + 'scan,
         >,
-    ) -> Scan<'scan, R, C> {
+    ) -> Scan<'scan, 'range, R, C> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -116,7 +116,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{collections::Bound, sync::Arc};
 

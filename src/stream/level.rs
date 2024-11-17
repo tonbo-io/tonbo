@@ -38,7 +38,7 @@ where
         Ulid,
         Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>,
     ),
-    OpenSst(Pin<Box<dyn Future<Output = Result<SsTable<R, C>, Error>> + Send + 'level>>),
+    OpenSst(Pin<Box<dyn MaybeSendFuture<Output = Result<SsTable<R, C>, Error>> + 'level>>),
     LoadStream(
         Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
     ),
@@ -119,7 +119,7 @@ where
             return match &mut self.status {
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
-                    self.path = Some(self.option.table_path(&gen, self.level));
+                    self.path = Some(self.option.table_path(gen, self.level));
 
                     let reader = self.fs.open_options(
                         self.path.as_ref().unwrap(),
@@ -144,7 +144,7 @@ where
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
-                            self.path = Some(self.option.table_path(&gen, self.level));
+                            self.path = Some(self.option.table_path(gen, self.level));
 
                             let reader = self.fs.open_options(
                                 self.path.as_ref().unwrap(),
@@ -218,7 +218,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{collections::Bound, sync::Arc};
 

@@ -85,18 +85,16 @@ where
     }
 
     /// scan records with primary keys in the `range`
-    pub fn scan<'scan>(
+    pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
-    ) -> Scan<'scan, R, C> {
+        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+    ) -> Scan<'scan, 'range, R, C> {
+        let ts = self.snapshot.ts();
+        let inner = self.local.range(range);
         self.snapshot._scan(
             range,
             Box::new(move |projection_mask: Option<ProjectionMask>| {
-                let mut transaction_scan = TransactionScan {
-                    inner: self.local.range(range),
-                    ts: self.snapshot.ts(),
-                }
-                .into();
+                let mut transaction_scan = TransactionScan { inner, ts }.into();
                 if let Some(mask) = projection_mask {
                     transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();
                 }
@@ -238,7 +236,7 @@ where
     ChannelClose,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{collections::Bound, sync::Arc};
 

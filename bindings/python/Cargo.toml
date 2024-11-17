@@ -9,8 +9,11 @@ crate-type = ["cdylib"]
 [workspace]
 
 [dependencies]
-fusio = { package = "fusio", version = "0.3.1", features = ["aws", "tokio"] }
-fusio-dispatch = { package = "fusio-dispatch", version = "0.2.0", features = [
+fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "8038993675591f87dd65b88ffdade31dc0a254b7", package = "fusio", version = "0.3.1", features = [
+    "aws",
+    "tokio",
+] }
+fusio-dispatch = { git = "https://github.com/tonbo-io/fusio.git", rev = "8038993675591f87dd65b88ffdade31dc0a254b7", package = "fusio-dispatch", version = "0.2.0", features = [
     "aws",
     "tokio",
 ] }

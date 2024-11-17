@@ -145,4 +145,4 @@ async fn main() {
 
 ## Contributing to Tonbo
 Follow the Contributing Guide to [contribute](https://github.com/tonbo-io/tonbo/blob/main/CONTRIBUTING.md).
-Please feel free to ask any question or contact us on Github [Discussions](https://github.com/orgs/tonbo-io/discussions) or [issues](https://github.com/tonbo-io/tonbo/issues).
+Please feel free to ask any question or contact us on Github [Discussions](https://github.com/tonbo-io/tonbo/discussions) or [issues](https://github.com/tonbo-io/tonbo/issues).

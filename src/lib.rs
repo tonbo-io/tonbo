@@ -404,11 +404,10 @@ where
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
-            let manager = &self.manager;
             let current = self.version_set.current().await;
             let mut scan = Scan::new(
                 &schema,
-                manager,
+                &self.manager,
                 range,
                 self.version_set.load_ts(),
                 &*current,
@@ -659,15 +658,16 @@ where
 }
 
 /// scan configuration intermediate structure
-pub struct Scan<'scan, R, C>
+pub struct Scan<'scan, 'range, R, C>
 where
     R: Record,
     C: LruCache<Ulid>,
+    'range: 'scan,
 {
     schema: &'scan Schema<R>,
     manager: &'scan StoreManager,
-    lower: Bound<&'scan R::Key>,
-    upper: Bound<&'scan R::Key>,
+    lower: Bound<&'range R::Key>,
+    upper: Bound<&'range R::Key>,
     ts: Timestamp,
 
     version: &'scan Version<R>,
@@ -681,7 +681,7 @@ where
     parquet_cache: C,
 }
 
-impl<'scan, R, C> Scan<'scan, R, C>
+impl<'scan, 'range, R, C> Scan<'scan, 'range, R, C>
 where
     R: Record + Send,
     C: LruCache<Ulid> + Unpin,
@@ -689,7 +689,7 @@ where
     fn new(
         schema: &'scan Schema<R>,
         manager: &'scan StoreManager,
-        (lower, upper): (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        (lower, upper): (Bound<&'range R::Key>, Bound<&'range R::Key>),
         ts: Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
@@ -883,7 +883,7 @@ pub enum Projection {
     Parts(Vec<usize>),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{
         collections::{BTreeMap, Bound},

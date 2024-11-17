@@ -160,16 +160,15 @@ where
 mod test {
     use std::ops::Bound;
 
-    use ulid::Ulid;
-
     use super::Scope;
+    use crate::fs::FileId;
 
     #[tokio::test]
     async fn test_meets_range() {
         let scope = Scope {
             min: 100,
             max: 200,
-            gen: Ulid::new(),
+            gen: FileId::new(),
             wal_ids: None,
         };
 

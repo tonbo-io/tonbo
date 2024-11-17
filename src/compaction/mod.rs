@@ -8,7 +8,6 @@ use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use parquet_lru::LruCache;
 use thiserror::Error;
 use tokio::sync::oneshot;
-use ulid::Ulid;
 
 use crate::{
     fs::{manager::StoreManager, FileId, FileType},
@@ -66,7 +65,7 @@ where
         parquet_lru_cache: C,
     ) -> Result<(), CompactionError<R>>
     where
-        C: LruCache<Ulid> + Unpin,
+        C: LruCache<FileId> + Unpin,
     {
         let mut guard = self.schema.write().await;
 
@@ -156,7 +155,7 @@ where
                 AsyncWriter::new(
                     level_0_fs
                         .open_options(
-                            &option.table_path(&gen, 0),
+                            &option.table_path(gen, 0),
                             FileType::Parquet.open_options(false),
                         )
                         .await?,
@@ -206,7 +205,7 @@ where
         parquet_cache: &C,
     ) -> Result<(), CompactionError<R>>
     where
-        C: LruCache<Ulid> + Unpin,
+        C: LruCache<FileId> + Unpin,
     {
         let mut level = 0;
 
@@ -226,7 +225,7 @@ where
                 for scope in meet_scopes_l.iter() {
                     let file = level_fs
                         .open_options(
-                            &option.table_path(&scope.gen, level),
+                            &option.table_path(scope.gen, level),
                             FileType::Parquet.open_options(true),
                         )
                         .await?;
@@ -401,7 +400,7 @@ where
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>>
     where
-        C: LruCache<Ulid> + Unpin,
+        C: LruCache<FileId> + Unpin,
     {
         let mut stream = MergeStream::<R, C>::from_vec(streams, u32::MAX.into()).await?;
 
@@ -472,12 +471,12 @@ where
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
-        let gen = Ulid::new();
+        let gen = FileId::new();
         let columns = builder.finish(None);
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
                 fs.open_options(
-                    &option.table_path(&gen, level),
+                    &option.table_path(gen, level),
                     FileType::Parquet.open_options(false),
                 )
                 .await?,
@@ -521,7 +520,7 @@ where
     EmptyLevel,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
@@ -582,7 +581,7 @@ pub(crate) mod tests {
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
                 fs.open_options(
-                    &option.table_path(&gen, level),
+                    &option.table_path(gen, level),
                     FileType::Parquet.open_options(false),
                 )
                 .await?,
