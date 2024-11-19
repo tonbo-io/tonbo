@@ -58,7 +58,7 @@ where
     status: FutureStatus<'level, R>,
     fs: Arc<dyn DynFs>,
     path: Option<Path>,
-    parquet_cache: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+    parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -77,7 +77,7 @@ where
         limit: Option<usize>,
         projection_mask: ProjectionMask,
         fs: Arc<dyn DynFs>,
-        parquet_cache: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+        parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -99,7 +99,7 @@ where
             status,
             fs,
             path: None,
-            parquet_cache,
+            parquet_lru,
         })
     }
 }
@@ -175,7 +175,7 @@ where
                     Poll::Ready(Ok(file)) => {
                         let id = *id;
                         self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(
-                            self.parquet_cache.clone(),
+                            self.parquet_lru.clone(),
                             id,
                             file,
                         )));

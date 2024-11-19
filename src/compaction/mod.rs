@@ -61,7 +61,7 @@ where
 
     pub(crate) async fn check_then_compaction(
         &mut self,
-        parquet_lru_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
@@ -110,7 +110,7 @@ where
                         &mut delete_gens,
                         &guard.record_instance,
                         &self.manager,
-                        parquet_lru_cache,
+                        parquet_lru,
                     )
                     .await?;
                 }
@@ -198,7 +198,7 @@ where
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &RecordInstance,
         manager: &StoreManager,
-        parquet_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
@@ -224,7 +224,7 @@ where
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(parquet_cache.clone(), scope.gen, file)
+                        inner: SsTable::open(parquet_lru.clone(), scope.gen, file)
                             .await?
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
@@ -247,7 +247,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
-                    parquet_cache.clone(),
+                    parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -268,7 +268,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
-                    parquet_cache.clone(),
+                    parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 

@@ -21,7 +21,7 @@ where
     share: RwLockReadGuard<'s, Schema<R>>,
     version: VersionRef<R>,
     manager: Arc<StoreManager>,
-    parquet_cache: ParquetLru,
+    parquet_lru: ParquetLru,
 }
 
 impl<'s, R> Snapshot<'s, R>
@@ -41,7 +41,7 @@ where
                 key,
                 self.ts,
                 projection,
-                self.parquet_cache.clone(),
+                self.parquet_lru.clone(),
             )
             .await?
             .and_then(|entry| {
@@ -64,7 +64,7 @@ where
             self.ts,
             &self.version,
             Box::new(move |_: Option<ProjectionMask>| None),
-            self.parquet_cache.clone(),
+            self.parquet_lru.clone(),
         )
     }
 
@@ -72,14 +72,14 @@ where
         share: RwLockReadGuard<'s, Schema<R>>,
         version: VersionRef<R>,
         manager: Arc<StoreManager>,
-        parquet_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Self {
         Self {
             ts: version.load_ts(),
             share,
             version,
             manager,
-            parquet_cache,
+            parquet_lru,
         }
     }
 
@@ -109,7 +109,7 @@ where
             self.ts,
             &self.version,
             fn_pre_stream,
-            self.parquet_cache.clone(),
+            self.parquet_lru.clone(),
         )
     }
 }

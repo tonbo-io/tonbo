@@ -121,7 +121,7 @@ where
         manager: &StoreManager,
         key: &TimestampedRef<R::Key>,
         projection_mask: ProjectionMask,
-        parquet_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let level_0_path = self
             .option
@@ -139,7 +139,7 @@ where
                     0,
                     scope.gen,
                     projection_mask.clone(),
-                    parquet_cache.clone(),
+                    parquet_lru.clone(),
                 )
                 .await?
             {
@@ -167,7 +167,7 @@ where
                     leve,
                     sort_runs[index].gen,
                     projection_mask.clone(),
-                    parquet_cache.clone(),
+                    parquet_lru.clone(),
                 )
                 .await?
             {
@@ -185,7 +185,7 @@ where
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,
-        parquet_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = store
             .open_options(
@@ -194,7 +194,7 @@ where
             )
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(parquet_cache, gen, file)
+        SsTable::<R>::open(parquet_lru, gen, file)
             .await?
             .get(key, projection_mask)
             .await
@@ -220,7 +220,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-        parquet_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Result<(), VersionError<R>> {
         let level_0_path = self
             .option
@@ -238,7 +238,7 @@ where
                 )
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(parquet_cache.clone(), scope.gen, file).await?;
+            let table = SsTable::open(parquet_lru.clone(), scope.gen, file).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -283,7 +283,7 @@ where
                     limit,
                     projection_mask.clone(),
                     level_fs.clone(),
-                    parquet_cache.clone(),
+                    parquet_lru.clone(),
                 )
                 .unwrap(),
             });

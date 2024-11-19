@@ -183,7 +183,7 @@ where
     version_set: VersionSet<R>,
     lock_map: LockMap<R::Key>,
     manager: Arc<StoreManager>,
-    parquet_lru_cache: ParquetLru,
+    parquet_lru: ParquetLru,
     _p: PhantomData<E>,
 }
 
@@ -309,7 +309,7 @@ where
             version_set,
             lock_map: Arc::new(Default::default()),
             manager,
-            parquet_lru_cache: lru_cache,
+            parquet_lru: lru_cache,
             _p: Default::default(),
         })
     }
@@ -324,7 +324,7 @@ where
             self.schema.read().await,
             self.version_set.current().await,
             self.manager.clone(),
-            self.parquet_lru_cache.clone(),
+            self.parquet_lru.clone(),
         )
     }
 
@@ -381,7 +381,7 @@ where
                 key,
                 self.version_set.load_ts(),
                 Projection::All,
-                self.parquet_lru_cache.clone(),
+                self.parquet_lru.clone(),
             )
             .await?
             .and_then(|entry| {
@@ -409,7 +409,7 @@ where
                 self.version_set.load_ts(),
                 &*current,
                 Box::new(|_| None),
-                self.parquet_lru_cache.clone(),
+                self.parquet_lru.clone(),
             ).take().await?;
 
             while let Some(record) = scan.next().await {
@@ -596,7 +596,7 @@ where
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
-        parquet_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
         if let Some(entry) = self.mutable.get(key, ts) {
             return Ok(Some(Entry::Mutable(entry)));
@@ -630,7 +630,7 @@ where
                 manager,
                 TimestampedRef::new(key, ts),
                 projection,
-                parquet_cache,
+                parquet_lru,
             )
             .await?
             .map(|entry| Entry::RecordBatch(entry)))
@@ -671,7 +671,7 @@ where
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
 
-    parquet_cache: ParquetLru,
+    parquet_lru: ParquetLru,
 }
 
 impl<'scan, 'range, R> Scan<'scan, 'range, R>
@@ -687,7 +687,7 @@ where
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
-        parquet_cache: ParquetLru,
+        parquet_lru: ParquetLru,
     ) -> Self {
         Self {
             schema,
@@ -700,7 +700,7 @@ where
             limit: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
-            parquet_cache,
+            parquet_lru,
         }
     }
 
@@ -776,7 +776,7 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
-                self.parquet_cache,
+                self.parquet_lru,
             )
             .await?;
 
@@ -829,7 +829,7 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
-                self.parquet_cache,
+                self.parquet_lru,
             )
             .await?;
         let merge_stream = MergeStream::from_vec(streams, self.ts).await?;
@@ -1350,7 +1350,7 @@ pub(crate) mod tests {
             version_set,
             lock_map: Arc::new(Default::default()),
             manager,
-            parquet_lru_cache: Arc::new(NoCache::default()),
+            parquet_lru: Arc::new(NoCache::default()),
             _p: Default::default(),
         })
     }
