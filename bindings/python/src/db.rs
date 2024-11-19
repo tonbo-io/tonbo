@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use parquet_lru::NoopCache;
 use pyo3::{
     prelude::*,
     pyclass, pymethods,
@@ -10,7 +9,6 @@ use pyo3::{
 use pyo3_asyncio::tokio::{future_into_py, get_runtime};
 use tonbo::{
     executor::tokio::TokioExecutor,
-    fs::FileId,
     record::{ColumnDesc, DynRecord},
     DB,
 };
@@ -30,7 +28,7 @@ type PyExecutor = TokioExecutor;
 pub struct TonboDB {
     desc: Arc<Vec<Column>>,
     primary_key_index: usize,
-    db: Arc<DB<DynRecord, PyExecutor, NoopCache<FileId>>>,
+    db: Arc<DB<DynRecord, PyExecutor>>,
 }
 
 #[pymethods]

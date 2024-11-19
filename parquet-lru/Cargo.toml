@@ -7,8 +7,8 @@ name = "parquet-lru"
 version = "0.1.0"
 
 [features]
+default = []
 foyer = ["dep:foyer", "dep:serde"]
-full = ["foyer"]
 
 [dependencies]
 bytes = { version = "1.8.0", features = ["serde"] }
@@ -17,4 +17,3 @@ futures-core = "0.3.31"
 futures-util = "0.3.31"
 parquet = { version = "53.2.0", features = ["async"] }
 serde = { version = "1.0.214", optional = true }
-thiserror = "2.0.3"

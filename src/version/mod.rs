@@ -13,10 +13,8 @@ use std::{
 use flume::{SendError, Sender};
 use fusio::DynFs;
 use parquet::arrow::ProjectionMask;
-use parquet_lru::LruCache;
 use thiserror::Error;
 use tracing::error;
-use ulid::Ulid;
 
 use crate::{
     fs::{manager::StoreManager, FileId, FileType},
@@ -27,7 +25,7 @@ use crate::{
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TimestampedRef},
     version::{cleaner::CleanTag, edit::VersionEdit},
-    DbOption,
+    DbOption, ParquetLru,
 };
 
 pub(crate) const MAX_LEVEL: usize = 7;
@@ -118,16 +116,13 @@ impl<R> Version<R>
 where
     R: Record,
 {
-    pub(crate) async fn query<C>(
+    pub(crate) async fn query(
         &self,
         manager: &StoreManager,
         key: &TimestampedRef<R::Key>,
         projection_mask: ProjectionMask,
-        parquet_cache: C,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>>
-    where
-        C: LruCache<Ulid>,
-    {
+        parquet_cache: ParquetLru,
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let level_0_path = self
             .option
             .level_fs_path(0)
@@ -183,18 +178,15 @@ where
         Ok(None)
     }
 
-    async fn table_query<C>(
+    async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
         key: &TimestampedRef<<R as Record>::Key>,
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,
-        parquet_cache: C,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>>
-    where
-        C: LruCache<Ulid>,
-    {
+        parquet_cache: ParquetLru,
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = store
             .open_options(
                 &self.option.table_path(gen, level),
@@ -202,7 +194,7 @@ where
             )
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R, C>::open(parquet_cache, gen, file)
+        SsTable::<R>::open(parquet_cache, gen, file)
             .await?
             .get(key, projection_mask)
             .await
@@ -220,19 +212,16 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn streams<'streams, C>(
+    pub(crate) async fn streams<'streams>(
         &self,
         manager: &StoreManager,
-        streams: &mut Vec<ScanStream<'streams, R, C>>,
+        streams: &mut Vec<ScanStream<'streams, R>>,
         range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-        parquet_cache: C,
-    ) -> Result<(), VersionError<R>>
-    where
-        C: LruCache<Ulid>,
-    {
+        parquet_cache: ParquetLru,
+    ) -> Result<(), VersionError<R>> {
         let level_0_path = self
             .option
             .level_fs_path(0)

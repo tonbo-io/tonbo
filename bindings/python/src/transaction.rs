@@ -1,13 +1,12 @@
 use std::{mem::transmute, sync::Arc};
 
-use parquet_lru::NoopCache;
 use pyo3::{
     pyclass, pymethods,
     types::{PyAnyMethods, PyMapping, PyMappingMethods, PySequenceMethods, PyTuple},
     Bound, IntoPy, Py, PyAny, PyResult, Python,
 };
 use pyo3_asyncio::tokio::future_into_py;
-use tonbo::{fs::FileId, record::DynRecord, transaction, Projection};
+use tonbo::{record::DynRecord, transaction, Projection};
 
 use crate::{
     column::Column,
@@ -19,14 +18,14 @@ use crate::{
 
 #[pyclass]
 pub struct Transaction {
-    txn: Option<transaction::Transaction<'static, DynRecord, NoopCache<FileId>>>,
+    txn: Option<transaction::Transaction<'static, DynRecord>>,
     desc: Arc<Vec<Column>>,
     primary_key_index: usize,
 }
 
 impl Transaction {
     pub(crate) fn new<'txn>(
-        txn: transaction::Transaction<'txn, DynRecord, NoopCache<FileId>>,
+        txn: transaction::Transaction<'txn, DynRecord>,
         desc: Arc<Vec<Column>>,
     ) -> Self {
         let primary_key_index = desc
@@ -38,8 +37,8 @@ impl Transaction {
         Transaction {
             txn: Some(unsafe {
                 transmute::<
-                    transaction::Transaction<'txn, DynRecord, NoopCache<FileId>>,
-                    transaction::Transaction<'static, DynRecord, NoopCache<FileId>>,
+                    transaction::Transaction<'txn, DynRecord>,
+                    transaction::Transaction<'static, DynRecord>,
                 >(txn)
             }),
             desc,
@@ -85,8 +84,8 @@ impl Transaction {
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
             transmute::<
-                &transaction::Transaction<'_, DynRecord, NoopCache<FileId>>,
-                &'static transaction::Transaction<'_, DynRecord, NoopCache<FileId>>,
+                &transaction::Transaction<'_, DynRecord>,
+                &'static transaction::Transaction<'_, DynRecord>,
             >(txn)
         };
 
@@ -170,8 +169,8 @@ impl Transaction {
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
             transmute::<
-                &transaction::Transaction<'_, DynRecord, NoopCache<FileId>>,
-                &'static transaction::Transaction<'_, DynRecord, NoopCache<FileId>>,
+                &transaction::Transaction<'_, DynRecord>,
+                &'static transaction::Transaction<'_, DynRecord>,
             >(txn)
         };
         let col_desc = self.desc.get(self.primary_key_index).unwrap();

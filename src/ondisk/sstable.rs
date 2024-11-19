@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ops::Bound};
+use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
 use fusio::{dynamic::DynFile, DynRead};
 use fusio_parquet::reader::AsyncReader;
@@ -11,7 +11,7 @@ use parquet::{
     },
     errors::Result as ParquetResult,
 };
-use parquet_lru::LruCache;
+use parquet_lru::{BoxedFileReader, DynLruCache};
 use ulid::Ulid;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
@@ -21,22 +21,20 @@ use crate::{
     timestamp::{Timestamp, TimestampedRef},
 };
 
-pub(crate) struct SsTable<R, C>
+pub(crate) struct SsTable<R>
 where
     R: Record,
-    C: LruCache<Ulid>,
 {
-    reader: C::LruReader<AsyncReader>,
+    reader: BoxedFileReader,
     _marker: PhantomData<R>,
 }
 
-impl<R, C> SsTable<R, C>
+impl<R> SsTable<R>
 where
     R: Record,
-    C: LruCache<Ulid>,
 {
     pub(crate) async fn open(
-        lru_cache: C,
+        lru_cache: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
         id: Ulid,
         file: Box<dyn DynFile>,
     ) -> Result<Self, fusio::Error> {
@@ -44,7 +42,10 @@ where
 
         Ok(SsTable {
             reader: lru_cache
-                .get_reader(id, AsyncReader::new(file, size).await?)
+                .get_reader(
+                    id,
+                    BoxedFileReader::new(AsyncReader::new(file, size).await?),
+                )
                 .await,
             _marker: PhantomData,
         })
@@ -127,8 +128,7 @@ pub(crate) mod tests {
         basic::{Compression, ZstdLevel},
         file::properties::WriterProperties,
     };
-    use parquet_lru::NoopCache;
-    use ulid::Ulid;
+    use parquet_lru::NoCache;
 
     use super::SsTable;
     use crate::{
@@ -167,15 +167,12 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    pub(crate) async fn open_sstable<R>(
-        store: &Arc<dyn DynFs>,
-        path: &Path,
-    ) -> SsTable<R, NoopCache<Ulid>>
+    pub(crate) async fn open_sstable<R>(store: &Arc<dyn DynFs>, path: &Path) -> SsTable<R>
     where
         R: Record,
     {
         SsTable::open(
-            Default::default(),
+            Arc::new(NoCache::default()),
             Default::default(),
             store
                 .open_options(path, FileType::Parquet.open_options(true))

@@ -4,9 +4,7 @@ use std::{
 };
 
 use futures_core::Stream;
-use parquet_lru::LruCache;
 use pin_project_lite::pin_project;
-use ulid::Ulid;
 
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
@@ -15,27 +13,25 @@ use crate::{
 };
 
 pin_project! {
-    pub struct PackageStream<'package, R, C>
+    pub struct PackageStream<'package, R>
     where
         R: Record,
-        C: LruCache<Ulid>,
     {
         row_count: usize,
         batch_size: usize,
-        inner: MergeStream<'package, R, C>,
+        inner: MergeStream<'package, R>,
         builder: <R::Columns as ArrowArrays>::Builder,
         projection_indices: Option<Vec<usize>>,
     }
 }
 
-impl<'package, R, C> PackageStream<'package, R, C>
+impl<'package, R> PackageStream<'package, R>
 where
     R: Record,
-    C: LruCache<Ulid>,
 {
     pub(crate) fn new(
         batch_size: usize,
-        merge: MergeStream<'package, R, C>,
+        merge: MergeStream<'package, R>,
         projection_indices: Option<Vec<usize>>,
         instance: &RecordInstance,
     ) -> Self {
@@ -49,10 +45,9 @@ where
     }
 }
 
-impl<'package, R, C> Stream for PackageStream<'package, R, C>
+impl<'package, R> Stream for PackageStream<'package, R>
 where
     R: Record,
-    C: LruCache<Ulid> + Unpin,
 {
     type Item = Result<R::Columns, parquet::errors::ParquetError>;
 
@@ -89,9 +84,7 @@ mod tests {
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array};
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
-    use parquet_lru::NoopCache;
     use tempfile::TempDir;
-    use ulid::Ulid;
 
     use crate::{
         inmem::{
@@ -184,7 +177,7 @@ mod tests {
         .await
         .unwrap();
 
-        let merge = MergeStream::<Test, NoopCache<Ulid>>::from_vec(
+        let merge = MergeStream::<Test>::from_vec(
             vec![m1
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into()],

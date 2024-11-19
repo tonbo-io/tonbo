@@ -6,9 +6,7 @@ use std::{
 
 use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
-use parquet_lru::LruCache;
 use pin_project_lite::pin_project;
-use ulid::Ulid;
 
 use crate::{
     record::Record,
@@ -16,25 +14,20 @@ use crate::{
 };
 
 pin_project! {
-    pub struct MemProjectionStream<'projection, R, C>
+    pub struct MemProjectionStream<'projection, R>
     where
         R: Record,
-        C: LruCache<Ulid>,
     {
-        stream: Box<ScanStream<'projection, R, C>>,
+        stream: Box<ScanStream<'projection, R>>,
         projection_mask: Arc<ProjectionMask>,
     }
 }
 
-impl<'projection, R, C> MemProjectionStream<'projection, R, C>
+impl<'projection, R> MemProjectionStream<'projection, R>
 where
     R: Record,
-    C: LruCache<Ulid>,
 {
-    pub(crate) fn new(
-        stream: ScanStream<'projection, R, C>,
-        projection_mask: ProjectionMask,
-    ) -> Self {
+    pub(crate) fn new(stream: ScanStream<'projection, R>, projection_mask: ProjectionMask) -> Self {
         Self {
             stream: Box::new(stream),
             projection_mask: Arc::new(projection_mask),
@@ -42,10 +35,9 @@ where
     }
 }
 
-impl<'projection, R, C> Stream for MemProjectionStream<'projection, R, C>
+impl<'projection, R> Stream for MemProjectionStream<'projection, R>
 where
     R: Record,
-    C: LruCache<Ulid> + Unpin,
 {
     type Item = Result<Entry<'projection, R>, ParquetError>;
 
@@ -69,8 +61,6 @@ mod tests {
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
-    use parquet_lru::NoopCache;
-    use ulid::Ulid;
 
     use crate::{
         inmem::mutable::Mutable, record::Record, stream::mem_projection::MemProjectionStream,
@@ -131,7 +121,7 @@ mod tests {
             vec![0, 1, 2, 4],
         );
 
-        let mut stream = MemProjectionStream::<Test, NoopCache<Ulid>>::new(
+        let mut stream = MemProjectionStream::<Test>::new(
             mutable
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into(),

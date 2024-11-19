@@ -2,19 +2,18 @@ use std::{collections::Bound, sync::Arc};
 
 use async_lock::RwLockReadGuard;
 use parquet::arrow::ProjectionMask;
-use parquet_lru::LruCache;
 
 use crate::{
-    fs::{manager::StoreManager, FileId},
+    fs::manager::StoreManager,
     record::Record,
     stream,
     stream::ScanStream,
     timestamp::Timestamp,
     version::{TransactionTs, VersionRef},
-    DbError, Projection, Scan, Schema,
+    DbError, ParquetLru, Projection, Scan, Schema,
 };
 
-pub struct Snapshot<'s, R, C>
+pub struct Snapshot<'s, R>
 where
     R: Record,
 {
@@ -22,13 +21,12 @@ where
     share: RwLockReadGuard<'s, Schema<R>>,
     version: VersionRef<R>,
     manager: Arc<StoreManager>,
-    parquet_cache: C,
+    parquet_cache: ParquetLru,
 }
 
-impl<'s, R, C> Snapshot<'s, R, C>
+impl<'s, R> Snapshot<'s, R>
 where
     R: Record,
-    C: LruCache<FileId> + Unpin,
 {
     pub async fn get<'get>(
         &'get self,
@@ -58,7 +56,7 @@ where
     pub fn scan<'scan, 'range>(
         &'scan self,
         range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
-    ) -> Scan<'scan, 'range, R, C> {
+    ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
             &self.manager,
@@ -74,7 +72,7 @@ where
         share: RwLockReadGuard<'s, Schema<R>>,
         version: VersionRef<R>,
         manager: Arc<StoreManager>,
-        parquet_cache: C,
+        parquet_cache: ParquetLru,
     ) -> Self {
         Self {
             ts: version.load_ts(),
@@ -101,9 +99,9 @@ where
         &'scan self,
         range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, C>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
-    ) -> Scan<'scan, 'range, R, C> {
+    ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
             &self.manager,

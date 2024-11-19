@@ -148,7 +148,7 @@ use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,
 };
-use parquet_lru::{LruCache, NoopCache};
+use parquet_lru::{DynLruCache, NoCache};
 use record::{ColumnDesc, DynRecord, Record, RecordInstance};
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
@@ -156,7 +156,6 @@ use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
-use ulid::Ulid;
 
 pub use crate::option::*;
 use crate::{
@@ -175,21 +174,20 @@ use crate::{
     wal::{log::LogType, RecoverError, WalFile},
 };
 
-pub struct DB<R, E, C>
+pub struct DB<R, E>
 where
     R: Record,
     E: Executor,
-    C: LruCache<Ulid>,
 {
     schema: Arc<RwLock<Schema<R>>>,
     version_set: VersionSet<R>,
     lock_map: LockMap<R::Key>,
     manager: Arc<StoreManager>,
-    parquet_lru_cache: C,
+    parquet_lru_cache: ParquetLru,
     _p: PhantomData<E>,
 }
 
-impl<E> DB<DynRecord, E, NoopCache<Ulid>>
+impl<E> DB<DynRecord, E>
 where
     E: Executor + Send + Sync + 'static,
 {
@@ -205,11 +203,11 @@ where
         let instance =
             RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index));
 
-        Self::build(option, executor, instance, Default::default()).await
+        Self::build(option, executor, instance, Arc::new(NoCache::default())).await
     }
 }
 
-impl<R, E> DB<R, E, NoopCache<Ulid>>
+impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
     R::Columns: Send + Sync,
@@ -225,24 +223,23 @@ where
             Arc::new(option),
             executor,
             RecordInstance::Normal,
-            Default::default(),
+            Arc::new(NoCache::default()),
         )
         .await
     }
 }
 
-impl<R, E, C> DB<R, E, C>
+impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
     R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
-    C: LruCache<Ulid> + Unpin,
 {
     async fn build(
         option: Arc<DbOption<R>>,
         executor: E,
         instance: RecordInstance,
-        lru_cache: C,
+        lru_cache: ParquetLru,
     ) -> Result<Self, DbError<R>> {
         let manager = Arc::new(StoreManager::new(
             option.base_fs.clone(),
@@ -318,11 +315,11 @@ where
     }
 
     /// open an optimistic ACID transaction
-    pub async fn transaction(&self) -> Transaction<'_, R, C> {
+    pub async fn transaction(&self) -> Transaction<'_, R> {
         Transaction::new(self.snapshot().await, self.lock_map.clone())
     }
 
-    pub async fn snapshot(&self) -> Snapshot<'_, R, C> {
+    pub async fn snapshot(&self) -> Snapshot<'_, R> {
         Snapshot::new(
             self.schema.read().await,
             self.version_set.current().await,
@@ -592,18 +589,15 @@ where
         self.mutable.append(None, key, ts, value).await
     }
 
-    async fn get<'get, C>(
+    async fn get<'get>(
         &'get self,
         version: &'get Version<R>,
         manager: &StoreManager,
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
-        parquet_cache: C,
-    ) -> Result<Option<Entry<'get, R>>, DbError<R>>
-    where
-        C: LruCache<Ulid>,
-    {
+        parquet_cache: ParquetLru,
+    ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
         if let Some(entry) = self.mutable.get(key, ts) {
             return Ok(Some(Entry::Mutable(entry)));
         }
@@ -658,10 +652,9 @@ where
 }
 
 /// scan configuration intermediate structure
-pub struct Scan<'scan, 'range, R, C>
+pub struct Scan<'scan, 'range, R>
 where
     R: Record,
-    C: LruCache<Ulid>,
     'range: 'scan,
 {
     schema: &'scan Schema<R>,
@@ -672,19 +665,18 @@ where
 
     version: &'scan Version<R>,
     fn_pre_stream:
-        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, C>> + Send + 'scan>,
+        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
 
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
 
-    parquet_cache: C,
+    parquet_cache: ParquetLru,
 }
 
-impl<'scan, 'range, R, C> Scan<'scan, 'range, R, C>
+impl<'scan, 'range, R> Scan<'scan, 'range, R>
 where
     R: Record + Send,
-    C: LruCache<Ulid> + Unpin,
 {
     fn new(
         schema: &'scan Schema<R>,
@@ -693,9 +685,9 @@ where
         ts: Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R, C>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
-        parquet_cache: C,
+        parquet_cache: ParquetLru,
     ) -> Self {
         Self {
             schema,
@@ -883,6 +875,8 @@ pub enum Projection {
     Parts(Vec<usize>),
 }
 
+pub type ParquetLru = Arc<dyn DynLruCache<FileId> + Send + Sync>;
+
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{
@@ -902,10 +896,9 @@ pub(crate) mod tests {
     use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
-    use parquet_lru::NoopCache;
+    use parquet_lru::NoCache;
     use tempfile::TempDir;
     use tracing::error;
-    use ulid::Ulid;
 
     use crate::{
         compaction::{CompactTask, CompactionError, Compactor},
@@ -1143,7 +1136,7 @@ pub(crate) mod tests {
         option: DbOption<Test>,
         executor: E,
     ) -> RecordBatch {
-        let db: DB<Test, E, _> = DB::new(option.clone(), executor).await.unwrap();
+        let db: DB<Test, E> = DB::new(option.clone(), executor).await.unwrap();
         let base_fs = db.manager.base_fs();
 
         db.write(
@@ -1295,7 +1288,7 @@ pub(crate) mod tests {
         schema: crate::Schema<R>,
         version: Version<R>,
         manager: Arc<StoreManager>,
-    ) -> Result<DB<R, E, NoopCache<Ulid>>, DbError<R>>
+    ) -> Result<DB<R, E>, DbError<R>>
     where
         R: Record + Send + Sync,
         R::Columns: Send + Sync,
@@ -1329,11 +1322,14 @@ pub(crate) mod tests {
             while let Ok(task) = compaction_rx.recv_async().await {
                 if let Err(err) = match task {
                     CompactTask::Freeze => {
-                        compactor.check_then_compaction(NoopCache::default()).await
+                        compactor
+                            .check_then_compaction(Arc::new(NoCache::default()))
+                            .await
                     }
                     CompactTask::Flush(option_tx) => {
-                        let mut result =
-                            compactor.check_then_compaction(NoopCache::default()).await;
+                        let mut result = compactor
+                            .check_then_compaction(Arc::new(NoCache::default()))
+                            .await;
                         if let Some(tx) = option_tx {
                             let channel_result =
                                 tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -1354,7 +1350,7 @@ pub(crate) mod tests {
             version_set,
             lock_map: Arc::new(Default::default()),
             manager,
-            parquet_lru_cache: Default::default(),
+            parquet_lru_cache: Arc::new(NoCache::default()),
             _p: Default::default(),
         })
     }
@@ -1583,7 +1579,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor, _> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (i, item) in test_items().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
@@ -1619,7 +1615,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor, _> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for item in &test_items()[0..10] {
             db.write(item.clone(), 0.into()).await.unwrap();
@@ -1668,10 +1664,9 @@ pub(crate) mod tests {
         schema.flush_wal().await.unwrap();
         drop(schema);
 
-        let db: DB<Test, TokioExecutor, _> =
-            DB::new(option.as_ref().to_owned(), TokioExecutor::new())
-                .await
-                .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option.as_ref().to_owned(), TokioExecutor::new())
+            .await
+            .unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_items() {
@@ -1741,7 +1736,7 @@ pub(crate) mod tests {
             "id".to_owned(),
             primary_key_index,
         );
-        let db: DB<DynRecord, TokioExecutor, _> =
+        let db: DB<DynRecord, TokioExecutor> =
             DB::with_schema(option, TokioExecutor::new(), desc, primary_key_index)
                 .await
                 .unwrap();
@@ -1781,7 +1776,7 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor, _> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
 
         for (idx, item) in test_items().into_iter().enumerate() {
             if idx % 2 == 0 {
@@ -1823,7 +1818,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<DynRecord, TokioExecutor, _> =
+        let db: DB<DynRecord, TokioExecutor> =
             DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
                 .await
                 .unwrap();
@@ -2053,7 +2048,7 @@ pub(crate) mod tests {
         option3.major_default_oldest_table_num = 1;
         option3.trigger_type = TriggerType::Length(5);
 
-        let db1: DB<DynRecord, TokioExecutor, _> = DB::with_schema(
+        let db1: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option,
             TokioExecutor::new(),
             cols_desc.clone(),
@@ -2061,7 +2056,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let db2: DB<DynRecord, TokioExecutor, _> = DB::with_schema(
+        let db2: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option2,
             TokioExecutor::new(),
             cols_desc.clone(),
@@ -2069,7 +2064,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let db3: DB<DynRecord, TokioExecutor, _> =
+        let db3: DB<DynRecord, TokioExecutor> =
             DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
                 .await
                 .unwrap();

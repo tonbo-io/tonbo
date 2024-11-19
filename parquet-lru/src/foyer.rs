@@ -10,7 +10,7 @@ use parquet::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, LruCache, Options};
+use crate::LruCache;
 
 #[derive(Clone)]
 pub struct FoyerCache<K>
@@ -32,23 +32,15 @@ impl<K> LruCache<K> for FoyerCache<K>
 where
     for<'a> K: Send + Sync + Hash + Eq + Serialize + Deserialize<'a> + Clone + 'static,
 {
-    type LruReader<R: AsyncFileReader + 'static> = FoyerReader<K, R>;
+    type LruReader<R>
+        = FoyerReader<K, R>
+    where
+        R: AsyncFileReader + 'static;
 
-    async fn new(options: Options) -> Result<Self, Error> {
-        Ok(Self {
-            inner: Arc::new(FoyerCacheInner {
-                meta: foyer::CacheBuilder::new(options.meta_capacity).build(),
-                data: foyer::HybridCacheBuilder::new()
-                    .memory(options.data_capacity)
-                    .storage(foyer::Engine::Large)
-                    .build()
-                    .await
-                    .map_err(|e| Error::External(e.into()))?,
-            }),
-        })
-    }
-
-    async fn get_reader<R: AsyncFileReader>(&self, key: K, reader: R) -> FoyerReader<K, R> {
+    async fn get_reader<R>(&self, key: K, reader: R) -> FoyerReader<K, R>
+    where
+        R: AsyncFileReader,
+    {
         FoyerReader::new(self.clone(), key, reader)
     }
 }
