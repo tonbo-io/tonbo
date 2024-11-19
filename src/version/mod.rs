@@ -25,7 +25,7 @@ use crate::{
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TimestampedRef},
     version::{cleaner::CleanTag, edit::VersionEdit},
-    DbOption,
+    DbOption, ParquetLru,
 };
 
 pub(crate) const MAX_LEVEL: usize = 7;
@@ -121,6 +121,7 @@ where
         manager: &StoreManager,
         key: &TimestampedRef<R::Key>,
         projection_mask: ProjectionMask,
+        parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let level_0_path = self
             .option
@@ -132,7 +133,14 @@ where
                 continue;
             }
             if let Some(entry) = self
-                .table_query(level_0_fs, key, 0, scope.gen, projection_mask.clone())
+                .table_query(
+                    level_0_fs,
+                    key,
+                    0,
+                    scope.gen,
+                    projection_mask.clone(),
+                    parquet_lru.clone(),
+                )
                 .await?
             {
                 return Ok(Some(entry));
@@ -159,6 +167,7 @@ where
                     leve,
                     sort_runs[index].gen,
                     projection_mask.clone(),
+                    parquet_lru.clone(),
                 )
                 .await?
             {
@@ -176,6 +185,7 @@ where
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,
+        parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
         let file = store
             .open_options(
@@ -184,7 +194,7 @@ where
             )
             .await
             .map_err(VersionError::Fusio)?;
-        SsTable::<R>::open(file)
+        SsTable::<R>::open(parquet_lru, gen, file)
             .await?
             .get(key, projection_mask)
             .await
@@ -201,6 +211,7 @@ where
         self.level_slice[level].len()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn streams<'streams>(
         &self,
         manager: &StoreManager,
@@ -209,6 +220,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        parquet_lru: ParquetLru,
     ) -> Result<(), VersionError<R>> {
         let level_0_path = self
             .option
@@ -226,7 +238,7 @@ where
                 )
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(file).await?;
+            let table = SsTable::open(parquet_lru.clone(), scope.gen, file).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -271,6 +283,7 @@ where
                     limit,
                     projection_mask.clone(),
                     level_fs.clone(),
+                    parquet_lru.clone(),
                 )
                 .unwrap(),
             });

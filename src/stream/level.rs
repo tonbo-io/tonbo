@@ -13,6 +13,8 @@ use fusio::{
 };
 use futures_core::Stream;
 use parquet::{arrow::ProjectionMask, errors::ParquetError};
+use parquet_lru::DynLruCache;
+use ulid::Ulid;
 
 use crate::{
     fs::{FileId, FileType},
@@ -31,7 +33,10 @@ where
 {
     Init(FileId),
     Ready(SsTableScan<'level, R>),
-    OpenFile(Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>),
+    OpenFile(
+        Ulid,
+        Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>,
+    ),
     OpenSst(Pin<Box<dyn MaybeSendFuture<Output = Result<SsTable<R>, Error>> + 'level>>),
     LoadStream(
         Pin<Box<dyn Future<Output = Result<SsTableScan<'level, R>, ParquetError>> + Send + 'level>>,
@@ -53,6 +58,7 @@ where
     status: FutureStatus<'level, R>,
     fs: Arc<dyn DynFs>,
     path: Option<Path>,
+    parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -71,6 +77,7 @@ where
         limit: Option<usize>,
         projection_mask: ProjectionMask,
         fs: Arc<dyn DynFs>,
+        parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -92,6 +99,7 @@ where
             status,
             fs,
             path: None,
+            parquet_lru,
         })
     }
 }
@@ -125,7 +133,7 @@ where
                             >,
                         >(reader)
                     };
-                    self.status = FutureStatus::OpenFile(reader);
+                    self.status = FutureStatus::OpenFile(gen, reader);
                     continue;
                 }
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
@@ -151,7 +159,7 @@ where
                                     >,
                                 >(reader)
                             };
-                            self.status = FutureStatus::OpenFile(reader);
+                            self.status = FutureStatus::OpenFile(gen, reader);
                             continue;
                         }
                     },
@@ -163,9 +171,14 @@ where
                     }
                     Poll::Pending => Poll::Pending,
                 },
-                FutureStatus::OpenFile(file_future) => match Pin::new(file_future).poll(cx) {
+                FutureStatus::OpenFile(id, file_future) => match Pin::new(file_future).poll(cx) {
                     Poll::Ready(Ok(file)) => {
-                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(file)));
+                        let id = *id;
+                        self.status = FutureStatus::OpenSst(Box::pin(SsTable::open(
+                            self.parquet_lru.clone(),
+                            id,
+                            file,
+                        )));
                         continue;
                     }
                     Poll::Ready(Err(err)) => {
@@ -209,6 +222,7 @@ mod tests {
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
+    use parquet_lru::NoCache;
     use tempfile::TempDir;
 
     use crate::{
@@ -251,6 +265,7 @@ mod tests {
                     [0, 1, 2, 3],
                 ),
                 manager.base_fs().clone(),
+                Arc::new(NoCache::default()),
             )
             .unwrap();
 
@@ -287,6 +302,7 @@ mod tests {
                     [0, 1, 2, 4],
                 ),
                 manager.base_fs().clone(),
+                Arc::new(NoCache::default()),
             )
             .unwrap();
 
@@ -323,6 +339,7 @@ mod tests {
                     [0, 1, 2],
                 ),
                 manager.base_fs().clone(),
+                Arc::new(NoCache::default()),
             )
             .unwrap();
 

@@ -10,17 +10,24 @@ use crate::{
     stream::ScanStream,
     timestamp::Timestamp,
     version::{TransactionTs, VersionRef},
-    DbError, Projection, Scan, Schema,
+    DbError, ParquetLru, Projection, Scan, Schema,
 };
 
-pub struct Snapshot<'s, R: Record> {
+pub struct Snapshot<'s, R>
+where
+    R: Record,
+{
     ts: Timestamp,
     share: RwLockReadGuard<'s, Schema<R>>,
     version: VersionRef<R>,
     manager: Arc<StoreManager>,
+    parquet_lru: ParquetLru,
 }
 
-impl<'s, R: Record> Snapshot<'s, R> {
+impl<'s, R> Snapshot<'s, R>
+where
+    R: Record,
+{
     pub async fn get<'get>(
         &'get self,
         key: &'get R::Key,
@@ -28,7 +35,14 @@ impl<'s, R: Record> Snapshot<'s, R> {
     ) -> Result<Option<stream::Entry<'get, R>>, DbError<R>> {
         Ok(self
             .share
-            .get(&self.version, &self.manager, key, self.ts, projection)
+            .get(
+                &self.version,
+                &self.manager,
+                key,
+                self.ts,
+                projection,
+                self.parquet_lru.clone(),
+            )
             .await?
             .and_then(|entry| {
                 if entry.value().is_none() {
@@ -50,6 +64,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
             self.ts,
             &self.version,
             Box::new(move |_: Option<ProjectionMask>| None),
+            self.parquet_lru.clone(),
         )
     }
 
@@ -57,12 +72,14 @@ impl<'s, R: Record> Snapshot<'s, R> {
         share: RwLockReadGuard<'s, Schema<R>>,
         version: VersionRef<R>,
         manager: Arc<StoreManager>,
+        parquet_lru: ParquetLru,
     ) -> Self {
         Self {
             ts: version.load_ts(),
             share,
             version,
             manager,
+            parquet_lru,
         }
     }
 
@@ -92,6 +109,7 @@ impl<'s, R: Record> Snapshot<'s, R> {
             self.ts,
             &self.version,
             fn_pre_stream,
+            self.parquet_lru.clone(),
         )
     }
 }

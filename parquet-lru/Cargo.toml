@@ -1,0 +1,22 @@
+[package]
+description = "Implement LRU cache reader for parquet::arrow::async_reader::AsyncFileReader."
+documentation = "https://docs.rs/parquet-lru"
+edition = "2021"
+license = "Apache-2.0"
+name = "parquet-lru"
+version = "0.2.0"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+foyer = ["dep:foyer", "dep:serde"]
+
+[dependencies]
+bytes = { version = "1.8.0", features = ["serde"] }
+foyer = { version = "0.12.2", optional = true }
+futures-core = "0.3.31"
+futures-util = "0.3.31"
+parquet = { version = "53.2.0", features = ["async"] }
+serde = { version = "1.0.214", optional = true }
