@@ -12,7 +12,8 @@ use tokio::{fs, io::AsyncWriteExt};
 
 use crate::common::{
     read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
-    RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, ITERATIONS, NUM_SCAN, READ_TIMES,
+    RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, TonboS3BenchDataBase, ITERATIONS,
+    NUM_SCAN, READ_TIMES,
 };
 
 async fn benchmark<T: BenchDatabase + Send + Sync>(
@@ -152,10 +153,13 @@ async fn main() {
 
         load::<TonboBenchDataBase>(&tbl_path, data_dir.join("tonbo")).await;
         load::<RocksdbBenchDatabase>(&tbl_path, data_dir.join("rocksdb")).await;
+        load::<TonboS3BenchDataBase>(&tbl_path, data_dir.join("tonbo_s3")).await;
     }
 
     let tonbo_latency_results = { benchmark::<TonboBenchDataBase>(data_dir.join("tonbo")).await };
     let rocksdb_results = { benchmark::<RocksdbBenchDatabase>(data_dir.join("rocksdb")).await };
+    let tonbo_s3_latency_results =
+        { benchmark::<TonboS3BenchDataBase>(data_dir.join("tonbo_s3")).await };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
 
@@ -163,7 +167,11 @@ async fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [tonbo_latency_results, rocksdb_results] {
+    for results in [
+        tonbo_latency_results,
+        rocksdb_results,
+        tonbo_s3_latency_results,
+    ] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -171,7 +179,7 @@ async fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "tonbo", "rocksdb"]);
+    table.set_header(["", "tonbo", "rocksdb", "tonbo_s3"]);
     for row in rows {
         table.add_row(row);
     }
