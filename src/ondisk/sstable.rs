@@ -1,12 +1,18 @@
-use std::{marker::PhantomData, ops::Bound};
+use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
 use fusio::{dynamic::DynFile, DynRead};
 use fusio_parquet::reader::AsyncReader;
 use futures_util::StreamExt;
-use parquet::arrow::{
-    arrow_reader::{ArrowReaderBuilder, ArrowReaderOptions},
-    ParquetRecordBatchStreamBuilder, ProjectionMask,
+use parquet::{
+    arrow::{
+        arrow_reader::{ArrowReaderBuilder, ArrowReaderOptions},
+        async_reader::{AsyncFileReader, AsyncReader as ParquetAsyncReader},
+        ParquetRecordBatchStreamBuilder, ProjectionMask,
+    },
+    errors::Result as ParquetResult,
 };
+use parquet_lru::{BoxedFileReader, DynLruCache};
+use ulid::Ulid;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
@@ -19,7 +25,7 @@ pub(crate) struct SsTable<R>
 where
     R: Record,
 {
-    reader: AsyncReader,
+    reader: BoxedFileReader,
     _marker: PhantomData<R>,
 }
 
@@ -27,11 +33,20 @@ impl<R> SsTable<R>
 where
     R: Record,
 {
-    pub(crate) async fn open(file: Box<dyn DynFile>) -> Result<Self, fusio::Error> {
+    pub(crate) async fn open(
+        lru_cache: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+        id: Ulid,
+        file: Box<dyn DynFile>,
+    ) -> Result<Self, fusio::Error> {
         let size = file.size().await?;
 
         Ok(SsTable {
-            reader: AsyncReader::new(file, size).await?,
+            reader: lru_cache
+                .get_reader(
+                    id,
+                    BoxedFileReader::new(AsyncReader::new(file, size).await?),
+                )
+                .await,
             _marker: PhantomData,
         })
     }
@@ -40,11 +55,10 @@ where
         self,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> parquet::errors::Result<
-        ArrowReaderBuilder<parquet::arrow::async_reader::AsyncReader<AsyncReader>>,
-    > {
+    ) -> ParquetResult<ArrowReaderBuilder<ParquetAsyncReader<Box<dyn AsyncFileReader + 'static>>>>
+    {
         let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(
-            self.reader,
+            Box::new(self.reader) as Box<dyn AsyncFileReader + 'static>,
             ArrowReaderOptions::default().with_page_index(true),
         )
         .await?;
@@ -58,7 +72,7 @@ where
         self,
         key: &TimestampedRef<R::Key>,
         projection_mask: ProjectionMask,
-    ) -> parquet::errors::Result<Option<RecordBatchEntry<R>>> {
+    ) -> ParquetResult<Option<RecordBatchEntry<R>>> {
         self.scan(
             (Bound::Included(key.value()), Bound::Included(key.value())),
             key.ts(),
@@ -114,6 +128,7 @@ pub(crate) mod tests {
         basic::{Compression, ZstdLevel},
         file::properties::WriterProperties,
     };
+    use parquet_lru::NoCache;
 
     use super::SsTable;
     use crate::{
@@ -157,6 +172,8 @@ pub(crate) mod tests {
         R: Record,
     {
         SsTable::open(
+            Arc::new(NoCache::default()),
+            Default::default(),
             store
                 .open_options(path, FileType::Parquet.open_options(true))
                 .await

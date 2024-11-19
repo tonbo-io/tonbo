@@ -137,6 +137,7 @@ pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
+use fs::FileId;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
@@ -147,6 +148,7 @@ use parquet::{
     arrow::{arrow_to_parquet_schema, ProjectionMask},
     errors::ParquetError,
 };
+use parquet_lru::{DynLruCache, NoCache};
 use record::{ColumnDesc, DynRecord, Record, RecordInstance};
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
@@ -159,7 +161,7 @@ pub use crate::option::*;
 use crate::{
     compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
-    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{manager::StoreManager, parse_file_id, FileType},
     serdes::Decode,
     snapshot::Snapshot,
     stream::{
@@ -181,10 +183,11 @@ where
     version_set: VersionSet<R>,
     lock_map: LockMap<R::Key>,
     manager: Arc<StoreManager>,
+    parquet_lru: ParquetLru,
     _p: PhantomData<E>,
 }
 
-impl<E: Executor> DB<DynRecord, E>
+impl<E> DB<DynRecord, E>
 where
     E: Executor + Send + Sync + 'static,
 {
@@ -200,7 +203,7 @@ where
         let instance =
             RecordInstance::Runtime(DynRecord::empty_record(column_descs, primary_index));
 
-        Self::build(option, executor, instance).await
+        Self::build(option, executor, instance, Arc::new(NoCache::default())).await
     }
 }
 
@@ -216,13 +219,27 @@ where
     ///
     /// For more configurable options, please refer to [`DbOption`].
     pub async fn new(option: DbOption<R>, executor: E) -> Result<Self, DbError<R>> {
-        Self::build(Arc::new(option), executor, RecordInstance::Normal).await
+        Self::build(
+            Arc::new(option),
+            executor,
+            RecordInstance::Normal,
+            Arc::new(NoCache::default()),
+        )
+        .await
     }
+}
 
+impl<R, E> DB<R, E>
+where
+    R: Record + Send + Sync,
+    R::Columns: Send + Sync,
+    E: Executor + Send + Sync + 'static,
+{
     async fn build(
         option: Arc<DbOption<R>>,
         executor: E,
         instance: RecordInstance,
+        lru_cache: ParquetLru,
     ) -> Result<Self, DbError<R>> {
         let manager = Arc::new(StoreManager::new(
             option.base_fs.clone(),
@@ -260,12 +277,20 @@ where
                 error!("[Cleaner Error]: {}", err)
             }
         });
+
+        let compact_task_cache = lru_cache.clone();
         executor.spawn(async move {
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction().await,
+                    CompactTask::Freeze => {
+                        compactor
+                            .check_then_compaction(compact_task_cache.clone())
+                            .await
+                    }
                     CompactTask::Flush(option_tx) => {
-                        let mut result = compactor.check_then_compaction().await;
+                        let mut result = compactor
+                            .check_then_compaction(compact_task_cache.clone())
+                            .await;
                         if let Some(tx) = option_tx {
                             if result.is_ok() {
                                 result = tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -278,11 +303,13 @@ where
                 }
             }
         });
+
         Ok(Self {
             schema,
             version_set,
             lock_map: Arc::new(Default::default()),
             manager,
+            parquet_lru: lru_cache,
             _p: Default::default(),
         })
     }
@@ -297,6 +324,7 @@ where
             self.schema.read().await,
             self.version_set.current().await,
             self.manager.clone(),
+            self.parquet_lru.clone(),
         )
     }
 
@@ -353,6 +381,7 @@ where
                 key,
                 self.version_set.load_ts(),
                 Projection::All,
+                self.parquet_lru.clone(),
             )
             .await?
             .and_then(|entry| {
@@ -380,6 +409,7 @@ where
                 self.version_set.load_ts(),
                 &*current,
                 Box::new(|_| None),
+                self.parquet_lru.clone(),
             ).take().await?;
 
             while let Some(record) = scan.next().await {
@@ -566,6 +596,7 @@ where
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
+        parquet_lru: ParquetLru,
     ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
         if let Some(entry) = self.mutable.get(key, ts) {
             return Ok(Some(Entry::Mutable(entry)));
@@ -595,7 +626,12 @@ where
         }
 
         Ok(version
-            .query(manager, TimestampedRef::new(key, ts), projection)
+            .query(
+                manager,
+                TimestampedRef::new(key, ts),
+                projection,
+                parquet_lru,
+            )
             .await?
             .map(|entry| Entry::RecordBatch(entry)))
     }
@@ -634,6 +670,8 @@ where
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
+
+    parquet_lru: ParquetLru,
 }
 
 impl<'scan, 'range, R> Scan<'scan, 'range, R>
@@ -649,6 +687,7 @@ where
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
+        parquet_lru: ParquetLru,
     ) -> Self {
         Self {
             schema,
@@ -661,6 +700,7 @@ where
             limit: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
+            parquet_lru,
         }
     }
 
@@ -736,6 +776,7 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.parquet_lru,
             )
             .await?;
 
@@ -788,6 +829,7 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.parquet_lru,
             )
             .await?;
         let merge_stream = MergeStream::from_vec(streams, self.ts).await?;
@@ -833,6 +875,8 @@ pub enum Projection {
     Parts(Vec<usize>),
 }
 
+pub type ParquetLru = Arc<dyn DynLruCache<FileId> + Send + Sync>;
+
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::{
@@ -852,6 +896,7 @@ pub(crate) mod tests {
     use futures::StreamExt;
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+    use parquet_lru::NoCache;
     use tempfile::TempDir;
     use tracing::error;
 
@@ -1276,9 +1321,15 @@ pub(crate) mod tests {
         executor.spawn(async move {
             while let Ok(task) = compaction_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction().await,
+                    CompactTask::Freeze => {
+                        compactor
+                            .check_then_compaction(Arc::new(NoCache::default()))
+                            .await
+                    }
                     CompactTask::Flush(option_tx) => {
-                        let mut result = compactor.check_then_compaction().await;
+                        let mut result = compactor
+                            .check_then_compaction(Arc::new(NoCache::default()))
+                            .await;
                         if let Some(tx) = option_tx {
                             let channel_result =
                                 tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -1299,6 +1350,7 @@ pub(crate) mod tests {
             version_set,
             lock_map: Arc::new(Default::default()),
             manager,
+            parquet_lru: Arc::new(NoCache::default()),
             _p: Default::default(),
         })
     }

@@ -112,5 +112,3 @@ mod tests {
         assert_eq!(write_hasher.finish(), read_hasher.finish());
     }
 }
-
-fn main() {}

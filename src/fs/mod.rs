@@ -8,7 +8,7 @@ use std::{
 use fusio::{fs::OpenOptions, path::Path};
 use ulid::{DecodeError, Ulid};
 
-pub(crate) type FileId = Ulid;
+pub type FileId = Ulid;
 
 pub enum FileType {
     Wal,

@@ -22,7 +22,7 @@ use crate::{
     version::{
         edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError, MAX_LEVEL,
     },
-    DbOption, Schema,
+    DbOption, ParquetLru, Schema,
 };
 
 #[derive(Debug)]
@@ -59,7 +59,10 @@ where
         }
     }
 
-    pub(crate) async fn check_then_compaction(&mut self) -> Result<(), CompactionError<R>> {
+    pub(crate) async fn check_then_compaction(
+        &mut self,
+        parquet_lru: ParquetLru,
+    ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
         guard.trigger.reset();
@@ -107,6 +110,7 @@ where
                         &mut delete_gens,
                         &guard.record_instance,
                         &self.manager,
+                        parquet_lru,
                     )
                     .await?;
                 }
@@ -194,6 +198,7 @@ where
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &RecordInstance,
         manager: &StoreManager,
+        parquet_lru: ParquetLru,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
@@ -219,7 +224,7 @@ where
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(file)
+                        inner: SsTable::open(parquet_lru.clone(), scope.gen, file)
                             .await?
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
@@ -242,6 +247,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
+                    parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -262,6 +268,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
+                    parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -512,6 +519,7 @@ pub(crate) mod tests {
     use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
     use parquet::arrow::AsyncArrowWriter;
+    use parquet_lru::NoCache;
     use tempfile::TempDir;
 
     use crate::{
@@ -809,6 +817,7 @@ pub(crate) mod tests {
             &mut vec![],
             &RecordInstance::Normal,
             &manager,
+            Arc::new(NoCache::default()),
         )
         .await
         .unwrap();
@@ -1200,6 +1209,7 @@ pub(crate) mod tests {
             &mut vec![],
             &RecordInstance::Normal,
             &manager,
+            Arc::new(NoCache::default()),
         )
         .await
         .unwrap();
