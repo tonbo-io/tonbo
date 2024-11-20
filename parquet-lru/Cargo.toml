@@ -18,5 +18,8 @@ bytes = { version = "1.8.0", features = ["serde"] }
 foyer = { version = "0.12.2", optional = true }
 futures-core = "0.3.31"
 futures-util = "0.3.31"
-parquet = { version = "53.2.0", features = ["async"] }
+parquet = { version = "53.2.0", default-features = false, features = [
+    "arrow",
+    "async",
+] }
 serde = { version = "1.0.214", optional = true }
