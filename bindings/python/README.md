@@ -4,6 +4,12 @@ This package intends to build a native python binding for [Tonbo](https://github
 
 Tonbo's Python bindings can be used to build data-intensive applications, including other types of databases.
 
+## Installation
+
+```sh
+pip install tonbo
+```
+
 ## Example
 
 ```py
