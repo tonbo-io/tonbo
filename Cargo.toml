@@ -60,6 +60,11 @@ required-features = ["bench"]
 
 [[bench]]
 harness = false
+name = "common"
+required-features = ["bench"]
+
+[[bench]]
+harness = false
 name = "writes"
 path = "benches/criterion/writes.rs"
 required-features = ["sled"]
