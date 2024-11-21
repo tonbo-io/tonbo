@@ -1,0 +1,28 @@
+name: Feature request
+labels: enhancement
+body:
+  - type: textarea
+    attributes:
+      label: What is the current?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What will it become?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What are the benefits?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Are there any alternatives?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Does it have a reference?
+    validations:
+      required: true

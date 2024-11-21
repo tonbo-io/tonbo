@@ -1,0 +1,14 @@
+name: Bug report
+labels: bug
+body:
+  - type: textarea
+    attributes:
+      label: More details about the bug
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What is your expected behavior?
+  - type: textarea
+    attributes:
+      label: How to reproduce?
