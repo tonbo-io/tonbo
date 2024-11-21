@@ -25,3 +25,4 @@ features = ["pyo3/extension-module"]
 
 module-name = "tonbo._tonbo"
 python-source = "python"
+strip = true
