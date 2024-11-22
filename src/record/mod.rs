@@ -2,7 +2,7 @@ pub mod internal;
 mod key;
 pub mod runtime;
 #[cfg(test)]
-mod str;
+mod test;
 
 use std::{error::Error, fmt::Debug, io, sync::Arc};
 
