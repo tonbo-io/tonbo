@@ -598,9 +598,6 @@ where
         projection: Projection,
         parquet_lru: ParquetLru,
     ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
-        if let Some(entry) = self.mutable.get(key, ts) {
-            return Ok(Some(Entry::Mutable(entry)));
-        }
         let primary_key_index = self.record_instance.primary_key_index::<R>();
 
         let projection = match projection {
@@ -618,6 +615,13 @@ where
                 )
             }
         };
+
+        if let Some(entry) = self.mutable.get(key, ts) {
+            return Ok(Some(Entry::Projection((
+                Box::new(Entry::Mutable(entry)),
+                Arc::new(projection),
+            ))));
+        }
 
         for (_, immutable) in self.immutables.iter().rev() {
             if let Some(entry) = immutable.get(key, ts, projection.clone()) {
