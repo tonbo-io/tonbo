@@ -907,7 +907,7 @@ pub(crate) mod tests {
         inmem::{immutable::tests::TestImmutableArrays, mutable::Mutable},
         record::{
             internal::InternalRecordRef,
-            test::{test_dyn_item_schema, test_dyn_items},
+            runtime::test::{test_dyn_item_schema, test_dyn_items},
             Column, Datatype, DynRecord, RecordDecodeError, RecordEncodeError, RecordInstance,
             RecordRef,
         },
