@@ -58,7 +58,7 @@ impl DataType {
             DataType::Bytes => Vec::<u8>::default().to_object(py),
         }
     }
-    pub(crate) fn none_value(&self) -> Arc<dyn Any> {
+    pub(crate) fn none_value(&self) -> Arc<dyn Any + Send + Sync> {
         match self {
             DataType::UInt8 => Arc::new(Option::<u8>::None),
             DataType::UInt16 => Arc::new(Option::<u16>::None),

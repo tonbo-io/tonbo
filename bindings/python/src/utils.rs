@@ -159,19 +159,29 @@ pub(crate) fn to_dict(
     dict
 }
 
-pub(crate) fn to_key(py: Python, datatype: &DataType, key: Py<PyAny>) -> Arc<dyn Any> {
+pub(crate) fn to_key(
+    py: Python,
+    datatype: &DataType,
+    key: Py<PyAny>,
+) -> Arc<dyn Any + Send + Sync> {
     match datatype {
-        DataType::UInt8 => Arc::new(key.extract::<u8>(py).unwrap()) as Arc<dyn Any>,
-        DataType::UInt16 => Arc::new(key.extract::<u16>(py).unwrap()) as Arc<dyn Any>,
-        DataType::UInt32 => Arc::new(key.extract::<u32>(py).unwrap()) as Arc<dyn Any>,
-        DataType::UInt64 => Arc::new(key.extract::<u64>(py).unwrap()) as Arc<dyn Any>,
-        DataType::Int8 => Arc::new(key.extract::<i8>(py).unwrap()) as Arc<dyn Any>,
-        DataType::Int16 => Arc::new(key.extract::<i16>(py).unwrap()) as Arc<dyn Any>,
-        DataType::Int32 => Arc::new(key.extract::<i32>(py).unwrap()) as Arc<dyn Any>,
-        DataType::Int64 => Arc::new(key.extract::<i64>(py).unwrap()) as Arc<dyn Any>,
-        DataType::String => Arc::new(key.extract::<String>(py).unwrap()) as Arc<dyn Any>,
-        DataType::Boolean => Arc::new(key.extract::<bool>(py).unwrap()) as Arc<dyn Any>,
-        DataType::Bytes => Arc::new(key.extract::<Vec<u8>>(py).unwrap()) as Arc<dyn Any>,
+        DataType::UInt8 => Arc::new(key.extract::<u8>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::UInt16 => Arc::new(key.extract::<u16>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::UInt32 => Arc::new(key.extract::<u32>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::UInt64 => Arc::new(key.extract::<u64>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::Int8 => Arc::new(key.extract::<i8>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::Int16 => Arc::new(key.extract::<i16>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::Int32 => Arc::new(key.extract::<i32>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::Int64 => Arc::new(key.extract::<i64>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
+        DataType::String => {
+            Arc::new(key.extract::<String>(py).unwrap()) as Arc<dyn Any + Send + Sync>
+        }
+        DataType::Boolean => {
+            Arc::new(key.extract::<bool>(py).unwrap()) as Arc<dyn Any + Send + Sync>
+        }
+        DataType::Bytes => {
+            Arc::new(key.extract::<Vec<u8>>(py).unwrap()) as Arc<dyn Any + Send + Sync>
+        }
     }
 }
 
