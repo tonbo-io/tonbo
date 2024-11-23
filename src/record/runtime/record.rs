@@ -55,7 +55,7 @@ impl DynRecord {
     pub(crate) fn empty_record(column_descs: Vec<ColumnDesc>, primary_index: usize) -> DynRecord {
         let mut columns = vec![];
         for desc in column_descs.iter() {
-            let value: Arc<dyn Any> = match desc.datatype {
+            let value: Arc<dyn Any + Send + Sync> = match desc.datatype {
                 Datatype::UInt8 => match desc.is_nullable {
                     true => Arc::<Option<u8>>::new(None),
                     false => Arc::new(u8::default()),
@@ -273,9 +273,6 @@ impl Record for DynRecord {
         self.columns.iter().fold(0, |acc, col| acc + col.size())
     }
 }
-
-unsafe impl Send for DynRecord {}
-unsafe impl Sync for DynRecord {}
 
 #[cfg(test)]
 pub(crate) mod test {
