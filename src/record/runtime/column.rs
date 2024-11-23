@@ -35,16 +35,18 @@ impl ColumnDesc {
 #[derive(Clone)]
 pub struct Column {
     pub datatype: Datatype,
-    pub value: Arc<dyn Any>,
+    pub value: Arc<dyn Any + Send + Sync>,
     pub is_nullable: bool,
     pub name: String,
 }
 
-unsafe impl Send for Column {}
-unsafe impl Sync for Column {}
-
 impl Column {
-    pub fn new(datatype: Datatype, name: String, value: Arc<dyn Any>, is_nullable: bool) -> Self {
+    pub fn new(
+        datatype: Datatype,
+        name: String,
+        value: Arc<dyn Any + Send + Sync>,
+        is_nullable: bool,
+    ) -> Self {
         Self {
             datatype,
             name,
@@ -102,7 +104,6 @@ impl PartialOrd for Column {
     }
 }
 
-#[macro_export]
 macro_rules! implement_col {
     ([], $({$Type:ty, $Datatype:ident}), *) => {
         impl Ord for Column {
@@ -168,7 +169,6 @@ macro_rules! implement_col {
     };
 }
 
-#[macro_export]
 macro_rules! implement_key_col {
     ($({$Type:ident, $Datatype:ident, $Array:ident}), *) => {
         impl Key for Column {
@@ -224,7 +224,6 @@ impl<'r> KeyRef<'r> for Column {
     }
 }
 
-#[macro_export]
 macro_rules! implement_decode_col {
     ([], $({$Type:ty, $Datatype:ident}), *) => {
         impl Decode for Column {
@@ -248,8 +247,8 @@ macro_rules! implement_decode_col {
                                         DecodeError::Fusio(error) => error,
                                         DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
                                     },
-                                )?) as Arc<dyn Any>,
-                                false => Arc::new(<$Type>::decode(reader).await?) as Arc<dyn Any>,
+                                )?) as Arc<dyn Any + Send + Sync>,
+                                false => Arc::new(<$Type>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
                             },
                         )*
                     };
@@ -265,7 +264,6 @@ macro_rules! implement_decode_col {
     }
 }
 
-#[macro_export]
 macro_rules! implement_encode_col {
     ([], $({$Type:ty, $Datatype:ident}), *) => {
         impl Encode for Column {
@@ -374,7 +372,6 @@ impl From<&Column> for Field {
     }
 }
 
-#[macro_export]
 macro_rules! for_datatype {
     ($macro:tt $(, $x:tt)*) => {
         $macro! {

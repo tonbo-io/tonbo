@@ -168,32 +168,32 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     let v = col.as_string::<i32>();
 
                     if primary_index == idx - 2 {
-                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any>
+                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any + Send + Sync>
                     } else {
                         let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
                             .then_some(v.value(offset).to_owned());
-                        Arc::new(value) as Arc<dyn Any>
+                        Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
                 Datatype::Boolean => {
                     let v = col.as_boolean();
 
                     if primary_index == idx - 2 {
-                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any>
+                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any + Send + Sync>
                     } else {
                         let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
                             .then_some(v.value(offset).to_owned());
-                        Arc::new(value) as Arc<dyn Any>
+                        Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
                 Datatype::Bytes => {
                     let v = col.as_binary::<i32>();
                     if primary_index == idx - 2 {
-                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any>
+                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any + Send + Sync>
                     } else {
                         let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
                             .then_some(v.value(offset).to_owned());
-                        Arc::new(value) as Arc<dyn Any>
+                        Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
             };
@@ -241,21 +241,18 @@ impl<'r> DynRecordRef<'r> {
         idx: usize,
         projection_mask: &'r parquet::arrow::ProjectionMask,
         primary: bool,
-    ) -> Arc<dyn Any>
+    ) -> Arc<dyn Any + Send + Sync>
     where
         T: ArrowPrimitiveType,
     {
         let v = col.as_primitive::<T>();
 
         if primary {
-            Arc::new(v.value(offset)) as Arc<dyn Any>
+            Arc::new(v.value(offset)) as Arc<dyn Any + Send + Sync>
         } else {
             let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
                 .then_some(v.value(offset));
-            Arc::new(value) as Arc<dyn Any>
+            Arc::new(value) as Arc<dyn Any + Send + Sync>
         }
     }
 }
-
-unsafe impl<'r> Send for DynRecordRef<'r> {}
-unsafe impl<'r> Sync for DynRecordRef<'r> {}

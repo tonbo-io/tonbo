@@ -16,7 +16,7 @@ pub struct Column {
     pub datatype: DataType,
     pub nullable: bool,
     pub primary_key: bool,
-    pub(crate) value: Arc<dyn Any>,
+    pub(crate) value: Arc<dyn Any + Send + Sync>,
 }
 
 unsafe impl Send for Column {}
