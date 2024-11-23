@@ -440,6 +440,16 @@ mod tests {
         drop(entry);
 
         txn1.commit().await.unwrap();
+
+        let txn2 = db.transaction().await;
+        let entry = txn2
+            .get(&key, Projection::Parts(vec![0, 1]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.get().vstring, 0.to_string());
+        assert_eq!(entry.get().vu32, Some(0));
+        assert_eq!(entry.get().vbool, None);
     }
 
     #[tokio::test]
