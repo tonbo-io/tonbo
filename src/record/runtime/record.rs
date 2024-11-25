@@ -1,58 +1,31 @@
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{any::Any, sync::Arc};
 
-use arrow::datatypes::{DataType, Field, Schema};
 use fusio::SeqRead;
-use parquet::{format::SortingColumn, schema::types::ColumnPath};
 
-use super::{array::DynRecordImmutableArrays, Column, ColumnDesc, Datatype, DynRecordRef};
+use super::{Datatype, DynRecordRef, Value, ValueDesc};
 use crate::{
-    record::{Record, RecordDecodeError},
+    record::{DynSchema, Record, RecordDecodeError},
     serdes::{Decode, Encode},
 };
 
 #[derive(Debug)]
 pub struct DynRecord {
-    columns: Vec<Column>,
+    values: Vec<Value>,
     primary_index: usize,
 }
 
 #[allow(unused)]
 impl DynRecord {
-    pub fn new(columns: Vec<Column>, primary_index: usize) -> Self {
+    pub fn new(values: Vec<Value>, primary_index: usize) -> Self {
         Self {
-            columns,
+            values,
             primary_index,
         }
-    }
-
-    pub(crate) fn primary_key_index(&self) -> usize {
-        self.primary_index + 2
-    }
-
-    pub(crate) fn arrow_schema(&self) -> Arc<Schema> {
-        let mut fields = vec![
-            Field::new("_null", DataType::Boolean, false),
-            Field::new("_ts", DataType::UInt32, false),
-        ];
-
-        for (idx, col) in self.columns.iter().enumerate() {
-            if idx == self.primary_index && col.is_nullable {
-                panic!("Primary key must not be nullable")
-            }
-            let mut field = Field::from(col);
-            fields.push(field);
-        }
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "primary_key_index".to_string(),
-            self.primary_index.to_string(),
-        );
-        Arc::new(Schema::new_with_metadata(fields, metadata))
     }
 }
 
 impl DynRecord {
-    pub(crate) fn empty_record(column_descs: Vec<ColumnDesc>, primary_index: usize) -> DynRecord {
+    pub(crate) fn empty_record(column_descs: Vec<ValueDesc>, primary_index: usize) -> DynRecord {
         let mut columns = vec![];
         for desc in column_descs.iter() {
             let value: Arc<dyn Any + Send + Sync> = match desc.datatype {
@@ -101,7 +74,7 @@ impl DynRecord {
                     false => Arc::new(Vec::<u8>::default()),
                 },
             };
-            columns.push(Column::new(
+            columns.push(Value::new(
                 desc.datatype,
                 desc.name.to_owned(),
                 value,
@@ -122,10 +95,10 @@ impl Decode for DynRecord {
     {
         let len = u32::decode(reader).await? as usize;
         let primary_index = u32::decode(reader).await? as usize;
-        let mut columns = vec![];
+        let mut values = vec![];
         // keep invariant for record: nullable --> Some(v); non-nullable --> v
         for i in 0..len {
-            let mut col = Column::decode(reader).await?;
+            let mut col = Value::decode(reader).await?;
             if i != primary_index && !col.is_nullable {
                 match col.datatype {
                     Datatype::UInt8 => {
@@ -178,34 +151,24 @@ impl Decode for DynRecord {
                     }
                 }
             }
-            columns.push(col);
+            values.push(col);
         }
 
         Ok(DynRecord {
-            columns,
+            values,
             primary_index,
         })
     }
 }
 
 impl Record for DynRecord {
-    type Columns = DynRecordImmutableArrays;
-
-    type Key = Column;
+    type Schema = DynSchema;
 
     type Ref<'r> = DynRecordRef<'r>;
 
-    fn primary_key_index() -> usize {
-        unreachable!("This method is not used.")
-    }
-
-    fn primary_key_path() -> (ColumnPath, Vec<SortingColumn>) {
-        unreachable!("This method is not used.")
-    }
-
     fn as_record_ref(&self) -> Self::Ref<'_> {
         let mut columns = vec![];
-        for (idx, col) in self.columns.iter().enumerate() {
+        for (idx, col) in self.values.iter().enumerate() {
             let datatype = col.datatype;
             let is_nullable = col.is_nullable;
             let mut value = col.value.clone();
@@ -255,7 +218,7 @@ impl Record for DynRecord {
                 };
             }
 
-            columns.push(Column::new(
+            columns.push(Value::new(
                 datatype,
                 col.name.to_owned(),
                 value,
@@ -265,12 +228,8 @@ impl Record for DynRecord {
         DynRecordRef::new(columns, self.primary_index)
     }
 
-    fn arrow_schema() -> &'static std::sync::Arc<Schema> {
-        unreachable!("This method is not used.")
-    }
-
     fn size(&self) -> usize {
-        self.columns.iter().fold(0, |acc, col| acc + col.size())
+        self.values.iter().fold(0, |acc, col| acc + col.size())
     }
 }
 
@@ -279,19 +238,19 @@ pub(crate) mod test {
     use std::sync::Arc;
 
     use super::DynRecord;
-    use crate::record::{Column, ColumnDesc, Datatype};
+    use crate::record::{Datatype, Value, ValueDesc};
 
     #[allow(unused)]
-    pub(crate) fn test_dyn_item_schema() -> (Vec<ColumnDesc>, usize) {
+    pub(crate) fn test_dyn_item_schema() -> (Vec<ValueDesc>, usize) {
         let descs = vec![
-            ColumnDesc::new("id".to_string(), Datatype::Int64, false),
-            ColumnDesc::new("age".to_string(), Datatype::Int8, true),
-            ColumnDesc::new("height".to_string(), Datatype::Int16, true),
-            ColumnDesc::new("weight".to_string(), Datatype::Int32, false),
-            ColumnDesc::new("name".to_string(), Datatype::String, false),
-            ColumnDesc::new("email".to_string(), Datatype::String, true),
-            ColumnDesc::new("enabled".to_string(), Datatype::Boolean, false),
-            ColumnDesc::new("bytes".to_string(), Datatype::Bytes, true),
+            ValueDesc::new("id".to_string(), Datatype::Int64, false),
+            ValueDesc::new("age".to_string(), Datatype::Int8, true),
+            ValueDesc::new("height".to_string(), Datatype::Int16, true),
+            ValueDesc::new("weight".to_string(), Datatype::Int32, false),
+            ValueDesc::new("name".to_string(), Datatype::String, false),
+            ValueDesc::new("email".to_string(), Datatype::String, true),
+            ValueDesc::new("enabled".to_string(), Datatype::Boolean, false),
+            ValueDesc::new("bytes".to_string(), Datatype::Bytes, true),
         ];
         (descs, 0)
     }
@@ -301,44 +260,44 @@ pub(crate) mod test {
         let mut items = vec![];
         for i in 0..50 {
             let mut columns = vec![
-                Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false),
-                Column::new(
+                Value::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false),
+                Value::new(
                     Datatype::Int8,
                     "age".to_string(),
                     Arc::new(Some(i as i8)),
                     true,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::Int16,
                     "height".to_string(),
                     Arc::new(Some(i as i16 * 20)),
                     true,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::Int32,
                     "weight".to_string(),
                     Arc::new(i * 200_i32),
                     false,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::String,
                     "name".to_string(),
                     Arc::new(i.to_string()),
                     false,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::String,
                     "email".to_string(),
                     Arc::new(Some(format!("{}@tonbo.io", i))),
                     true,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::Boolean,
                     "enabled".to_string(),
                     Arc::new(i % 2 == 0),
                     false,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::Bytes,
                     "bytes".to_string(),
                     Arc::new(Some(i.to_le_bytes().to_vec())),

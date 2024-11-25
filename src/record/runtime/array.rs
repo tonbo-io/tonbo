@@ -7,15 +7,15 @@ use arrow::{
         StringArray, StringBuilder, UInt32Builder,
     },
     datatypes::{
-        Int16Type, Int32Type, Int64Type, Int8Type, Schema, UInt16Type, UInt32Type, UInt64Type,
-        UInt8Type,
+        Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type,
+        UInt64Type, UInt8Type,
     },
 };
 
-use super::{column::Column, record::DynRecord, record_ref::DynRecordRef, Datatype};
+use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, Datatype};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
-    record::{Key, Record},
+    record::{Key, Record, Schema},
     timestamp::Timestamped,
 };
 
@@ -23,7 +23,7 @@ use crate::{
 pub struct DynRecordImmutableArrays {
     _null: Arc<arrow::array::BooleanArray>,
     _ts: Arc<arrow::array::UInt32Array>,
-    columns: Vec<Column>,
+    columns: Vec<Value>,
     record_batch: arrow::record_batch::RecordBatch,
 }
 
@@ -32,7 +32,7 @@ impl ArrowArrays for DynRecordImmutableArrays {
 
     type Builder = DynRecordBuilder;
 
-    fn builder(schema: &Arc<Schema>, capacity: usize) -> Self::Builder {
+    fn builder(schema: Arc<ArrowSchema>, capacity: usize) -> Self::Builder {
         let mut builders: Vec<Box<dyn ArrayBuilder + Send + Sync>> = vec![];
         let mut datatypes = vec![];
         for field in schema.fields().iter().skip(2) {
@@ -153,7 +153,7 @@ impl ArrowArrays for DynRecordImmutableArrays {
                             .to_owned(),
                     ),
                 };
-                columns.push(Column {
+                columns.push(Value {
                     datatype,
                     name,
                     value,
@@ -171,7 +171,7 @@ impl ArrowArrays for DynRecordImmutableArrays {
     }
 }
 impl DynRecordImmutableArrays {
-    fn primitive_value<T>(col: &Column, offset: usize) -> T::Native
+    fn primitive_value<T>(col: &Value, offset: usize) -> T::Native
     where
         T: ArrowPrimitiveType,
     {
@@ -188,13 +188,13 @@ pub struct DynRecordBuilder {
     datatypes: Vec<Datatype>,
     _null: BooleanBufferBuilder,
     _ts: UInt32Builder,
-    schema: Arc<Schema>,
+    schema: Arc<ArrowSchema>,
 }
 
 impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
     fn push(
         &mut self,
-        key: Timestamped<<<DynRecord as Record>::Key as Key>::Ref<'_>>,
+        key: Timestamped<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
         row: Option<DynRecordRef>,
     ) {
         self._null.append(row.is_none());
@@ -466,7 +466,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt8Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::UInt8,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -479,7 +479,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt16Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::UInt16,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -492,7 +492,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt32Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::UInt32,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -505,7 +505,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt64Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::UInt64,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -518,7 +518,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int8Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::Int8,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -531,7 +531,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int16Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::Int16,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -544,7 +544,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int32Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::Int32,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -557,7 +557,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::Int64,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -568,7 +568,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                 Datatype::String => {
                     let value =
                         Arc::new(Self::as_builder_mut::<StringBuilder>(builder.as_mut()).finish());
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::String,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -579,7 +579,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                 Datatype::Boolean => {
                     let value =
                         Arc::new(Self::as_builder_mut::<BooleanBuilder>(builder.as_mut()).finish());
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::Boolean,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -592,7 +592,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Column {
+                    columns.push(Value {
                         datatype: Datatype::Bytes,
                         name: field.name().to_owned(),
                         value: value.clone(),
@@ -624,7 +624,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
 impl DynRecordBuilder {
     fn push_primary_key(
         &mut self,
-        key: Timestamped<<<DynRecord as Record>::Key as Key>::Ref<'_>>,
+        key: Timestamped<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
         primary_key_index: usize,
     ) {
         let builder = self.builders.get_mut(primary_key_index).unwrap();

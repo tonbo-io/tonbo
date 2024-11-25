@@ -16,13 +16,13 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct ColumnDesc {
+pub struct ValueDesc {
     pub datatype: Datatype,
     pub is_nullable: bool,
     pub name: String,
 }
 
-impl ColumnDesc {
+impl ValueDesc {
     pub fn new(name: String, datatype: Datatype, is_nullable: bool) -> Self {
         Self {
             name,
@@ -30,17 +30,35 @@ impl ColumnDesc {
             is_nullable,
         }
     }
+
+    pub(crate) fn arrow_field(&self) -> Field {
+        let arrow_type = match self.datatype {
+            Datatype::UInt8 => DataType::UInt8,
+            Datatype::UInt16 => DataType::UInt16,
+            Datatype::UInt32 => DataType::UInt32,
+            Datatype::UInt64 => DataType::UInt64,
+            Datatype::Int8 => DataType::Int8,
+            Datatype::Int16 => DataType::Int16,
+            Datatype::Int32 => DataType::Int32,
+            Datatype::Int64 => DataType::Int64,
+            Datatype::String => DataType::Utf8,
+            Datatype::Boolean => DataType::Boolean,
+            Datatype::Bytes => DataType::Binary,
+        };
+        Field::new(&self.name, arrow_type, self.is_nullable)
+    }
 }
 
 #[derive(Clone)]
-pub struct Column {
+pub struct Value {
     pub datatype: Datatype,
-    pub value: Arc<dyn Any + Send + Sync>,
     pub is_nullable: bool,
     pub name: String,
+
+    pub value: Arc<dyn Any + Send + Sync>,
 }
 
-impl Column {
+impl Value {
     pub fn new(
         datatype: Datatype,
         name: String,
@@ -96,9 +114,9 @@ impl Column {
     }
 }
 
-impl Eq for Column {}
+impl Eq for Value {}
 
-impl PartialOrd for Column {
+impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -106,7 +124,7 @@ impl PartialOrd for Column {
 
 macro_rules! implement_col {
     ([], $({$Type:ty, $Datatype:ident}), *) => {
-        impl Ord for Column {
+        impl Ord for Value {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
                 match self.datatype {
                     $(
@@ -119,7 +137,7 @@ macro_rules! implement_col {
             }
         }
 
-        impl PartialEq for Column {
+        impl PartialEq for Value {
             fn eq(&self, other: &Self) -> bool {
                 self.datatype == other.datatype
                     && self.is_nullable == other.is_nullable
@@ -134,7 +152,7 @@ macro_rules! implement_col {
             }
         }
 
-        impl Hash for Column {
+        impl Hash for Value {
             fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
                 match self.datatype {
                     $(
@@ -144,9 +162,9 @@ macro_rules! implement_col {
             }
         }
 
-        impl Debug for Column {
+        impl Debug for Value {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let mut debug_struct = f.debug_struct("Column");
+                let mut debug_struct = f.debug_struct("Value");
                 match self.datatype {
                     $(
                         Datatype::$Datatype => {
@@ -171,8 +189,8 @@ macro_rules! implement_col {
 
 macro_rules! implement_key_col {
     ($({$Type:ident, $Datatype:ident, $Array:ident}), *) => {
-        impl Key for Column {
-            type Ref<'a> = Column;
+        impl Key for Value {
+            type Ref<'a> = Value;
 
             fn as_key_ref(&self) -> Self::Ref<'_> {
                 self.clone()
@@ -216,8 +234,8 @@ macro_rules! implement_key_col {
     }
 }
 
-impl<'r> KeyRef<'r> for Column {
-    type Key = Column;
+impl<'r> KeyRef<'r> for Value {
+    type Key = Value;
 
     fn to_key(self) -> Self::Key {
         self
@@ -226,7 +244,7 @@ impl<'r> KeyRef<'r> for Column {
 
 macro_rules! implement_decode_col {
     ([], $({$Type:ty, $Datatype:ident}), *) => {
-        impl Decode for Column {
+        impl Decode for Value {
             type Error = fusio::Error;
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
@@ -253,7 +271,7 @@ macro_rules! implement_decode_col {
                         )*
                     };
                 let name = String::decode(reader).await?;
-                Ok(Column {
+                Ok(Value {
                     datatype,
                     is_nullable,
                     name,
@@ -266,7 +284,7 @@ macro_rules! implement_decode_col {
 
 macro_rules! implement_encode_col {
     ([], $({$Type:ty, $Datatype:ident}), *) => {
-        impl Encode for Column {
+        impl Encode for Value {
             type Error = fusio::Error;
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
@@ -319,7 +337,7 @@ macro_rules! implement_encode_col {
     }
 }
 
-impl Column {
+impl Value {
     fn tag(datatype: Datatype) -> u8 {
         match datatype {
             Datatype::UInt8 => 0,
@@ -354,8 +372,8 @@ impl Column {
     }
 }
 
-impl From<&Column> for Field {
-    fn from(col: &Column) -> Self {
+impl From<&ValueDesc> for Field {
+    fn from(col: &ValueDesc) -> Self {
         match col.datatype {
             Datatype::UInt8 => Field::new(&col.name, DataType::UInt8, col.is_nullable),
             Datatype::UInt16 => Field::new(&col.name, DataType::UInt16, col.is_nullable),

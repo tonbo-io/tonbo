@@ -2,11 +2,12 @@ pub mod internal;
 mod key;
 pub mod runtime;
 #[cfg(test)]
-mod test;
+pub(crate) mod test;
 
 use std::{error::Error, fmt::Debug, io, sync::Arc};
 
-use arrow::{array::RecordBatch, datatypes::Schema};
+use array::DynRecordImmutableArrays;
+use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
 use internal::InternalRecordRef;
 pub use key::{Key, KeyRef};
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
@@ -18,55 +19,104 @@ use crate::{
     serdes::{Decode, Encode},
 };
 
-#[allow(unused)]
-pub(crate) enum RecordInstance {
-    Normal,
-    Runtime(DynRecord),
+// #[allow(unused)]
+// pub(crate) enum RecordInstance {
+//     Normal,
+//     Runtime(DynRecord),
+// }
+
+// #[allow(unused)]
+// impl RecordInstance {
+//     pub(crate) fn primary_key_index<R>(&self) -> usize
+//     where
+//         R: Record,
+//     {
+//         match self {
+//             RecordInstance::Normal => R::primary_key_index(),
+//             RecordInstance::Runtime(record) => record.primary_key_index(),
+//         }
+//     }
+
+//     pub(crate) fn arrow_schema<R>(&self) -> Arc<ArrowSchema>
+//     where
+//         R: Record,
+//     {
+//         match self {
+//             RecordInstance::Normal => R::arrow_schema().clone(),
+//             RecordInstance::Runtime(record) => record.arrow_schema(),
+//         }
+//     }
+// }
+
+pub trait Schema {
+    type Record: Record<Schema = Self>;
+
+    type Columns: ArrowArrays<Record = Self::Record>;
+
+    type Key: Key;
+
+    fn arrow_schema(&self) -> &Arc<ArrowSchema>;
+
+    fn primary_key_index(&self) -> usize;
+
+    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>);
 }
 
-#[allow(unused)]
-impl RecordInstance {
-    pub(crate) fn primary_key_index<R>(&self) -> usize
-    where
-        R: Record,
-    {
-        match self {
-            RecordInstance::Normal => R::primary_key_index(),
-            RecordInstance::Runtime(record) => record.primary_key_index(),
+#[derive(Debug)]
+pub struct DynSchema {
+    schema: Vec<ValueDesc>,
+    primary_index: usize,
+    arrow_schema: Arc<ArrowSchema>,
+}
+
+impl DynSchema {
+    pub fn new(schema: Vec<ValueDesc>, primary_index: usize) -> Self {
+        let arrow_schema = Arc::new(ArrowSchema::new(
+            schema
+                .iter()
+                .map(|desc| desc.arrow_field())
+                .collect::<Vec<_>>(),
+        ));
+        Self {
+            schema,
+            primary_index,
+            arrow_schema,
         }
     }
+}
 
-    pub(crate) fn arrow_schema<R>(&self) -> Arc<Schema>
-    where
-        R: Record,
-    {
-        match self {
-            RecordInstance::Normal => R::arrow_schema().clone(),
-            RecordInstance::Runtime(record) => record.arrow_schema(),
-        }
+impl Schema for DynSchema {
+    type Record = DynRecord;
+
+    type Columns = DynRecordImmutableArrays;
+
+    type Key = Value;
+
+    fn arrow_schema(&self) -> &Arc<ArrowSchema> {
+        &self.arrow_schema
+    }
+
+    fn primary_key_index(&self) -> usize {
+        self.primary_index
+    }
+
+    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
+        unimplemented!()
     }
 }
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
-    type Columns: ArrowArrays<Record = Self>;
-
-    type Key: Key;
+    type Schema: Schema<Record = Self>;
 
     type Ref<'r>: RecordRef<'r, Record = Self>
     where
         Self: 'r;
 
-    fn key(&self) -> <<Self as Record>::Key as Key>::Ref<'_> {
+    fn key(&self) -> <<<Self as Record>::Schema as Schema>::Key as Key>::Ref<'_> {
         self.as_record_ref().key()
     }
 
-    fn primary_key_index() -> usize;
-
-    fn primary_key_path() -> (ColumnPath, Vec<SortingColumn>);
-
     fn as_record_ref(&self) -> Self::Ref<'_>;
-
-    fn arrow_schema() -> &'static Arc<Schema>;
 
     fn size(&self) -> usize;
 }
@@ -74,7 +124,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
 pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
     type Record: Record;
 
-    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;
+    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r>;
 
     fn projection(&mut self, projection_mask: &ProjectionMask);
 
@@ -82,7 +132,7 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
         record_batch: &'r RecordBatch,
         offset: usize,
         projection_mask: &'r ProjectionMask,
-        full_schema: &'r Arc<Schema>,
+        full_schema: &'r Arc<ArrowSchema>,
     ) -> InternalRecordRef<'r, Self>;
 }
 

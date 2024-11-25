@@ -527,7 +527,7 @@ pub(crate) mod tests {
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileId, FileType},
         inmem::{immutable::Immutable, mutable::Mutable},
-        record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance},
+        record::{Datatype, DynRecord, Record, RecordInstance, Value, ValueDesc},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -712,7 +712,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let empty_record = DynRecord::empty_record(
-            vec![ColumnDesc::new("id".to_owned(), Datatype::Int32, false)],
+            vec![ValueDesc::new("id".to_owned(), Datatype::Int32, false)],
             0,
         );
         let instance = RecordInstance::Runtime(empty_record);
@@ -720,7 +720,7 @@ pub(crate) mod tests {
         let mut batch1_data = vec![];
         let mut batch2_data = vec![];
         for i in 0..40 {
-            let col = Column::new(Datatype::Int32, "id".to_owned(), Arc::new(i), false);
+            let col = Value::new(Datatype::Int32, "id".to_owned(), Arc::new(i), false);
             if i % 4 == 0 {
                 continue;
             }
@@ -758,11 +758,11 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(
             scope.min,
-            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(2), false)
+            Value::new(Datatype::Int32, "id".to_owned(), Arc::new(2), false)
         );
         assert_eq!(
             scope.max,
-            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(39), false)
+            Value::new(Datatype::Int32, "id".to_owned(), Arc::new(39), false)
         );
     }
 

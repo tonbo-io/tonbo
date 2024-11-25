@@ -246,8 +246,8 @@ mod tests {
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
         record::{
-            runtime::{Column, Datatype, DynRecord},
-            ColumnDesc,
+            runtime::{Datatype, DynRecord, Value},
+            ValueDesc,
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
@@ -789,9 +789,9 @@ mod tests {
     #[tokio::test]
     async fn test_dyn_record() {
         let descs = vec![
-            ColumnDesc::new("age".to_string(), Datatype::Int8, false),
-            ColumnDesc::new("height".to_string(), Datatype::Int16, true),
-            ColumnDesc::new("weight".to_string(), Datatype::Int32, false),
+            ValueDesc::new("age".to_string(), Datatype::Int8, false),
+            ValueDesc::new("height".to_string(), Datatype::Int16, true),
+            ValueDesc::new("weight".to_string(), Datatype::Int32, false),
         ];
 
         let temp_dir = TempDir::new().unwrap();
@@ -806,14 +806,14 @@ mod tests {
 
         db.insert(DynRecord::new(
             vec![
-                Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
-                Column::new(
+                Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
+                Value::new(
                     Datatype::Int16,
                     "height".to_string(),
                     Arc::new(Some(180_i16)),
                     true,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::Int32,
                     "weight".to_string(),
                     Arc::new(56_i32),
@@ -827,7 +827,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false);
+            let key = Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());

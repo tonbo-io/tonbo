@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     fs::FileId,
-    record::{Key, Record},
+    record::{Key, Record, Schema},
     serdes::{Decode, Encode},
     timestamp::Timestamped,
     wal::{log::LogType, record_entry::RecordEntry},
@@ -48,7 +48,7 @@ where
     pub(crate) async fn write<'r>(
         &mut self,
         log_ty: LogType,
-        key: Timestamped<<R::Key as Key>::Ref<'r>>,
+        key: Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'r>>,
         value: Option<R::Ref<'r>>,
     ) -> Result<(), <R::Ref<'r> as Encode>::Error> {
         let mut writer = HashWriter::new(&mut self.file);
@@ -73,7 +73,7 @@ where
         &mut self,
     ) -> impl Stream<
         Item = Result<
-            (LogType, Timestamped<R::Key>, Option<R>),
+            (LogType, Timestamped<<R::Schema as Schema>::Key>, Option<R>),
             RecoverError<<R as Decode>::Error>,
         >,
     > + '_ {

@@ -7,7 +7,7 @@ mod tests {
     use futures::StreamExt;
     use tonbo::{
         executor::opfs::OpfsExecutor,
-        record::{Column, ColumnDesc, Datatype, DynRecord, Record},
+        record::{Datatype, DynRecord, Record, Value, ValueDesc},
         DbOption, Projection, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;

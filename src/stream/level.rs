@@ -19,7 +19,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
-    record::Record,
+    record::{Record, Schema},
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
     timestamp::Timestamp,
@@ -47,8 +47,8 @@ pub(crate) struct LevelStream<'level, R>
 where
     R: Record,
 {
-    lower: Bound<&'level R::Key>,
-    upper: Bound<&'level R::Key>,
+    lower: Bound<&'level <R::Schema as Schema>::Key>,
+    upper: Bound<&'level <R::Schema as Schema>::Key>,
     ts: Timestamp,
     level: usize,
     option: Arc<DbOption<R>>,
@@ -72,7 +72,10 @@ where
         level: usize,
         start: usize,
         end: usize,
-        range: (Bound<&'level R::Key>, Bound<&'level R::Key>),
+        range: (
+            Bound<&'level <R::Schema as Schema>::Key>,
+            Bound<&'level <R::Schema as Schema>::Key>,
+        ),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,

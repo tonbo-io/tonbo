@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{manager::StoreManager, parse_file_id, FileId, FileType},
-    record::Record,
+    record::{Record, Schema},
     serdes::Encode,
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
@@ -176,7 +176,7 @@ where
 
     pub(crate) async fn apply_edits(
         &self,
-        mut version_edits: Vec<VersionEdit<R::Key>>,
+        mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {

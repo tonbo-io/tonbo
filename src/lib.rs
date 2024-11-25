@@ -149,7 +149,7 @@ use parquet::{
     errors::ParquetError,
 };
 use parquet_lru::{DynLruCache, NoCache};
-use record::{ColumnDesc, DynRecord, Record, RecordInstance};
+use record::{DynRecord, Record, ValueDesc};
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
@@ -181,7 +181,7 @@ where
 {
     schema: Arc<RwLock<Schema<R>>>,
     version_set: VersionSet<R>,
-    lock_map: LockMap<R::Key>,
+    lock_map: LockMap<<R::Schema as record::Schema>::Key>,
     manager: Arc<StoreManager>,
     parquet_lru: ParquetLru,
     _p: PhantomData<E>,
@@ -195,7 +195,7 @@ where
     pub async fn with_schema(
         option: DbOption<DynRecord>,
         executor: E,
-        column_descs: Vec<ColumnDesc>,
+        column_descs: Vec<ValueDesc>,
         primary_index: usize,
     ) -> Result<Self, DbError<DynRecord>> {
         let option = Arc::new(option);
@@ -912,8 +912,8 @@ pub(crate) mod tests {
         record::{
             internal::InternalRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
-            Column, Datatype, DynRecord, RecordDecodeError, RecordEncodeError, RecordInstance,
-            RecordRef,
+            Datatype, DynRecord, RecordDecodeError, RecordEncodeError, RecordInstance, RecordRef,
+            Value,
         },
         serdes::{Decode, Encode},
         trigger::{TriggerFactory, TriggerType},
@@ -1841,7 +1841,7 @@ pub(crate) mod tests {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx.get(&key, Projection::All).await.unwrap();
                 if i == 28 {
                     assert!(option1.is_none());
@@ -1935,8 +1935,8 @@ pub(crate) mod tests {
         // test scan
         {
             let tx = db.transaction().await;
-            let lower = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(0_i64), false);
-            let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(49_i64), false);
+            let lower = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(0_i64), false);
+            let upper = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 2, 7])
@@ -2090,7 +2090,7 @@ pub(crate) mod tests {
             let tx3 = db3.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx1.get(&key, Projection::All).await.unwrap();
                 let option2 = tx2.get(&key, Projection::All).await.unwrap();
                 let option3 = tx3.get(&key, Projection::All).await.unwrap();
@@ -2148,8 +2148,8 @@ pub(crate) mod tests {
         // test scan
         {
             let tx1 = db1.transaction().await;
-            let lower = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(8_i64), false);
-            let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(43_i64), false);
+            let lower = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(8_i64), false);
+            let upper = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(43_i64), false);
             let mut scan = tx1
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 1])

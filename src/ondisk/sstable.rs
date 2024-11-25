@@ -16,7 +16,7 @@ use ulid::Ulid;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    record::Record,
+    record::{Record, Schema},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TimestampedRef},
 };
@@ -70,7 +70,7 @@ where
 
     pub(crate) async fn get(
         self,
-        key: &TimestampedRef<R::Key>,
+        key: &TimestampedRef<<R::Schema as Schema>::Key>,
         projection_mask: ProjectionMask,
     ) -> ParquetResult<Option<RecordBatchEntry<R>>> {
         self.scan(
@@ -87,7 +87,10 @@ where
 
     pub(crate) async fn scan<'scan>(
         self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        range: (
+            Bound<&'scan <R::Schema as Schema>::Key>,
+            Bound<&'scan <R::Schema as Schema>::Key>,
+        ),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
@@ -134,7 +137,8 @@ pub(crate) mod tests {
     use crate::{
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileType},
-        record::Record,
+        inmem::immutable::tests::TestSchema,
+        record::{Record, Schema},
         tests::{get_test_record_batch, Test},
         timestamp::Timestamped,
         DbOption,
@@ -153,7 +157,7 @@ pub(crate) mod tests {
         );
         let mut writer = AsyncArrowWriter::try_new_with_options(
             AsyncWriter::new(file),
-            Test::arrow_schema().clone(),
+            TestSchema {}.arrow_schema().clone(),
             options,
         )
         .expect("Failed to create writer");
@@ -211,7 +215,7 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                         [0, 1, 2, 3],
                     ),
                 )
@@ -228,7 +232,7 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                         [0, 1, 2, 4],
                     ),
                 )
@@ -245,7 +249,7 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                         [0, 1, 2],
                     ),
                 )
@@ -286,7 +290,7 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                         [0, 1, 2, 3],
                     ),
                 )
@@ -311,7 +315,7 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                         [0, 1, 2, 4],
                     ),
                 )
@@ -336,7 +340,7 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                         [0, 1, 2],
                     ),
                 )
