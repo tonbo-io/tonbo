@@ -9,10 +9,10 @@ use pyo3::{
 use pyo3_asyncio::tokio::{future_into_py, get_runtime};
 use tonbo::{
     executor::tokio::TokioExecutor,
-    record::{ColumnDesc, DynRecord},
+    record::DynRecord,
     DB,
 };
-
+use tonbo::record::{DynSchema, Value, ValueDesc};
 use crate::{
     column::Column,
     error::{CommitError, DbError},
@@ -54,17 +54,17 @@ impl TonboDB {
                     primary_key_name = Some(col.name.clone());
                 }
                 cols.push(col.clone());
-                desc.push(ColumnDesc::from(col));
+                desc.push(ValueDesc::from(col));
             }
         }
+        let schema = DynSchema::new(desc, primary_key_index.unwrap());
         let option = option.into_option(primary_key_index.unwrap(), primary_key_name.unwrap());
         let db = get_runtime()
             .block_on(async {
                 DB::with_schema(
                     option,
                     TokioExecutor::new(),
-                    desc,
-                    primary_key_index.unwrap(),
+                    schema,
                 )
                 .await
             })
@@ -87,7 +87,7 @@ impl TonboDB {
         for i in 0..values.len()? {
             let value = values.get_item(i)?;
             if let Ok(bound_col) = value.downcast::<Column>() {
-                let col = tonbo::record::Column::from(bound_col.extract::<Column>()?);
+                let col = Value::from(bound_col.extract::<Column>()?);
                 cols.push(col);
             }
         }

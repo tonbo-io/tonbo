@@ -4,14 +4,14 @@ use pyo3::{
     types::{PyBytes, PyDict, PyDictMethods},
     Bound, Py, PyAny, Python,
 };
-use tonbo::record::Datatype;
+use tonbo::record::{Datatype, Value};
 
 use crate::{column::Column, datatype::DataType, range};
 
 pub(crate) fn to_dict(
     py: Python,
     primary_key_index: usize,
-    record: Vec<tonbo::record::Column>,
+    record: Vec<Value>,
 ) -> Bound<PyDict> {
     let dict = PyDict::new_bound(py);
     for (idx, col) in record.iter().enumerate() {
@@ -185,8 +185,8 @@ pub(crate) fn to_key(
     }
 }
 
-pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> tonbo::record::Column {
-    tonbo::record::Column::new(
+pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> Value {
+    Value::new(
         Datatype::from(&col.datatype),
         col.name.to_owned(),
         to_key(py, &col.datatype, key),
@@ -200,8 +200,8 @@ pub(crate) fn to_bound(
     lower: Option<Py<range::Bound>>,
     high: Option<Py<range::Bound>>,
 ) -> (
-    std::ops::Bound<tonbo::record::Column>,
-    std::ops::Bound<tonbo::record::Column>,
+    std::ops::Bound<Value>,
+    std::ops::Bound<Value>,
 ) {
     let lower = match lower {
         Some(bound) => bound.get().to_bound(py, col),
