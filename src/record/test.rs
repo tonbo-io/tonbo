@@ -5,12 +5,12 @@ use arrow::{
         Array, AsArray, BooleanArray, BooleanBufferBuilder, RecordBatch, StringArray,
         StringBuilder, UInt32Array, UInt32Builder,
     },
-    datatypes::{DataType, Field, Schema, UInt32Type},
+    datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type},
 };
 use once_cell::sync::Lazy;
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 
-use super::{internal::InternalRecordRef, Key, Record, RecordRef};
+use super::{internal::InternalRecordRef, Key, Record, RecordRef, Schema};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     timestamp::Timestamped,
@@ -18,10 +18,45 @@ use crate::{
 
 const PRIMARY_FIELD_NAME: &str = "vstring";
 
-impl Record for String {
+#[derive(Debug)]
+pub struct StringSchema;
+
+impl Schema for StringSchema {
+    type Record = String;
+
     type Columns = StringColumns;
 
-    type Key = Self;
+    type Key = String;
+
+    fn arrow_schema(&self) -> &Arc<ArrowSchema> {
+        static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("_null", DataType::Boolean, false),
+                Field::new("_ts", DataType::UInt32, false),
+                Field::new(PRIMARY_FIELD_NAME, DataType::Utf8, false),
+            ]))
+        });
+
+        &SCHEMA
+    }
+
+    fn primary_key_index(&self) -> usize {
+        2
+    }
+
+    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
+        (
+            ColumnPath::new(vec!["_ts".to_string(), PRIMARY_FIELD_NAME.to_string()]),
+            vec![
+                SortingColumn::new(1, true, true),
+                SortingColumn::new(2, false, true),
+            ],
+        )
+    }
+}
+
+impl Record for String {
+    type Schema = StringSchema;
 
     type Ref<'r>
         = &'r str
@@ -32,34 +67,8 @@ impl Record for String {
         self
     }
 
-    fn primary_key_index() -> usize {
-        2
-    }
-
-    fn primary_key_path() -> (ColumnPath, Vec<SortingColumn>) {
-        (
-            ColumnPath::new(vec!["_ts".to_string(), PRIMARY_FIELD_NAME.to_string()]),
-            vec![
-                SortingColumn::new(1, true, true),
-                SortingColumn::new(2, false, true),
-            ],
-        )
-    }
-
     fn as_record_ref(&self) -> Self::Ref<'_> {
         self
-    }
-
-    fn arrow_schema() -> &'static Arc<Schema> {
-        static SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
-            Arc::new(Schema::new(vec![
-                Field::new("_null", DataType::Boolean, false),
-                Field::new("_ts", DataType::UInt32, false),
-                Field::new(PRIMARY_FIELD_NAME, DataType::Utf8, false),
-            ]))
-        });
-
-        &SCHEMA
     }
 
     fn size(&self) -> usize {
@@ -70,7 +79,7 @@ impl Record for String {
 impl<'r> RecordRef<'r> for &'r str {
     type Record = String;
 
-    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
+    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
         self
     }
 
@@ -80,7 +89,7 @@ impl<'r> RecordRef<'r> for &'r str {
         record_batch: &'r RecordBatch,
         offset: usize,
         _: &'r ProjectionMask,
-        _: &'r Arc<Schema>,
+        _: &'r Arc<ArrowSchema>,
     ) -> InternalRecordRef<'r, Self> {
         let ts = record_batch
             .column(1)
@@ -108,7 +117,7 @@ impl ArrowArrays for StringColumns {
 
     type Builder = StringColumnsBuilder;
 
-    fn builder(_schema: &Arc<Schema>, capacity: usize) -> Self::Builder {
+    fn builder(_schema: Arc<ArrowSchema>, capacity: usize) -> Self::Builder {
         StringColumnsBuilder {
             _null: BooleanBufferBuilder::new(capacity),
             _ts: UInt32Builder::with_capacity(capacity),
@@ -166,8 +175,9 @@ impl Builder<StringColumns> for StringColumnsBuilder {
         let _ts = Arc::new(self._ts.finish());
         let string = Arc::new(self.string.finish());
 
+        let schema = StringSchema;
         let record_batch = RecordBatch::try_new(
-            <StringColumns as ArrowArrays>::Record::arrow_schema().clone(),
+            schema.arrow_schema().clone(),
             vec![
                 Arc::clone(&_null) as Arc<dyn Array>,
                 Arc::clone(&_ts) as Arc<dyn Array>,

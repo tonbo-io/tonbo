@@ -3,18 +3,18 @@ use pyo3::{
     types::{PyAnyMethods, PyMapping, PyMappingMethods},
     Py, PyAny, PyResult, Python,
 };
-use tonbo::record::DynRecord;
+use tonbo::record::{DynRecord, Value};
 
 use crate::Column;
 
 #[derive(Clone)]
 struct Record {
-    columns: Vec<tonbo::record::Column>,
+    columns: Vec<Value>,
     primary_key_index: usize,
 }
 
 impl Record {
-    fn new(columns: Vec<tonbo::record::Column>, primary_key_index: usize) -> Self {
+    fn new(columns: Vec<Value>, primary_key_index: usize) -> Self {
         Self {
             columns,
             primary_key_index,
@@ -58,7 +58,7 @@ impl RecordBatch {
                 if col.primary_key {
                     primary_key_index = col_idx;
                 }
-                let col = tonbo::record::Column::from(col);
+                let col = Value::from(col);
                 cols.push(col);
                 col_idx += 1;
             }

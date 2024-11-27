@@ -21,7 +21,7 @@ use record_batch::RecordBatchEntry;
 use crate::{
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
-    record::{Key, Record, RecordRef},
+    record::{Key, Record, RecordRef, Schema},
     stream::{level::LevelStream, mem_projection::MemProjectionStream},
     timestamp::Timestamped,
     transaction::TransactionScan,
@@ -31,8 +31,15 @@ pub enum Entry<'entry, R>
 where
     R: Record,
 {
-    Transaction((Timestamped<<R::Key as Key>::Ref<'entry>>, &'entry Option<R>)),
-    Mutable(crossbeam_skiplist::map::Entry<'entry, Timestamped<R::Key>, Option<R>>),
+    Transaction(
+        (
+            Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'entry>>,
+            &'entry Option<R>,
+        ),
+    ),
+    Mutable(
+        crossbeam_skiplist::map::Entry<'entry, Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
+    ),
     Projection((Box<Entry<'entry, R>>, Arc<ProjectionMask>)),
     RecordBatch(RecordBatchEntry<R>),
 }
@@ -41,14 +48,14 @@ impl<R> Entry<'_, R>
 where
     R: Record,
 {
-    pub(crate) fn key(&self) -> Timestamped<<R::Key as Key>::Ref<'_>> {
+    pub(crate) fn key(&self) -> Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'_>> {
         match self {
             Entry::Transaction((key, _)) => {
                 // Safety: shorter lifetime must be safe
                 unsafe {
                     transmute::<
-                        Timestamped<<<R as Record>::Key as Key>::Ref<'_>>,
-                        Timestamped<<<R as Record>::Key as Key>::Ref<'_>>,
+                        Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
+                        Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
                     >(key.clone())
                 }
             }
@@ -77,7 +84,7 @@ where
 impl<R> fmt::Debug for Entry<'_, R>
 where
     R: Record + Debug,
-    R::Key: Debug,
+    <R::Schema as Schema>::Key: Debug,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {

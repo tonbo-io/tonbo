@@ -107,6 +107,7 @@ pub(crate) mod tests {
     use crate::{
         executor::{tokio::TokioExecutor, Executor},
         fs::{manager::StoreManager, FileId, FileType},
+        inmem::immutable::tests::TestSchema,
         tests::Test,
         version::cleaner::{CleanTag, Cleaner},
         DbOption,
@@ -116,9 +117,10 @@ pub(crate) mod tests {
     async fn test_cleaner() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::from((
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+            &TestSchema,
+        )));
 
         let gen_0 = FileId::new();
         let gen_1 = FileId::new();

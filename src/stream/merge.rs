@@ -163,7 +163,11 @@ mod tests {
 
     use super::MergeStream;
     use crate::{
-        inmem::mutable::Mutable, stream::Entry, trigger::TriggerFactory, wal::log::LogType,
+        inmem::{immutable::tests::TestSchema, mutable::Mutable},
+        record::test::StringSchema,
+        stream::Entry,
+        trigger::TriggerFactory,
+        wal::log::LogType,
         DbOption,
     };
 
@@ -171,13 +175,18 @@ mod tests {
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from((
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
+        ));
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m1 = Mutable::<String>::new(&option, trigger, &fs).await.unwrap();
+        let m1 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
+            .await
+            .unwrap();
 
         m1.remove(LogType::Full, "b".into(), 3.into())
             .await
@@ -191,7 +200,9 @@ mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m2 = Mutable::<String>::new(&option, trigger, &fs).await.unwrap();
+        let m2 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
+            .await
+            .unwrap();
         m2.insert(LogType::Full, "a".into(), 1.into())
             .await
             .unwrap();
@@ -204,7 +215,9 @@ mod tests {
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m3 = Mutable::<String>::new(&option, trigger, &fs).await.unwrap();
+        let m3 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
+            .await
+            .unwrap();
         m3.insert(LogType::Full, "e".into(), 4.into())
             .await
             .unwrap();
@@ -265,13 +278,18 @@ mod tests {
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from((
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
+        ));
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m1 = Mutable::<String>::new(&option, trigger, &fs).await.unwrap();
+        let m1 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
+            .await
+            .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();
@@ -351,13 +369,18 @@ mod tests {
     async fn merge_mutable_limit() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from((
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
+        ));
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m1 = Mutable::<String>::new(&option, trigger, &fs).await.unwrap();
+        let m1 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
+            .await
+            .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();

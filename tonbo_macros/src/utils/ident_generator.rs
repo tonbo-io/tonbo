@@ -3,6 +3,8 @@ use syn::Ident;
 pub(crate) trait IdentGenerator {
     fn to_ref_ident(&self) -> Ident;
 
+    fn to_schema_ident(&self) -> Ident;
+
     fn to_builder_ident(&self) -> Ident;
 
     fn to_array_ident(&self) -> Ident;
@@ -13,6 +15,10 @@ pub(crate) trait IdentGenerator {
 impl IdentGenerator for proc_macro2::Ident {
     fn to_ref_ident(&self) -> Ident {
         Ident::new(&format!("{}Ref", self), self.span())
+    }
+
+    fn to_schema_ident(&self) -> Ident {
+        Ident::new(&format!("{}Schema", self), self.span())
     }
 
     fn to_builder_ident(&self) -> Ident {
