@@ -193,7 +193,10 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            DbOption::from((
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            )),
             TokioExecutor::new(),
         )
         .await;
@@ -268,7 +271,10 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            DbOption::from((
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            )),
             TokioExecutor::new(),
         )
         .await;

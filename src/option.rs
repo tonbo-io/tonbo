@@ -14,7 +14,7 @@ use parquet::{
 
 use crate::{
     fs::{FileId, FileType},
-    record::Record,
+    record::{Record, Schema},
     trigger::TriggerType,
     version::{Version, MAX_LEVEL},
     DbError,
@@ -96,13 +96,13 @@ where
     }
 }
 
-impl<R> From<Path> for DbOption<R>
+impl<R> From<(Path, &R::Schema)> for DbOption<R>
 where
     R: Record,
 {
     /// build the default configured [`DbOption`] based on the passed path
-    fn from(base_path: Path) -> Self {
-        let (column_paths, sorting_columns) = R::primary_key_path();
+    fn from((base_path, schema): (Path, &R::Schema)) -> Self {
+        let (column_paths, sorting_columns) = schema.primary_key_path();
         DbOption {
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,

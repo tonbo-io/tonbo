@@ -63,21 +63,31 @@ mod tests {
     use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
 
     use crate::{
-        inmem::mutable::Mutable, record::Record, stream::mem_projection::MemProjectionStream,
-        tests::Test, trigger::TriggerFactory, wal::log::LogType, DbOption,
+        inmem::{immutable::tests::TestSchema, mutable::Mutable},
+        record::{Record, Schema},
+        stream::mem_projection::MemProjectionStream,
+        tests::Test,
+        trigger::TriggerFactory,
+        wal::log::LogType,
+        DbOption,
     };
 
     #[tokio::test]
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from((
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        ));
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let mutable = Mutable::<Test>::new(&option, trigger, &fs).await.unwrap();
+        let mutable = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
+            .await
+            .unwrap();
 
         mutable
             .insert(
@@ -117,7 +127,7 @@ mod tests {
             .unwrap();
 
         let mask = ProjectionMask::roots(
-            &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+            &arrow_to_parquet_schema(TestSchema.arrow_schema()).unwrap(),
             vec![0, 1, 2, 4],
         );
 

@@ -229,17 +229,23 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version, fs::manager::StoreManager, record::Record,
-        stream::level::LevelStream, tests::Test, DbOption,
+        compaction::tests::build_version,
+        fs::manager::StoreManager,
+        inmem::immutable::tests::TestSchema,
+        record::{Record, Schema},
+        stream::level::LevelStream,
+        tests::Test,
+        DbOption,
     };
 
     #[tokio::test]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::from((
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+            &TestSchema {},
+        )));
 
         manager
             .base_fs()
@@ -252,7 +258,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
 
         {
             let mut level_stream_1 = LevelStream::new(
@@ -264,7 +270,7 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                     [0, 1, 2, 3],
                 ),
                 manager.base_fs().clone(),
@@ -301,7 +307,7 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                     [0, 1, 2, 4],
                 ),
                 manager.base_fs().clone(),
@@ -338,7 +344,7 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                     [0, 1, 2],
                 ),
                 manager.base_fs().clone(),

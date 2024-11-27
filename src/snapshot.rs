@@ -5,7 +5,7 @@ use parquet::arrow::ProjectionMask;
 
 use crate::{
     fs::manager::StoreManager,
-    record::Record,
+    record::{Record, Schema as RecordSchema},
     stream,
     stream::ScanStream,
     timestamp::Timestamp,
@@ -30,7 +30,7 @@ where
 {
     pub async fn get<'get>(
         &'get self,
-        key: &'get R::Key,
+        key: &'get <R::Schema as RecordSchema>::Key,
         projection: Projection,
     ) -> Result<Option<stream::Entry<'get, R>>, DbError<R>> {
         Ok(self
@@ -55,7 +55,10 @@ where
 
     pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+        range: (
+            Bound<&'range <R::Schema as RecordSchema>::Key>,
+            Bound<&'range <R::Schema as RecordSchema>::Key>,
+        ),
     ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
@@ -97,7 +100,10 @@ where
 
     pub(crate) fn _scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+        range: (
+            Bound<&'range <R::Schema as RecordSchema>::Key>,
+            Bound<&'range <R::Schema as RecordSchema>::Key>,
+        ),
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
@@ -127,6 +133,7 @@ mod tests {
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
+        inmem::immutable::tests::TestSchema,
         tests::{build_db, build_schema},
         version::TransactionTs,
         DbOption,
@@ -136,9 +143,10 @@ mod tests {
     async fn snapshot_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::from((
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        ));
+            &TestSchema,
+        )));
 
         manager
             .base_fs()
@@ -151,7 +159,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -160,6 +168,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::new(),
             schema,
+            Arc::new(TestSchema),
             version,
             manager,
         )

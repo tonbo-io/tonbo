@@ -236,6 +236,7 @@ pub(crate) mod tests {
         timestamp::timestamped::Timestamped,
     };
 
+    #[derive(Debug)]
     pub struct TestSchema;
 
     impl Schema for TestSchema {

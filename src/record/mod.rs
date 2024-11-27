@@ -4,10 +4,13 @@ pub mod runtime;
 #[cfg(test)]
 pub(crate) mod test;
 
-use std::{error::Error, fmt::Debug, io, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt::Debug, io, sync::Arc};
 
 use array::DynRecordImmutableArrays;
-use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use arrow::{
+    array::RecordBatch,
+    datatypes::{DataType, Field, Schema as ArrowSchema},
+};
 use internal::InternalRecordRef;
 pub use key::{Key, KeyRef};
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
@@ -48,7 +51,7 @@ use crate::{
 //     }
 // }
 
-pub trait Schema {
+pub trait Schema: Debug + Send + Sync {
     type Record: Record<Schema = Self>;
 
     type Columns: ArrowArrays<Record = Self::Record>;
@@ -71,11 +74,17 @@ pub struct DynSchema {
 
 impl DynSchema {
     pub fn new(schema: Vec<ValueDesc>, primary_index: usize) -> Self {
-        let arrow_schema = Arc::new(ArrowSchema::new(
-            schema
-                .iter()
-                .map(|desc| desc.arrow_field())
-                .collect::<Vec<_>>(),
+        let mut metadata = HashMap::new();
+        metadata.insert("primary_key_index".to_string(), primary_index.to_string());
+        let arrow_schema = Arc::new(ArrowSchema::new_with_metadata(
+            [
+                Field::new("_null", DataType::Boolean, false),
+                Field::new("_ts", DataType::UInt32, false),
+            ]
+            .into_iter()
+            .chain(schema.iter().map(|desc| desc.arrow_field()))
+            .collect::<Vec<_>>(),
+            metadata,
         ));
         Self {
             schema,

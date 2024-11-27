@@ -234,11 +234,14 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from((
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        ));
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
-        let mem_table = Mutable::<Test>::new(&option, trigger, &fs, TestSchema)
+        let mem_table = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
             .await
             .unwrap();
 
@@ -284,7 +287,10 @@ mod tests {
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from((
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
+        ));
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));

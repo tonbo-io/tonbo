@@ -238,10 +238,10 @@ pub(crate) mod test {
     use std::sync::Arc;
 
     use super::DynRecord;
-    use crate::record::{Datatype, Value, ValueDesc};
+    use crate::record::{Datatype, DynSchema, Value, ValueDesc};
 
     #[allow(unused)]
-    pub(crate) fn test_dyn_item_schema() -> (Vec<ValueDesc>, usize) {
+    pub(crate) fn test_dyn_item_schema() -> DynSchema {
         let descs = vec![
             ValueDesc::new("id".to_string(), Datatype::Int64, false),
             ValueDesc::new("age".to_string(), Datatype::Int8, true),
@@ -252,7 +252,7 @@ pub(crate) mod test {
             ValueDesc::new("enabled".to_string(), Datatype::Boolean, false),
             ValueDesc::new("bytes".to_string(), Datatype::Bytes, true),
         ];
-        (descs, 0)
+        DynSchema::new(descs, 0)
     }
 
     #[allow(unused)]

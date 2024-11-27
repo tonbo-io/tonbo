@@ -1,14 +1,16 @@
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
+use arrow::datatypes::Schema as ArrowSchema;
 use futures_core::Stream;
 use pin_project_lite::pin_project;
 
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
-    record::{Record, RecordInstance},
+    record::{Record, Schema},
     stream::merge::MergeStream,
 };
 
@@ -20,7 +22,7 @@ pin_project! {
         row_count: usize,
         batch_size: usize,
         inner: MergeStream<'package, R>,
-        builder: <R::Columns as ArrowArrays>::Builder,
+        builder: <<R::Schema as Schema>::Columns as ArrowArrays>::Builder,
         projection_indices: Option<Vec<usize>>,
     }
 }
@@ -33,13 +35,13 @@ where
         batch_size: usize,
         merge: MergeStream<'package, R>,
         projection_indices: Option<Vec<usize>>,
-        instance: &RecordInstance,
+        schema: Arc<ArrowSchema>,
     ) -> Self {
         Self {
             row_count: 0,
             batch_size,
             inner: merge,
-            builder: R::Columns::builder(&instance.arrow_schema::<R>(), batch_size),
+            builder: <R::Schema as Schema>::Columns::builder(schema, batch_size),
             projection_indices,
         }
     }
@@ -49,7 +51,7 @@ impl<'package, R> Stream for PackageStream<'package, R>
 where
     R: Record,
 {
-    type Item = Result<R::Columns, parquet::errors::ParquetError>;
+    type Item = Result<<R::Schema as Schema>::Columns, parquet::errors::ParquetError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut project = self.project();
@@ -88,10 +90,13 @@ mod tests {
 
     use crate::{
         inmem::{
-            immutable::{tests::TestImmutableArrays, ArrowArrays},
+            immutable::{
+                tests::{TestImmutableArrays, TestSchema},
+                ArrowArrays,
+            },
             mutable::Mutable,
         },
-        record::Record,
+        record::{Record, Schema},
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
         trigger::TriggerFactory,
@@ -103,13 +108,18 @@ mod tests {
     async fn iter() {
         let temp_dir = TempDir::new().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::from((
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        ));
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let m1 = Mutable::<Test>::new(&option, trigger, &fs).await.unwrap();
+        let m1 = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
+            .await
+            .unwrap();
         m1.insert(
             LogType::Full,
             Test {
@@ -191,7 +201,7 @@ mod tests {
             row_count: 0,
             batch_size: 8192,
             inner: merge,
-            builder: TestImmutableArrays::builder(Test::arrow_schema(), 8192),
+            builder: TestImmutableArrays::builder(TestSchema {}.arrow_schema().clone(), 8192),
             projection_indices: Some(projection_indices.clone()),
         };
 
@@ -199,7 +209,12 @@ mod tests {
         assert_eq!(
             arrays.as_record_batch(),
             &RecordBatch::try_new(
-                Arc::new(Test::arrow_schema().project(&projection_indices).unwrap(),),
+                Arc::new(
+                    TestSchema {}
+                        .arrow_schema()
+                        .project(&projection_indices)
+                        .unwrap(),
+                ),
                 vec![
                     Arc::new(BooleanArray::from(vec![
                         false, false, false, false, false, false
