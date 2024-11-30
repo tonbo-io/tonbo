@@ -4,14 +4,17 @@ from tonbo import error as error
 from tonbo.fs import FsOptions
 
 @final
-class Record: ...
+class Record:
+    def __call__(self) -> None: ...
 
 @final
 class Bound(Enum):
     """Tonbo range for scan. None for unbounded"""
 
-    Included = auto()
-    Excluded = auto()
+    @staticmethod
+    def Included(key: Any) -> Bound: ...
+    @staticmethod
+    def Excluded(key: Any) -> Bound: ...
 
 @final
 class DataType(Enum):
