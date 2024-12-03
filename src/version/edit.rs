@@ -123,12 +123,7 @@ mod tests {
 
     use tokio::io::AsyncSeekExt;
 
-    use crate::{
-        fs::generate_file_id,
-        scope::Scope,
-        serdes::Encode,
-        version::edit::VersionEdit,
-    };
+    use crate::{fs::generate_file_id, scope::Scope, serdes::Encode, version::edit::VersionEdit};
 
     #[tokio::test]
     async fn encode_and_decode() {
