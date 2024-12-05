@@ -118,15 +118,15 @@ mod tests {
     use futures_util::StreamExt;
     use tokio::io::AsyncSeekExt;
 
-    use super::{log::LogType, FileId, WalFile};
-    use crate::timestamp::Timestamped;
+    use super::{log::LogType, WalFile};
+    use crate::{fs::generate_file_id, timestamp::Timestamped};
 
     #[tokio::test]
     async fn write_and_recover() {
         let mut bytes = Vec::new();
         let mut file = Cursor::new(&mut bytes);
         {
-            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
+            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
             wal.write(
                 LogType::Full,
                 Timestamped::new("hello", 0.into()),
@@ -138,7 +138,7 @@ mod tests {
         }
         {
             file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
+            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
 
             {
                 let mut stream = pin!(wal.recover());
@@ -147,7 +147,7 @@ mod tests {
                 assert_eq!(value, Some("hello".to_string()));
             }
 
-            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
+            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
 
             wal.write(
                 LogType::Full,
@@ -160,7 +160,7 @@ mod tests {
 
         {
             file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-            let mut wal = WalFile::<_, String>::new(&mut file, FileId::new());
+            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
 
             {
                 let mut stream = pin!(wal.recover());

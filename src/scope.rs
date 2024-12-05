@@ -161,14 +161,14 @@ mod test {
     use std::ops::Bound;
 
     use super::Scope;
-    use crate::fs::FileId;
+    use crate::fs::generate_file_id;
 
     #[tokio::test]
     async fn test_meets_range() {
         let scope = Scope {
             min: 100,
             max: 200,
-            gen: FileId::new(),
+            gen: generate_file_id(),
             wal_ids: None,
         };
 
