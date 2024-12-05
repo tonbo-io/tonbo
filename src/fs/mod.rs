@@ -6,9 +6,23 @@ use std::{
 };
 
 use fusio::{fs::OpenOptions, path::Path};
+use once_cell::sync::OnceCell;
 use ulid::{DecodeError, Ulid};
 
 pub type FileId = Ulid;
+
+static GENERATOR: OnceCell<std::sync::Mutex<ulid::Generator>> = OnceCell::new();
+
+#[inline]
+pub fn generate_file_id() -> FileId {
+    // init
+    let m = GENERATOR.get_or_init(|| std::sync::Mutex::new(ulid::Generator::new()));
+    let mut guard = m
+        .lock()
+        .expect("global file id generator lock should not fail");
+
+    guard.generate().expect("generator should not fail")
+}
 
 pub enum FileType {
     Wal,

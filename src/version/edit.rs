@@ -123,7 +123,7 @@ mod tests {
 
     use tokio::io::AsyncSeekExt;
 
-    use crate::{fs::FileId, scope::Scope, serdes::Encode, version::edit::VersionEdit};
+    use crate::{fs::generate_file_id, scope::Scope, serdes::Encode, version::edit::VersionEdit};
 
     #[tokio::test]
     async fn encode_and_decode() {
@@ -134,7 +134,7 @@ mod tests {
                     min: "Min".to_string(),
                     max: "Max".to_string(),
                     gen: Default::default(),
-                    wal_ids: Some(vec![FileId::new(), FileId::new()]),
+                    wal_ids: Some(vec![generate_file_id(), generate_file_id()]),
                 },
             },
             VersionEdit::Remove {
