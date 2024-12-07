@@ -18,7 +18,8 @@ aws = ["fusio-dispatch/aws", "fusio/aws"]
 bench = ["redb", "rocksdb", "sled"]
 bytes = ["dep:bytes"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
-default = ["aws", "bytes", "tokio", "tokio-http"]
+default = ["aws", "bytes", "float", "tokio", "tokio-http"]
+float = ["dep:ordered-float"]
 load_tbl = []
 object-store = ["fusio/object_store"]
 opfs = [
@@ -42,7 +43,7 @@ wasm = ["aws", "bytes", "opfs"]
 
 [[example]]
 name = "declare"
-required-features = ["bytes", "tokio"]
+required-features = ["bytes", "float", "tokio"]
 
 [[example]]
 name = "datafusion"
@@ -90,6 +91,7 @@ futures-io = "0.3"
 futures-util = "0.3"
 lockable = "0.1.1"
 once_cell = "1"
+ordered-float = { version = "4", optional = true }
 parquet = { version = "53", default-features = false, features = [
     "async",
     "base64",

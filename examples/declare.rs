@@ -3,6 +3,7 @@ use std::ops::Bound;
 use bytes::Bytes;
 use fusio::path::Path;
 use futures_util::stream::StreamExt;
+use ordered_float::OrderedFloat;
 use tokio::fs;
 use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
 
@@ -15,6 +16,7 @@ pub struct User {
     email: Option<String>,
     age: u8,
     bytes: Bytes,
+    float: Option<OrderedFloat<f32>>,
 }
 
 #[tokio::main]
@@ -32,6 +34,7 @@ async fn main() {
         email: Some("alice@gmail.com".into()),
         age: 22,
         bytes: Bytes::from(vec![0, 1, 2]),
+        float: Some(OrderedFloat(1.1)),
     })
     .await
     .unwrap();
@@ -61,7 +64,7 @@ async fn main() {
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 // tonbo supports pushing down projection
-                .projection(vec![1, 3])
+                .projection(vec![1, 3, 4])
                 // push down limitation
                 .limit(1)
                 .take()
@@ -75,6 +78,7 @@ async fn main() {
                         email: Some("alice@gmail.com"),
                         age: None,
                         bytes: Some(&[0, 1, 2]),
+                        float: Some(OrderedFloat(1.1)),
                     })
                 );
             }

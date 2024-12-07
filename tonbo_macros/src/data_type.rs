@@ -1,5 +1,6 @@
 use proc_macro2::Ident;
 use quote::quote;
+use syn::{GenericArgument, Type};
 
 pub(crate) enum DataType {
     UInt8,
@@ -10,6 +11,8 @@ pub(crate) enum DataType {
     Int16,
     Int32,
     Int64,
+    Float32,
+    Float64,
     String,
     Boolean,
     Bytes,
@@ -33,6 +36,20 @@ impl DataType {
             DataType::Int32
         } else if path.is_ident("i64") {
             DataType::Int64
+        } else if path.segments[0].ident == "OrderedFloat" {
+            if let syn::PathArguments::AngleBracketed(ref generic_args) = path.segments[0].arguments
+            {
+                if generic_args.args.len() == 1 {
+                    if let GenericArgument::Type(Type::Path(type_path)) = &generic_args.args[0] {
+                        if type_path.path.is_ident("f32") {
+                            return DataType::Float32;
+                        } else if type_path.path.is_ident("f64") {
+                            return DataType::Float64;
+                        }
+                    }
+                }
+            }
+            unreachable!("only f32/f64 is allowed in `OrderFloat`");
         } else if path.is_ident("String") {
             DataType::String
         } else if path.is_ident("bool") {
@@ -76,6 +93,12 @@ impl DataType {
             DataType::Boolean => {
                 quote!(bool)
             }
+            DataType::Float32 => {
+                quote!(ordered_float::OrderedFloat::<f32>)
+            }
+            DataType::Float64 => {
+                quote!(ordered_float::OrderedFloat::<f64>)
+            }
             DataType::Bytes => {
                 quote!(bytes::Bytes)
             }
@@ -107,6 +130,12 @@ impl DataType {
             }
             DataType::Int64 => {
                 quote!(::tonbo::arrow::datatypes::DataType::Int64)
+            }
+            DataType::Float32 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Float32)
+            }
+            DataType::Float64 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Float64)
             }
             DataType::String => {
                 quote!(::tonbo::arrow::datatypes::DataType::Utf8)
@@ -145,6 +174,12 @@ impl DataType {
             }
             DataType::Int64 => {
                 quote!(::tonbo::arrow::array::Int64Array)
+            }
+            DataType::Float32 => {
+                quote!(::tonbo::arrow::array::Float32Array)
+            }
+            DataType::Float64 => {
+                quote!(::tonbo::arrow::array::Float64Array)
             }
             DataType::String => {
                 quote!(::tonbo::arrow::array::StringArray)
@@ -187,6 +222,12 @@ impl DataType {
             }
             DataType::Int64 => {
                 quote!(as_primitive::<::tonbo::arrow::datatypes::Int64Type>())
+            }
+            DataType::Float32 => {
+                quote!(as_primitive::<::tonbo::arrow::datatypes::Float32Type>())
+            }
+            DataType::Float64 => {
+                quote!(as_primitive::<::tonbo::arrow::datatypes::Float64Type>())
             }
             DataType::String => {
                 quote!(as_string::<i32>())
@@ -240,6 +281,16 @@ impl DataType {
             DataType::Int64 => {
                 quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                     ::tonbo::arrow::datatypes::Int64Type,
+                >::with_capacity(capacity))
+            }
+            DataType::Float32 => {
+                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                    ::tonbo::arrow::datatypes::Float32Type,
+                >::with_capacity(capacity))
+            }
+            DataType::Float64 => {
+                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                    ::tonbo::arrow::datatypes::Float64Type,
                 >::with_capacity(capacity))
             }
             DataType::String => {
@@ -318,6 +369,20 @@ impl DataType {
                     >
                 )
             }
+            DataType::Float32 => {
+                quote!(
+                    ::tonbo::arrow::array::PrimitiveBuilder<
+                        ::tonbo::arrow::datatypes::Float32Type,
+                    >
+                )
+            }
+            DataType::Float64 => {
+                quote!(
+                    ::tonbo::arrow::array::PrimitiveBuilder<
+                        ::tonbo::arrow::datatypes::Float64Type,
+                    >
+                )
+            }
             DataType::String => {
                 quote!(::tonbo::arrow::array::StringBuilder)
             }
@@ -357,6 +422,12 @@ impl DataType {
                 quote!(std::mem::size_of_val(self.#field_name.values_slice()))
             }
             DataType::Int64 => {
+                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
+            }
+            DataType::Float32 => {
+                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
+            }
+            DataType::Float64 => {
                 quote!(std::mem::size_of_val(self.#field_name.values_slice()))
             }
             DataType::String => {
@@ -399,6 +470,12 @@ impl DataType {
             }
             DataType::Int64 => {
                 quote! {std::mem::size_of::<i64>()}
+            }
+            DataType::Float32 => {
+                quote! {std::mem::size_of::<f32>()}
+            }
+            DataType::Float64 => {
+                quote! {std::mem::size_of::<f64>()}
             }
             DataType::String => {
                 if is_nullable {

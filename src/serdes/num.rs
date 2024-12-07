@@ -44,6 +44,8 @@ implement_encode_decode!(u8);
 implement_encode_decode!(u16);
 implement_encode_decode!(u32);
 implement_encode_decode!(u64);
+implement_encode_decode!(f32);
+implement_encode_decode!(f64);
 
 #[cfg(test)]
 mod tests {
@@ -63,6 +65,8 @@ mod tests {
         let source_5 = 16i16;
         let source_6 = 32i32;
         let source_7 = 64i64;
+        let source_8 = 32f32;
+        let source_9 = 64f64;
 
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
@@ -75,6 +79,8 @@ mod tests {
         source_5.encode(&mut cursor).await.unwrap();
         source_6.encode(&mut cursor).await.unwrap();
         source_7.encode(&mut cursor).await.unwrap();
+        source_8.encode(&mut cursor).await.unwrap();
+        source_9.encode(&mut cursor).await.unwrap();
 
         cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let decoded_0 = u8::decode(&mut cursor).await.unwrap();
@@ -85,6 +91,8 @@ mod tests {
         let decoded_5 = i16::decode(&mut cursor).await.unwrap();
         let decoded_6 = i32::decode(&mut cursor).await.unwrap();
         let decoded_7 = i64::decode(&mut cursor).await.unwrap();
+        let decoded_8 = f32::decode(&mut cursor).await.unwrap();
+        let decoded_9 = f64::decode(&mut cursor).await.unwrap();
 
         assert_eq!(source_0, decoded_0);
         assert_eq!(source_1, decoded_1);
@@ -94,5 +102,7 @@ mod tests {
         assert_eq!(source_5, decoded_5);
         assert_eq!(source_6, decoded_6);
         assert_eq!(source_7, decoded_7);
+        assert_eq!(source_8, decoded_8);
+        assert_eq!(source_9, decoded_9);
     }
 }

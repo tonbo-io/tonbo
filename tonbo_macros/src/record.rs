@@ -380,7 +380,11 @@ fn trait_decode_ref_codegen(
 
         let as_method = data_type.to_as_method();
 
-        field_names.push(quote!(#field_name,));
+        if matches!(data_type, DataType::Float32 | DataType::Float64) {
+            field_names.push(quote!(#field_name: #field_name.map(ordered_float::OrderedFloat),));
+        } else {
+            field_names.push(quote!(#field_name,));
+        }
 
         if field.primary_key.unwrap_or_default() {
             from_record_batch_fields.push(quote! {
@@ -561,7 +565,11 @@ fn trait_arrow_array_codegen(
 
         let builder_with_capacity_method = data_type.to_builder_with_capacity_method();
 
-        field_names.push(quote!(#field_name,));
+        if matches!(data_type, DataType::Float32 | DataType::Float64) {
+            field_names.push(quote!(#field_name: #field_name.map(ordered_float::OrderedFloat),));
+        } else {
+            field_names.push(quote!(#field_name,));
+        }
 
         builder_init_fields.push(quote! {
             #field_name: #builder_with_capacity_method,
@@ -659,6 +667,7 @@ fn struct_builder_codegen(
 
         let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
 
+        let is_wrapper = matches!(data_type, DataType::Float32 | DataType::Float64);
         let is_string = matches!(data_type, DataType::String);
         let is_bytes = matches!(data_type, DataType::Bytes);
         let builder = data_type.to_builder();
@@ -680,11 +689,16 @@ fn struct_builder_codegen(
             + #size_method
         });
 
+        let value = if is_wrapper {
+            quote! { *#field_name }
+        } else {
+            quote! { #field_name }
+        };
         if field.primary_key.unwrap_or_default() {
         } else if is_nullable {
             builder_push_some_fields.push(quote! {
                 match row.#field_name {
-                    Some(#field_name) => self.#field_name.append_value(#field_name),
+                    Some(#field_name) => self.#field_name.append_value(#value),
                     None => self.#field_name.append_null(),
                 }
             });
@@ -701,7 +715,7 @@ fn struct_builder_codegen(
             };
             builder_push_some_fields.push(quote! {
                 match row.#field_name {
-                    Some(#field_name) => self.#field_name.append_value(#field_name),
+                    Some(#field_name) => self.#field_name.append_value(#value),
                     None => #append_default,
                 }
             });
