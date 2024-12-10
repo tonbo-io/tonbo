@@ -28,6 +28,7 @@ class FsOptions:
             region: str | None = None,
             sign_payload: bool | None = None,
             checksum: bool | None = None,
+            endpoint: str | None = None,
         ) -> None: ...
 
 def parse(path: str) -> str: ...
