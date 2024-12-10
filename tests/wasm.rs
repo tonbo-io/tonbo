@@ -302,4 +302,119 @@ mod tests {
         drop(db);
         remove("opfs_dir").await;
     }
+
+    #[ignore]
+    #[wasm_bindgen_test]
+    async fn test_s3_read_write() {
+        use fusio::remotes::aws::AwsCredential;
+        use fusio_dispatch::FsOptions;
+
+        if option_env!("AWS_ACCESS_KEY_ID").is_none() {
+            return;
+        }
+        let key_id = option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
+        let secret_key = option_env!("AWS_SECRET_ACCESS_KEY").unwrap().to_string();
+
+        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+
+        let fs_option = FsOptions::S3 {
+            bucket: "wasm-data".to_string(),
+            credential: Some(AwsCredential {
+                key_id,
+                secret_key,
+                token: None,
+            }),
+            endpoint: None,
+            sign_payload: None,
+            checksum: None,
+            region: Some("ap-southeast-2".to_string()),
+        };
+
+        let option = DbOption::with_path(
+            Path::from_opfs_path("s3_rw").unwrap(),
+            "id".to_string(),
+            primary_key_index,
+        )
+        .level_path(
+            0,
+            Path::from_url_path("tonbo/l0").unwrap(),
+            fs_option.clone(),
+        )
+        .unwrap()
+        .level_path(
+            1,
+            Path::from_url_path("tonbo/l1").unwrap(),
+            fs_option.clone(),
+        )
+        .unwrap()
+        .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
+        .unwrap()
+        .major_threshold_with_sst_size(3)
+        .level_sst_magnification(1)
+        .max_sst_file_size(1 * 1024);
+
+        let db: DB<DynRecord, OpfsExecutor> =
+            DB::with_schema(option, OpfsExecutor::new(), cols_desc, primary_key_index)
+                .await
+                .unwrap();
+
+        for (i, item) in test_dyn_items().into_iter().enumerate() {
+            db.insert(item).await.unwrap();
+            if i % 5 == 0 {
+                db.flush().await.unwrap();
+            }
+        }
+
+        {
+            let tx = db.transaction().await;
+
+            let mut scan = tx
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(vec![0, 1, 2])
+                .take()
+                .await
+                .unwrap();
+
+            let mut i = 0;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
+
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.name, "id".to_string());
+                assert_eq!(
+                    *primary_key_col
+                        .value
+                        .as_ref()
+                        .downcast_ref::<i64>()
+                        .unwrap(),
+                    i
+                );
+
+                let col = columns.get(1).unwrap();
+                assert_eq!(col.datatype, Datatype::Int8);
+                assert_eq!(col.name, "age".to_string());
+                let age = col.value.as_ref().downcast_ref::<Option<i8>>();
+                assert!(age.is_some());
+                assert_eq!(age.unwrap(), &Some(i as i8));
+
+                let col = columns.get(2).unwrap();
+                assert_eq!(col.datatype, Datatype::String);
+                assert_eq!(col.name, "name".to_string());
+                let name = col.value.as_ref().downcast_ref::<Option<String>>();
+                assert!(name.is_some());
+                assert_eq!(name.unwrap(), &Some(i.to_string()));
+
+                let col = columns.get(4).unwrap();
+                assert_eq!(col.datatype, Datatype::Bytes);
+                assert_eq!(col.name, "bytes".to_string());
+                let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
+                assert!(bytes.unwrap().is_none());
+                i += 1
+            }
+        }
+        drop(db);
+
+        remove("s3_rw").await;
+    }
 }

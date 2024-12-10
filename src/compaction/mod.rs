@@ -276,13 +276,16 @@ where
                     inner: level_scan_ll,
                 });
             }
+
+            let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
+            let level_l_fs = manager.get_fs(level_l_path);
             Self::build_tables(
                 option,
                 version_edits,
                 level + 1,
                 streams,
                 instance,
-                level_fs,
+                level_l_fs,
             )
             .await?;
 
