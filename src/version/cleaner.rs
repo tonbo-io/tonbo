@@ -106,7 +106,7 @@ pub(crate) mod tests {
 
     use crate::{
         executor::{tokio::TokioExecutor, Executor},
-        fs::{manager::StoreManager, FileId, FileType},
+        fs::{generate_file_id, manager::StoreManager, FileId, FileType},
         inmem::immutable::tests::TestSchema,
         tests::Test,
         version::cleaner::{CleanTag, Cleaner},
@@ -122,10 +122,10 @@ pub(crate) mod tests {
             &TestSchema,
         )));
 
-        let gen_0 = FileId::new();
-        let gen_1 = FileId::new();
-        let gen_2 = FileId::new();
-        let gen_3 = FileId::new();
+        let gen_0 = generate_file_id();
+        let gen_1 = generate_file_id();
+        let gen_2 = generate_file_id();
+        let gen_3 = generate_file_id();
         let fs = option
             .level_fs_path(0)
             .map(|path| manager.get_fs(path))

@@ -8,7 +8,7 @@ use crossbeam_skiplist::{
 use fusio::{buffered::BufWriter, DynFs, DynWrite};
 
 use crate::{
-    fs::{FileId, FileType},
+    fs::{generate_file_id, FileId, FileType},
     inmem::immutable::Immutable,
     record::{Key, KeyRef, Record, Schema},
     timestamp::{
@@ -54,7 +54,7 @@ where
     ) -> Result<Self, fusio::Error> {
         let mut wal = None;
         if option.use_wal {
-            let file_id = FileId::new();
+            let file_id = generate_file_id();
 
             let file = Box::new(BufWriter::new(
                 fs.open_options(&option.wal_path(file_id), FileType::Wal.open_options(false))

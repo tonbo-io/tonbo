@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
-    fs::{manager::StoreManager, FileId, FileType},
+    fs::{generate_file_id, manager::StoreManager, FileId, FileType},
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
         mutable::Mutable,
@@ -156,7 +156,7 @@ where
             let mut min = None;
             let mut max = None;
 
-            let gen = FileId::new();
+            let gen = generate_file_id();
             let mut wal_ids = Vec::with_capacity(batches.len());
 
             let mut writer = AsyncArrowWriter::try_new(
@@ -288,13 +288,16 @@ where
                     inner: level_scan_ll,
                 });
             }
+
+            let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
+            let level_l_fs = manager.get_fs(level_l_path);
             Self::build_tables(
                 option,
                 version_edits,
                 level + 1,
                 streams,
                 instance,
-                level_fs,
+                level_l_fs,
             )
             .await?;
 
@@ -491,7 +494,7 @@ where
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
-        let gen = FileId::new();
+        let gen = generate_file_id();
         let columns = builder.finish(None);
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
@@ -555,7 +558,7 @@ pub(crate) mod tests {
     use crate::{
         compaction::Compactor,
         executor::tokio::TokioExecutor,
-        fs::{manager::StoreManager, FileId, FileType},
+        fs::{generate_file_id, manager::StoreManager, FileId, FileType},
         inmem::{
             immutable::{tests::TestSchema, Immutable},
             mutable::Mutable,
@@ -719,8 +722,8 @@ pub(crate) mod tests {
             &option,
             None,
             &vec![
-                (Some(FileId::new()), batch_1),
-                (Some(FileId::new()), batch_2),
+                (Some(generate_file_id()), batch_1),
+                (Some(generate_file_id()), batch_2),
             ],
             &TestSchema,
             &manager,
@@ -782,8 +785,8 @@ pub(crate) mod tests {
             &option,
             None,
             &vec![
-                (Some(FileId::new()), batch_1),
-                (Some(FileId::new()), batch_2),
+                (Some(generate_file_id()), batch_1),
+                (Some(generate_file_id()), batch_2),
             ],
             &instance,
             &manager,
@@ -903,8 +906,8 @@ pub(crate) mod tests {
             .unwrap_or(manager.base_fs());
 
         // level 0
-        let table_gen_1 = FileId::new();
-        let table_gen_2 = FileId::new();
+        let table_gen_1 = generate_file_id();
+        let table_gen_2 = generate_file_id();
         build_parquet_table::<Test>(
             option,
             table_gen_1,
@@ -983,9 +986,9 @@ pub(crate) mod tests {
         .unwrap();
 
         // level 1
-        let table_gen_3 = FileId::new();
-        let table_gen_4 = FileId::new();
-        let table_gen_5 = FileId::new();
+        let table_gen_3 = generate_file_id();
+        let table_gen_4 = generate_file_id();
+        let table_gen_5 = generate_file_id();
         build_parquet_table::<Test>(
             option,
             table_gen_3,
@@ -1180,8 +1183,8 @@ pub(crate) mod tests {
             .map(|path| manager.get_fs(path))
             .unwrap_or(manager.base_fs());
 
-        let table_gen0 = FileId::new();
-        let table_gen1 = FileId::new();
+        let table_gen0 = generate_file_id();
+        let table_gen1 = generate_file_id();
         let mut records0 = vec![];
         let mut records1 = vec![];
         for i in 0..10 {

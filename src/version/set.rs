@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
     record::{Record, Schema},
     serdes::Encode,
     timestamp::Timestamp,
@@ -135,7 +135,7 @@ where
             .map(|file_meta| parse_file_id(&file_meta.0.path, FileType::Log))
             .transpose()?
             .flatten()
-            .unwrap_or_else(FileId::new);
+            .unwrap_or_else(generate_file_id);
 
         let mut log = fs
             .open_options(
@@ -263,7 +263,7 @@ where
         log.close().await?;
         if edit_len >= option.version_log_snapshot_threshold {
             let fs = self.manager.base_fs();
-            let old_log_id = mem::replace(log_id, FileId::new());
+            let old_log_id = mem::replace(log_id, generate_file_id());
             let new_log = fs
                 .open_options(
                     &option.version_log_path(*log_id),
@@ -296,7 +296,7 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        fs::{manager::StoreManager, FileId, FileType},
+        fs::{generate_file_id, manager::StoreManager, FileType},
         record::{test::StringSchema, Record},
         scope::Scope,
         version::{
@@ -317,7 +317,7 @@ pub(crate) mod tests {
     where
         R: Record,
     {
-        let log_id = FileId::new();
+        let log_id = generate_file_id();
         let log = manager
             .base_fs()
             .open_options(
@@ -399,9 +399,9 @@ pub(crate) mod tests {
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
-        let gen_0 = FileId::new();
-        let gen_1 = FileId::new();
-        let gen_2 = FileId::new();
+        let gen_0 = generate_file_id();
+        let gen_1 = generate_file_id();
+        let gen_2 = generate_file_id();
 
         version_set
             .apply_edits(
@@ -528,10 +528,10 @@ pub(crate) mod tests {
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
-        let gen_0 = FileId::new();
-        let gen_1 = FileId::new();
-        let gen_2 = FileId::new();
-        let gen_3 = FileId::new();
+        let gen_0 = generate_file_id();
+        let gen_1 = generate_file_id();
+        let gen_2 = generate_file_id();
+        let gen_3 = generate_file_id();
         version_set
             .apply_edits(
                 vec![VersionEdit::Add {

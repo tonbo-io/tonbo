@@ -947,7 +947,7 @@ pub(crate) mod tests {
     use crate::{
         compaction::{CompactTask, CompactionError, Compactor},
         executor::{tokio::TokioExecutor, Executor},
-        fs::{manager::StoreManager, FileId},
+        fs::{generate_file_id, manager::StoreManager, FileId},
         inmem::{
             immutable::tests::{TestImmutableArrays, TestSchema},
             mutable::Mutable,
@@ -1286,7 +1286,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             vec![(
-                Some(FileId::new()),
+                Some(generate_file_id()),
                 Immutable::new(mutable.data, TestSchema {}.arrow_schema().clone()),
             )]
         };
