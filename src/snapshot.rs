@@ -12,6 +12,7 @@ use crate::{
     version::{TransactionTs, VersionRef},
     DbError, ParquetLru, Projection, Scan, Schema,
 };
+use crate::record::RecordInstance;
 
 pub struct Snapshot<'s, R>
 where
@@ -20,6 +21,7 @@ where
     ts: Timestamp,
     share: RwLockReadGuard<'s, Schema<R>>,
     version: VersionRef<R>,
+    instance: Arc<RecordInstance>,
     manager: Arc<StoreManager>,
     parquet_lru: ParquetLru,
 }
@@ -37,6 +39,7 @@ where
             .share
             .get(
                 &self.version,
+                &self.instance,
                 &self.manager,
                 key,
                 self.ts,
@@ -60,6 +63,7 @@ where
         Scan::new(
             &self.share,
             &self.manager,
+            &self.instance,
             range,
             self.ts,
             &self.version,
@@ -71,6 +75,7 @@ where
     pub(crate) fn new(
         share: RwLockReadGuard<'s, Schema<R>>,
         version: VersionRef<R>,
+        instance: Arc<RecordInstance>,
         manager: Arc<StoreManager>,
         parquet_lru: ParquetLru,
     ) -> Self {
@@ -78,6 +83,7 @@ where
             ts: version.load_ts(),
             share,
             version,
+            instance,
             manager,
             parquet_lru,
         }
@@ -105,6 +111,7 @@ where
         Scan::new(
             &self.share,
             &self.manager,
+            &self.instance,
             range,
             self.ts,
             &self.version,
@@ -131,6 +138,7 @@ mod tests {
         version::TransactionTs,
         DbOption,
     };
+    use crate::record::RecordInstance;
 
     #[tokio::test]
     async fn snapshot_scan() {
@@ -160,6 +168,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::new(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )

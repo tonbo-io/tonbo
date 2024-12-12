@@ -184,6 +184,7 @@ where
     lock_map: LockMap<R::Key>,
     manager: Arc<StoreManager>,
     parquet_lru: ParquetLru,
+    instance: Arc<RecordInstance>,
     _p: PhantomData<E>,
 }
 
@@ -241,6 +242,7 @@ where
         instance: RecordInstance,
         lru_cache: ParquetLru,
     ) -> Result<Self, DbError<R>> {
+        let instance = Arc::new(instance);
         let manager = Arc::new(StoreManager::new(
             option.base_fs.clone(),
             option.level_paths.clone(),
@@ -263,13 +265,14 @@ where
 
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let schema = Arc::new(RwLock::new(
-            Schema::new(option.clone(), task_tx, &version_set, instance, &manager).await?,
+            Schema::new(option.clone(), task_tx, &version_set, &manager).await?,
         ));
         let mut compactor = Compactor::<R>::new(
             schema.clone(),
             option.clone(),
             version_set.clone(),
             manager.clone(),
+            instance.clone(),
         );
 
         executor.spawn(async move {
@@ -310,6 +313,7 @@ where
             lock_map: Arc::new(Default::default()),
             manager,
             parquet_lru: lru_cache,
+            instance,
             _p: Default::default(),
         })
     }
@@ -323,6 +327,7 @@ where
         Snapshot::new(
             self.schema.read().await,
             self.version_set.current().await,
+            self.instance.clone(),
             self.manager.clone(),
             self.parquet_lru.clone(),
         )
@@ -377,6 +382,7 @@ where
             .await
             .get(
                 &*self.version_set.current().await,
+                &self.instance,
                 &self.manager,
                 key,
                 self.version_set.load_ts(),
@@ -405,6 +411,7 @@ where
             let mut scan = Scan::new(
                 &schema,
                 &self.manager,
+                &self.instance,
                 range,
                 self.version_set.load_ts(),
                 &*current,
@@ -462,6 +469,10 @@ where
         self.schema.write().await.flush_wal().await?;
         Ok(())
     }
+
+    pub fn instance(&self) -> &RecordInstance {
+        self.instance.as_ref()
+    }
 }
 
 pub(crate) struct Schema<R>
@@ -473,7 +484,6 @@ where
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
-    record_instance: RecordInstance,
 }
 
 impl<R> Schema<R>
@@ -484,7 +494,6 @@ where
         option: Arc<DbOption<R>>,
         compaction_tx: Sender<CompactTask>,
         version_set: &VersionSet<R>,
-        record_instance: RecordInstance,
         manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
@@ -494,7 +503,6 @@ where
             compaction_tx,
             recover_wal_ids: None,
             trigger,
-            record_instance,
         };
 
         let base_fs = manager.base_fs();
@@ -592,13 +600,14 @@ where
     async fn get<'get>(
         &'get self,
         version: &'get Version<R>,
+        record_instance: &'get RecordInstance,
         manager: &StoreManager,
         key: &'get R::Key,
         ts: Timestamp,
         projection: Projection,
         parquet_lru: ParquetLru,
     ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
-        let primary_key_index = self.record_instance.primary_key_index::<R>();
+        let primary_key_index = record_instance.primary_key_index::<R>();
 
         let projection = match projection {
             Projection::All => ProjectionMask::all(),
@@ -610,7 +619,7 @@ where
                 fixed_projection.dedup();
 
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(&self.record_instance.arrow_schema::<R>()).unwrap(),
+                    &arrow_to_parquet_schema(&record_instance.arrow_schema::<R>()).unwrap(),
                     fixed_projection,
                 )
             }
@@ -663,6 +672,7 @@ where
 {
     schema: &'scan Schema<R>,
     manager: &'scan StoreManager,
+    instance: &'scan RecordInstance,
     lower: Bound<&'range R::Key>,
     upper: Bound<&'range R::Key>,
     ts: Timestamp,
@@ -685,6 +695,7 @@ where
     fn new(
         schema: &'scan Schema<R>,
         manager: &'scan StoreManager,
+        instance: &'scan RecordInstance,
         (lower, upper): (Bound<&'range R::Key>, Bound<&'range R::Key>),
         ts: Timestamp,
         version: &'scan Version<R>,
@@ -696,6 +707,7 @@ where
         Self {
             schema,
             manager,
+            instance,
             lower,
             upper,
             ts,
@@ -722,13 +734,13 @@ where
         for p in &mut projection {
             *p += 2;
         }
-        let primary_key_index = self.schema.record_instance.primary_key_index::<R>();
+        let primary_key_index = self.instance.primary_key_index::<R>();
         let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
 
         let mask = ProjectionMask::roots(
-            &arrow_to_parquet_schema(&self.schema.record_instance.arrow_schema::<R>()).unwrap(),
+            &arrow_to_parquet_schema(&self.instance.arrow_schema::<R>()).unwrap(),
             fixed_projection.clone(),
         );
 
@@ -842,7 +854,7 @@ where
             batch_size,
             merge_stream,
             self.projection_indices,
-            &self.schema.record_instance,
+            &self.instance,
         ))
     }
 }
@@ -1279,7 +1291,6 @@ pub(crate) mod tests {
                 compaction_tx,
                 recover_wal_ids: None,
                 trigger,
-                record_instance: RecordInstance::Normal,
             },
             compaction_rx,
         ))
@@ -1290,6 +1301,7 @@ pub(crate) mod tests {
         compaction_rx: Receiver<CompactTask>,
         executor: E,
         schema: crate::Schema<R>,
+        instance: Arc<RecordInstance>,
         version: Version<R>,
         manager: Arc<StoreManager>,
     ) -> Result<DB<R, E>, DbError<R>>
@@ -1315,6 +1327,7 @@ pub(crate) mod tests {
             option.clone(),
             version_set.clone(),
             manager.clone(),
+            instance.clone(),
         );
 
         executor.spawn(async move {
@@ -1355,6 +1368,7 @@ pub(crate) mod tests {
             lock_map: Arc::new(Default::default()),
             manager,
             parquet_lru: Arc::new(NoCache::default()),
+            instance,
             _p: Default::default(),
         })
     }
@@ -1656,7 +1670,6 @@ pub(crate) mod tests {
             compaction_tx: task_tx.clone(),
             recover_wal_ids: None,
             trigger,
-            record_instance: RecordInstance::Normal,
         };
 
         for (i, item) in test_items().into_iter().enumerate() {
@@ -1723,7 +1736,6 @@ pub(crate) mod tests {
             compaction_tx: task_tx.clone(),
             recover_wal_ids: None,
             trigger,
-            record_instance: RecordInstance::Normal,
         };
 
         for item in test_dyn_items().into_iter() {

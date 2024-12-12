@@ -254,6 +254,7 @@ mod tests {
         version::TransactionTs,
         DbOption, Projection, DB,
     };
+    use crate::record::RecordInstance;
 
     #[tokio::test]
     async fn transaction_read_write() {
@@ -319,6 +320,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::new(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )
@@ -480,6 +482,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::new(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )
@@ -575,6 +578,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::new(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )
@@ -751,6 +755,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::new(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )

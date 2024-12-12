@@ -19,14 +19,14 @@ use crate::{
 };
 
 #[allow(unused)]
-pub(crate) enum RecordInstance {
+pub enum RecordInstance {
     Normal,
     Runtime(DynRecord),
 }
 
 #[allow(unused)]
 impl RecordInstance {
-    pub(crate) fn primary_key_index<R>(&self) -> usize
+    pub fn primary_key_index<R>(&self) -> usize
     where
         R: Record,
     {
@@ -36,7 +36,7 @@ impl RecordInstance {
         }
     }
 
-    pub(crate) fn arrow_schema<R>(&self) -> Arc<Schema>
+    pub fn arrow_schema<R>(&self) -> Arc<Schema>
     where
         R: Record,
     {
@@ -45,6 +45,18 @@ impl RecordInstance {
             RecordInstance::Runtime(record) => record.arrow_schema(),
         }
     }
+
+    pub fn dyn_columns(&self) -> &[Column] {
+        match self {
+            RecordInstance::Runtime(record) => {
+                record.columns()
+            }
+            RecordInstance::Normal => {
+                &[]
+            }
+        }
+    }
+
 }
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {

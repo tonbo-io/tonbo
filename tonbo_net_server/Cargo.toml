@@ -1,0 +1,25 @@
+[package]
+name = "tonbo_net_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-stream = "0.3"
+fusio = { path = "../../fusio/fusio", package = "fusio", version = "0.3.3", features = [
+    "dyn",
+    "fs",
+] }
+futures-core = "0.3"
+futures-util = "0.3"
+prost = { version = "0.13" }
+thiserror = "2"
+tonbo = { path = "../", package = "tonbo" }
+tonic = { version = "0.12" }
+itertools = "0.13.0"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+
+[build-dependencies]
+tonic-build = {version = "0.12"}

@@ -1,40 +1,46 @@
 use fusio::{SeqRead, Write};
+use crate::serdes::{Decode, Encode};
 
-use super::{Decode, Encode};
-
-impl Decode for Vec<u8> {
-    type Error = fusio::Error;
+impl<T> Decode for Vec<T>
+where
+    T: Decode,
+{
+    type Error = T::Error;
 
     async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
     where
         R: SeqRead,
     {
-        let len = u32::decode(reader).await?;
-        let (result, buf) = reader
-            .read_exact(vec![0u8; len as usize * size_of::<u8>()])
-            .await;
-        result?;
+        let len = u32::decode(reader).await? as usize;
+        let mut items = Vec::with_capacity(len);
 
-        Ok(buf)
+        for _ in 0..len {
+            items.push(T::decode(reader).await?);
+        }
+        Ok(items)
     }
 }
 
-impl Encode for Vec<u8> {
-    type Error = fusio::Error;
+impl<T> Encode for Vec<T>
+where
+    T: Encode + Send + Sync,
+{
+    type Error = T::Error;
 
     async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
     where
         W: Write,
     {
         (self.len() as u32).encode(writer).await?;
-        let (result, _) = writer.write_all(self.as_slice()).await;
-        result?;
 
+        for item in self {
+            item.encode(writer).await?;
+        }
         Ok(())
     }
 
     fn size(&self) -> usize {
-        size_of::<u32>() + size_of::<u8>() * self.len()
+        self.iter().map(|item| item.size()).sum::<usize>() + size_of::<u32>()
     }
 }
 

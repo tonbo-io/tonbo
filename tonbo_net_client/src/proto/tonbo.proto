@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package tonbo;
+
+message GetReq {
+    bytes key = 1;
+}
+
+message GetResp {
+     optional bytes record = 1;
+}
+
+message ScanReq {
+    bytes min = 1;
+    bytes max = 2;
+}
+
+message ScanResp {
+    bytes record = 1;
+}
+
+message InsertReq {
+    bytes record = 1;
+}
+
+message RemoveReq {
+    bytes key = 1;
+}
+
+message SchemaResp {
+    repeated ColumnDesc desc = 1;
+    uint32 primary_key_index = 2;
+}
+
+enum Datatype {
+    UINT8 = 0;
+    UINT16 = 1;
+    UINT32 = 2;
+    UINT64 = 3;
+    INT8 = 4;
+    INT16 = 5;
+    INT32 = 6;
+    INT64 = 7;
+    STRING = 8;
+    BOOLEAN = 9;
+    BYTES = 10;
+}
+
+message ColumnDesc {
+    string name = 1;
+    Datatype ty = 2;
+    bool is_nullable = 3;
+}
+
+message Empty {}
+
+service TonboRpc {
+    rpc Schema(Empty) returns (SchemaResp) {}
+    rpc Get (GetReq) returns (GetResp) {}
+    rpc Scan (ScanReq) returns (stream ScanResp) {}
+    rpc Insert (InsertReq) returns (Empty) {}
+    rpc Remove (RemoveReq) returns (Empty) {}
+    rpc Flush (Empty) returns (Empty) {}
+}
