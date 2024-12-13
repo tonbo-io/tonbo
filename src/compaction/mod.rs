@@ -309,7 +309,7 @@ where
                     level: (level + 1) as u8,
                     gen: scope.gen,
                 });
-                delete_gens.push((scope.gen, level));
+                delete_gens.push((scope.gen, level + 1));
             }
             level += 1;
         }
