@@ -418,9 +418,11 @@ where
                 Box::new(|_| None),
                 self.parquet_lru.clone(),
             ).take().await?;
-
-            while let Some(record) = scan.next().await {
-                yield Ok(f(TransactionEntry::Stream(record?)))
+            
+            while let Some(record) = scan.next().await.transpose()? {
+                if record.value().is_some() {
+                    yield Ok(f(TransactionEntry::Stream(record)))
+                } 
             }
         }
     }

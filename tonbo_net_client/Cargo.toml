@@ -3,6 +3,11 @@ name = "tonbo_net_client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["transport", "tonbo/tokio"]
+transport = ["tonic/transport", "tonic-build/transport"]
+wasm = ["dep:tonic-web-wasm-client", "tonbo/wasm"]
+
 [dependencies]
 async-stream = "0.3"
 fusio = { path = "../../fusio/fusio", package = "fusio", version = "0.3.3", features = [
@@ -13,8 +18,16 @@ futures-core = "0.3"
 futures-util = "0.3"
 prost = { version = "0.13" }
 thiserror = "2"
-tonbo = { path = "../", package = "tonbo" }
-tonic = { version = "0.12" }
+tonbo = { path = "../", package = "tonbo", default-features = false}
+tonic = { version = "0.12", default-features = false, features = [
+    "prost",
+    "codegen",
+] }
+tonic-web-wasm-client = {version = "0.6", optional = true}
+
 
 [build-dependencies]
-tonic-build = {version = "0.12"}
+tonic-build = { version = "0.12", default-features = false, features = [
+    "prost",
+] }
+

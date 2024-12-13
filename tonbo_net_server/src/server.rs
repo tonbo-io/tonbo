@@ -1,24 +1,34 @@
-use std::io::Cursor;
-use std::ops::Bound;
-use std::pin::{pin, Pin};
-use std::sync::Arc;
+use std::{
+    io::Cursor,
+    ops::Bound,
+    pin::{pin, Pin},
+    sync::Arc,
+};
+
 use async_stream::stream;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use tonic::{Code, Request, Response, Status};
-use tonic::transport::Server;
-use tonbo::arrow::datatypes::Schema;
-use tonbo::DB;
-use tonbo::executor::tokio::TokioExecutor;
-use tonbo::record::{Column, Datatype, DynRecord, Record};
-use tonbo::serdes::{Decode, Encode};
-use crate::proto::{ColumnDesc, Empty, GetReq, GetResp, InsertReq, RemoveReq, ScanReq, ScanResp, SchemaResp};
-use crate::proto::tonbo_rpc_server::{TonboRpc, TonboRpcServer};
-use crate::ServerError;
 use itertools::Itertools;
+use tonbo::{
+    executor::tokio::TokioExecutor,
+    record::{Column, Datatype, DynRecord},
+    serdes::{Decode, Encode},
+    DB,
+};
+use tonic::{transport::Server, Code, Request, Response, Status};
+
+use crate::{
+    proto::{
+        tonbo_rpc_server::{TonboRpc, TonboRpcServer},
+        ColumnDesc, Empty, GetReq, GetResp, InsertReq, RemoveReq, ScanReq, ScanResp, SchemaResp,
+    },
+    ServerError,
+};
 
 pub async fn service(addr: String, db: DB<DynRecord, TokioExecutor>) -> Result<(), ServerError> {
-    let service = TonboService { inner: Arc::new(db) };
+    let service = TonboService {
+        inner: Arc::new(db),
+    };
     let addr = addr.parse()?;
     println!("addr: {}", addr);
 
@@ -36,7 +46,7 @@ struct TonboService {
 
 impl TonboService {
     fn primary_key_index(&self) -> usize {
-        self.inner.instance().primary_key_index::<DynRecord>()
+        self.inner.instance().primary_key_index::<DynRecord>() - 2
     }
 }
 
@@ -44,7 +54,8 @@ impl TonboService {
 impl TonboRpc for TonboService {
     async fn schema(&self, _: Request<Empty>) -> Result<Response<SchemaResp>, Status> {
         let instance = self.inner.instance();
-        let desc = instance.dyn_columns()
+        let desc = instance
+            .dyn_columns()
             .iter()
             .map(|column| {
                 let ty: crate::proto::Datatype = column.datatype.into();
@@ -56,24 +67,40 @@ impl TonboRpc for TonboService {
             })
             .collect_vec();
 
-        Ok(Response::new(SchemaResp { desc, primary_key_index: instance.primary_key_index::<DynRecord>() as u32 }))
+        Ok(Response::new(SchemaResp {
+            desc,
+            primary_key_index: instance.primary_key_index::<DynRecord>() as u32 - 2,
+        }))
     }
 
     async fn get(&self, request: Request<GetReq>) -> Result<Response<GetResp>, Status> {
         let mut req = request.into_inner();
-        let key = Column::decode(&mut Cursor::new(&mut req.key)).await
+        let key = Column::decode(&mut Cursor::new(&mut req.key))
+            .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
 
-        let tuple = self.inner
+        let tuple = self
+            .inner
             .get(&key, |e| Some(e.get().columns))
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
         let record = if let Some(tuple) = tuple {
             let mut bytes = Vec::new();
-            DynRecord::new(tuple, self.primary_key_index())
-                .as_record_ref()
-                .encode(&mut Cursor::new(&mut bytes))
-                .await.map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+            let mut writer = Cursor::new(&mut bytes);
+            (tuple.len() as u32)
+                .encode(&mut writer)
+                .await
+                .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+            (self.primary_key_index() as u32)
+                .encode(&mut writer)
+                .await
+                .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+
+            for col in tuple.iter() {
+                col.encode(&mut writer)
+                    .await
+                    .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+            }
             Some(bytes)
         } else {
             None
@@ -100,9 +127,23 @@ impl TonboRpc for TonboService {
             while let Some(entry) = stream.next().await {
                 let Some(columns) = entry.map_err(|e| Status::new(Code::Internal, e.to_string()))? else { continue };
                 let mut bytes = Vec::new();
-                DynRecord::new(columns, primary_key_index)
-                    .as_record_ref()
-                .encode(&mut Cursor::new(&mut bytes)).await.map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+
+                let mut writer = Cursor::new(&mut bytes);
+                (columns.len() as u32)
+                    .encode(&mut writer)
+                    .await
+                    .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+                (primary_key_index as u32)
+                    .encode(&mut writer)
+                    .await
+                    .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+
+                for col in columns.iter() {
+                    col.encode(&mut writer)
+                        .await
+                        .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+                }
+
                 yield Ok::<ScanResp, Status>(ScanResp { record: bytes });
             }
         };
@@ -112,10 +153,10 @@ impl TonboRpc for TonboService {
 
     async fn insert(&self, request: Request<InsertReq>) -> Result<Response<Empty>, Status> {
         let mut req = request.into_inner();
-        let record = DynRecord::decode(&mut Cursor::new(&mut req.record)).await
+        let record = DynRecord::decode(&mut Cursor::new(&mut req.record))
+            .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
 
-        println!("{:#?}", record.columns());
         self.inner
             .insert(record)
             .await
@@ -125,7 +166,8 @@ impl TonboRpc for TonboService {
 
     async fn remove(&self, request: Request<RemoveReq>) -> Result<Response<Empty>, Status> {
         let mut req = request.into_inner();
-        let column = Column::decode(&mut Cursor::new(&mut req.key)).await
+        let column = Column::decode(&mut Cursor::new(&mut req.key))
+            .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
         self.inner
             .remove(column)
@@ -135,8 +177,8 @@ impl TonboRpc for TonboService {
     }
 
     async fn flush(&self, _: Request<Empty>) -> Result<Response<Empty>, Status> {
-       self.inner
-           .flush()
+        self.inner
+            .flush()
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
         Ok(Response::new(Empty {}))
@@ -165,9 +207,12 @@ impl Into<crate::proto::Datatype> for Datatype {
 mod tests {
     use fusio::path::Path;
     use tempfile::TempDir;
-    use tonbo::{DbOption, DB};
-    use tonbo::executor::tokio::TokioExecutor;
-    use tonbo::record::{ColumnDesc, Datatype, DynRecord};
+    use tonbo::{
+        executor::tokio::TokioExecutor,
+        record::{ColumnDesc, Datatype, DynRecord},
+        DbOption, DB,
+    };
+
     use crate::server::service;
 
     #[tokio::test]
@@ -178,19 +223,15 @@ mod tests {
             ColumnDesc::new("name".to_string(), Datatype::String, true),
             ColumnDesc::new("like".to_string(), Datatype::Int32, true),
         ];
-        let mut option2 = DbOption::with_path(
+        let option2 = DbOption::with_path(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             "id".to_string(),
             0,
         );
-        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
-            option2,
-            TokioExecutor::new(),
-            desc,
-            0,
-        )
-            .await
-            .unwrap();
+        let db: DB<DynRecord, TokioExecutor> =
+            DB::with_schema(option2, TokioExecutor::new(), desc, 0)
+                .await
+                .unwrap();
 
         service("[::1]:50051".to_string(), db).await.unwrap()
     }

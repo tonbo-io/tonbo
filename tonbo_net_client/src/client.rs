@@ -1,15 +1,20 @@
-use std::io::Cursor;
-use std::ops::Bound;
+use std::{io::Cursor, ops::Bound};
+
 use async_stream::stream;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use tonbo::{
+    record::{Column, Datatype, DynRecord, Record},
+    serdes::{Decode, Encode},
+};
 use tonic::Request;
-use crate::proto::tonbo_rpc_client::TonboRpcClient;
-use tonic::transport::Channel;
-use crate::proto::{ColumnDesc, Empty, GetReq, InsertReq, RemoveReq, ScanReq};
-use tonbo::record::{Column, Datatype, DynRecord, Record};
-use tonbo::serdes::{Decode, Encode};
-use crate::ClientError;
+
+use crate::{
+    proto::{
+        tonbo_rpc_client::TonboRpcClient, ColumnDesc, Empty, GetReq, InsertReq, RemoveReq, ScanReq,
+    },
+    ClientError,
+};
 
 pub struct TonboSchema {
     pub desc: Vec<ColumnDesc>,
@@ -31,19 +36,27 @@ impl TonboSchema {
 }
 
 pub struct TonboClient {
-    conn: TonboRpcClient<Channel>,
+    #[cfg(not(feature = "wasm"))]
+    conn: TonboRpcClient<tonic::transport::Channel>,
+    #[cfg(feature = "wasm")]
+    conn: TonboRpcClient<tonic_web_wasm_client::Client>,
 }
 
 impl TonboClient {
+    // #[cfg(not(feature = "wasm"))]
     pub async fn connect(addr: String) -> Result<TonboClient, ClientError> {
+        #[cfg(not(feature = "wasm"))]
         let conn = TonboRpcClient::connect(addr).await?;
+        #[cfg(feature = "wasm")]
+        let conn = {
+            let client = tonic_web_wasm_client::Client::new(addr);
+            TonboRpcClient::new(client)
+        };
         Ok(TonboClient { conn })
     }
 
     pub async fn schema(&mut self) -> Result<TonboSchema, ClientError> {
-        let resp = self.conn.schema(Request::new(Empty {})).await?
-            .into_inner();
-
+        let resp = self.conn.schema(Request::new(Empty {})).await?.into_inner();
 
         Ok(TonboSchema {
             desc: resp.desc,
@@ -57,17 +70,29 @@ impl TonboClient {
         column.encode(&mut Cursor::new(&mut bytes)).await?;
         let resp = self.conn.get(Request::new(GetReq { key: bytes })).await?;
 
-        let Some(mut value) = resp.into_inner().record else { return Ok(None); };
+        let Some(mut value) = resp.into_inner().record else {
+            return Ok(None);
+        };
         Ok(Some(DynRecord::decode(&mut Cursor::new(&mut value)).await?))
     }
 
-    pub async fn scan(&mut self, min: Bound<Column>, max: Bound<Column>) -> Result<impl Stream<Item = Result<DynRecord, ClientError>>, ClientError> {
+    pub async fn scan(
+        &mut self,
+        min: Bound<Column>,
+        max: Bound<Column>,
+    ) -> Result<impl Stream<Item = Result<DynRecord, ClientError>>, ClientError> {
         let mut min_bytes = Vec::new();
         let mut max_bytes = Vec::new();
         min.encode(&mut Cursor::new(&mut min_bytes)).await?;
         max.encode(&mut Cursor::new(&mut max_bytes)).await?;
 
-        let resp = self.conn.scan(Request::new(ScanReq { min: min_bytes, max: max_bytes })).await?;
+        let resp = self
+            .conn
+            .scan(Request::new(ScanReq {
+                min: min_bytes,
+                max: max_bytes,
+            }))
+            .await?;
 
         Ok(Box::pin(stream! {
             let mut stream = resp.into_inner();
@@ -82,11 +107,16 @@ impl TonboClient {
     pub async fn insert(&mut self, record: DynRecord) -> Result<(), ClientError> {
         let mut bytes = Vec::new();
 
-        record.as_record_ref().encode(&mut Cursor::new(&mut bytes)).await?;
+        record
+            .as_record_ref()
+            .encode(&mut Cursor::new(&mut bytes))
+            .await?;
 
         let record_ref = record.as_record_ref();
-        println!("{:#?}", record_ref.columns);
-        let _ = self.conn.insert(Request::new(InsertReq { record: bytes})).await?;
+        let _ = self
+            .conn
+            .insert(Request::new(InsertReq { record: bytes }))
+            .await?;
 
         Ok(())
     }
@@ -95,7 +125,10 @@ impl TonboClient {
         let mut bytes = Vec::new();
 
         column.encode(&mut Cursor::new(&mut bytes)).await?;
-        let _ = self.conn.remove(Request::new(RemoveReq { key: bytes })).await?;
+        let _ = self
+            .conn
+            .remove(Request::new(RemoveReq { key: bytes }))
+            .await?;
 
         Ok(())
     }
