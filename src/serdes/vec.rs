@@ -1,4 +1,5 @@
 use fusio::{SeqRead, Write};
+
 use crate::serdes::{Decode, Encode};
 
 impl<T> Decode for Vec<T>

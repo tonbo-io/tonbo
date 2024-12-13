@@ -1,12 +1,12 @@
 mod arc;
 mod boolean;
+mod bound;
 #[cfg(feature = "bytes")]
 mod bytes;
 mod num;
 pub(crate) mod option;
 mod string;
 mod vec;
-mod bound;
 
 use std::future::Future;
 

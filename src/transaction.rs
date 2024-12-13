@@ -247,14 +247,13 @@ mod tests {
         fs::manager::StoreManager,
         record::{
             runtime::{Column, Datatype, DynRecord},
-            ColumnDesc,
+            ColumnDesc, RecordInstance,
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
         version::TransactionTs,
         DbOption, Projection, DB,
     };
-    use crate::record::RecordInstance;
 
     #[tokio::test]
     async fn transaction_read_write() {

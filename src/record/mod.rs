@@ -48,15 +48,10 @@ impl RecordInstance {
 
     pub fn dyn_columns(&self) -> &[Column] {
         match self {
-            RecordInstance::Runtime(record) => {
-                record.columns()
-            }
-            RecordInstance::Normal => {
-                &[]
-            }
+            RecordInstance::Runtime(record) => record.columns(),
+            RecordInstance::Normal => &[],
         }
     }
-
 }
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {

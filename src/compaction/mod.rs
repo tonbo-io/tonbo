@@ -51,7 +51,7 @@ where
         option: Arc<DbOption<R>>,
         version_set: VersionSet<R>,
         manager: Arc<StoreManager>,
-        instance: Arc<RecordInstance>
+        instance: Arc<RecordInstance>,
     ) -> Self {
         Compactor::<R> {
             option,
@@ -78,7 +78,7 @@ where
                 &mut guard.mutable,
                 Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await?,
             );
-            let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
+            let (file_id, immutable) = mutable.into_immutable(&self.instance).await?;
             guard.immutables.push((file_id, immutable));
         } else if !is_manual {
             return Ok(());

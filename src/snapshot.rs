@@ -5,14 +5,13 @@ use parquet::arrow::ProjectionMask;
 
 use crate::{
     fs::manager::StoreManager,
-    record::Record,
+    record::{Record, RecordInstance},
     stream,
     stream::ScanStream,
     timestamp::Timestamp,
     version::{TransactionTs, VersionRef},
     DbError, ParquetLru, Projection, Scan, Schema,
 };
-use crate::record::RecordInstance;
 
 pub struct Snapshot<'s, R>
 where
@@ -134,11 +133,11 @@ mod tests {
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
+        record::RecordInstance,
         tests::{build_db, build_schema},
         version::TransactionTs,
         DbOption,
     };
-    use crate::record::RecordInstance;
 
     #[tokio::test]
     async fn snapshot_scan() {

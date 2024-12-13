@@ -1,5 +1,7 @@
 use std::ops::Bound;
+
 use fusio::{SeqRead, Write};
+
 use crate::serdes::{Decode, Encode};
 
 impl<T> Decode for Bound<T>
@@ -13,14 +15,10 @@ where
         R: SeqRead,
     {
         Ok(match u8::decode(reader).await? {
-            0 => {
-                Bound::Included(T::decode(reader).await?)
-            },
-            1 => {
-                Bound::Excluded(T::decode(reader).await?)
-            },
+            0 => Bound::Included(T::decode(reader).await?),
+            1 => Bound::Excluded(T::decode(reader).await?),
             2 => Bound::Unbounded,
-            _ => unreachable!()
+            _ => unreachable!(),
         })
     }
 }
@@ -53,9 +51,10 @@ where
     }
 
     fn size(&self) -> usize {
-        size_of::<u8>() + match self {
-            Bound::Included(value) | Bound::Excluded(value) => value.size(),
-            Bound::Unbounded => 0,
-        }
+        size_of::<u8>()
+            + match self {
+                Bound::Included(value) | Bound::Excluded(value) => value.size(),
+                Bound::Unbounded => 0,
+            }
     }
 }
