@@ -62,7 +62,7 @@ impl TonboDB {
             .block_on(async {
                 DB::with_schema(
                     option,
-                    TokioExecutor::new(),
+                    TokioExecutor::current(),
                     desc,
                     primary_key_index.unwrap(),
                 )

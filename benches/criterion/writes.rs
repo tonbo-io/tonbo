@@ -61,7 +61,7 @@ fn single_write(c: &mut Criterion) {
         let option = DbOption::from(fusio::path::Path::from_filesystem_path("/tmp/tonbo").unwrap())
             .disable_wal();
         let db = runtime
-            .block_on(async { DB::new(option, TokioExecutor::default()).await })
+            .block_on(async { DB::new(option, TokioExecutor::current()).await })
             .unwrap();
 
         group.bench_with_input(BenchmarkId::new("Tonbo", batch), &batch, |b, batch| {
