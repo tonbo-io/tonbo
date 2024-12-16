@@ -20,7 +20,7 @@ use crate::{
     stream::mem_projection::MemProjectionStream,
     timestamp::{Timestamp, Timestamped},
     wal::log::LogType,
-    DbError, LockMap, Projection, Record, Scan, Schema,
+    DbError, LockMap, Projection, Record, Scan, DbStorage,
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
@@ -186,7 +186,7 @@ where
     }
 
     async fn append(
-        schema: &Schema<R>,
+        schema: &DbStorage<R>,
         log_ty: LogType,
         key: <R::Schema as RecordSchema>::Key,
         record: Option<R>,

@@ -10,7 +10,7 @@ use crate::{
     stream::ScanStream,
     timestamp::Timestamp,
     version::{TransactionTs, VersionRef},
-    DbError, ParquetLru, Projection, Scan, Schema,
+    DbError, DbStorage, ParquetLru, Projection, Scan,
 };
 
 pub struct Snapshot<'s, R>
@@ -18,7 +18,7 @@ where
     R: Record,
 {
     ts: Timestamp,
-    share: RwLockReadGuard<'s, Schema<R>>,
+    share: RwLockReadGuard<'s, DbStorage<R>>,
     version: VersionRef<R>,
     manager: Arc<StoreManager>,
     parquet_lru: ParquetLru,
@@ -72,7 +72,7 @@ where
     }
 
     pub(crate) fn new(
-        share: RwLockReadGuard<'s, Schema<R>>,
+        share: RwLockReadGuard<'s, DbStorage<R>>,
         version: VersionRef<R>,
         manager: Arc<StoreManager>,
         parquet_lru: ParquetLru,
@@ -94,7 +94,7 @@ where
         self.version.increase_ts()
     }
 
-    pub(crate) fn schema(&self) -> &Schema<R> {
+    pub(crate) fn schema(&self) -> &DbStorage<R> {
         &self.share
     }
 

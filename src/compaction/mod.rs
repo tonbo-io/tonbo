@@ -22,7 +22,7 @@ use crate::{
     version::{
         edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError, MAX_LEVEL,
     },
-    DbOption, ParquetLru, Schema,
+    DbOption, DbStorage, ParquetLru,
 };
 
 #[derive(Debug)]
@@ -36,7 +36,7 @@ where
     R: Record,
 {
     pub(crate) option: Arc<DbOption>,
-    pub(crate) schema: Arc<RwLock<Schema<R>>>,
+    pub(crate) schema: Arc<RwLock<DbStorage<R>>>,
     pub(crate) version_set: VersionSet<R>,
     pub(crate) manager: Arc<StoreManager>,
     pub(crate) record_schema: Arc<R::Schema>,
@@ -47,7 +47,7 @@ where
     R: Record,
 {
     pub(crate) fn new(
-        schema: Arc<RwLock<Schema<R>>>,
+        schema: Arc<RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
         option: Arc<DbOption>,
         version_set: VersionSet<R>,

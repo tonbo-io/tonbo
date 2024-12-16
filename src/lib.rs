@@ -169,7 +169,7 @@ use crate::{
     compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileType},
-    record::Schema as RecordSchema,
+    record::Schema,
     serdes::Decode,
     snapshot::Snapshot,
     stream::{
@@ -187,9 +187,9 @@ where
     R: Record,
     E: Executor,
 {
-    schema: Arc<RwLock<Schema<R>>>,
+    schema: Arc<RwLock<DbStorage<R>>>,
     version_set: VersionSet<R>,
-    lock_map: LockMap<<R::Schema as record::Schema>::Key>,
+    lock_map: LockMap<<R::Schema as Schema>::Key>,
     manager: Arc<StoreManager>,
     parquet_lru: ParquetLru,
     _p: PhantomData<E>,
@@ -198,7 +198,7 @@ where
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
-    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
     /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
@@ -220,7 +220,7 @@ where
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
-    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
     async fn build(
@@ -252,7 +252,7 @@ where
 
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let schema = Arc::new(RwLock::new(
-            Schema::new(
+            DbStorage::new(
                 option.clone(),
                 task_tx,
                 &version_set,
@@ -341,10 +341,7 @@ where
     }
 
     /// delete the record with the primary key as the `key`
-    pub async fn remove(
-        &self,
-        key: <R::Schema as RecordSchema>::Key,
-    ) -> Result<bool, CommitError<R>> {
+    pub async fn remove(&self, key: <R::Schema as Schema>::Key) -> Result<bool, CommitError<R>> {
         Ok(self
             .schema
             .read()
@@ -368,7 +365,7 @@ where
     /// get the record with `key` as the primary key and process it using closure `f`
     pub async fn get<T>(
         &self,
-        key: &<R::Schema as RecordSchema>::Key,
+        key: &<R::Schema as Schema>::Key,
         mut f: impl FnMut(TransactionEntry<'_, R>) -> Option<T>,
     ) -> Result<Option<T>, CommitError<R>> {
         Ok(self
@@ -397,8 +394,8 @@ where
     pub async fn scan<'scan, T: 'scan>(
         &'scan self,
         range: (
-            Bound<&'scan <R::Schema as RecordSchema>::Key>,
-            Bound<&'scan <R::Schema as RecordSchema>::Key>,
+            Bound<&'scan <R::Schema as Schema>::Key>,
+            Bound<&'scan <R::Schema as Schema>::Key>,
         ),
         mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
@@ -467,22 +464,19 @@ where
     }
 }
 
-pub(crate) struct Schema<R>
+pub(crate) struct DbStorage<R>
 where
     R: Record,
 {
     pub mutable: Mutable<R>,
-    pub immutables: Vec<(
-        Option<FileId>,
-        Immutable<<R::Schema as RecordSchema>::Columns>,
-    )>,
+    pub immutables: Vec<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
     record_schema: Arc<R::Schema>,
 }
 
-impl<R> Schema<R>
+impl<R> DbStorage<R>
 where
     R: Record + Send,
 {
@@ -494,7 +488,7 @@ where
         manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
-        let mut schema = Schema {
+        let mut schema = DbStorage {
             mutable: Mutable::new(
                 &option,
                 trigger.clone(),
@@ -586,7 +580,7 @@ where
     async fn remove(
         &self,
         log_ty: LogType,
-        key: <R::Schema as RecordSchema>::Key,
+        key: <R::Schema as Schema>::Key,
         ts: Timestamp,
     ) -> Result<bool, DbError<R>> {
         self.mutable.remove(log_ty, key, ts).await
@@ -594,7 +588,7 @@ where
 
     async fn recover_append(
         &self,
-        key: <R::Schema as RecordSchema>::Key,
+        key: <R::Schema as Schema>::Key,
         ts: Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
@@ -605,7 +599,7 @@ where
         &'get self,
         version: &'get Version<R>,
         manager: &StoreManager,
-        key: &'get <R::Schema as RecordSchema>::Key,
+        key: &'get <R::Schema as Schema>::Key,
         ts: Timestamp,
         projection: Projection,
         parquet_lru: ParquetLru,
@@ -652,7 +646,7 @@ where
             .map(|entry| Entry::RecordBatch(entry)))
     }
 
-    fn check_conflict(&self, key: &<R::Schema as RecordSchema>::Key, ts: Timestamp) -> bool {
+    fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: Timestamp) -> bool {
         self.mutable.check_conflict(key, ts)
             || self
                 .immutables
@@ -673,10 +667,10 @@ where
     R: Record,
     'range: 'scan,
 {
-    schema: &'scan Schema<R>,
+    schema: &'scan DbStorage<R>,
     manager: &'scan StoreManager,
-    lower: Bound<&'range <R::Schema as RecordSchema>::Key>,
-    upper: Bound<&'range <R::Schema as RecordSchema>::Key>,
+    lower: Bound<&'range <R::Schema as Schema>::Key>,
+    upper: Bound<&'range <R::Schema as Schema>::Key>,
     ts: Timestamp,
 
     version: &'scan Version<R>,
@@ -695,11 +689,11 @@ where
     R: Record + Send,
 {
     fn new(
-        schema: &'scan Schema<R>,
+        schema: &'scan DbStorage<R>,
         manager: &'scan StoreManager,
         (lower, upper): (
-            Bound<&'range <R::Schema as RecordSchema>::Key>,
-            Bound<&'range <R::Schema as RecordSchema>::Key>,
+            Bound<&'range <R::Schema as Schema>::Key>,
+            Bound<&'range <R::Schema as Schema>::Key>,
         ),
         ts: Timestamp,
         version: &'scan Version<R>,
@@ -811,7 +805,7 @@ where
         self,
         batch_size: usize,
     ) -> Result<
-        impl Stream<Item = Result<<R::Schema as RecordSchema>::Columns, ParquetError>> + 'scan,
+        impl Stream<Item = Result<<R::Schema as Schema>::Columns, ParquetError>> + 'scan,
         DbError<R>,
     > {
         let mut streams = Vec::new();
@@ -1174,7 +1168,7 @@ pub(crate) mod tests {
     pub(crate) async fn build_schema(
         option: Arc<DbOption>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(crate::Schema<Test>, Receiver<CompactTask>), fusio::Error> {
+    ) -> Result<(crate::DbStorage<Test>, Receiver<CompactTask>), fusio::Error> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
         let mutable = Mutable::new(&option, trigger.clone(), fs, Arc::new(TestSchema {})).await?;
@@ -1268,7 +1262,7 @@ pub(crate) mod tests {
         let (compaction_tx, compaction_rx) = bounded(1);
 
         Ok((
-            crate::Schema {
+            crate::DbStorage {
                 mutable,
                 immutables,
                 compaction_tx,
@@ -1284,7 +1278,7 @@ pub(crate) mod tests {
         option: Arc<DbOption>,
         compaction_rx: Receiver<CompactTask>,
         executor: E,
-        schema: crate::Schema<R>,
+        schema: crate::DbStorage<R>,
         record_schema: Arc<R::Schema>,
         version: Version<R>,
         manager: Arc<StoreManager>,
@@ -1655,7 +1649,7 @@ pub(crate) mod tests {
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
-        let schema: crate::Schema<Test> = crate::Schema {
+        let schema: crate::DbStorage<Test> = crate::DbStorage {
             mutable: Mutable::new(&option, trigger.clone(), &fs, Arc::new(TestSchema))
                 .await
                 .unwrap(),
@@ -1725,7 +1719,7 @@ pub(crate) mod tests {
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
-        let schema: crate::Schema<DynRecord> = crate::Schema {
+        let schema: crate::DbStorage<DynRecord> = crate::DbStorage {
             mutable: Mutable::new(
                 &option,
                 trigger.clone(),
