@@ -9,10 +9,10 @@ use pyo3::{
 use pyo3_asyncio::tokio::{future_into_py, get_runtime};
 use tonbo::{
     executor::tokio::TokioExecutor,
-    record::DynRecord,
+    record::{DynRecord, DynSchema, Value, ValueDesc},
     DB,
 };
-use tonbo::record::{DynSchema, Value, ValueDesc};
+
 use crate::{
     column::Column,
     error::{CommitError, DbError},
@@ -40,7 +40,6 @@ impl TonboDB {
         let mut desc = vec![];
         let mut cols = vec![];
         let mut primary_key_index = None;
-        let mut primary_key_name = None;
 
         for i in 0..values.len()? {
             let value = values.get_item(i)?;
@@ -51,23 +50,15 @@ impl TonboDB {
                         panic!("Multiple primary keys is not allowed!")
                     }
                     primary_key_index = Some(desc.len());
-                    primary_key_name = Some(col.name.clone());
                 }
                 cols.push(col.clone());
                 desc.push(ValueDesc::from(col));
             }
         }
         let schema = DynSchema::new(desc, primary_key_index.unwrap());
-        let option = option.into_option(primary_key_index.unwrap(), primary_key_name.unwrap());
+        let option = option.into_option(&schema);
         let db = get_runtime()
-            .block_on(async {
-                DB::with_schema(
-                    option,
-                    TokioExecutor::current(),
-                    schema,
-                )
-                .await
-            })
+            .block_on(async { DB::new(option, TokioExecutor::current(), schema).await })
             .unwrap();
         Ok(Self {
             db: Arc::new(db),

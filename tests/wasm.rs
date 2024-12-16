@@ -73,15 +73,10 @@ mod tests {
         let fs = fusio::disk::LocalFs {};
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir_rw").unwrap(),
-            "id".to_string(),
-            0,
-        );
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir_rw").unwrap(), &schema);
 
-        let db: DB<DynRecord, OpfsExecutor> = DB::with_schema(option, OpfsExecutor::new(), schema)
-            .await
-            .unwrap();
+        let db: DB<DynRecord, OpfsExecutor> =
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         for item in test_dyn_items().into_iter() {
             db.insert(item).await.unwrap();
@@ -158,15 +153,10 @@ mod tests {
         let path = Path::from_opfs_path("opfs_dir_txn").unwrap();
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir_txn").unwrap(),
-            "id".to_string(),
-            0,
-        );
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir_txn").unwrap(), &schema);
 
-        let db: DB<DynRecord, OpfsExecutor> = DB::with_schema(option, OpfsExecutor::new(), schema)
-            .await
-            .unwrap();
+        let db: DB<DynRecord, OpfsExecutor> =
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         {
             let mut txn = db.transaction().await;
@@ -241,17 +231,11 @@ mod tests {
         let fs = fusio::disk::LocalFs {};
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir").unwrap(),
-            "id".to_string(),
-            0,
-        );
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap(), &schema);
 
         {
             let db: DB<DynRecord, OpfsExecutor> =
-                DB::with_schema(option, OpfsExecutor::new(), schema)
-                    .await
-                    .unwrap();
+                DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
             for item in test_dyn_items().into_iter() {
                 db.insert(item).await.unwrap();
@@ -261,14 +245,9 @@ mod tests {
         }
 
         let schema = test_dyn_item_schema();
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir").unwrap(),
-            "id".to_string(),
-            0,
-        );
-        let db: DB<DynRecord, OpfsExecutor> = DB::with_schema(option, OpfsExecutor::new(), schema)
-            .await
-            .unwrap();
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap(), &schema);
+        let db: DB<DynRecord, OpfsExecutor> =
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_dyn_items() {
@@ -311,7 +290,7 @@ mod tests {
         let key_id = option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
         let secret_key = option_env!("AWS_SECRET_ACCESS_KEY").unwrap().to_string();
 
-        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+        let schema = test_dyn_item_schema();
 
         let fs_option = FsOptions::S3 {
             bucket: "wasm-data".to_string(),
@@ -326,33 +305,27 @@ mod tests {
             region: Some("ap-southeast-2".to_string()),
         };
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("s3_rw").unwrap(),
-            "id".to_string(),
-            primary_key_index,
-        )
-        .level_path(
-            0,
-            Path::from_url_path("tonbo/l0").unwrap(),
-            fs_option.clone(),
-        )
-        .unwrap()
-        .level_path(
-            1,
-            Path::from_url_path("tonbo/l1").unwrap(),
-            fs_option.clone(),
-        )
-        .unwrap()
-        .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
-        .unwrap()
-        .major_threshold_with_sst_size(3)
-        .level_sst_magnification(1)
-        .max_sst_file_size(1 * 1024);
+        let option = DbOption::new(Path::from_opfs_path("s3_rw").unwrap(), &schema)
+            .level_path(
+                0,
+                Path::from_url_path("tonbo/l0").unwrap(),
+                fs_option.clone(),
+            )
+            .unwrap()
+            .level_path(
+                1,
+                Path::from_url_path("tonbo/l1").unwrap(),
+                fs_option.clone(),
+            )
+            .unwrap()
+            .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
+            .unwrap()
+            .major_threshold_with_sst_size(3)
+            .level_sst_magnification(1)
+            .max_sst_file_size(1 * 1024);
 
         let db: DB<DynRecord, OpfsExecutor> =
-            DB::with_schema(option, OpfsExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             db.insert(item).await.unwrap();

@@ -6,8 +6,11 @@ use pyo3::{
     Bound, IntoPy, Py, PyAny, PyResult, Python,
 };
 use pyo3_asyncio::tokio::future_into_py;
-use tonbo::{record::DynRecord, transaction, Projection};
-use tonbo::record::Value;
+use tonbo::{
+    record::{DynRecord, Value},
+    transaction, Projection,
+};
+
 use crate::{
     column::Column,
     error::{repeated_commit_err, CommitError, DbError},
@@ -181,16 +184,14 @@ impl Transaction {
         future_into_py(py, async move {
             let mut scan = txn.scan((
                 unsafe {
-                    transmute::<
-                        std::ops::Bound<&Value>,
-                        std::ops::Bound<&'static Value>,
-                    >(lower.as_ref())
+                    transmute::<std::ops::Bound<&Value>, std::ops::Bound<&'static Value>>(
+                        lower.as_ref(),
+                    )
                 },
                 unsafe {
-                    transmute::<
-                        std::ops::Bound<&Value>,
-                        std::ops::Bound<&'static Value>,
-                    >(high.as_ref())
+                    transmute::<std::ops::Bound<&Value>, std::ops::Bound<&'static Value>>(
+                        high.as_ref(),
+                    )
                 },
             ));
 

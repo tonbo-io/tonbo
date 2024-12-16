@@ -47,7 +47,7 @@ where
     R: Record,
 {
     pub async fn new(
-        option: &DbOption<R>,
+        option: &DbOption,
         trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
         fs: &Arc<dyn DynFs>,
         schema: Arc<R::Schema>,
@@ -234,10 +234,10 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
@@ -287,10 +287,10 @@ mod tests {
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &StringSchema,
-        ));
+        );
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
@@ -375,23 +375,23 @@ mod tests {
     #[tokio::test]
     async fn test_dyn_read() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let option = DbOption::with_path(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_string(),
+        let schema = DynSchema::new(
+            vec![
+                ValueDesc::new("age".to_string(), Datatype::Int8, false),
+                ValueDesc::new("height".to_string(), Datatype::Int16, true),
+            ],
             0,
+        );
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &schema,
         );
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
 
-        let schema = Arc::new(DynSchema::new(
-            vec![
-                ValueDesc::new("age".to_string(), Datatype::Int8, false),
-                ValueDesc::new("height".to_string(), Datatype::Int16, true),
-            ],
-            0,
-        ));
+        let schema = Arc::new(schema);
 
         let mutable = Mutable::<DynRecord>::new(&option, trigger, &fs, schema)
             .await

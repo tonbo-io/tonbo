@@ -1,4 +1,3 @@
-use tonbo::record::Schema;
 use tonbo_macros::Record;
 
 #[derive(Record, Debug, PartialEq)]

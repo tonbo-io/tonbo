@@ -96,7 +96,7 @@ mod tests {
             },
             mutable::Mutable,
         },
-        record::{Record, Schema},
+        record::Schema,
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
         trigger::TriggerFactory,
@@ -108,10 +108,10 @@ mod tests {
     async fn iter() {
         let temp_dir = TempDir::new().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 

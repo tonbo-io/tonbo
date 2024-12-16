@@ -258,7 +258,6 @@ mod tests {
         record::{
             runtime::{test::test_dyn_item_schema, Datatype, DynRecord, Value},
             test::StringSchema,
-            ValueDesc,
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
@@ -271,10 +270,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let db = DB::<String, TokioExecutor>::new(
-            DbOption::from((
+            DbOption::new(
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &StringSchema,
-            )),
+            ),
             TokioExecutor::current(),
             StringSchema,
         )
@@ -310,10 +309,10 @@ mod tests {
     async fn transaction_get() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from((
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        )));
+        ));
 
         manager
             .base_fs()
@@ -402,10 +401,10 @@ mod tests {
     #[tokio::test]
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &StringSchema,
-        ));
+        );
 
         let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current(), StringSchema)
             .await
@@ -438,10 +437,10 @@ mod tests {
     #[tokio::test]
     async fn transaction_projection() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
 
         let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
             .await
@@ -479,10 +478,10 @@ mod tests {
     async fn transaction_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from((
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        )));
+        ));
 
         manager
             .base_fs()
@@ -576,10 +575,10 @@ mod tests {
     async fn test_transaction_scan_bound() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from((
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        )));
+        ));
 
         manager
             .base_fs()
@@ -754,10 +753,10 @@ mod tests {
     async fn test_transaction_scan_limit() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from((
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        )));
+        ));
 
         manager
             .base_fs()
@@ -817,19 +816,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_dyn_record() {
-        let descs = vec![
-            ValueDesc::new("age".to_string(), Datatype::Int8, false),
-            ValueDesc::new("height".to_string(), Datatype::Int16, true),
-            ValueDesc::new("weight".to_string(), Datatype::Int32, false),
-        ];
-
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::with_path(
+        let schema = test_dyn_item_schema();
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_string(),
-            0,
+            &schema,
         );
-        let db = DB::with_schema(option, TokioExecutor::current(), test_dyn_item_schema())
+        let db = DB::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
 

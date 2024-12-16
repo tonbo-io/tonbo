@@ -221,10 +221,10 @@ async fn main() -> Result<()> {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/music").await;
 
-    let options = DbOption::from((
+    let options = DbOption::new(
         Path::from_filesystem_path("./db_path/music").unwrap(),
         &MusicSchema,
-    ));
+    );
 
     let db = DB::new(options, TokioExecutor::current(), MusicSchema)
         .await

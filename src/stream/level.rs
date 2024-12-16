@@ -51,7 +51,7 @@ where
     upper: Bound<&'level <R::Schema as Schema>::Key>,
     ts: Timestamp,
     level: usize,
-    option: Arc<DbOption<R>>,
+    option: Arc<DbOption>,
     gens: VecDeque<FileId>,
     limit: Option<usize>,
     projection_mask: ProjectionMask,
@@ -229,23 +229,18 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version,
-        fs::manager::StoreManager,
-        inmem::immutable::tests::TestSchema,
-        record::{Record, Schema},
-        stream::level::LevelStream,
-        tests::Test,
-        DbOption,
+        compaction::tests::build_version, fs::manager::StoreManager,
+        inmem::immutable::tests::TestSchema, record::Schema, stream::level::LevelStream, DbOption,
     };
 
     #[tokio::test]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let option = Arc::new(DbOption::from((
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema {},
-        )));
+        ));
 
         manager
             .base_fs()

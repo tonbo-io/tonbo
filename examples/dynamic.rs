@@ -1,10 +1,11 @@
-use std::fs;
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use fusio::path::Path;
-use tonbo::executor::tokio::TokioExecutor;
-use tonbo::record::{Datatype, DynRecord, DynSchema, Value, ValueDesc};
-use tonbo::{DbOption, DB};
+use tonbo::{
+    executor::tokio::TokioExecutor,
+    record::{Datatype, DynRecord, DynSchema, Value, ValueDesc},
+    DbOption, DB,
+};
 
 #[tokio::main]
 async fn main() {
@@ -18,11 +19,11 @@ async fn main() {
         0,
     );
 
-    let options = DbOption::from((
+    let options = DbOption::new(
         Path::from_filesystem_path("./db_path/users").unwrap(),
         &schema,
-    ));
-    let db = DB::with_schema(options, TokioExecutor::current(), schema)
+    );
+    let db = DB::new(options, TokioExecutor::current(), schema)
         .await
         .unwrap();
 

@@ -1,8 +1,8 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use fusio::SeqRead;
 
-use super::{Datatype, DynRecordRef, Value, ValueDesc};
+use super::{Datatype, DynRecordRef, Value};
 use crate::{
     record::{DynSchema, Record, RecordDecodeError},
     serdes::{Decode, Encode},
@@ -21,68 +21,6 @@ impl DynRecord {
             values,
             primary_index,
         }
-    }
-}
-
-impl DynRecord {
-    pub(crate) fn empty_record(column_descs: Vec<ValueDesc>, primary_index: usize) -> DynRecord {
-        let mut columns = vec![];
-        for desc in column_descs.iter() {
-            let value: Arc<dyn Any + Send + Sync> = match desc.datatype {
-                Datatype::UInt8 => match desc.is_nullable {
-                    true => Arc::<Option<u8>>::new(None),
-                    false => Arc::new(u8::default()),
-                },
-                Datatype::UInt16 => match desc.is_nullable {
-                    true => Arc::<Option<u16>>::new(None),
-                    false => Arc::new(u16::default()),
-                },
-                Datatype::UInt32 => match desc.is_nullable {
-                    true => Arc::<Option<u32>>::new(None),
-                    false => Arc::new(u32::default()),
-                },
-                Datatype::UInt64 => match desc.is_nullable {
-                    true => Arc::<Option<u64>>::new(None),
-                    false => Arc::new(u64::default()),
-                },
-                Datatype::Int8 => match desc.is_nullable {
-                    true => Arc::<Option<i8>>::new(None),
-                    false => Arc::new(i8::default()),
-                },
-                Datatype::Int16 => match desc.is_nullable {
-                    true => Arc::<Option<i16>>::new(None),
-                    false => Arc::new(i16::default()),
-                },
-                Datatype::Int32 => match desc.is_nullable {
-                    true => Arc::<Option<i32>>::new(None),
-                    false => Arc::new(i32::default()),
-                },
-                Datatype::Int64 => match desc.is_nullable {
-                    true => Arc::<Option<i64>>::new(None),
-                    false => Arc::new(i64::default()),
-                },
-                Datatype::String => match desc.is_nullable {
-                    true => Arc::<Option<String>>::new(None),
-                    false => Arc::new(String::default()),
-                },
-                Datatype::Boolean => match desc.is_nullable {
-                    true => Arc::<Option<bool>>::new(None),
-                    false => Arc::new(bool::default()),
-                },
-                Datatype::Bytes => match desc.is_nullable {
-                    true => Arc::<Option<Vec<u8>>>::new(None),
-                    false => Arc::new(Vec::<u8>::default()),
-                },
-            };
-            columns.push(Value::new(
-                desc.datatype,
-                desc.name.to_owned(),
-                value,
-                desc.is_nullable,
-            ));
-        }
-
-        DynRecord::new(columns, primary_index)
     }
 }
 

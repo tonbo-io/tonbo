@@ -163,22 +163,18 @@ mod tests {
 
     use super::MergeStream;
     use crate::{
-        inmem::{immutable::tests::TestSchema, mutable::Mutable},
-        record::test::StringSchema,
-        stream::Entry,
-        trigger::TriggerFactory,
-        wal::log::LogType,
-        DbOption,
+        inmem::mutable::Mutable, record::test::StringSchema, stream::Entry,
+        trigger::TriggerFactory, wal::log::LogType, DbOption,
     };
 
     #[tokio::test]
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &StringSchema,
-        ));
+        );
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
@@ -278,10 +274,10 @@ mod tests {
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &StringSchema,
-        ));
+        );
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
@@ -369,10 +365,10 @@ mod tests {
     async fn merge_mutable_limit() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &StringSchema,
-        ));
+        );
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 

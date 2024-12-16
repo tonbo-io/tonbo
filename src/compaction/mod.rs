@@ -35,7 +35,7 @@ pub(crate) struct Compactor<R>
 where
     R: Record,
 {
-    pub(crate) option: Arc<DbOption<R>>,
+    pub(crate) option: Arc<DbOption>,
     pub(crate) schema: Arc<RwLock<Schema<R>>>,
     pub(crate) version_set: VersionSet<R>,
     pub(crate) manager: Arc<StoreManager>,
@@ -49,7 +49,7 @@ where
     pub(crate) fn new(
         schema: Arc<RwLock<Schema<R>>>,
         record_schema: Arc<R::Schema>,
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         version_set: VersionSet<R>,
         manager: Arc<StoreManager>,
     ) -> Self {
@@ -148,7 +148,7 @@ where
     }
 
     pub(crate) async fn minor_compaction(
-        option: &DbOption<R>,
+        option: &DbOption,
         recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(
             Option<FileId>,
@@ -211,7 +211,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn major_compaction(
         version: &Version<R>,
-        option: &DbOption<R>,
+        option: &DbOption,
         mut min: &<R::Schema as RecordSchema>::Key,
         mut max: &<R::Schema as RecordSchema>::Key,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
@@ -419,7 +419,7 @@ where
     }
 
     async fn build_tables<'scan>(
-        option: &DbOption<R>,
+        option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'scan, R>>,
@@ -490,7 +490,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     async fn build_table(
-        option: &DbOption<R>,
+        option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
         builder: &mut <<R::Schema as RecordSchema>::Columns as ArrowArrays>::Builder,
@@ -582,7 +582,7 @@ pub(crate) mod tests {
     };
 
     async fn build_immutable<R>(
-        option: &DbOption<R>,
+        option: &DbOption,
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
@@ -601,7 +601,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn build_parquet_table<R>(
-        option: &DbOption<R>,
+        option: &DbOption,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
@@ -634,10 +634,10 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_dir_l0 = tempfile::tempdir().unwrap();
 
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ))
+        )
         .level_path(
             0,
             Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
@@ -747,10 +747,13 @@ pub(crate) mod tests {
     async fn dyn_minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let option = DbOption::with_path(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "id".to_string(),
+        let schema = DynSchema::new(
+            vec![ValueDesc::new("id".to_owned(), Datatype::Int32, false)],
             0,
+        );
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &schema,
         );
         manager
             .base_fs()
@@ -758,10 +761,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let instance = Arc::new(DynSchema::new(
-            vec![ValueDesc::new("id".to_owned(), Datatype::Int32, false)],
-            0,
-        ));
+        let instance = Arc::new(schema);
 
         let mut batch1_data = vec![];
         let mut batch2_data = vec![];
@@ -818,10 +818,10 @@ pub(crate) mod tests {
         let temp_dir_l0 = TempDir::new().unwrap();
         let temp_dir_l1 = TempDir::new().unwrap();
 
-        let mut option = DbOption::from((
+        let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ))
+        )
         .level_path(
             0,
             Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
@@ -900,7 +900,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn build_version(
-        option: &Arc<DbOption<Test>>,
+        option: &Arc<DbOption>,
         manager: &StoreManager,
         schema: &Arc<TestSchema>,
     ) -> ((FileId, FileId, FileId, FileId, FileId), Version<Test>) {
@@ -1162,10 +1162,10 @@ pub(crate) mod tests {
     pub(crate) async fn major_panic() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from((
+        let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
         option.major_threshold_with_sst_size = 1;
         option.level_sst_magnification = 1;
         let manager =
@@ -1273,10 +1273,10 @@ pub(crate) mod tests {
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from((
+        let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 0;
         option.major_threshold_with_sst_size = 2;

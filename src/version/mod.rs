@@ -46,7 +46,7 @@ where
     ts: Timestamp,
     pub(crate) level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
-    option: Arc<DbOption<R>>,
+    option: Arc<DbOption>,
     timestamp: Arc<AtomicU32>,
     log_length: u32,
 }
@@ -58,7 +58,7 @@ where
     #[cfg(test)]
     #[allow(unused)]
     pub(crate) fn new(
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         clean_sender: Sender<CleanTag>,
         timestamp: Arc<AtomicU32>,
     ) -> Self {
@@ -72,7 +72,7 @@ where
         }
     }
 
-    pub(crate) fn option(&self) -> &Arc<DbOption<R>> {
+    pub(crate) fn option(&self) -> &Arc<DbOption> {
         &self.option
     }
 }

@@ -54,10 +54,10 @@
 //!     // make sure the path exists
 //!     let _ = fs::create_dir_all("./db_path/users").await;
 //!
-//!     let options = DbOption::from((
+//!     let options = DbOption::new(
 //!         Path::from_filesystem_path("./db_path/users").unwrap(),
 //!         &UserSchema,
-//!     ));
+//!     );
 //!     // pluggable async runtime and I/O
 //!     let db = DB::new(options, TokioExecutor::current(), UserSchema)
 //!         .await
@@ -154,7 +154,7 @@ use parquet::{
     errors::ParquetError,
 };
 use parquet_lru::{DynLruCache, NoCache};
-use record::{DynRecord, Record};
+use record::Record;
 use thiserror::Error;
 use timestamp::{Timestamp, TimestampedRef};
 use tokio::sync::oneshot;
@@ -167,7 +167,7 @@ use crate::{
     compaction::{CompactTask, CompactionError, Compactor},
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileType},
-    record::{DynSchema, Schema as RecordSchema},
+    record::Schema as RecordSchema,
     serdes::Decode,
     snapshot::Snapshot,
     stream::{
@@ -193,22 +193,6 @@ where
     _p: PhantomData<E>,
 }
 
-impl<E> DB<DynRecord, E>
-where
-    E: Executor + Send + Sync + 'static,
-{
-    /// Open [`DB`] with schema which determined by [`ColumnDesc`].
-    pub async fn with_schema(
-        option: DbOption<DynRecord>,
-        executor: E,
-        schema: DynSchema,
-    ) -> Result<Self, DbError<DynRecord>> {
-        let option = Arc::new(option);
-
-        Self::build(option, executor, schema, Arc::new(NoCache::default())).await
-    }
-}
-
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
@@ -220,11 +204,7 @@ where
     /// according to the configuration of [`DbOption`].
     ///
     /// For more configurable options, please refer to [`DbOption`].
-    pub async fn new(
-        option: DbOption<R>,
-        executor: E,
-        schema: R::Schema,
-    ) -> Result<Self, DbError<R>> {
+    pub async fn new(option: DbOption, executor: E, schema: R::Schema) -> Result<Self, DbError<R>> {
         Self::build(
             Arc::new(option),
             executor,
@@ -242,7 +222,7 @@ where
     E: Executor + Send + Sync + 'static,
 {
     async fn build(
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         executor: E,
         schema: R::Schema,
         lru_cache: ParquetLru,
@@ -266,7 +246,7 @@ where
         }
         let (task_tx, task_rx) = bounded(1);
 
-        let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
+        let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let schema = Arc::new(RwLock::new(
@@ -505,7 +485,7 @@ where
     R: Record + Send,
 {
     async fn new(
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
         version_set: &VersionSet<R>,
         record_schema: Arc<R::Schema>,
@@ -682,10 +662,6 @@ where
     async fn flush_wal(&self) -> Result<(), DbError<R>> {
         self.mutable.flush_wal().await?;
         Ok(())
-    }
-
-    pub(crate) fn record_schema(&self) -> &Arc<R::Schema> {
-        &self.record_schema
     }
 }
 
@@ -931,15 +907,14 @@ pub(crate) mod tests {
 
     use arrow::{
         array::{Array, AsArray, RecordBatch},
-        datatypes::{DataType, Field, Schema, UInt32Type},
+        datatypes::{Schema, UInt32Type},
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
     use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
     use fusio_dispatch::FsOptions;
     use futures::StreamExt;
-    use once_cell::sync::Lazy;
-    use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+    use parquet::arrow::ProjectionMask;
     use parquet_lru::NoCache;
     use tempfile::TempDir;
     use tracing::error;
@@ -947,15 +922,12 @@ pub(crate) mod tests {
     use crate::{
         compaction::{CompactTask, CompactionError, Compactor},
         executor::{tokio::TokioExecutor, Executor},
-        fs::{generate_file_id, manager::StoreManager, FileId},
-        inmem::{
-            immutable::tests::{TestImmutableArrays, TestSchema},
-            mutable::Mutable,
-        },
+        fs::{generate_file_id, manager::StoreManager},
+        inmem::{immutable::tests::TestSchema, mutable::Mutable},
         record::{
             internal::InternalRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
-            Datatype, DynRecord, DynSchema, Key, RecordDecodeError, RecordEncodeError, RecordRef,
+            Datatype, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
             Schema as RecordSchema, Value,
         },
         serdes::{Decode, Encode},
@@ -1150,7 +1122,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn get_test_record_batch<E: Executor + Send + Sync + 'static>(
-        option: DbOption<Test>,
+        option: DbOption,
         executor: E,
     ) -> RecordBatch {
         let db: DB<Test, E> = DB::new(option.clone(), executor, TestSchema {})
@@ -1198,7 +1170,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn build_schema(
-        option: Arc<DbOption<Test>>,
+        option: Arc<DbOption>,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(crate::Schema<Test>, Receiver<CompactTask>), fusio::Error> {
         let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
@@ -1307,7 +1279,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn build_db<R, E>(
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         compaction_rx: Receiver<CompactTask>,
         executor: E,
         schema: crate::Schema<R>,
@@ -1329,7 +1301,7 @@ pub(crate) mod tests {
 
         let schema = Arc::new(RwLock::new(schema));
 
-        let (mut cleaner, clean_sender) = Cleaner::<R>::new(option.clone(), manager.clone());
+        let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let version_set =
             build_version_set(version, clean_sender, option.clone(), manager.clone()).await?;
         let mut compactor = Compactor::<R>::new(
@@ -1595,7 +1567,7 @@ pub(crate) mod tests {
         let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
         let path_l0 = Path::from_filesystem_path(temp_dir_l0.path()).unwrap();
 
-        let mut option = DbOption::from((path, &TestSchema))
+        let mut option = DbOption::new(path, &TestSchema)
             .level_path(0, path_l0, FsOptions::Local)
             .unwrap();
         option.immutable_chunk_num = 1;
@@ -1635,10 +1607,10 @@ pub(crate) mod tests {
     async fn test_flush() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from((
+        let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1672,10 +1644,10 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
 
-        let option = Arc::new(DbOption::from((
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        )));
+        ));
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let (task_tx, _task_rx) = bounded(1);
@@ -1738,10 +1710,9 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
 
         let dyn_schema = Arc::new(test_dyn_item_schema());
-        let option = Arc::new(DbOption::with_path(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "id".to_owned(),
-            dyn_schema.primary_key_index(),
+            dyn_schema.as_ref(),
         ));
         manager
             .base_fs()
@@ -1777,14 +1748,13 @@ pub(crate) mod tests {
         schema.flush_wal().await.unwrap();
         drop(schema);
 
-        let option = DbOption::with_path(
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "id".to_owned(),
-            dyn_schema.primary_key_index(),
+            dyn_schema.as_ref(),
         );
         let dyn_schema = test_dyn_item_schema();
         let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::current(), dyn_schema)
+            DB::new(option, TokioExecutor::current(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -1817,10 +1787,10 @@ pub(crate) mod tests {
     async fn test_get_removed() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from((
+        let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1857,10 +1827,9 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let dyn_schema = test_dyn_item_schema();
-        let mut option = DbOption::with_path(
+        let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "id".to_string(),
-            dyn_schema.primary_key_index(),
+            &dyn_schema,
         );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
@@ -1871,7 +1840,7 @@ pub(crate) mod tests {
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::current(), dyn_schema)
+            DB::new(option, TokioExecutor::current(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -2065,10 +2034,9 @@ pub(crate) mod tests {
         let temp_dir1 = TempDir::with_prefix("db1").unwrap();
 
         let dyn_schema = test_dyn_item_schema();
-        let mut option = DbOption::with_path(
+        let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir1.path()).unwrap(),
-            "id".to_string(),
-            dyn_schema.primary_key_index(),
+            &dyn_schema,
         );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
@@ -2077,10 +2045,9 @@ pub(crate) mod tests {
         option.trigger_type = TriggerType::Length(5);
 
         let temp_dir2 = TempDir::with_prefix("db2").unwrap();
-        let mut option2 = DbOption::with_path(
+        let mut option2 = DbOption::new(
             Path::from_filesystem_path(temp_dir2.path()).unwrap(),
-            "id".to_string(),
-            dyn_schema.primary_key_index(),
+            &dyn_schema,
         );
         option2.immutable_chunk_num = 1;
         option2.immutable_chunk_max_num = 1;
@@ -2089,10 +2056,9 @@ pub(crate) mod tests {
         option2.trigger_type = TriggerType::Length(5);
 
         let temp_dir3 = TempDir::with_prefix("db3").unwrap();
-        let mut option3 = DbOption::with_path(
+        let mut option3 = DbOption::new(
             Path::from_filesystem_path(temp_dir3.path()).unwrap(),
-            "id".to_string(),
-            dyn_schema.primary_key_index(),
+            &dyn_schema,
         );
         option3.immutable_chunk_num = 1;
         option3.immutable_chunk_max_num = 1;
@@ -2101,15 +2067,15 @@ pub(crate) mod tests {
         option3.trigger_type = TriggerType::Length(5);
 
         let db1: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option, TokioExecutor::current(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db2: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option2, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option2, TokioExecutor::current(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db3: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option3, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option3, TokioExecutor::current(), test_dyn_item_schema())
                 .await
                 .unwrap();
 

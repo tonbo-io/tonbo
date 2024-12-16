@@ -8,11 +8,7 @@ use tonbo::record::{Datatype, Value};
 
 use crate::{column::Column, datatype::DataType, range};
 
-pub(crate) fn to_dict(
-    py: Python,
-    primary_key_index: usize,
-    record: Vec<Value>,
-) -> Bound<PyDict> {
+pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) -> Bound<PyDict> {
     let dict = PyDict::new_bound(py);
     for (idx, col) in record.iter().enumerate() {
         match &col.datatype {
@@ -199,10 +195,7 @@ pub(crate) fn to_bound(
     col: &Column,
     lower: Option<Py<range::Bound>>,
     high: Option<Py<range::Bound>>,
-) -> (
-    std::ops::Bound<Value>,
-    std::ops::Bound<Value>,
-) {
+) -> (std::ops::Bound<Value>, std::ops::Bound<Value>) {
     let lower = match lower {
         Some(bound) => bound.get().to_bound(py, col),
         None => std::ops::Bound::Unbounded,

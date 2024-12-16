@@ -64,7 +64,7 @@ mod tests {
 
     use crate::{
         inmem::{immutable::tests::TestSchema, mutable::Mutable},
-        record::{Record, Schema},
+        record::Schema,
         stream::mem_projection::MemProjectionStream,
         tests::Test,
         trigger::TriggerFactory,
@@ -76,10 +76,10 @@ mod tests {
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::from((
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
