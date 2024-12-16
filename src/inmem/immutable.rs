@@ -231,6 +231,7 @@ pub(crate) mod tests {
 
     use super::{ArrowArrays, Builder};
     use crate::{
+        magic,
         record::{Record, Schema},
         tests::{Test, TestRef},
         timestamp::timestamped::Timestamped,
@@ -250,7 +251,7 @@ pub(crate) mod tests {
             static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
                 Arc::new(ArrowSchema::new(vec![
                     Field::new("_null", DataType::Boolean, false),
-                    Field::new("_ts", DataType::UInt32, false),
+                    Field::new(magic::TS, DataType::UInt32, false),
                     Field::new("vstring", DataType::Utf8, false),
                     Field::new("vu32", DataType::UInt32, false),
                     Field::new("vbool", DataType::Boolean, true),
@@ -271,7 +272,7 @@ pub(crate) mod tests {
             Vec<parquet::format::SortingColumn>,
         ) {
             (
-                ColumnPath::new(vec!["_ts".to_string(), "vstring".to_string()]),
+                ColumnPath::new(vec![magic::TS.to_string(), "vstring".to_string()]),
                 vec![
                     SortingColumn::new(1, true, true),
                     SortingColumn::new(2, false, true),

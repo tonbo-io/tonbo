@@ -13,6 +13,7 @@ use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::Colum
 use super::{internal::InternalRecordRef, Key, Record, RecordRef, Schema};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
+    magic,
     timestamp::Timestamped,
 };
 
@@ -32,7 +33,7 @@ impl Schema for StringSchema {
         static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
             Arc::new(ArrowSchema::new(vec![
                 Field::new("_null", DataType::Boolean, false),
-                Field::new("_ts", DataType::UInt32, false),
+                Field::new(magic::TS, DataType::UInt32, false),
                 Field::new(PRIMARY_FIELD_NAME, DataType::Utf8, false),
             ]))
         });
@@ -46,7 +47,7 @@ impl Schema for StringSchema {
 
     fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
         (
-            ColumnPath::new(vec!["_ts".to_string(), PRIMARY_FIELD_NAME.to_string()]),
+            ColumnPath::new(vec![magic::TS.to_string(), PRIMARY_FIELD_NAME.to_string()]),
             vec![
                 SortingColumn::new(1, true, true),
                 SortingColumn::new(2, false, true),

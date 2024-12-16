@@ -15,6 +15,7 @@ use arrow::{
 use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, Datatype};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
+    magic::USER_COLUMN_OFFSET,
     record::{Key, Record, Schema},
     timestamp::Timestamped,
 };
@@ -117,7 +118,7 @@ impl ArrowArrays for DynRecordImmutableArrays {
 
         let mut columns = vec![];
         for (idx, col) in self.columns.iter().enumerate() {
-            if projection_mask.leaf_included(idx + 2) && !col.is_nullable {
+            if projection_mask.leaf_included(idx + USER_COLUMN_OFFSET) && !col.is_nullable {
                 let datatype = col.datatype;
                 let name = col.name.to_string();
                 let value: Arc<dyn Any + Send + Sync> = match datatype {
@@ -458,7 +459,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             .zip(self.datatypes.iter())
             .enumerate()
         {
-            let field = self.schema.field(idx + 2);
+            let field = self.schema.field(idx + USER_COLUMN_OFFSET);
             let is_nullable = field.is_nullable();
             match datatype {
                 Datatype::UInt8 => {

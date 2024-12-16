@@ -121,6 +121,7 @@ mod compaction;
 pub mod executor;
 pub mod fs;
 pub mod inmem;
+pub mod magic;
 mod ondisk;
 pub mod option;
 pub mod record;
@@ -147,6 +148,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
 use lockable::LockableHashMap;
+use magic::USER_COLUMN_OFFSET;
 pub use once_cell;
 pub use parquet;
 use parquet::{
@@ -615,7 +617,7 @@ where
             Projection::Parts(projection) => {
                 let mut fixed_projection: Vec<usize> = [0, 1, primary_key_index]
                     .into_iter()
-                    .chain(projection.into_iter().map(|p| p + 2))
+                    .chain(projection.into_iter().map(|p| p + USER_COLUMN_OFFSET))
                     .collect();
                 fixed_projection.dedup();
 
@@ -733,7 +735,7 @@ where
     pub fn projection(self, mut projection: Vec<usize>) -> Self {
         // skip two columns: _null and _ts
         for p in &mut projection {
-            *p += 2;
+            *p += USER_COLUMN_OFFSET;
         }
         let primary_key_index = self.schema.record_schema.primary_key_index();
         let mut fixed_projection = vec![0, 1, primary_key_index];

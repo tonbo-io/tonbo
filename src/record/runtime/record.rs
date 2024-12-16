@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use fusio::SeqRead;
 
-use super::{Datatype, DynRecordRef, Value};
+use super::{schema::DynSchema, Datatype, DynRecordRef, Value};
 use crate::{
-    record::{DynSchema, Record, RecordDecodeError},
+    record::{Record, RecordDecodeError},
     serdes::{Decode, Encode},
 };
 
@@ -175,8 +175,8 @@ impl Record for DynRecord {
 pub(crate) mod test {
     use std::sync::Arc;
 
-    use super::DynRecord;
-    use crate::record::{Datatype, DynSchema, Value, ValueDesc};
+    use super::{DynRecord, DynSchema};
+    use crate::record::{Datatype, Value, ValueDesc};
 
     #[allow(unused)]
     pub(crate) fn test_dyn_item_schema() -> DynSchema {
