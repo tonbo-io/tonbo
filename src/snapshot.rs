@@ -166,7 +166,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             Arc::new(TestSchema),
             version,

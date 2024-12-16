@@ -197,7 +197,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             )),
-            TokioExecutor::new(),
+            TokioExecutor::current(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_query_test.parquet");
@@ -275,7 +275,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             )),
-            TokioExecutor::new(),
+            TokioExecutor::current(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_scan_test.parquet");

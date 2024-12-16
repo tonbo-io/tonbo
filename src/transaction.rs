@@ -275,7 +275,7 @@ mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &StringSchema,
             )),
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             StringSchema,
         )
         .await
@@ -333,7 +333,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -407,7 +407,7 @@ mod tests {
             &StringSchema,
         ));
 
-        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::new(), StringSchema)
+        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current(), StringSchema)
             .await
             .unwrap();
 
@@ -443,7 +443,7 @@ mod tests {
             &TestSchema,
         ));
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::new(), TestSchema)
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
             .await
             .unwrap();
 
@@ -502,7 +502,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -599,7 +599,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -777,7 +777,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -829,7 +829,7 @@ mod tests {
             "age".to_string(),
             0,
         );
-        let db = DB::with_schema(option, TokioExecutor::default(), test_dyn_item_schema())
+        let db = DB::with_schema(option, TokioExecutor::current(), test_dyn_item_schema())
             .await
             .unwrap();
 

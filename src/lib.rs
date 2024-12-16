@@ -59,7 +59,7 @@
 //!         &UserSchema,
 //!     ));
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new(options, TokioExecutor::default(), UserSchema)
+//!     let db = DB::new(options, TokioExecutor::current(), UserSchema)
 //!         .await
 //!         .unwrap();
 //!     // insert with owned value
@@ -1606,7 +1606,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
             .await
             .unwrap();
 
@@ -1647,7 +1647,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
             .await
             .unwrap();
 
@@ -1701,10 +1701,13 @@ pub(crate) mod tests {
         schema.flush_wal().await.unwrap();
         drop(schema);
 
-        let db: DB<Test, TokioExecutor> =
-            DB::new(option.as_ref().to_owned(), TokioExecutor::new(), TestSchema)
-                .await
-                .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(
+            option.as_ref().to_owned(),
+            TokioExecutor::current(),
+            TestSchema,
+        )
+        .await
+        .unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_items() {
@@ -1781,7 +1784,7 @@ pub(crate) mod tests {
         );
         let dyn_schema = test_dyn_item_schema();
         let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::new(), dyn_schema)
+            DB::with_schema(option, TokioExecutor::current(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -1823,7 +1826,7 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
             .await
             .unwrap();
 
@@ -1868,7 +1871,7 @@ pub(crate) mod tests {
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::new(), dyn_schema)
+            DB::with_schema(option, TokioExecutor::current(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -2098,15 +2101,15 @@ pub(crate) mod tests {
         option3.trigger_type = TriggerType::Length(5);
 
         let db1: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::new(), test_dyn_item_schema())
+            DB::with_schema(option, TokioExecutor::current(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db2: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option2, TokioExecutor::new(), test_dyn_item_schema())
+            DB::with_schema(option2, TokioExecutor::current(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db3: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option3, TokioExecutor::new(), test_dyn_item_schema())
+            DB::with_schema(option3, TokioExecutor::current(), test_dyn_item_schema())
                 .await
                 .unwrap();
 

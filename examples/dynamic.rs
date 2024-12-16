@@ -22,7 +22,7 @@ async fn main() {
         Path::from_filesystem_path("./db_path/users").unwrap(),
         &schema,
     ));
-    let db = DB::with_schema(options, TokioExecutor::new(), schema)
+    let db = DB::with_schema(options, TokioExecutor::current(), schema)
         .await
         .unwrap();
 
