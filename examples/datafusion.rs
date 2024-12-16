@@ -217,7 +217,7 @@ async fn main() -> Result<()> {
 
     let options = DbOption::from(Path::from_filesystem_path("./db_path/music").unwrap());
 
-    let db = DB::new(options, TokioExecutor::default()).await.unwrap();
+    let db = DB::new(options, TokioExecutor::current()).await.unwrap();
     for (id, name, like) in [
         (0, "welcome".to_string(), 0),
         (1, "tonbo".to_string(), 999),
