@@ -1583,7 +1583,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current()).await.unwrap();
 
         for (i, item) in test_items().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
@@ -1619,7 +1619,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current()).await.unwrap();
 
         for item in &test_items()[0..10] {
             db.write(item.clone(), 0.into()).await.unwrap();
@@ -1668,9 +1668,10 @@ pub(crate) mod tests {
         schema.flush_wal().await.unwrap();
         drop(schema);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option.as_ref().to_owned(), TokioExecutor::new())
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> =
+            DB::new(option.as_ref().to_owned(), TokioExecutor::current())
+                .await
+                .unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_items() {
@@ -1741,7 +1742,7 @@ pub(crate) mod tests {
             primary_key_index,
         );
         let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::new(), desc, primary_key_index)
+            DB::with_schema(option, TokioExecutor::current(), desc, primary_key_index)
                 .await
                 .unwrap();
 
@@ -1780,7 +1781,7 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current()).await.unwrap();
 
         for (idx, item) in test_items().into_iter().enumerate() {
             if idx % 2 == 0 {
@@ -1822,10 +1823,14 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option, TokioExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+        let db: DB<DynRecord, TokioExecutor> = DB::with_schema(
+            option,
+            TokioExecutor::current(),
+            cols_desc,
+            primary_key_index,
+        )
+        .await
+        .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i == 28 {
@@ -2054,7 +2059,7 @@ pub(crate) mod tests {
 
         let db1: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             cols_desc.clone(),
             primary_key_index,
         )
@@ -2062,16 +2067,20 @@ pub(crate) mod tests {
         .unwrap();
         let db2: DB<DynRecord, TokioExecutor> = DB::with_schema(
             option2,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             cols_desc.clone(),
             primary_key_index,
         )
         .await
         .unwrap();
-        let db3: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option3, TokioExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+        let db3: DB<DynRecord, TokioExecutor> = DB::with_schema(
+            option3,
+            TokioExecutor::current(),
+            cols_desc,
+            primary_key_index,
+        )
+        .await
+        .unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i >= 40 {

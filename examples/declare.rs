@@ -24,7 +24,7 @@ async fn main() {
 
     let options = DbOption::from(Path::from_filesystem_path("./db_path/users").unwrap());
     // pluggable async runtime and I/O
-    let db = DB::new(options, TokioExecutor::default()).await.unwrap();
+    let db = DB::new(options, TokioExecutor::current()).await.unwrap();
 
     // insert with owned value
     db.insert(User {

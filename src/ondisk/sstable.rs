@@ -190,7 +190,7 @@ pub(crate) mod tests {
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-            TokioExecutor::new(),
+            TokioExecutor::current(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_query_test.parquet");
@@ -265,7 +265,7 @@ pub(crate) mod tests {
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-            TokioExecutor::new(),
+            TokioExecutor::current(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_scan_test.parquet");
