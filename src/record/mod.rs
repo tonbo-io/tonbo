@@ -110,7 +110,16 @@ impl Schema for DynSchema {
     }
 
     fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
-        unimplemented!()
+        (
+            ColumnPath::new(vec![
+                "_ts".to_string(),
+                self.schema[self.primary_index].name.clone(),
+            ]),
+            vec![
+                SortingColumn::new(1_i32, true, true),
+                SortingColumn::new(self.primary_key_index() as i32, false, true),
+            ],
+        )
     }
 }
 

@@ -28,7 +28,6 @@ pub struct DbOption<R> {
     pub(crate) clean_channel_buffer: usize,
     pub(crate) base_path: Path,
     pub(crate) base_fs: FsOptions,
-    // TODO: DEBUG
     pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,

@@ -76,9 +76,15 @@ where
 
             let mutable = mem::replace(
                 &mut guard.mutable,
-                Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await?,
+                Mutable::new(
+                    &self.option,
+                    trigger_clone,
+                    self.manager.base_fs(),
+                    self.record_schema.clone(),
+                )
+                .await?,
             );
-            let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
+            let (file_id, immutable) = mutable.into_immutable().await?;
             guard.immutables.push((file_id, immutable));
         } else if !is_manual {
             return Ok(());
