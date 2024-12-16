@@ -65,35 +65,37 @@ where
     pub(crate) async fn check_then_compaction(
         &mut self,
         parquet_lru: ParquetLru,
+        is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
         guard.trigger.reset();
 
-        if guard.mutable.is_empty() {
+        if !guard.mutable.is_empty() {
+            let trigger_clone = guard.trigger.clone();
+
+            let mutable = mem::replace(
+                &mut guard.mutable,
+                Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await?,
+            );
+            let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
+            guard.immutables.push((file_id, immutable));
+        } else if !is_manual {
             return Ok(());
         }
 
-        let trigger_clone = guard.trigger.clone();
-        let mutable = mem::replace(
-            &mut guard.mutable,
-            Mutable::new(
-                &self.option,
-                trigger_clone,
-                self.manager.base_fs(),
-                self.record_schema.clone(),
-            )
-            .await?,
-        );
-        let (file_id, immutable) = mutable.into_immutable().await?;
-
-        guard.immutables.push((file_id, immutable));
-        if guard.immutables.len() > self.option.immutable_chunk_max_num {
+        if (is_manual && !guard.immutables.is_empty())
+            || guard.immutables.len() > self.option.immutable_chunk_max_num
+        {
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
             let guard = self.schema.upgradable_read().await;
-            let chunk_num = self.option.immutable_chunk_num;
+            let chunk_num = if is_manual {
+                guard.immutables.len()
+            } else {
+                self.option.immutable_chunk_num
+            };
             let excess = &guard.immutables[0..chunk_num];
 
             if let Some(scope) = Self::minor_compaction(
@@ -313,7 +315,7 @@ where
                     level: (level + 1) as u8,
                     gen: scope.gen,
                 });
-                delete_gens.push((scope.gen, level));
+                delete_gens.push((scope.gen, level + 1));
             }
             level += 1;
         }

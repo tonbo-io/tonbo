@@ -299,12 +299,12 @@ where
                 if let Err(err) = match task {
                     CompactTask::Freeze => {
                         compactor
-                            .check_then_compaction(compact_task_cache.clone())
+                            .check_then_compaction(compact_task_cache.clone(), false)
                             .await
                     }
                     CompactTask::Flush(option_tx) => {
                         let mut result = compactor
-                            .check_then_compaction(compact_task_cache.clone())
+                            .check_then_compaction(compact_task_cache.clone(), true)
                             .await;
                         if let Some(tx) = option_tx {
                             if result.is_ok() {
@@ -1350,12 +1350,12 @@ pub(crate) mod tests {
                 if let Err(err) = match task {
                     CompactTask::Freeze => {
                         compactor
-                            .check_then_compaction(Arc::new(NoCache::default()))
+                            .check_then_compaction(Arc::new(NoCache::default()), false)
                             .await
                     }
                     CompactTask::Flush(option_tx) => {
                         let mut result = compactor
-                            .check_then_compaction(Arc::new(NoCache::default()))
+                            .check_then_compaction(Arc::new(NoCache::default()), true)
                             .await;
                         if let Some(tx) = option_tx {
                             let channel_result =
