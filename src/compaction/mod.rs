@@ -1241,7 +1241,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current()).await.unwrap();
 
         for i in 5..9 {
             let item = Test {

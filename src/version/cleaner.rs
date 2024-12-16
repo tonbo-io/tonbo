@@ -157,7 +157,7 @@ pub(crate) mod tests {
 
         let (mut cleaner, tx) = Cleaner::<Test>::new(option.clone(), manager.clone());
 
-        let executor = TokioExecutor::new();
+        let executor = TokioExecutor::current();
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {

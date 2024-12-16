@@ -261,7 +261,7 @@ mod tests {
 
         let db = DB::<String, TokioExecutor>::new(
             DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-            TokioExecutor::new(),
+            TokioExecutor::current(),
         )
         .await
         .unwrap();
@@ -317,7 +317,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             version,
             manager,
@@ -387,7 +387,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::new())
+        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current())
             .await
             .unwrap();
 
@@ -420,7 +420,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::new())
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current())
             .await
             .unwrap();
 
@@ -478,7 +478,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             version,
             manager,
@@ -573,7 +573,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             version,
             manager,
@@ -749,7 +749,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::new(),
+            TokioExecutor::current(),
             schema,
             version,
             manager,
@@ -800,7 +800,7 @@ mod tests {
             "age".to_string(),
             0,
         );
-        let db = DB::with_schema(option, TokioExecutor::default(), descs, 0)
+        let db = DB::with_schema(option, TokioExecutor::current(), descs, 0)
             .await
             .unwrap();
 
