@@ -1,17 +1,19 @@
 use std::{
-    fmt,
-    fmt::Debug,
     marker::PhantomData,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use crate::record::Record;
 
-pub trait Trigger<R: Record>: fmt::Debug {
-    fn item(&self, item: &Option<R>) -> bool;
+pub trait Trigger<R: Record>: Send + Sync {
+    fn check_if_exceed(&self, item: &Option<R>) -> bool;
 
     fn reset(&self);
 }
+
 #[derive(Debug)]
 pub struct SizeOfMemTrigger<R> {
     threshold: usize,
@@ -30,7 +32,7 @@ impl<T> SizeOfMemTrigger<T> {
 }
 
 impl<R: Record> Trigger<R> for SizeOfMemTrigger<R> {
-    fn item(&self, item: &Option<R>) -> bool {
+    fn check_if_exceed(&self, item: &Option<R>) -> bool {
         let size = item.as_ref().map_or(0, R::size);
         self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
     }
@@ -58,7 +60,7 @@ impl<T> LengthTrigger<T> {
 }
 
 impl<R: Record> Trigger<R> for LengthTrigger<R> {
-    fn item(&self, _: &Option<R>) -> bool {
+    fn check_if_exceed(&self, _: &Option<R>) -> bool {
         self.count.fetch_add(1, Ordering::SeqCst) + 1 >= self.threshold
     }
 
@@ -78,10 +80,10 @@ pub(crate) struct TriggerFactory<R> {
 }
 
 impl<R: Record> TriggerFactory<R> {
-    pub fn create(trigger_type: TriggerType) -> Box<dyn Trigger<R> + Send + Sync> {
+    pub fn create(trigger_type: TriggerType) -> Arc<dyn Trigger<R>> {
         match trigger_type {
-            TriggerType::SizeOfMem(threshold) => Box::new(SizeOfMemTrigger::new(threshold)),
-            TriggerType::Length(threshold) => Box::new(LengthTrigger::new(threshold)),
+            TriggerType::SizeOfMem(threshold) => Arc::new(SizeOfMemTrigger::new(threshold)),
+            TriggerType::Length(threshold) => Arc::new(LengthTrigger::new(threshold)),
         }
     }
 }
@@ -106,19 +108,19 @@ mod tests {
         assert_eq!(record_size, 8);
 
         assert!(
-            !trigger.item(&record),
+            !trigger.check_if_exceed(&record),
             "Trigger should not be exceeded after 1 record"
         );
 
-        trigger.item(&record);
+        trigger.check_if_exceed(&record);
         assert!(
-            trigger.item(&record),
+            trigger.check_if_exceed(&record),
             "Trigger should be exceeded after 2 records"
         );
 
         trigger.reset();
         assert!(
-            !trigger.item(&record),
+            !trigger.check_if_exceed(&record),
             "Trigger should not be exceeded after reset"
         );
     }
@@ -135,19 +137,19 @@ mod tests {
         });
 
         assert!(
-            !trigger.item(&record),
+            !trigger.check_if_exceed(&record),
             "Trigger should not be exceeded after 1 record"
         );
 
-        trigger.item(&record);
+        trigger.check_if_exceed(&record);
         assert!(
-            trigger.item(&record),
+            trigger.check_if_exceed(&record),
             "Trigger should be exceeded after 2 records"
         );
 
         trigger.reset();
         assert!(
-            !trigger.item(&record),
+            !trigger.check_if_exceed(&record),
             "Trigger should not be exceeded after reset"
         );
     }
@@ -156,23 +158,23 @@ mod tests {
         let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(9));
         let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
 
-        assert!(!size_of_mem_trigger.item(&Some(Test {
+        assert!(!size_of_mem_trigger.check_if_exceed(&Some(Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None
         })));
-        assert!(size_of_mem_trigger.item(&Some(Test {
+        assert!(size_of_mem_trigger.check_if_exceed(&Some(Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None
         })));
 
-        assert!(!length_trigger.item(&Some(Test {
+        assert!(!length_trigger.check_if_exceed(&Some(Test {
             vstring: "test".to_string(),
             vu32: 1,
             vbool: Some(true)
         })));
-        assert!(length_trigger.item(&Some(Test {
+        assert!(length_trigger.check_if_exceed(&Some(Test {
             vstring: "test".to_string(),
             vu32: 1,
             vbool: Some(true)
