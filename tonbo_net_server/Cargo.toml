@@ -11,10 +11,15 @@ fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "216eb446fb0a0c6e
 ] }
 futures-core = "0.3"
 futures-util = "0.3"
+http = "1.2.0"
 prost = { version = "0.13" }
 thiserror = "2"
 tonbo = { path = "../", package = "tonbo" }
 tonic = { version = "0.12" }
+tower-http = { version = "0.6.2", default-features = false, features = [
+    "cors",
+] }
+tonic-web = "0.12.3"
 itertools = "0.13.0"
 
 [dev-dependencies]

@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use ::http::HeaderName;
 use async_stream::stream;
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -16,6 +17,8 @@ use tonbo::{
     DB,
 };
 use tonic::{transport::Server, Code, Request, Response, Status};
+use tonic_web::GrpcWebLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     proto::{
@@ -25,6 +28,11 @@ use crate::{
     ServerError,
 };
 
+const DEFAULT_EXPOSED_HEADERS: [&str; 3] =
+    ["grpc-status", "grpc-message", "grpc-status-details-bin"];
+const DEFAULT_ALLOW_HEADERS: [&str; 4] =
+    ["x-grpc-web", "content-type", "x-user-agent", "grpc-timeout"];
+
 pub async fn service(addr: String, db: DB<DynRecord, TokioExecutor>) -> Result<(), ServerError> {
     let service = TonboService {
         inner: Arc::new(db),
@@ -33,6 +41,26 @@ pub async fn service(addr: String, db: DB<DynRecord, TokioExecutor>) -> Result<(
     println!("addr: {}", addr);
 
     Server::builder()
+        .accept_http1(true)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::mirror_request())
+                .expose_headers(
+                    DEFAULT_EXPOSED_HEADERS
+                        .iter()
+                        .cloned()
+                        .map(HeaderName::from_static)
+                        .collect::<Vec<HeaderName>>(),
+                )
+                .allow_headers(
+                    DEFAULT_ALLOW_HEADERS
+                        .iter()
+                        .cloned()
+                        .map(HeaderName::from_static)
+                        .collect::<Vec<HeaderName>>(),
+                ),
+        )
+        .layer(GrpcWebLayer::new())
         .add_service(TonboRpcServer::new(service))
         .serve(addr)
         .await?;

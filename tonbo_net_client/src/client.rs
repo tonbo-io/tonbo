@@ -43,7 +43,6 @@ pub struct TonboClient {
 }
 
 impl TonboClient {
-    // #[cfg(not(feature = "wasm"))]
     pub async fn connect(addr: String) -> Result<TonboClient, ClientError> {
         #[cfg(not(feature = "wasm"))]
         let conn = TonboRpcClient::connect(addr).await?;
@@ -112,7 +111,6 @@ impl TonboClient {
             .encode(&mut Cursor::new(&mut bytes))
             .await?;
 
-        let record_ref = record.as_record_ref();
         let _ = self
             .conn
             .insert(Request::new(InsertReq { record: bytes }))
