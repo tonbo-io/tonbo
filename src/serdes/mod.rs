@@ -5,6 +5,8 @@ mod bytes;
 mod list;
 mod num;
 pub(crate) mod option;
+#[cfg(feature = "float")]
+mod ordered_float;
 mod string;
 
 use std::future::Future;
