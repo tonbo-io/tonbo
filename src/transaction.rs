@@ -20,7 +20,7 @@ use crate::{
     stream::mem_projection::MemProjectionStream,
     timestamp::{Timestamp, Timestamped},
     wal::log::LogType,
-    DbError, LockMap, Projection, Record, Scan, DbStorage,
+    DbError, DbStorage, LockMap, Projection, Record, Scan,
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
