@@ -28,7 +28,10 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
 use tonbo::{
-    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DbOption, DB,
+    executor::tokio::TokioExecutor,
+    inmem::immutable::ArrowArrays,
+    record::{Record, Schema},
+    DbOption, DB,
 };
 use tonbo_macros::Record;
 
@@ -49,7 +52,10 @@ struct MusicExec {
     db: Arc<DB<Music, TokioExecutor>>,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
-    range: (Bound<<Music as Record>::Key>, Bound<<Music as Record>::Key>),
+    range: (
+        Bound<<MusicSchema as Schema>::Key>,
+        Bound<<MusicSchema as Schema>::Key>,
+    ),
 }
 
 struct MusicStream {
@@ -63,7 +69,7 @@ impl TableProvider for MusicProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        Music::arrow_schema().clone()
+        MusicSchema {}.arrow_schema().clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -96,7 +102,7 @@ impl TableProvider for MusicProvider {
 
 impl MusicExec {
     fn new(db: Arc<DB<Music, TokioExecutor>>, projection: Option<&Vec<usize>>) -> Self {
-        let schema = Music::arrow_schema();
+        let schema = MusicSchema {}.arrow_schema();
         let schema = if let Some(projection) = &projection {
             Arc::new(schema.project(projection).unwrap())
         } else {
@@ -127,7 +133,7 @@ impl Stream for MusicStream {
 
 impl RecordBatchStream for MusicStream {
     fn schema(&self) -> SchemaRef {
-        Music::arrow_schema().clone()
+        MusicSchema {}.arrow_schema().clone()
     }
 }
 
@@ -215,9 +221,14 @@ async fn main() -> Result<()> {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/music").await;
 
-    let options = DbOption::from(Path::from_filesystem_path("./db_path/music").unwrap());
+    let options = DbOption::new(
+        Path::from_filesystem_path("./db_path/music").unwrap(),
+        &MusicSchema,
+    );
 
-    let db = DB::new(options, TokioExecutor::current()).await.unwrap();
+    let db = DB::new(options, TokioExecutor::current(), MusicSchema)
+        .await
+        .unwrap();
     for (id, name, like) in [
         (0, "welcome".to_string(), 0),
         (1, "tonbo".to_string(), 999),

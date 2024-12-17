@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
-    record::Record,
+    record::{Record, Schema},
     serdes::Encode,
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
@@ -60,7 +60,7 @@ where
     inner: Arc<RwLock<VersionSetInner<R>>>,
     clean_sender: Sender<CleanTag>,
     timestamp: Arc<AtomicU32>,
-    option: Arc<DbOption<R>>,
+    option: Arc<DbOption>,
     manager: Arc<StoreManager>,
 }
 
@@ -98,7 +98,7 @@ where
 {
     pub(crate) async fn new(
         clean_sender: Sender<CleanTag>,
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         manager: Arc<StoreManager>,
     ) -> Result<Self, VersionError<R>> {
         let fs = manager.base_fs();
@@ -176,7 +176,7 @@ where
 
     pub(crate) async fn apply_edits(
         &self,
-        mut version_edits: Vec<VersionEdit<R::Key>>,
+        mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {
@@ -297,7 +297,7 @@ pub(crate) mod tests {
 
     use crate::{
         fs::{generate_file_id, manager::StoreManager, FileType},
-        record::Record,
+        record::{test::StringSchema, Record},
         scope::Scope,
         version::{
             cleaner::CleanTag,
@@ -311,7 +311,7 @@ pub(crate) mod tests {
     pub(crate) async fn build_version_set<R>(
         version: Version<R>,
         clean_sender: Sender<CleanTag>,
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         manager: Arc<StoreManager>,
     ) -> Result<VersionSet<R>, VersionError<R>>
     where
@@ -344,8 +344,9 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
         ));
         manager
             .base_fs()
@@ -381,7 +382,10 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
+        );
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -508,8 +512,9 @@ pub(crate) mod tests {
     async fn version_level_sort() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
         ));
 
         let (sender, _) = bounded(1);

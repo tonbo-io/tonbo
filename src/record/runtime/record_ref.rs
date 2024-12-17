@@ -3,28 +3,29 @@ use std::{any::Any, marker::PhantomData, mem, sync::Arc};
 use arrow::{
     array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
     datatypes::{
-        Int16Type, Int32Type, Int64Type, Int8Type, Schema, UInt16Type, UInt32Type, UInt64Type,
-        UInt8Type,
+        Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type,
+        UInt64Type, UInt8Type,
     },
 };
 use fusio::Write;
 
-use super::{Column, Datatype, DynRecord};
+use super::{Datatype, DynRecord, Value};
 use crate::{
-    record::{internal::InternalRecordRef, Key, Record, RecordEncodeError, RecordRef},
+    magic::USER_COLUMN_OFFSET,
+    record::{internal::InternalRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema},
     serdes::Encode,
 };
 
 #[derive(Clone)]
 pub struct DynRecordRef<'r> {
-    pub columns: Vec<Column>,
+    pub columns: Vec<Value>,
     // XXX: log encode should keep the same behavior
     pub primary_index: usize,
     _marker: PhantomData<&'r ()>,
 }
 
 impl<'r> DynRecordRef<'r> {
-    pub(crate) fn new(columns: Vec<Column>, primary_index: usize) -> Self {
+    pub(crate) fn new(columns: Vec<Value>, primary_index: usize) -> Self {
         Self {
             columns,
             primary_index,
@@ -60,7 +61,7 @@ impl<'r> Encode for DynRecordRef<'r> {
 impl<'r> RecordRef<'r> for DynRecordRef<'r> {
     type Record = DynRecord;
 
-    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
+    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
         self.columns
             .get(self.primary_index)
             .cloned()
@@ -71,7 +72,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         record_batch: &'r arrow::array::RecordBatch,
         offset: usize,
         projection_mask: &'r parquet::arrow::ProjectionMask,
-        full_schema: &'r Arc<Schema>,
+        full_schema: &'r Arc<ArrowSchema>,
     ) -> InternalRecordRef<'r, Self> {
         let null = record_batch.column(0).as_boolean().value(offset);
         let metadata = full_schema.metadata();
@@ -98,7 +99,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                 .enumerate()
                 .find(|(_idx, f)| field.contains(f));
             if batch_field.is_none() {
-                columns.push(Column::with_none_value(
+                columns.push(Value::with_none_value(
                     datatype,
                     field.name().to_owned(),
                     field.is_nullable(),
@@ -197,7 +198,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     }
                 }
             };
-            columns.push(Column::new(
+            columns.push(Value::new(
                 datatype,
                 field.name().to_owned(),
                 value,
@@ -215,7 +216,8 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
 
     fn projection(&mut self, projection_mask: &parquet::arrow::ProjectionMask) {
         for (idx, col) in self.columns.iter_mut().enumerate() {
-            if idx != self.primary_index && !projection_mask.leaf_included(idx + 2) {
+            if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
+            {
                 match col.datatype {
                     Datatype::UInt8 => col.value = Arc::<Option<u8>>::new(None),
                     Datatype::UInt16 => col.value = Arc::<Option<u16>>::new(None),

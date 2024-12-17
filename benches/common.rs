@@ -273,7 +273,7 @@ impl BenchDatabase for TonboS3BenchDataBase {
             .disable_wal();
 
         TonboS3BenchDataBase::new(
-            tonbo::DB::new(option, TokioExecutor::current())
+            tonbo::DB::new(option, TokioExecutor::current(), &CustomerSchema)
                 .await
                 .unwrap(),
         )
@@ -324,7 +324,7 @@ impl BenchDatabase for TonboBenchDataBase {
             DbOption::from(fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap())
                 .disable_wal();
 
-        let db = tonbo::DB::new(option, TokioExecutor::current())
+        let db = tonbo::DB::new(option, TokioExecutor::current(), &CustomerSchema)
             .await
             .unwrap();
         TonboBenchDataBase::new(db)

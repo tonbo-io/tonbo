@@ -19,7 +19,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
-    record::Record,
+    record::{Record, Schema},
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
     timestamp::Timestamp,
@@ -47,11 +47,11 @@ pub(crate) struct LevelStream<'level, R>
 where
     R: Record,
 {
-    lower: Bound<&'level R::Key>,
-    upper: Bound<&'level R::Key>,
+    lower: Bound<&'level <R::Schema as Schema>::Key>,
+    upper: Bound<&'level <R::Schema as Schema>::Key>,
     ts: Timestamp,
     level: usize,
-    option: Arc<DbOption<R>>,
+    option: Arc<DbOption>,
     gens: VecDeque<FileId>,
     limit: Option<usize>,
     projection_mask: ProjectionMask,
@@ -72,7 +72,10 @@ where
         level: usize,
         start: usize,
         end: usize,
-        range: (Bound<&'level R::Key>, Bound<&'level R::Key>),
+        range: (
+            Bound<&'level <R::Schema as Schema>::Key>,
+            Bound<&'level <R::Schema as Schema>::Key>,
+        ),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
@@ -226,16 +229,17 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version, fs::manager::StoreManager, record::Record,
-        stream::level::LevelStream, tests::Test, DbOption,
+        compaction::tests::build_version, fs::manager::StoreManager,
+        inmem::immutable::tests::TestSchema, record::Schema, stream::level::LevelStream, DbOption,
     };
 
     #[tokio::test]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema {},
         ));
 
         manager
@@ -249,7 +253,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
 
         {
             let mut level_stream_1 = LevelStream::new(
@@ -261,7 +265,7 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                     [0, 1, 2, 3],
                 ),
                 manager.base_fs().clone(),
@@ -298,7 +302,7 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                     [0, 1, 2, 4],
                 ),
                 manager.base_fs().clone(),
@@ -335,7 +339,7 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
                     [0, 1, 2],
                 ),
                 manager.base_fs().clone(),
