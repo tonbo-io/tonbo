@@ -115,7 +115,7 @@ mod tests {
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let m1 = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
             .await
