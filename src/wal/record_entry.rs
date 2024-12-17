@@ -1,7 +1,7 @@
 use fusio::{SeqRead, Write};
 
 use crate::{
-    record::{Key, Record},
+    record::{Key, Record, Schema},
     serdes::{Decode, Encode},
     timestamp::Timestamped,
 };
@@ -10,8 +10,13 @@ pub(crate) enum RecordEntry<'r, R>
 where
     R: Record,
 {
-    Encode((Timestamped<<R::Key as Key>::Ref<'r>>, Option<R::Ref<'r>>)),
-    Decode((Timestamped<R::Key>, Option<R>)),
+    Encode(
+        (
+            Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'r>>,
+            Option<R::Ref<'r>>,
+        ),
+    ),
+    Decode((Timestamped<<R::Schema as Schema>::Key>, Option<R>)),
 }
 
 impl<R> Encode for RecordEntry<'_, R>
@@ -51,7 +56,9 @@ where
     where
         R: SeqRead,
     {
-        let key = Timestamped::<Re::Key>::decode(reader).await.unwrap();
+        let key = Timestamped::<<Re::Schema as Schema>::Key>::decode(reader)
+            .await
+            .unwrap();
         let record = Option::<Re>::decode(reader).await.unwrap();
 
         Ok(RecordEntry::Decode((key, record)))

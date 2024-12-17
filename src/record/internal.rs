@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, mem::transmute};
 
-use super::{Key, Record, RecordRef};
+use super::{Key, Record, RecordRef, Schema};
 use crate::timestamp::{Timestamp, Timestamped};
 
 #[derive(Debug)]
@@ -32,7 +32,9 @@ impl<'r, R> InternalRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
-    pub fn value(&self) -> Timestamped<<<R::Record as Record>::Key as Key>::Ref<'_>> {
+    pub fn value(
+        &self,
+    ) -> Timestamped<<<<R::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>> {
         // Safety: shorter lifetime of the value must be safe
         unsafe { transmute(Timestamped::new(self.record.clone().key(), self.ts)) }
     }

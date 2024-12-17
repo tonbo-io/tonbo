@@ -14,17 +14,17 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
-    record::{Key, KeyRef},
+    record::{Key, KeyRef, Schema as RecordSchema},
     snapshot::Snapshot,
     stream,
     stream::mem_projection::MemProjectionStream,
     timestamp::{Timestamp, Timestamped},
     wal::log::LogType,
-    DbError, LockMap, Projection, Record, Scan, Schema,
+    DbError, DbStorage, LockMap, Projection, Record, Scan,
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
-    inner: Range<'scan, R::Key, Option<R>>,
+    inner: Range<'scan, <R::Schema as RecordSchema>::Key, Option<R>>,
     ts: Timestamp,
 }
 
@@ -32,7 +32,10 @@ impl<'scan, R> Iterator for TransactionScan<'scan, R>
 where
     R: Record,
 {
-    type Item = (Timestamped<<R::Key as Key>::Ref<'scan>>, &'scan Option<R>);
+    type Item = (
+        Timestamped<<<R::Schema as RecordSchema>::Key as Key>::Ref<'scan>>,
+        &'scan Option<R>,
+    );
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner
@@ -46,16 +49,19 @@ pub struct Transaction<'txn, R>
 where
     R: Record,
 {
-    local: BTreeMap<R::Key, Option<R>>,
+    local: BTreeMap<<R::Schema as RecordSchema>::Key, Option<R>>,
     snapshot: Snapshot<'txn, R>,
-    lock_map: LockMap<R::Key>,
+    lock_map: LockMap<<R::Schema as RecordSchema>::Key>,
 }
 
 impl<'txn, R> Transaction<'txn, R>
 where
     R: Record + Send,
 {
-    pub(crate) fn new(snapshot: Snapshot<'txn, R>, lock_map: LockMap<R::Key>) -> Self {
+    pub(crate) fn new(
+        snapshot: Snapshot<'txn, R>,
+        lock_map: LockMap<<R::Schema as RecordSchema>::Key>,
+    ) -> Self {
         Self {
             local: BTreeMap::new(),
             snapshot,
@@ -67,7 +73,7 @@ where
     /// [`Projection`]
     pub async fn get<'get>(
         &'get self,
-        key: &'get R::Key,
+        key: &'get <R::Schema as RecordSchema>::Key,
         projection: Projection,
     ) -> Result<Option<TransactionEntry<'get, R>>, DbError<R>> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
@@ -83,7 +89,10 @@ where
     /// scan records with primary keys in the `range`
     pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+        range: (
+            Bound<&'range <R::Schema as RecordSchema>::Key>,
+            Bound<&'range <R::Schema as RecordSchema>::Key>,
+        ),
     ) -> Scan<'scan, 'range, R> {
         let ts = self.snapshot.ts();
         let inner = self.local.range(range);
@@ -105,11 +114,11 @@ where
     }
 
     /// delete the record with the primary key as the `key` on this transaction
-    pub fn remove(&mut self, key: R::Key) {
+    pub fn remove(&mut self, key: <R::Schema as RecordSchema>::Key) {
         self.entry(key, None)
     }
 
-    fn entry(&mut self, key: R::Key, value: Option<R>) {
+    fn entry(&mut self, key: <R::Schema as RecordSchema>::Key, value: Option<R>) {
         match self.local.entry(key) {
             Entry::Vacant(v) => {
                 v.insert(value);
@@ -177,9 +186,9 @@ where
     }
 
     async fn append(
-        schema: &Schema<R>,
+        schema: &DbStorage<R>,
         log_ty: LogType,
-        key: <R as Record>::Key,
+        key: <R::Schema as RecordSchema>::Key,
         record: Option<R>,
         new_ts: Timestamp,
     ) -> Result<bool, CommitError<R>> {
@@ -225,7 +234,7 @@ where
     #[error("transaction database error {:?}", .0)]
     Database(#[from] DbError<R>),
     #[error("transaction write conflict: {:?}", .0)]
-    WriteConflict(R::Key),
+    WriteConflict(<R::Schema as RecordSchema>::Key),
     #[error("Failed to send compact task")]
     SendCompactTaskError(#[from] SendError<CompactTask>),
     #[error("Channel is closed")]
@@ -245,9 +254,10 @@ mod tests {
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
+        inmem::immutable::tests::TestSchema,
         record::{
-            runtime::{Column, Datatype, DynRecord},
-            ColumnDesc,
+            runtime::{test::test_dyn_item_schema, Datatype, DynRecord, Value},
+            test::StringSchema,
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
@@ -260,8 +270,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let db = DB::<String, TokioExecutor>::new(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &StringSchema,
+            ),
             TokioExecutor::current(),
+            StringSchema,
         )
         .await
         .unwrap();
@@ -295,8 +309,9 @@ mod tests {
     async fn transaction_get() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
         ));
 
         manager
@@ -310,7 +325,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -319,6 +334,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(TestSchema),
             version,
             manager,
         )
@@ -385,9 +401,12 @@ mod tests {
     #[tokio::test]
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
+        );
 
-        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current())
+        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current(), StringSchema)
             .await
             .unwrap();
 
@@ -418,9 +437,12 @@ mod tests {
     #[tokio::test]
     async fn transaction_projection() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current())
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
             .await
             .unwrap();
 
@@ -456,8 +478,9 @@ mod tests {
     async fn transaction_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
         ));
 
         manager
@@ -471,7 +494,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -480,6 +503,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(TestSchema),
             version,
             manager,
         )
@@ -551,8 +575,9 @@ mod tests {
     async fn test_transaction_scan_bound() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
         ));
 
         manager
@@ -566,7 +591,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -575,6 +600,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(TestSchema),
             version,
             manager,
         )
@@ -727,8 +753,9 @@ mod tests {
     async fn test_transaction_scan_limit() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
         ));
 
         manager
@@ -742,7 +769,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -751,6 +778,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(TestSchema),
             version,
             manager,
         )
@@ -788,32 +816,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_dyn_record() {
-        let descs = vec![
-            ColumnDesc::new("age".to_string(), Datatype::Int8, false),
-            ColumnDesc::new("height".to_string(), Datatype::Int16, true),
-            ColumnDesc::new("weight".to_string(), Datatype::Int32, false),
-        ];
-
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::with_path(
+        let schema = test_dyn_item_schema();
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "age".to_string(),
-            0,
+            &schema,
         );
-        let db = DB::with_schema(option, TokioExecutor::current(), descs, 0)
+        let db = DB::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
 
         db.insert(DynRecord::new(
             vec![
-                Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
-                Column::new(
+                Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
+                Value::new(
                     Datatype::Int16,
                     "height".to_string(),
                     Arc::new(Some(180_i16)),
                     true,
                 ),
-                Column::new(
+                Value::new(
                     Datatype::Int32,
                     "weight".to_string(),
                     Arc::new(56_i32),
@@ -827,7 +849,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Column::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false);
+            let key = Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());

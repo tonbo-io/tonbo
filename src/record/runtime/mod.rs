@@ -1,12 +1,14 @@
-mod array;
-mod column;
+pub(crate) mod array;
 mod record;
 mod record_ref;
+mod schema;
+mod value;
 
 use arrow::datatypes::DataType;
-pub use column::*;
 pub use record::*;
 pub use record_ref::*;
+pub use schema::*;
+pub use value::*;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Datatype {
