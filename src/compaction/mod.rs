@@ -590,7 +590,7 @@ pub(crate) mod tests {
     where
         R: Record + Send,
     {
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable: Mutable<R> = Mutable::new(option, trigger, fs, schema.clone()).await?;
 
