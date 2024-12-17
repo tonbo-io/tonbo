@@ -49,6 +49,14 @@ impl DynRecord {
         );
         Arc::new(Schema::new_with_metadata(fields, metadata))
     }
+
+    pub fn columns(&self) -> &[Column] {
+        self.columns.as_slice()
+    }
+
+    pub fn primary_column(&self) -> &Column {
+        &self.columns[self.primary_index]
+    }
 }
 
 impl DynRecord {

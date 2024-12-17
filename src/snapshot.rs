@@ -5,7 +5,7 @@ use parquet::arrow::ProjectionMask;
 
 use crate::{
     fs::manager::StoreManager,
-    record::Record,
+    record::{Record, RecordInstance},
     stream,
     stream::ScanStream,
     timestamp::Timestamp,
@@ -20,6 +20,7 @@ where
     ts: Timestamp,
     share: RwLockReadGuard<'s, Schema<R>>,
     version: VersionRef<R>,
+    instance: Arc<RecordInstance>,
     manager: Arc<StoreManager>,
     parquet_lru: ParquetLru,
 }
@@ -37,6 +38,7 @@ where
             .share
             .get(
                 &self.version,
+                &self.instance,
                 &self.manager,
                 key,
                 self.ts,
@@ -60,6 +62,7 @@ where
         Scan::new(
             &self.share,
             &self.manager,
+            &self.instance,
             range,
             self.ts,
             &self.version,
@@ -71,6 +74,7 @@ where
     pub(crate) fn new(
         share: RwLockReadGuard<'s, Schema<R>>,
         version: VersionRef<R>,
+        instance: Arc<RecordInstance>,
         manager: Arc<StoreManager>,
         parquet_lru: ParquetLru,
     ) -> Self {
@@ -78,6 +82,7 @@ where
             ts: version.load_ts(),
             share,
             version,
+            instance,
             manager,
             parquet_lru,
         }
@@ -105,6 +110,7 @@ where
         Scan::new(
             &self.share,
             &self.manager,
+            &self.instance,
             range,
             self.ts,
             &self.version,
@@ -127,6 +133,7 @@ mod tests {
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
+        record::RecordInstance,
         tests::{build_db, build_schema},
         version::TransactionTs,
         DbOption,
@@ -160,6 +167,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )

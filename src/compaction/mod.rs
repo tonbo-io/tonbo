@@ -39,6 +39,7 @@ where
     pub(crate) schema: Arc<RwLock<Schema<R>>>,
     pub(crate) version_set: VersionSet<R>,
     pub(crate) manager: Arc<StoreManager>,
+    pub(crate) instance: Arc<RecordInstance>,
 }
 
 impl<R> Compactor<R>
@@ -50,12 +51,14 @@ where
         option: Arc<DbOption<R>>,
         version_set: VersionSet<R>,
         manager: Arc<StoreManager>,
+        instance: Arc<RecordInstance>,
     ) -> Self {
         Compactor::<R> {
             option,
             schema,
             version_set,
             manager,
+            instance,
         }
     }
 
@@ -75,7 +78,7 @@ where
                 &mut guard.mutable,
                 Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await?,
             );
-            let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
+            let (file_id, immutable) = mutable.into_immutable(&self.instance).await?;
             guard.immutables.push((file_id, immutable));
         } else if !is_manual {
             return Ok(());
@@ -99,7 +102,7 @@ where
                 &self.option,
                 recover_wal_ids,
                 excess,
-                &guard.record_instance,
+                &self.instance,
                 &self.manager,
             )
             .await?
@@ -116,7 +119,7 @@ where
                         &scope.max,
                         &mut version_edits,
                         &mut delete_gens,
-                        &guard.record_instance,
+                        &self.instance,
                         &self.manager,
                         parquet_lru,
                     )

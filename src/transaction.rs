@@ -247,7 +247,7 @@ mod tests {
         fs::manager::StoreManager,
         record::{
             runtime::{Column, Datatype, DynRecord},
-            ColumnDesc,
+            ColumnDesc, RecordInstance,
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
@@ -319,6 +319,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )
@@ -480,6 +481,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )
@@ -575,6 +577,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )
@@ -751,6 +754,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
+            Arc::new(RecordInstance::Normal),
             version,
             manager,
         )
