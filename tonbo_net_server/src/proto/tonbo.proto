@@ -3,7 +3,8 @@ syntax = "proto3";
 package tonbo;
 
 message GetReq {
-    bytes key = 1;
+    string table_name = 1;
+    bytes key = 2;
 }
 
 message GetResp {
@@ -11,8 +12,9 @@ message GetResp {
 }
 
 message ScanReq {
-    bytes min = 1;
-    bytes max = 2;
+    string table_name = 1;
+    bytes min = 2;
+    bytes max = 3;
 }
 
 message ScanResp {
@@ -20,16 +22,23 @@ message ScanResp {
 }
 
 message InsertReq {
-    bytes record = 1;
+    string table_name = 1;
+    bytes record = 2;
 }
 
 message RemoveReq {
-    bytes key = 1;
+    string table_name = 1;
+    bytes key = 2;
 }
 
-message SchemaResp {
-    repeated ColumnDesc desc = 1;
-    uint32 primary_key_index = 2;
+message FlushReq {
+    string table_name = 1;
+}
+
+message CreateTableReq {
+    string table_name = 1;
+    repeated ColumnDesc desc = 2;
+    uint32 primary_key_index = 3;
 }
 
 enum Datatype {
@@ -55,10 +64,10 @@ message ColumnDesc {
 message Empty {}
 
 service TonboRpc {
-    rpc Schema(Empty) returns (SchemaResp) {}
+    rpc CreateTable(CreateTableReq) returns (Empty) {}
     rpc Get (GetReq) returns (GetResp) {}
     rpc Scan (ScanReq) returns (stream ScanResp) {}
     rpc Insert (InsertReq) returns (Empty) {}
     rpc Remove (RemoveReq) returns (Empty) {}
-    rpc Flush (Empty) returns (Empty) {}
+    rpc Flush (FlushReq) returns (Empty) {}
 }

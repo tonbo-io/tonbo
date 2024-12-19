@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 async-stream = "0.3"
-fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "216eb446fb0a0c6e5e85bfac51a6f6ed8e5ed606", package = "fusio", version = "0.3.3", features = [
+fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "88c6134948d05bef33598a969e9292ad38a8db4b", package = "fusio", version = "0.3.3", features = [
     "dyn",
     "fs",
 ] }
@@ -20,6 +20,7 @@ tower-http = { version = "0.6.2", default-features = false, features = [
     "cors",
 ] }
 tonic-web = "0.12.3"
+ttl_cache = "0.5"
 itertools = "0.13.0"
 
 [dev-dependencies]

@@ -11,55 +11,59 @@ use tonic::Request;
 
 use crate::{
     proto::{
-        tonbo_rpc_client::TonboRpcClient, ColumnDesc, Empty, GetReq, InsertReq, RemoveReq, ScanReq,
+        tonbo_rpc_client::TonboRpcClient, ColumnDesc, CreateTableReq, FlushReq, GetReq, InsertReq,
+        RemoveReq, ScanReq,
     },
     ClientError,
 };
-
-pub struct TonboSchema {
-    pub desc: Vec<ColumnDesc>,
-    pub primary_key_index: usize,
-}
-
-impl TonboSchema {
-    pub fn primary_key_desc(&self) -> &ColumnDesc {
-        &self.desc[self.primary_key_index]
-    }
-
-    pub fn len(&self) -> usize {
-        self.desc.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.desc.is_empty()
-    }
-}
 
 pub struct TonboClient {
     #[cfg(not(feature = "wasm"))]
     conn: TonboRpcClient<tonic::transport::Channel>,
     #[cfg(feature = "wasm")]
     conn: TonboRpcClient<tonic_web_wasm_client::Client>,
+    table_name: String,
+    descs: Vec<tonbo::record::ColumnDesc>,
+    pk_index: usize,
 }
 
 impl TonboClient {
-    pub async fn connect(addr: String) -> Result<TonboClient, ClientError> {
+    pub async fn connect(
+        addr: String,
+        table_name: String,
+        descs: Vec<tonbo::record::ColumnDesc>,
+        pk_index: usize,
+    ) -> Result<TonboClient, ClientError> {
         #[cfg(not(feature = "wasm"))]
-        let conn = TonboRpcClient::connect(addr).await?;
+        let mut conn = TonboRpcClient::connect(addr).await?;
         #[cfg(feature = "wasm")]
-        let conn = {
+        let mut conn = {
             let client = tonic_web_wasm_client::Client::new(addr);
             TonboRpcClient::new(client)
         };
-        Ok(TonboClient { conn })
-    }
+        let desc = descs
+            .iter()
+            .map(|desc| {
+                let ty: crate::proto::Datatype = desc.datatype.into();
+                ColumnDesc {
+                    name: desc.name.clone(),
+                    ty: ty as i32,
+                    is_nullable: desc.is_nullable,
+                }
+            })
+            .collect::<Vec<_>>();
+        conn.create_table(CreateTableReq {
+            table_name: table_name.clone(),
+            desc,
+            primary_key_index: pk_index as u32,
+        })
+        .await?;
 
-    pub async fn schema(&mut self) -> Result<TonboSchema, ClientError> {
-        let resp = self.conn.schema(Request::new(Empty {})).await?.into_inner();
-
-        Ok(TonboSchema {
-            desc: resp.desc,
-            primary_key_index: resp.primary_key_index as usize,
+        Ok(TonboClient {
+            conn,
+            table_name,
+            descs,
+            pk_index,
         })
     }
 
@@ -67,7 +71,13 @@ impl TonboClient {
         let mut bytes = Vec::new();
 
         column.encode(&mut Cursor::new(&mut bytes)).await?;
-        let resp = self.conn.get(Request::new(GetReq { key: bytes })).await?;
+        let resp = self
+            .conn
+            .get(Request::new(GetReq {
+                table_name: self.table_name.clone(),
+                key: bytes,
+            }))
+            .await?;
 
         let Some(mut value) = resp.into_inner().record else {
             return Ok(None);
@@ -88,6 +98,7 @@ impl TonboClient {
         let resp = self
             .conn
             .scan(Request::new(ScanReq {
+                table_name: self.table_name.clone(),
                 min: min_bytes,
                 max: max_bytes,
             }))
@@ -113,7 +124,10 @@ impl TonboClient {
 
         let _ = self
             .conn
-            .insert(Request::new(InsertReq { record: bytes }))
+            .insert(Request::new(InsertReq {
+                table_name: self.table_name.clone(),
+                record: bytes,
+            }))
             .await?;
 
         Ok(())
@@ -125,16 +139,42 @@ impl TonboClient {
         column.encode(&mut Cursor::new(&mut bytes)).await?;
         let _ = self
             .conn
-            .remove(Request::new(RemoveReq { key: bytes }))
+            .remove(Request::new(RemoveReq {
+                table_name: self.table_name.clone(),
+                key: bytes,
+            }))
             .await?;
 
         Ok(())
     }
 
     pub async fn flush(&mut self) -> Result<(), ClientError> {
-        let _ = self.conn.flush(Request::new(Empty {})).await?;
+        let _ = self
+            .conn
+            .flush(Request::new(FlushReq {
+                table_name: self.table_name.clone(),
+            }))
+            .await?;
 
         Ok(())
+    }
+}
+
+impl Into<crate::proto::Datatype> for Datatype {
+    fn into(self) -> crate::proto::Datatype {
+        match self {
+            Datatype::UInt8 => crate::proto::Datatype::Uint8,
+            Datatype::UInt16 => crate::proto::Datatype::Uint16,
+            Datatype::UInt32 => crate::proto::Datatype::Uint32,
+            Datatype::UInt64 => crate::proto::Datatype::Uint64,
+            Datatype::Int8 => crate::proto::Datatype::Int8,
+            Datatype::Int16 => crate::proto::Datatype::Int16,
+            Datatype::Int32 => crate::proto::Datatype::Int32,
+            Datatype::Int64 => crate::proto::Datatype::Int64,
+            Datatype::String => crate::proto::Datatype::String,
+            Datatype::Boolean => crate::proto::Datatype::Boolean,
+            Datatype::Bytes => crate::proto::Datatype::Bytes,
+        }
     }
 }
 

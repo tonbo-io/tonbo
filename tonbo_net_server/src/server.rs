@@ -2,28 +2,34 @@ use std::{
     io::Cursor,
     ops::Bound,
     pin::{pin, Pin},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use ::http::HeaderName;
 use async_stream::stream;
+use fusio::path::Path;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use itertools::Itertools;
+use tokio::sync::RwLock;
 use tonbo::{
     executor::tokio::TokioExecutor,
-    record::{Column, Datatype, DynRecord},
+    record::{Column, Datatype, DynRecord, Record},
     serdes::{Decode, Encode},
-    DB,
+    DbOption, DB,
 };
 use tonic::{transport::Server, Code, Request, Response, Status};
 use tonic_web::GrpcWebLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use ttl_cache::TtlCache;
 
 use crate::{
     proto::{
         tonbo_rpc_server::{TonboRpc, TonboRpcServer},
-        ColumnDesc, Empty, GetReq, GetResp, InsertReq, RemoveReq, ScanReq, ScanResp, SchemaResp,
+        CreateTableReq, Empty, FlushReq, GetReq, GetResp, InsertReq, RemoveReq, ScanReq, ScanResp,
     },
     ServerError,
 };
@@ -33,9 +39,17 @@ const DEFAULT_EXPOSED_HEADERS: [&str; 3] =
 const DEFAULT_ALLOW_HEADERS: [&str; 4] =
     ["x-grpc-web", "content-type", "x-user-agent", "grpc-timeout"];
 
-pub async fn service(addr: String, db: DB<DynRecord, TokioExecutor>) -> Result<(), ServerError> {
+const DB_DURATION: Duration = Duration::from_secs(20 * 60);
+const DB_WRITE_LIMIT: usize = 100 * 1024 * 1024;
+
+pub async fn service<P: AsRef<std::path::Path>>(
+    addr: String,
+    base_path: P,
+) -> Result<(), ServerError> {
     let service = TonboService {
-        inner: Arc::new(db),
+        base_path: base_path.as_ref().to_path_buf(),
+        inner: RwLock::new(TtlCache::new(256)),
+        write_limit: Default::default(),
     };
     let addr = addr.parse()?;
     println!("addr: {}", addr);
@@ -67,59 +81,94 @@ pub async fn service(addr: String, db: DB<DynRecord, TokioExecutor>) -> Result<(
     Ok(())
 }
 
-#[derive(Clone)]
 struct TonboService {
-    inner: Arc<DB<DynRecord, TokioExecutor>>,
-}
-
-impl TonboService {
-    fn primary_key_index(&self) -> usize {
-        self.inner.instance().primary_key_index::<DynRecord>() - 2
-    }
+    base_path: std::path::PathBuf,
+    inner: RwLock<TtlCache<String, Arc<DB<DynRecord, TokioExecutor>>>>,
+    write_limit: AtomicUsize,
 }
 
 #[tonic::async_trait]
 impl TonboRpc for TonboService {
-    async fn schema(&self, _: Request<Empty>) -> Result<Response<SchemaResp>, Status> {
-        let instance = self.inner.instance();
-        let desc = instance
-            .dyn_columns()
-            .iter()
-            .map(|column| {
-                let ty: crate::proto::Datatype = column.datatype.into();
-                ColumnDesc {
-                    name: column.name.clone(),
-                    ty: ty as i32,
-                    is_nullable: column.is_nullable,
-                }
-            })
-            .collect_vec();
+    async fn create_table(
+        &self,
+        request: Request<CreateTableReq>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let mut guard = self.inner.write().await;
 
-        Ok(Response::new(SchemaResp {
-            desc,
-            primary_key_index: instance.primary_key_index::<DynRecord>() as u32 - 2,
-        }))
+        let pk_index = req.primary_key_index as usize;
+        let mut descs = Vec::with_capacity(req.desc.len());
+
+        for desc in req.desc {
+            let datatype = crate::proto::Datatype::try_from(desc.ty)
+                .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+            descs.push(tonbo::record::ColumnDesc::new(
+                desc.name,
+                Datatype::from(datatype),
+                desc.is_nullable,
+            ));
+        }
+        if let Some(db_instance) = guard.get(&req.table_name) {
+            let instance = db_instance.instance();
+
+            if instance.primary_key_index::<DynRecord>() != req.primary_key_index as usize {
+                return Err(Status::new(
+                    Code::Internal,
+                    "`primary_key_index` does not match the existing schema".to_string(),
+                ));
+            }
+            // FIXME: why `dyn_columns` returns not ColumnDesc
+            for (column, column_desc) in instance.dyn_columns().iter().zip(descs.iter()) {
+                if column.name != column_desc.name
+                    || column.datatype != column_desc.datatype
+                    || column.is_nullable != column_desc.is_nullable
+                {
+                    return Err(Status::new(
+                        Code::Internal,
+                        "`descs` does not match the existing schema".to_string(),
+                    ));
+                }
+            }
+        } else {
+            let option = DbOption::with_path(
+                Path::from_absolute_path(self.base_path.join(&req.table_name)).unwrap(),
+                descs[pk_index].name.to_string(),
+                pk_index,
+            );
+            let db: DB<DynRecord, TokioExecutor> =
+                DB::with_schema(option, TokioExecutor::new(), descs, pk_index)
+                    .await
+                    .unwrap();
+            guard.insert(req.table_name, Arc::new(db), DB_DURATION);
+        }
+
+        Ok(Response::new(Empty {}))
     }
 
     async fn get(&self, request: Request<GetReq>) -> Result<Response<GetResp>, Status> {
         let mut req = request.into_inner();
+        let guard = self.inner.read().await;
+        let Some(db_instance) = guard.get(&req.table_name) else {
+            return Err(Status::new(Code::NotFound, "table not found"));
+        };
+
         let key = Column::decode(&mut Cursor::new(&mut req.key))
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
 
-        let tuple = self
-            .inner
+        let tuple = db_instance
             .get(&key, |e| Some(e.get().columns))
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
         let record = if let Some(tuple) = tuple {
+            let primary_key_index = db_instance.instance().primary_key_index::<DynRecord>() - 2;
             let mut bytes = Vec::new();
             let mut writer = Cursor::new(&mut bytes);
             (tuple.len() as u32)
                 .encode(&mut writer)
                 .await
                 .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
-            (self.primary_key_index() as u32)
+            (primary_key_index as u32)
                 .encode(&mut writer)
                 .await
                 .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
@@ -140,8 +189,12 @@ impl TonboRpc for TonboService {
 
     async fn scan(&self, request: Request<ScanReq>) -> Result<Response<Self::ScanStream>, Status> {
         let mut req = request.into_inner();
-        let db = self.inner.clone();
-        let primary_key_index = self.primary_key_index();
+        let guard = self.inner.read().await;
+        let Some(db_instance) = guard.get(&req.table_name) else {
+            return Err(Status::new(Code::NotFound, "table not found"));
+        };
+        let primary_key_index = db_instance.instance().primary_key_index::<DynRecord>() - 2;
+        let db = db_instance.clone();
 
         let stream = stream! {
             let min = Bound::<Column>::decode(&mut Cursor::new(&mut req.min)).await
@@ -184,11 +237,23 @@ impl TonboRpc for TonboService {
         let record = DynRecord::decode(&mut Cursor::new(&mut req.record))
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+        if self.write_limit.load(Ordering::Relaxed) > DB_WRITE_LIMIT {
+            return Err(Status::new(
+                Code::Internal,
+                "write limit exceeded".to_string(),
+            ));
+        }
+        let guard = self.inner.read().await;
+        let Some(db_instance) = guard.get(&req.table_name) else {
+            return Err(Status::new(Code::NotFound, "table not found"));
+        };
 
-        self.inner
+        let record_size = record.size();
+        db_instance
             .insert(record)
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+        self.write_limit.fetch_add(record_size, Ordering::SeqCst);
         Ok(Response::new(Empty {}))
     }
 
@@ -197,15 +262,35 @@ impl TonboRpc for TonboService {
         let column = Column::decode(&mut Cursor::new(&mut req.key))
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
-        self.inner
+        if self.write_limit.load(Ordering::Relaxed) > DB_WRITE_LIMIT {
+            return Err(Status::new(
+                Code::Internal,
+                "write limit exceeded".to_string(),
+            ));
+        }
+        let guard = self.inner.read().await;
+
+        let Some(db_instance) = guard.get(&req.table_name) else {
+            return Err(Status::new(Code::NotFound, "table not found"));
+        };
+
+        let column_size = column.size();
+        db_instance
             .remove(column)
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+        self.write_limit.fetch_add(column_size, Ordering::SeqCst);
         Ok(Response::new(Empty {}))
     }
 
-    async fn flush(&self, _: Request<Empty>) -> Result<Response<Empty>, Status> {
-        self.inner
+    async fn flush(&self, request: Request<FlushReq>) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let guard = self.inner.read().await;
+        let Some(db_instance) = guard.get(&req.table_name) else {
+            return Err(Status::new(Code::NotFound, "table not found"));
+        };
+
+        db_instance
             .flush()
             .await
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
@@ -231,36 +316,36 @@ impl Into<crate::proto::Datatype> for Datatype {
     }
 }
 
+impl From<crate::proto::Datatype> for Datatype {
+    fn from(value: crate::proto::Datatype) -> Self {
+        match value {
+            crate::proto::Datatype::Uint8 => Datatype::UInt8,
+            crate::proto::Datatype::Uint16 => Datatype::UInt16,
+            crate::proto::Datatype::Uint32 => Datatype::UInt32,
+            crate::proto::Datatype::Uint64 => Datatype::UInt64,
+            crate::proto::Datatype::Int8 => Datatype::Int8,
+            crate::proto::Datatype::Int16 => Datatype::Int16,
+            crate::proto::Datatype::Int32 => Datatype::Int32,
+            crate::proto::Datatype::Int64 => Datatype::Int64,
+            crate::proto::Datatype::String => Datatype::String,
+            crate::proto::Datatype::Boolean => Datatype::Boolean,
+            crate::proto::Datatype::Bytes => Datatype::Bytes,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use fusio::path::Path;
     use tempfile::TempDir;
-    use tonbo::{
-        executor::tokio::TokioExecutor,
-        record::{ColumnDesc, Datatype, DynRecord},
-        DbOption, DB,
-    };
 
     use crate::server::service;
 
     #[tokio::test]
     async fn test_service() {
         let temp_dir = TempDir::new().unwrap();
-        let desc = vec![
-            ColumnDesc::new("id".to_string(), Datatype::Int64, false),
-            ColumnDesc::new("name".to_string(), Datatype::String, true),
-            ColumnDesc::new("like".to_string(), Datatype::Int32, true),
-        ];
-        let option2 = DbOption::with_path(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "id".to_string(),
-            0,
-        );
-        let db: DB<DynRecord, TokioExecutor> =
-            DB::with_schema(option2, TokioExecutor::new(), desc, 0)
-                .await
-                .unwrap();
 
-        service("[::1]:50051".to_string(), db).await.unwrap()
+        service("[::1]:50051".to_string(), temp_dir.path())
+            .await
+            .unwrap()
     }
 }
