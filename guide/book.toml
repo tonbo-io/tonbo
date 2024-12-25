@@ -1,0 +1,11 @@
+[book]
+authors = ["crwen"]
+language = "en"
+multilingual = false
+src = "src"
+title = "The Tonbo Guide"
+
+[output.html]
+git-repository-url = "https://github.com/tonbo-io/tonbo"
+[output.html.playground]
+runnable = false
