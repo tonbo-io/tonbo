@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Formatter};
 
-use fusio::path::Path;
+pub use fusio::path::Path;
 use fusio_dispatch::FsOptions;
 use parquet::{
     basic::Compression,
