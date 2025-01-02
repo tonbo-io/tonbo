@@ -472,7 +472,7 @@ where
     pub immutables: Vec<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
-    trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+    trigger: Arc<dyn Trigger<R>>,
     record_schema: Arc<R::Schema>,
 }
 
@@ -487,7 +487,7 @@ where
         record_schema: Arc<R::Schema>,
         manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let mut schema = DbStorage {
             mutable: Mutable::new(
                 &option,
@@ -1169,7 +1169,7 @@ pub(crate) mod tests {
         option: Arc<DbOption>,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(crate::DbStorage<Test>, Receiver<CompactTask>), fusio::Error> {
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable = Mutable::new(&option, trigger.clone(), fs, Arc::new(TestSchema {})).await?;
 
@@ -1211,7 +1211,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let immutables = {
-            let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+            let trigger = TriggerFactory::create(option.trigger_type);
 
             let mutable: Mutable<Test> =
                 Mutable::new(&option, trigger.clone(), fs, Arc::new(TestSchema)).await?;
@@ -1648,7 +1648,7 @@ pub(crate) mod tests {
 
         let (task_tx, _task_rx) = bounded(1);
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::DbStorage<Test> = crate::DbStorage {
             mutable: Mutable::new(&option, trigger.clone(), &fs, Arc::new(TestSchema))
                 .await
@@ -1718,7 +1718,7 @@ pub(crate) mod tests {
 
         let (task_tx, _task_rx) = bounded(1);
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::DbStorage<DynRecord> = crate::DbStorage {
             mutable: Mutable::new(
                 &option,
