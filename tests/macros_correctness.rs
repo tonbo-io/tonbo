@@ -13,6 +13,7 @@ mod tests {
     use std::{io::Cursor, sync::Arc};
 
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array, UInt8Array};
+    use fusio_log::{Decode, Encode};
     use parquet::{
         arrow::{arrow_to_parquet_schema, ProjectionMask},
         format::SortingColumn,
@@ -23,7 +24,6 @@ mod tests {
         inmem::immutable::{ArrowArrays, Builder},
         magic,
         record::{Record, RecordRef, Schema},
-        serdes::{Decode, Encode},
         timestamp::timestamped::Timestamped,
     };
 

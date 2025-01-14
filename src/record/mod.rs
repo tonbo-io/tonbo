@@ -7,16 +7,14 @@ pub(crate) mod test;
 use std::{error::Error, fmt::Debug, io, sync::Arc};
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use fusio_log::{Decode, Encode};
 use internal::InternalRecordRef;
 pub use key::{Key, KeyRef};
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 pub use runtime::*;
 use thiserror::Error;
 
-use crate::{
-    inmem::immutable::ArrowArrays,
-    serdes::{Decode, Encode},
-};
+use crate::inmem::immutable::ArrowArrays;
 
 pub trait Schema: Debug + Send + Sync {
     type Record: Record<Schema = Self>;

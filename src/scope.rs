@@ -1,11 +1,9 @@
 use std::ops::Bound;
 
 use fusio::{SeqRead, Write};
+use fusio_log::{Decode, Encode};
 
-use crate::{
-    fs::FileId,
-    serdes::{Decode, Encode},
-};
+use crate::fs::FileId;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Scope<K> {

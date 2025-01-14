@@ -8,12 +8,10 @@ use arrow::{
     datatypes::{DataType, Field},
 };
 use fusio::{SeqRead, Write};
+use fusio_log::{Decode, DecodeError, Encode};
 
 use super::Datatype;
-use crate::{
-    record::{Key, KeyRef},
-    serdes::{option::DecodeError, Decode, Encode},
-};
+use crate::record::{Key, KeyRef};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {

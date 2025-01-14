@@ -543,6 +543,8 @@ where
     Fusio(#[from] fusio::Error),
     #[error("compaction version error: {0}")]
     Version(#[from] VersionError<R>),
+    #[error("compaction logger error: {0}")]
+    Logger(#[from] fusio_log::error::LogError),
     #[error("compaction channel is closed")]
     ChannelClose,
     #[error("database error: {0}")]

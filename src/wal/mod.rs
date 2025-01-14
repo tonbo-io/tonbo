@@ -1,38 +1,41 @@
-mod checksum;
 pub(crate) mod log;
-pub(crate) mod record_entry;
 
-use std::marker::PhantomData;
+use std::sync::Arc;
 
 use async_stream::stream;
-use checksum::{HashReader, HashWriter};
-use fusio::{SeqRead, Write};
+use fusio::DynFs;
+use fusio_log::{error::LogError, Decode, FsOptions, Logger, Options, Path};
 use futures_core::Stream;
-use log::Log;
+use futures_util::TryStreamExt;
 use thiserror::Error;
 
-use crate::{
-    fs::FileId,
-    record::{Key, Record, Schema},
-    serdes::{Decode, Encode},
-    timestamp::Timestamped,
-    wal::{log::LogType, record_entry::RecordEntry},
-};
+use crate::{fs::FileId, record::Record, wal::log::Log};
 
-#[derive(Debug)]
-pub(crate) struct WalFile<F, R> {
-    file: F,
+pub(crate) struct WalFile<R>
+where
+    R: Record,
+{
+    file: Logger<Log<R>>,
     file_id: FileId,
-    _marker: PhantomData<R>,
 }
 
-impl<F, R> WalFile<F, R> {
-    pub(crate) fn new(file: F, file_id: FileId) -> Self {
-        Self {
-            file,
-            file_id,
-            _marker: PhantomData,
-        }
+impl<R> WalFile<R>
+where
+    R: Record,
+{
+    pub(crate) async fn new(
+        fs: Arc<dyn DynFs>,
+        path: Path,
+        wal_buffer_size: usize,
+        file_id: FileId,
+    ) -> Self {
+        let file = Options::new(path)
+            .buf_size(wal_buffer_size)
+            .build_with_fs::<Log<R>>(fs)
+            .await
+            .unwrap();
+
+        Self { file, file_id }
     }
 
     pub(crate) fn file_id(&self) -> FileId {
@@ -40,61 +43,39 @@ impl<F, R> WalFile<F, R> {
     }
 }
 
-impl<F, R> WalFile<F, R>
+impl<R> WalFile<R>
 where
-    F: Write,
     R: Record,
 {
-    pub(crate) async fn write<'r>(
-        &mut self,
-        log_ty: LogType,
-        key: Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'r>>,
-        value: Option<R::Ref<'r>>,
-    ) -> Result<(), <R::Ref<'r> as Encode>::Error> {
-        let mut writer = HashWriter::new(&mut self.file);
-        Log::new(log_ty, RecordEntry::<R>::Encode((key, value)))
-            .encode(&mut writer)
-            .await?;
-        writer.eol().await?;
-        Ok(())
+    pub(crate) async fn write<'r>(&mut self, data: &Log<R>) -> Result<(), LogError> {
+        self.file.write(data).await
     }
 
-    pub(crate) async fn flush(&mut self) -> Result<(), fusio::Error> {
+    pub(crate) async fn flush(&mut self) -> Result<(), LogError> {
         self.file.close().await
     }
 }
 
-impl<F, R> WalFile<F, R>
+impl<R> WalFile<R>
 where
-    F: SeqRead,
     R: Record,
 {
-    pub(crate) fn recover(
-        &mut self,
-    ) -> impl Stream<
-        Item = Result<
-            (LogType, Timestamped<<R::Schema as Schema>::Key>, Option<R>),
-            RecoverError<<R as Decode>::Error>,
-        >,
-    > + '_ {
+    pub(crate) async fn recover(
+        fs_option: FsOptions,
+        path: Path,
+    ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<<R as Decode>::Error>>> {
         stream! {
-            loop {
-                let mut reader = HashReader::new(&mut self.file);
-
-                let record = match Log::<RecordEntry<'static, R>>::decode(&mut reader).await {
-                    Ok(record) => record,
-                    Err(_) => return,
-                };
-                if !reader.checksum().await? {
-                    yield Err(RecoverError::Checksum);
-                    return;
+            let mut stream = Options::new(path)
+                .fs(fs_option)
+                .recover::<Log<R>>()
+                .await
+                .unwrap();
+                while let Ok(batch) = stream.try_next().await {
+                    match batch {
+                        Some(batch) => yield Ok(batch),
+                        None => break,
+                    }
                 }
-                if let RecordEntry::Decode((key, value)) = record.record {
-                    yield Ok((record.log_type, key, value));
-                } else {
-                    unreachable!()
-                }
-            }
         }
     }
 }
@@ -109,67 +90,76 @@ pub enum RecoverError<E: std::error::Error> {
     Io(#[from] std::io::Error),
     #[error("wal recover fusio error")]
     Fusio(#[from] fusio::Error),
+    #[error("wal recover log error")]
+    Logger(#[from] LogError),
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, pin::pin};
+    use std::{pin::pin, sync::Arc};
 
+    use fusio::disk::TokioFs;
+    use fusio_log::Path;
     use futures_util::StreamExt;
-    use tokio::io::AsyncSeekExt;
+    use tempfile::TempDir;
 
     use super::{log::LogType, WalFile};
-    use crate::{fs::generate_file_id, timestamp::Timestamped};
+    use crate::{
+        fs::{generate_file_id, FileType},
+        timestamp::Timestamped,
+        wal::log::Log,
+    };
 
     #[tokio::test]
     async fn write_and_recover() {
-        let mut bytes = Vec::new();
-        let mut file = Cursor::new(&mut bytes);
+        let temp_dir = TempDir::new().unwrap();
+
+        let wal_id = generate_file_id();
+        let wal_path = Path::from_filesystem_path(temp_dir.path())
+            .unwrap()
+            .child(format!("{}.{}", wal_id, FileType::Wal));
+        let fs_option = fusio_log::FsOptions::Local;
+        let mut wal = WalFile::<String>::new(Arc::new(TokioFs), wal_path.clone(), 0, wal_id).await;
         {
-            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
-            wal.write(
-                LogType::Full,
-                Timestamped::new("hello", 0.into()),
-                Some("hello"),
-            )
+            wal.write(&Log::new(
+                Timestamped::new("hello".into(), 0.into()),
+                Some("hello".into()),
+                Some(LogType::Full),
+            ))
             .await
             .unwrap();
             wal.flush().await.unwrap();
         }
         {
-            file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
-
             {
-                let mut stream = pin!(wal.recover());
-                let (_, key, value) = stream.next().await.unwrap().unwrap();
-                assert_eq!(key.ts, 0.into());
-                assert_eq!(value, Some("hello".to_string()));
+                let mut stream =
+                    pin!(WalFile::<String>::recover(fs_option.clone(), wal_path.clone()).await);
+                for log in stream.next().await.unwrap().unwrap() {
+                    assert_eq!(log.key.ts, 0.into());
+                    assert_eq!(log.value, Some("hello".to_string()));
+                }
             }
 
-            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
-
-            wal.write(
-                LogType::Full,
-                Timestamped::new("world", 1.into()),
-                Some("world"),
-            )
+            wal.write(&Log::new(
+                Timestamped::new("world".into(), 1.into()),
+                Some("world".into()),
+                Some(LogType::Full),
+            ))
             .await
             .unwrap();
         }
 
         {
-            file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-            let mut wal = WalFile::<_, String>::new(&mut file, generate_file_id());
-
             {
-                let mut stream = pin!(wal.recover());
-                let (_, key, value) = stream.next().await.unwrap().unwrap();
-                assert_eq!(key.ts, 0.into());
-                assert_eq!(value, Some("hello".to_string()));
-                let (_, key, value) = stream.next().await.unwrap().unwrap();
-                assert_eq!(key.ts, 1.into());
-                assert_eq!(value, Some("world".to_string()));
+                let mut stream = pin!(WalFile::<String>::recover(fs_option, wal_path).await);
+                for log in stream.next().await.unwrap().unwrap() {
+                    assert_eq!(log.key.ts, 0.into());
+                    assert_eq!(log.value, Some("hello".to_string()));
+                }
+                for log in stream.next().await.unwrap().unwrap() {
+                    assert_eq!(log.key.ts, 1.into());
+                    assert_eq!(log.value, Some("world".to_string()));
+                }
             }
         }
     }

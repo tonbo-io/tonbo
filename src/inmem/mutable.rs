@@ -1,22 +1,25 @@
-use std::{intrinsics::transmute, ops::Bound, sync::Arc};
+use std::{ops::Bound, sync::Arc};
 
 use async_lock::Mutex;
 use crossbeam_skiplist::{
     map::{Entry, Range},
     SkipMap,
 };
-use fusio::{buffered::BufWriter, DynFs, DynWrite};
+use fusio::DynFs;
 
 use crate::{
-    fs::{generate_file_id, FileId, FileType},
+    fs::{generate_file_id, FileId},
     inmem::immutable::Immutable,
-    record::{Key, KeyRef, Record, Schema},
+    record::{KeyRef, Record, Schema},
     timestamp::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
     trigger::Trigger,
-    wal::{log::LogType, WalFile},
+    wal::{
+        log::{Log, LogType},
+        WalFile,
+    },
     DbError, DbOption,
 };
 
@@ -36,7 +39,7 @@ where
     R: Record,
 {
     pub(crate) data: SkipMap<Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
-    wal: Option<Mutex<WalFile<Box<dyn DynWrite>, R>>>,
+    wal: Option<Mutex<WalFile<R>>>,
     pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
 
     pub(super) schema: Arc<R::Schema>,
@@ -56,13 +59,15 @@ where
         if option.use_wal {
             let file_id = generate_file_id();
 
-            let file = Box::new(BufWriter::new(
-                fs.open_options(&option.wal_path(file_id), FileType::Wal.open_options(false))
-                    .await?,
-                option.wal_buffer_size,
-            )) as Box<dyn DynWrite>;
-
-            wal = Some(Mutex::new(WalFile::new(file, file_id)));
+            wal = Some(Mutex::new(
+                WalFile::<R>::new(
+                    fs.clone(),
+                    option.wal_path(file_id),
+                    option.wal_buffer_size,
+                    file_id,
+                )
+                .await,
+            ));
         };
 
         Ok(Self {
@@ -106,21 +111,18 @@ where
     ) -> Result<bool, DbError<R>> {
         let timestamped_key = Timestamped::new(key, ts);
 
-        if let (Some(log_ty), Some(wal)) = (log_ty, &self.wal) {
+        let record_entry = Log::new(timestamped_key, value, log_ty);
+        if let (Some(_log_ty), Some(wal)) = (log_ty, &self.wal) {
             let mut wal_guard = wal.lock().await;
 
             wal_guard
-                .write(
-                    log_ty,
-                    timestamped_key.map(|key| unsafe { transmute(key.as_key_ref()) }),
-                    value.as_ref().map(R::as_record_ref),
-                )
+                .write(&record_entry)
                 .await
                 .map_err(|e| DbError::WalWrite(Box::new(e)))?;
         }
 
-        let is_exceeded = self.trigger.item(&value);
-        self.data.insert(timestamped_key, value);
+        let is_exceeded = self.trigger.item(&record_entry.value);
+        self.data.insert(record_entry.key, record_entry.value);
 
         Ok(is_exceeded)
     }
@@ -176,7 +178,10 @@ where
 
     pub(crate) async fn into_immutable(
         self,
-    ) -> Result<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>), fusio::Error> {
+    ) -> Result<
+        (Option<FileId>, Immutable<<R::Schema as Schema>::Columns>),
+        fusio_log::error::LogError,
+    > {
         let mut file_id = None;
 
         if let Some(wal) = self.wal {
