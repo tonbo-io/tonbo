@@ -94,7 +94,7 @@ pub enum RecoverError<E: std::error::Error> {
     Logger(#[from] LogError),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{pin::pin, sync::Arc};
 
