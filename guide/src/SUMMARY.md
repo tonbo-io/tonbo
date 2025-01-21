@@ -9,4 +9,3 @@
   - [Using under Wasm](./examples/wasm.md)
 - [Contribution](./contribution/index.md)
   - [Building](./contribution/build.md)
-  - [Test](./contribution/testing.md)
