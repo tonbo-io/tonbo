@@ -40,8 +40,7 @@ where
 {
     pub(crate) data: SkipMap<Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<R>>>,
-    pub(crate) trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
-
+    pub(crate) trigger: Arc<dyn Trigger<R>>,
     pub(super) schema: Arc<R::Schema>,
 }
 
@@ -51,7 +50,7 @@ where
 {
     pub async fn new(
         option: &DbOption,
-        trigger: Arc<Box<dyn Trigger<R> + Send + Sync>>,
+        trigger: Arc<dyn Trigger<R>>,
         fs: &Arc<dyn DynFs>,
         schema: Arc<R::Schema>,
     ) -> Result<Self, fusio::Error> {
@@ -121,7 +120,7 @@ where
                 .map_err(|e| DbError::WalWrite(Box::new(e)))?;
         }
 
-        let is_exceeded = self.trigger.item(&record_entry.value);
+        let is_exceeded = self.trigger.check_if_exceed(&record_entry.value);
         self.data.insert(record_entry.key, record_entry.value);
 
         Ok(is_exceeded)
@@ -245,7 +244,7 @@ mod tests {
         );
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
         let mem_table = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
             .await
             .unwrap();
@@ -298,7 +297,7 @@ mod tests {
         );
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
             .await
@@ -394,7 +393,7 @@ mod tests {
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
         let schema = Arc::new(schema);
 
