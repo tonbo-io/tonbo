@@ -8,12 +8,12 @@ use arrow::{
     },
 };
 use fusio::Write;
+use fusio_log::Encode;
 
 use super::{Datatype, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{internal::InternalRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema},
-    serdes::Encode,
 };
 
 #[derive(Clone)]

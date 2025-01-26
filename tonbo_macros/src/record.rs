@@ -273,7 +273,7 @@ fn trait_decode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
     }
     quote! {
 
-        impl ::tonbo::serdes::Decode for #struct_name {
+        impl ::fusio_log::Decode for #struct_name {
             type Error = ::tonbo::record::RecordDecodeError;
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
@@ -514,7 +514,7 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
         let field_name = field.ident.as_ref().unwrap();
 
         encode_method_fields.push(quote! {
-                    ::tonbo::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
+                    ::fusio_log::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
                         field_name: stringify!(#field_name).to_string(),
                         error: Box::new(err),
                     })?;
@@ -527,7 +527,7 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
     let struct_ref_name = struct_name.to_ref_ident();
 
     quote! {
-        impl<'r> ::tonbo::serdes::Encode for #struct_ref_name<'r> {
+        impl<'r> ::fusio_log::Encode for #struct_ref_name<'r> {
             type Error = ::tonbo::record::RecordEncodeError;
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>

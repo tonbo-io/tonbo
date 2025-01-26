@@ -126,7 +126,6 @@ mod ondisk;
 pub mod option;
 pub mod record;
 mod scope;
-pub mod serdes;
 pub mod snapshot;
 pub mod stream;
 pub mod timestamp;
@@ -135,15 +134,14 @@ mod trigger;
 mod version;
 mod wal;
 
-use std::{
-    collections::HashMap, io, io::Cursor, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc,
-};
+use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
 
 pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
 use fs::FileId;
+use fusio_log::Decode;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
@@ -163,6 +161,7 @@ use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
+use wal::log::Log;
 
 pub use crate::option::*;
 use crate::{
@@ -170,13 +169,11 @@ use crate::{
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileType},
     record::Schema,
-    serdes::Decode,
     snapshot::Snapshot,
     stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
         ScanStream,
     },
-    timestamp::Timestamped,
     trigger::{Trigger, TriggerFactory},
     version::{cleaner::Cleaner, set::VersionSet, TransactionTs, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
@@ -522,49 +519,53 @@ where
         for wal_meta in wal_metas {
             let wal_path = wal_meta.path;
 
-            let file = base_fs
-                .open_options(&wal_path, FileType::Wal.open_options(false))
-                .await?;
             // SAFETY: wal_stream return only file name
             let wal_id = parse_file_id(&wal_path, FileType::Wal)?.unwrap();
-            let mut wal = WalFile::new(Cursor::new(file), wal_id);
             wal_ids.push(wal_id);
 
-            let mut recover_stream = pin!(wal.recover());
+            let mut recover_stream =
+                pin!(WalFile::<R>::recover(option.base_fs.clone(), wal_path).await);
             while let Some(record) = recover_stream.next().await {
-                let (log_type, Timestamped { ts, value: key }, value_option) = record?;
+                let record_batch = record?;
 
-                let is_excess = match log_type {
-                    LogType::Full => {
-                        schema
-                            .recover_append(key, version_set.increase_ts(), value_option)
-                            .await?
-                    }
-                    LogType::First => {
-                        transaction_map.insert(ts, vec![(key, value_option)]);
-                        false
-                    }
-                    LogType::Middle => {
-                        transaction_map
-                            .get_mut(&ts)
-                            .unwrap()
-                            .push((key, value_option));
-                        false
-                    }
-                    LogType::Last => {
-                        let mut is_excess = false;
-                        let mut records = transaction_map.remove(&ts).unwrap();
-                        records.push((key, value_option));
+                for entry in record_batch {
+                    let Log {
+                        key,
+                        value,
+                        log_type,
+                    } = entry;
+                    let ts = key.ts;
+                    let key = key.value;
 
-                        let ts = version_set.increase_ts();
-                        for (key, value_option) in records {
-                            is_excess = schema.recover_append(key, ts, value_option).await?;
+                    let is_excess = match log_type.unwrap() {
+                        LogType::Full => {
+                            schema
+                                .recover_append(key, version_set.increase_ts(), value)
+                                .await?
                         }
-                        is_excess
+                        LogType::First => {
+                            transaction_map.insert(ts, vec![(key, value)]);
+                            false
+                        }
+                        LogType::Middle => {
+                            transaction_map.get_mut(&ts).unwrap().push((key, value));
+                            false
+                        }
+                        LogType::Last => {
+                            let mut is_excess = false;
+                            let mut records = transaction_map.remove(&ts).unwrap();
+                            records.push((key, value));
+
+                            let ts = version_set.increase_ts();
+                            for (key, value_option) in records {
+                                is_excess = schema.recover_append(key, ts, value_option).await?;
+                            }
+                            is_excess
+                        }
+                    };
+                    if is_excess {
+                        let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
                     }
-                };
-                if is_excess {
-                    let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
                 }
             }
         }
@@ -882,6 +883,8 @@ where
     WalWrite(Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("exceeds the maximum level(0-6)")]
     ExceedsMaxLevel,
+    #[error("write log error: {0}")]
+    Logger(#[from] fusio_log::error::LogError),
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
@@ -909,6 +912,7 @@ pub(crate) mod tests {
     use flume::{bounded, Receiver};
     use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
     use fusio_dispatch::FsOptions;
+    use fusio_log::{Decode, Encode};
     use futures::StreamExt;
     use parquet::arrow::ProjectionMask;
     use parquet_lru::NoCache;
@@ -926,7 +930,6 @@ pub(crate) mod tests {
             Datatype, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
             Schema as RecordSchema, Value,
         },
-        serdes::{Decode, Encode},
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,

@@ -12,6 +12,7 @@ use std::{
 
 use flume::{SendError, Sender};
 use fusio::DynFs;
+use fusio_log::{error::LogError, Encode};
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
@@ -21,7 +22,6 @@ use crate::{
     ondisk::sstable::SsTable,
     record::{Record, Schema},
     scope::Scope,
-    serdes::Encode,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TimestampedRef},
     version::{cleaner::CleanTag, edit::VersionEdit},
@@ -342,4 +342,6 @@ where
     UlidDecode(#[from] ulid::DecodeError),
     #[error("version send error: {0}")]
     Send(#[from] SendError<CleanTag>),
+    #[error("recover error: {0}")]
+    Logger(#[from] LogError),
 }

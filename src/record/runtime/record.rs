@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
 use fusio::SeqRead;
+use fusio_log::{Decode, Encode};
 
 use super::{schema::DynSchema, Datatype, DynRecordRef, Value};
-use crate::{
-    record::{Record, RecordDecodeError},
-    serdes::{Decode, Encode},
-};
+use crate::record::{Record, RecordDecodeError};
 
 #[derive(Debug)]
 pub struct DynRecord {
