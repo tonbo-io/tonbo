@@ -81,7 +81,7 @@ async-trait = { version = "0.1", optional = true }
 bytes = { version = "1.7", optional = true }
 crc32fast = "1"
 crossbeam-skiplist = "0.1"
-datafusion = { version = "42.2.0", optional = true }
+datafusion = { version = "44.0.0", optional = true }
 flume = { version = "0.11", features = ["async"] }
 fusio = { git = "https://github.com/tonbo-io/fusio", rev = "1fb503916a4945e5ff5fcc136f3d65e56375fb3d", version = "0.3.4", package = "fusio", features = [
     "dyn",
