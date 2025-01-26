@@ -51,6 +51,7 @@ impl From<DbError> for PyErr {
             tonbo::DbError::Recover(err) => RecoverError::new_err(err.to_string()),
             tonbo::DbError::WalWrite(err) => PyIOError::new_err(err.to_string()),
             tonbo::DbError::ExceedsMaxLevel => ExceedsMaxLevelError::new_err("Exceeds max level"),
+            tonbo::DbError::Logger(err) => PyIOError::new_err(err.to_string()),
         }
     }
 }
