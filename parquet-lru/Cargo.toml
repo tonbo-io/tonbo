@@ -15,7 +15,7 @@ foyer = ["dep:foyer", "dep:serde"]
 
 [dependencies]
 bytes = { version = "1.8.0", features = ["serde"] }
-foyer = { version = "0.12.2", optional = true }
+foyer = { version = "0.14.0", optional = true }
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 parquet = { version = "53.2.0", default-features = false, features = [
