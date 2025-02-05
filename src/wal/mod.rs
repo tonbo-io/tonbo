@@ -52,7 +52,7 @@ where
     }
 
     pub(crate) async fn flush(&mut self) -> Result<(), LogError> {
-        self.file.close().await
+        self.file.flush().await
     }
 }
 
