@@ -15,8 +15,11 @@ pub(crate) struct WalFile<R>
 where
     R: Record,
 {
-    file: Logger<Log<R>>,
+    file: Option<Logger<Log<R>>>,
     file_id: FileId,
+    path: Path,
+    wal_buffer_size: usize,
+    fs: Arc<dyn DynFs>,
 }
 
 impl<R> WalFile<R>
@@ -29,13 +32,19 @@ where
         wal_buffer_size: usize,
         file_id: FileId,
     ) -> Self {
-        let file = Options::new(path)
+        let file = Options::new(path.clone())
             .buf_size(wal_buffer_size)
-            .build_with_fs::<Log<R>>(fs)
+            .build_with_fs::<Log<R>>(fs.clone())
             .await
             .unwrap();
 
-        Self { file, file_id }
+        Self {
+            file: Some(file),
+            file_id,
+            path,
+            wal_buffer_size,
+            fs,
+        }
     }
 
     pub(crate) fn file_id(&self) -> FileId {
@@ -48,11 +57,23 @@ where
     R: Record,
 {
     pub(crate) async fn write<'r>(&mut self, data: &Log<R>) -> Result<(), LogError> {
-        self.file.write(data).await
+        if self.file.is_none() {
+            self.file = Some(
+                Options::new(self.path.clone())
+                    .buf_size(self.wal_buffer_size)
+                    .build_with_fs::<Log<R>>(self.fs.clone())
+                    .await?,
+            );
+        }
+
+        self.file.as_mut().unwrap().write(data).await
     }
 
     pub(crate) async fn flush(&mut self) -> Result<(), LogError> {
-        self.file.close().await
+        match self.file.take() {
+            Some(mut file) => file.close().await,
+            None => Ok(()),
+        }
     }
 }
 
