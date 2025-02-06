@@ -49,7 +49,6 @@ where
     R: Record,
 {
     current: VersionRef<R>,
-    // log_with_id: (Logger<VersionEdit<<R::Schema as Schema>::Key>>, FileId),
     log_id: FileId,
 }
 

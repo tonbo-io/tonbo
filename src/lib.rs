@@ -484,6 +484,25 @@ where
         record_schema: Arc<R::Schema>,
         manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
+        let base_fs = manager.base_fs();
+        let wal_dir_path = option.wal_dir_path();
+        let mut transaction_map = HashMap::new();
+        let mut wal_ids = Vec::new();
+
+        let wal_metas = {
+            let mut wal_metas = Vec::new();
+            let mut wal_stream = base_fs.list(&wal_dir_path).await?;
+
+            while let Some(file_meta) = wal_stream.next().await {
+                let file_meta = file_meta?;
+                if file_meta.path.as_ref().ends_with("wal") {
+                    wal_metas.push(file_meta);
+                }
+            }
+            wal_metas.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
+            wal_metas
+        };
+
         let trigger = TriggerFactory::create(option.trigger_type);
         let mut schema = DbStorage {
             mutable: Mutable::new(
@@ -498,22 +517,6 @@ where
             recover_wal_ids: None,
             trigger,
             record_schema,
-        };
-
-        let base_fs = manager.base_fs();
-        let wal_dir_path = option.wal_dir_path();
-        let mut transaction_map = HashMap::new();
-        let mut wal_ids = Vec::new();
-
-        let wal_metas = {
-            let mut wal_metas = Vec::new();
-            let mut wal_stream = base_fs.list(&wal_dir_path).await?;
-
-            while let Some(file_meta) = wal_stream.next().await {
-                wal_metas.push(file_meta?);
-            }
-            wal_metas.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
-            wal_metas
         };
 
         for wal_meta in wal_metas {
