@@ -49,7 +49,7 @@ where
     R: Record,
 {
     current: VersionRef<R>,
-    log_with_id: (Logger<VersionEdit<<R::Schema as Schema>::Key>>, FileId),
+    log_id: FileId,
 }
 
 pub(crate) struct VersionSet<R>
@@ -148,8 +148,6 @@ where
             None => generate_file_id(),
         };
 
-        let log = Self::open_version_log(&option, fs.clone(), log_id).await?;
-
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
         let set = VersionSet::<R> {
@@ -162,7 +160,7 @@ where
                     timestamp: timestamp.clone(),
                     log_length: 0,
                 }),
-                log_with_id: (log, log_id),
+                log_id,
             })),
             clean_sender,
             timestamp,
@@ -188,8 +186,11 @@ where
         let option = &self.option;
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
-        let (log, log_id) = &mut guard.log_with_id;
+        let log_id = &mut guard.log_id;
         let edit_len = new_version.log_length + version_edits.len() as u32;
+
+        let mut log =
+            Self::open_version_log(&self.option, self.manager.base_fs().clone(), *log_id).await?;
 
         if !is_recover {
             version_edits.push(VersionEdit::NewLogLength { len: edit_len });
@@ -266,8 +267,8 @@ where
         if edit_len >= option.version_log_snapshot_threshold {
             let fs = self.manager.base_fs();
             let old_log_id = mem::replace(log_id, generate_file_id());
-            let new_log = Self::open_version_log(option, fs.clone(), *log_id).await?;
-            let _old_log = mem::replace(log, new_log);
+            let mut log = Self::open_version_log(option, fs.clone(), *log_id).await?;
+            // let _old_log = mem::replace(log, new_log);
 
             new_version.log_length = 0;
             log.write_batch(new_version.to_edits().iter())
@@ -300,13 +301,12 @@ pub(crate) mod tests {
     use flume::{bounded, Sender};
     use fusio::path::Path;
     use fusio_dispatch::FsOptions;
-    use fusio_log::Options;
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
     use crate::{
         fs::{generate_file_id, manager::StoreManager},
-        record::{test::StringSchema, Record, Schema},
+        record::{test::StringSchema, Record},
         scope::Scope,
         version::{
             cleaner::CleanTag,
@@ -328,17 +328,12 @@ pub(crate) mod tests {
     {
         let log_id = generate_file_id();
 
-        let log = Options::new(option.version_log_path(log_id))
-            .disable_buf()
-            .build_with_fs::<VersionEdit<<R::Schema as Schema>::Key>>(manager.base_fs().clone())
-            .await
-            .map_err(VersionError::Logger)?;
         let timestamp = version.timestamp.clone();
 
         Ok(VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
-                log_with_id: (log, log_id),
+                log_id,
             })),
             clean_sender,
             timestamp,
@@ -458,8 +453,7 @@ pub(crate) mod tests {
 
         let guard = version_set.inner.write().await;
 
-        let edits =
-            VersionEdit::<String>::recover(option.version_log_path(guard.log_with_id.1)).await;
+        let edits = VersionEdit::<String>::recover(option.version_log_path(guard.log_id)).await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(

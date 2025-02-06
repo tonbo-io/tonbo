@@ -274,6 +274,7 @@ mod tests {
                 }
             }
         }
+        db.flush_wal().await.unwrap();
         drop(db);
         remove("opfs_dir").await;
     }
