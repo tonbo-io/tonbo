@@ -48,7 +48,10 @@ impl FileType {
                 if only_read {
                     OpenOptions::default().read(true)
                 } else {
-                    OpenOptions::default().create(true).write(true)
+                    OpenOptions::default()
+                        .create(true)
+                        .write(true)
+                        .truncate(true)
                 }
             }
         }
