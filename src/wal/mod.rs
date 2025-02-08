@@ -75,6 +75,14 @@ where
             None => Ok(()),
         }
     }
+
+    pub(crate) async fn remove(mut self) -> Result<(), LogError> {
+        if let Some(mut file) = self.file.take() {
+            file.close().await?;
+        }
+        self.fs.remove(&self.path).await?;
+        Ok(())
+    }
 }
 
 impl<R> WalFile<R>

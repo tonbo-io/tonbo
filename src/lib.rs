@@ -459,6 +459,13 @@ where
         self.schema.write().await.flush_wal().await?;
         Ok(())
     }
+
+    pub async fn destroy(self) -> Result<(), DbError<R>> {
+        self.schema.write().await.destroy(&self.manager).await?;
+        self.version_set.destroy().await?;
+
+        Ok(())
+    }
 }
 
 pub(crate) struct DbStorage<R>
@@ -471,6 +478,7 @@ where
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<dyn Trigger<R>>,
     record_schema: Arc<R::Schema>,
+    option: Arc<DbOption>,
 }
 
 impl<R> DbStorage<R>
@@ -517,6 +525,7 @@ where
             recover_wal_ids: None,
             trigger,
             record_schema,
+            option: option.clone(),
         };
 
         for wal_meta in wal_metas {
@@ -661,6 +670,20 @@ where
 
     async fn flush_wal(&self) -> Result<(), DbError<R>> {
         self.mutable.flush_wal().await?;
+        Ok(())
+    }
+
+    async fn destroy(&mut self, manager: &StoreManager) -> Result<(), DbError<R>> {
+        self.mutable.destroy().await?;
+
+        let base_fs = manager.base_fs();
+        let wal_dir_path = self.option.wal_dir_path();
+        let mut wal_stream = base_fs.list(&wal_dir_path).await?;
+        let fs = manager.base_fs();
+
+        while let Some(file_meta) = wal_stream.next().await {
+            fs.remove(&file_meta?.path).await?;
+        }
         Ok(())
     }
 }
@@ -1275,6 +1298,7 @@ pub(crate) mod tests {
                 recover_wal_ids: None,
                 trigger,
                 record_schema: Arc::new(TestSchema {}),
+                option,
             },
             compaction_rx,
         ))
@@ -1664,6 +1688,7 @@ pub(crate) mod tests {
             recover_wal_ids: None,
             trigger,
             record_schema: Arc::new(TestSchema),
+            option: option.clone(),
         };
 
         for (i, item) in test_items().into_iter().enumerate() {
@@ -1739,6 +1764,7 @@ pub(crate) mod tests {
             recover_wal_ids: None,
             trigger,
             record_schema: dyn_schema.clone(),
+            option,
         };
 
         for item in test_dyn_items().into_iter() {

@@ -291,6 +291,40 @@ where
             .await
             .map_err(VersionError::Logger)
     }
+
+    pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
+        let log_dir_path = self.option.version_log_dir_path();
+        let log_fs = self.manager.base_fs();
+        let mut log_stream = log_fs.list(&log_dir_path).await?;
+        while let Ok(meta) = log_stream.next().await.transpose() {
+            match meta {
+                Some(meta) => log_fs.remove(&meta.path).await?,
+                None => break,
+            }
+        }
+
+        for level in 0..MAX_LEVEL {
+            let level_path = self
+                .option
+                .level_fs_path(level)
+                .unwrap_or(&self.option.base_path);
+            let fs = self.manager.get_fs(level_path);
+            let mut stream = fs.list(level_path).await?;
+            while let Ok(meta) = stream.next().await.transpose() {
+                match meta {
+                    Some(meta) => {
+                        let path = std::path::Path::new(meta.path.as_ref());
+                        if path.is_file() {
+                            log_fs.remove(&meta.path).await?;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(all(test, feature = "tokio"))]
