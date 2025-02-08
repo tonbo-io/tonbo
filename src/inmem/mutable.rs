@@ -76,6 +76,13 @@ where
             schema,
         })
     }
+
+    pub(crate) async fn destroy(&mut self) -> Result<(), DbError<R>> {
+        if let Some(wal) = self.wal.take() {
+            wal.into_inner().remove().await?;
+        }
+        Ok(())
+    }
 }
 
 impl<R> Mutable<R>
