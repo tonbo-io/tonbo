@@ -120,6 +120,7 @@ rocksdb = { version = "0.22", optional = true }
 sled = { version = "0.34", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3.1", features = ["wasm_js"] }
 wasm-bindgen = "0.2.95"
 wasm-bindgen-futures = { version = "0.4.45", optional = true }
 
