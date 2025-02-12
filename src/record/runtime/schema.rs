@@ -47,7 +47,7 @@ impl Schema for DynSchema {
     }
 
     fn primary_key_index(&self) -> usize {
-        self.primary_index
+        self.primary_index + 2
     }
 
     fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
