@@ -4,7 +4,7 @@ use pyo3::{
     types::{PyBytes, PyDict, PyDictMethods},
     Bound, Py, PyAny, Python,
 };
-use tonbo::record::{Datatype, Value};
+use tonbo::record::{DataType as TonboDataType, Value};
 
 use crate::{column::Column, datatype::DataType, range};
 
@@ -12,7 +12,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
     let dict = PyDict::new_bound(py);
     for (idx, col) in record.iter().enumerate() {
         match &col.datatype {
-            Datatype::UInt8 => {
+            TonboDataType::UInt8 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -24,7 +24,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::UInt16 => {
+            TonboDataType::UInt16 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -36,7 +36,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::UInt32 => {
+            TonboDataType::UInt32 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -48,7 +48,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::UInt64 => {
+            TonboDataType::UInt64 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -60,7 +60,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::Int8 => {
+            TonboDataType::Int8 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -72,7 +72,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::Int16 => {
+            TonboDataType::Int16 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -84,7 +84,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::Int32 => {
+            TonboDataType::Int32 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -96,7 +96,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::Int64 => {
+            TonboDataType::Int64 => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -108,7 +108,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::String => {
+            TonboDataType::String => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -120,7 +120,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::Boolean => {
+            TonboDataType::Boolean => {
                 if idx == primary_key_index {
                     dict.set_item(
                         col.name.clone(),
@@ -132,7 +132,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(col.name.clone(), value).unwrap();
                 }
             }
-            Datatype::Bytes => {
+            TonboDataType::Bytes => {
                 if idx == primary_key_index {
                     let value = col.value.as_ref().downcast_ref::<Vec<u8>>().unwrap();
                     let v = PyBytes::new_bound(py, value);
@@ -183,7 +183,7 @@ pub(crate) fn to_key(
 
 pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> Value {
     Value::new(
-        Datatype::from(&col.datatype),
+        TonboDataType::from(&col.datatype),
         col.name.to_owned(),
         to_key(py, &col.datatype, key),
         col.nullable,

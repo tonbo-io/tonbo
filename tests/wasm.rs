@@ -7,18 +7,18 @@ mod tests {
     use futures::StreamExt;
     use tonbo::{
         executor::opfs::OpfsExecutor,
-        record::{Datatype, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
         DbOption, Projection, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;
 
     fn test_dyn_item_schema() -> DynSchema {
         let descs = vec![
-            ValueDesc::new("id".to_string(), Datatype::Int64, false),
-            ValueDesc::new("age".to_string(), Datatype::Int8, true),
-            ValueDesc::new("name".to_string(), Datatype::String, false),
-            ValueDesc::new("email".to_string(), Datatype::String, true),
-            ValueDesc::new("bytes".to_string(), Datatype::Bytes, true),
+            ValueDesc::new("id".to_string(), DataType::Int64, false),
+            ValueDesc::new("age".to_string(), DataType::Int8, true),
+            ValueDesc::new("name".to_string(), DataType::String, false),
+            ValueDesc::new("email".to_string(), DataType::String, true),
+            ValueDesc::new("bytes".to_string(), DataType::Bytes, true),
         ];
         DynSchema::new(descs, 0)
     }
@@ -27,27 +27,27 @@ mod tests {
         let mut items = vec![];
         for i in 0..50 {
             let columns = vec![
-                Value::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false),
+                Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false),
                 Value::new(
-                    Datatype::Int8,
+                    DataType::Int8,
                     "age".to_string(),
                     Arc::new(Some(i as i8)),
                     true,
                 ),
                 Value::new(
-                    Datatype::String,
+                    DataType::String,
                     "name".to_string(),
                     Arc::new(i.to_string()),
                     false,
                 ),
                 Value::new(
-                    Datatype::String,
+                    DataType::String,
                     "email".to_string(),
                     Arc::new(Some(format!("{}@tonbo.io", i))),
                     true,
                 ),
                 Value::new(
-                    Datatype::Bytes,
+                    DataType::Bytes,
                     "bytes".to_string(),
                     Arc::new(Some((i as i32).to_le_bytes().to_vec())),
                     true,
@@ -87,7 +87,7 @@ mod tests {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Value::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx.get(&key, Projection::All).await.unwrap();
                 let entry = option1.unwrap();
                 let record_ref = entry.get();
@@ -169,8 +169,8 @@ mod tests {
         // test scan
         {
             let txn = db.transaction().await;
-            let lower = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(5_i64), false);
-            let upper = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(47_i64), false);
+            let lower = Value::new(DataType::Int64, "id".to_owned(), Arc::new(5_i64), false);
+            let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(47_i64), false);
             let mut scan = txn
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 2, 4])
@@ -183,7 +183,7 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.datatype, DataType::Int64);
                 assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -195,21 +195,21 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, Datatype::Int8);
+                assert_eq!(col.datatype, DataType::Int8);
                 assert_eq!(col.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &None);
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::String);
+                assert_eq!(col.datatype, DataType::String);
                 assert_eq!(col.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype, Datatype::Bytes);
+                assert_eq!(col.datatype, DataType::Bytes);
                 assert_eq!(col.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
@@ -350,7 +350,7 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.datatype, DataType::Int64);
                 assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -362,21 +362,21 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, Datatype::Int8);
+                assert_eq!(col.datatype, DataType::Int8);
                 assert_eq!(col.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &Some(i as i8));
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::String);
+                assert_eq!(col.datatype, DataType::String);
                 assert_eq!(col.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype, Datatype::Bytes);
+                assert_eq!(col.datatype, DataType::Bytes);
                 assert_eq!(col.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.unwrap().is_none());

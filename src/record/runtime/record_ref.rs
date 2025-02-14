@@ -10,7 +10,7 @@ use arrow::{
 use fusio::Write;
 use fusio_log::Encode;
 
-use super::{Datatype, DynRecord, Value};
+use super::{DataType, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{internal::InternalRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema},
@@ -91,7 +91,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         let mut columns = vec![];
 
         for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
-            let datatype = Datatype::from(field.data_type());
+            let datatype = DataType::from(field.data_type());
             let schema = record_batch.schema();
             let flattened_fields = schema.flattened_fields();
             let batch_field = flattened_fields
@@ -109,63 +109,63 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             let col = record_batch.column(batch_field.unwrap().0);
             let is_nullable = field.is_nullable();
             let value = match datatype {
-                Datatype::UInt8 => Self::primitive_value::<UInt8Type>(
+                DataType::UInt8 => Self::primitive_value::<UInt8Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::UInt16 => Self::primitive_value::<UInt16Type>(
+                DataType::UInt16 => Self::primitive_value::<UInt16Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::UInt32 => Self::primitive_value::<UInt32Type>(
+                DataType::UInt32 => Self::primitive_value::<UInt32Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::UInt64 => Self::primitive_value::<UInt64Type>(
+                DataType::UInt64 => Self::primitive_value::<UInt64Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::Int8 => Self::primitive_value::<Int8Type>(
+                DataType::Int8 => Self::primitive_value::<Int8Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::Int16 => Self::primitive_value::<Int16Type>(
+                DataType::Int16 => Self::primitive_value::<Int16Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::Int32 => Self::primitive_value::<Int32Type>(
+                DataType::Int32 => Self::primitive_value::<Int32Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::Int64 => Self::primitive_value::<Int64Type>(
+                DataType::Int64 => Self::primitive_value::<Int64Type>(
                     col,
                     offset,
                     idx,
                     projection_mask,
                     primary_index == idx - 2,
                 ),
-                Datatype::String => {
+                DataType::String => {
                     let v = col.as_string::<i32>();
 
                     if primary_index == idx - 2 {
@@ -176,7 +176,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                         Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
-                Datatype::Boolean => {
+                DataType::Boolean => {
                     let v = col.as_boolean();
 
                     if primary_index == idx - 2 {
@@ -187,7 +187,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                         Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
-                Datatype::Bytes => {
+                DataType::Bytes => {
                     let v = col.as_binary::<i32>();
                     if primary_index == idx - 2 {
                         Arc::new(v.value(offset).to_owned()) as Arc<dyn Any + Send + Sync>
@@ -219,17 +219,17 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
             {
                 match col.datatype {
-                    Datatype::UInt8 => col.value = Arc::<Option<u8>>::new(None),
-                    Datatype::UInt16 => col.value = Arc::<Option<u16>>::new(None),
-                    Datatype::UInt32 => col.value = Arc::<Option<u32>>::new(None),
-                    Datatype::UInt64 => col.value = Arc::<Option<u64>>::new(None),
-                    Datatype::Int8 => col.value = Arc::<Option<i8>>::new(None),
-                    Datatype::Int16 => col.value = Arc::<Option<i16>>::new(None),
-                    Datatype::Int32 => col.value = Arc::<Option<i32>>::new(None),
-                    Datatype::Int64 => col.value = Arc::<Option<i64>>::new(None),
-                    Datatype::String => col.value = Arc::<Option<String>>::new(None),
-                    Datatype::Boolean => col.value = Arc::<Option<bool>>::new(None),
-                    Datatype::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
+                    DataType::UInt8 => col.value = Arc::<Option<u8>>::new(None),
+                    DataType::UInt16 => col.value = Arc::<Option<u16>>::new(None),
+                    DataType::UInt32 => col.value = Arc::<Option<u32>>::new(None),
+                    DataType::UInt64 => col.value = Arc::<Option<u64>>::new(None),
+                    DataType::Int8 => col.value = Arc::<Option<i8>>::new(None),
+                    DataType::Int16 => col.value = Arc::<Option<i16>>::new(None),
+                    DataType::Int32 => col.value = Arc::<Option<i32>>::new(None),
+                    DataType::Int64 => col.value = Arc::<Option<i64>>::new(None),
+                    DataType::String => col.value = Arc::<Option<String>>::new(None),
+                    DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
+                    DataType::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
                 };
             }
         }
