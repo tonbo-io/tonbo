@@ -12,7 +12,7 @@ use arrow::{
     },
 };
 
-use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, Datatype};
+use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, DataType};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic::USER_COLUMN_OFFSET,
@@ -37,55 +37,55 @@ impl ArrowArrays for DynRecordImmutableArrays {
         let mut builders: Vec<Box<dyn ArrayBuilder + Send + Sync>> = vec![];
         let mut datatypes = vec![];
         for field in schema.fields().iter().skip(2) {
-            let datatype = Datatype::from(field.data_type());
+            let datatype = DataType::from(field.data_type());
             match datatype {
-                Datatype::UInt8 => {
+                DataType::UInt8 => {
                     builders.push(Box::new(PrimitiveBuilder::<UInt8Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::UInt16 => {
+                DataType::UInt16 => {
                     builders.push(Box::new(PrimitiveBuilder::<UInt16Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::UInt32 => {
+                DataType::UInt32 => {
                     builders.push(Box::new(PrimitiveBuilder::<UInt32Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::UInt64 => {
+                DataType::UInt64 => {
                     builders.push(Box::new(PrimitiveBuilder::<UInt64Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::Int8 => {
+                DataType::Int8 => {
                     builders.push(Box::new(PrimitiveBuilder::<Int8Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::Int16 => {
+                DataType::Int16 => {
                     builders.push(Box::new(PrimitiveBuilder::<Int16Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::Int32 => {
+                DataType::Int32 => {
                     builders.push(Box::new(PrimitiveBuilder::<Int32Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::Int64 => {
+                DataType::Int64 => {
                     builders.push(Box::new(PrimitiveBuilder::<Int64Type>::with_capacity(
                         capacity,
                     )));
                 }
-                Datatype::String => {
+                DataType::String => {
                     builders.push(Box::new(StringBuilder::with_capacity(capacity, 0)));
                 }
-                Datatype::Boolean => {
+                DataType::Boolean => {
                     builders.push(Box::new(BooleanBuilder::with_capacity(capacity)));
                 }
-                Datatype::Bytes => {
+                DataType::Bytes => {
                     builders.push(Box::new(GenericBinaryBuilder::<i32>::with_capacity(
                         capacity, 0,
                     )));
@@ -122,15 +122,15 @@ impl ArrowArrays for DynRecordImmutableArrays {
                 let datatype = col.datatype;
                 let name = col.name.to_string();
                 let value: Arc<dyn Any + Send + Sync> = match datatype {
-                    Datatype::UInt8 => Arc::new(Self::primitive_value::<UInt8Type>(col, offset)),
-                    Datatype::UInt16 => Arc::new(Self::primitive_value::<UInt16Type>(col, offset)),
-                    Datatype::UInt32 => Arc::new(Self::primitive_value::<UInt32Type>(col, offset)),
-                    Datatype::UInt64 => Arc::new(Self::primitive_value::<UInt64Type>(col, offset)),
-                    Datatype::Int8 => Arc::new(Self::primitive_value::<Int8Type>(col, offset)),
-                    Datatype::Int16 => Arc::new(Self::primitive_value::<Int16Type>(col, offset)),
-                    Datatype::Int32 => Arc::new(Self::primitive_value::<Int32Type>(col, offset)),
-                    Datatype::Int64 => Arc::new(Self::primitive_value::<Int64Type>(col, offset)),
-                    Datatype::String => Arc::new(
+                    DataType::UInt8 => Arc::new(Self::primitive_value::<UInt8Type>(col, offset)),
+                    DataType::UInt16 => Arc::new(Self::primitive_value::<UInt16Type>(col, offset)),
+                    DataType::UInt32 => Arc::new(Self::primitive_value::<UInt32Type>(col, offset)),
+                    DataType::UInt64 => Arc::new(Self::primitive_value::<UInt64Type>(col, offset)),
+                    DataType::Int8 => Arc::new(Self::primitive_value::<Int8Type>(col, offset)),
+                    DataType::Int16 => Arc::new(Self::primitive_value::<Int16Type>(col, offset)),
+                    DataType::Int32 => Arc::new(Self::primitive_value::<Int32Type>(col, offset)),
+                    DataType::Int64 => Arc::new(Self::primitive_value::<Int64Type>(col, offset)),
+                    DataType::String => Arc::new(
                         col.value
                             .as_ref()
                             .downcast_ref::<StringArray>()
@@ -138,14 +138,14 @@ impl ArrowArrays for DynRecordImmutableArrays {
                             .value(offset)
                             .to_owned(),
                     ),
-                    Datatype::Boolean => Arc::new(
+                    DataType::Boolean => Arc::new(
                         col.value
                             .as_ref()
                             .downcast_ref::<BooleanArray>()
                             .unwrap()
                             .value(offset),
                     ),
-                    Datatype::Bytes => Arc::new(
+                    DataType::Bytes => Arc::new(
                         col.value
                             .as_ref()
                             .downcast_ref::<GenericBinaryArray<i32>>()
@@ -186,7 +186,7 @@ impl DynRecordImmutableArrays {
 
 pub struct DynRecordBuilder {
     builders: Vec<Box<dyn ArrayBuilder + Send + Sync>>,
-    datatypes: Vec<Datatype>,
+    datatypes: Vec<DataType>,
     _null: BooleanBufferBuilder,
     _ts: UInt32Builder,
     schema: Arc<ArrowSchema>,
@@ -220,7 +220,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     }
                     let datatype = col.datatype;
                     match datatype {
-                        Datatype::UInt8 => {
+                        DataType::UInt8 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<UInt8Type>>(
                                 builder.as_mut(),
                             );
@@ -230,7 +230,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::UInt16 => {
+                        DataType::UInt16 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<UInt16Type>>(
                                 builder.as_mut(),
                             );
@@ -240,7 +240,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::UInt32 => {
+                        DataType::UInt32 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<UInt32Type>>(
                                 builder.as_mut(),
                             );
@@ -250,7 +250,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::UInt64 => {
+                        DataType::UInt64 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<UInt64Type>>(
                                 builder.as_mut(),
                             );
@@ -260,7 +260,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::Int8 => {
+                        DataType::Int8 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<Int8Type>>(
                                 builder.as_mut(),
                             );
@@ -270,7 +270,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::Int16 => {
+                        DataType::Int16 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<Int16Type>>(
                                 builder.as_mut(),
                             );
@@ -280,7 +280,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::Int32 => {
+                        DataType::Int32 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<Int32Type>>(
                                 builder.as_mut(),
                             );
@@ -290,7 +290,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::Int64 => {
+                        DataType::Int64 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(
                                 builder.as_mut(),
                             );
@@ -300,7 +300,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::String => {
+                        DataType::String => {
                             let bd = Self::as_builder_mut::<StringBuilder>(builder.as_mut());
                             let value =
                                 col.value.as_ref().downcast_ref::<Option<String>>().unwrap();
@@ -309,7 +309,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::Boolean => {
+                        DataType::Boolean => {
                             let bd = Self::as_builder_mut::<BooleanBuilder>(builder.as_mut());
                             let value = col.value.as_ref().downcast_ref::<Option<bool>>().unwrap();
                             match value {
@@ -317,7 +317,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_null(),
                             }
                         }
-                        Datatype::Bytes => {
+                        DataType::Bytes => {
                             let bd =
                                 Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut());
                             let value = col
@@ -344,47 +344,47 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         continue;
                     }
                     match datatype {
-                        Datatype::UInt8 => {
+                        DataType::UInt8 => {
                             Self::as_builder_mut::<PrimitiveBuilder<UInt8Type>>(builder.as_mut())
                                 .append_value(u8::default());
                         }
-                        Datatype::UInt16 => {
+                        DataType::UInt16 => {
                             Self::as_builder_mut::<PrimitiveBuilder<UInt16Type>>(builder.as_mut())
                                 .append_value(u16::default());
                         }
-                        Datatype::UInt32 => {
+                        DataType::UInt32 => {
                             Self::as_builder_mut::<PrimitiveBuilder<UInt32Type>>(builder.as_mut())
                                 .append_value(u32::default());
                         }
-                        Datatype::UInt64 => {
+                        DataType::UInt64 => {
                             Self::as_builder_mut::<PrimitiveBuilder<UInt64Type>>(builder.as_mut())
                                 .append_value(u64::default());
                         }
-                        Datatype::Int8 => {
+                        DataType::Int8 => {
                             Self::as_builder_mut::<PrimitiveBuilder<Int8Type>>(builder.as_mut())
                                 .append_value(i8::default());
                         }
-                        Datatype::Int16 => {
+                        DataType::Int16 => {
                             Self::as_builder_mut::<PrimitiveBuilder<Int16Type>>(builder.as_mut())
                                 .append_value(i16::default());
                         }
-                        Datatype::Int32 => {
+                        DataType::Int32 => {
                             Self::as_builder_mut::<PrimitiveBuilder<Int32Type>>(builder.as_mut())
                                 .append_value(i32::default());
                         }
-                        Datatype::Int64 => {
+                        DataType::Int64 => {
                             Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(builder.as_mut())
                                 .append_value(i64::default());
                         }
-                        Datatype::String => {
+                        DataType::String => {
                             Self::as_builder_mut::<StringBuilder>(builder.as_mut())
                                 .append_value(String::default());
                         }
-                        Datatype::Boolean => {
+                        DataType::Boolean => {
                             Self::as_builder_mut::<BooleanBuilder>(builder.as_mut())
                                 .append_value(bool::default());
                         }
-                        Datatype::Bytes => {
+                        DataType::Bytes => {
                             Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                                 .append_value(Vec::<u8>::default());
                         }
@@ -401,45 +401,45 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             .zip(self.datatypes.iter())
             .fold(size, |acc, (builder, datatype)| {
                 acc + match datatype {
-                    Datatype::UInt8 => mem::size_of_val(
+                    DataType::UInt8 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<UInt8Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::UInt16 => mem::size_of_val(
+                    DataType::UInt16 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<UInt16Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::UInt32 => mem::size_of_val(
+                    DataType::UInt32 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<UInt32Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::UInt64 => mem::size_of_val(
+                    DataType::UInt64 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<UInt64Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::Int8 => mem::size_of_val(
+                    DataType::Int8 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<Int8Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::Int16 => mem::size_of_val(
+                    DataType::Int16 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<Int16Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::Int32 => mem::size_of_val(
+                    DataType::Int32 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<Int32Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::Int64 => mem::size_of_val(
+                    DataType::Int64 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<Int64Type>>(builder.as_ref())
                             .values_slice(),
                     ),
-                    Datatype::String => mem::size_of_val(
+                    DataType::String => mem::size_of_val(
                         Self::as_builder::<StringBuilder>(builder.as_ref()).values_slice(),
                     ),
-                    Datatype::Boolean => mem::size_of_val(
+                    DataType::Boolean => mem::size_of_val(
                         Self::as_builder::<BooleanBuilder>(builder.as_ref()).values_slice(),
                     ),
-                    Datatype::Bytes => mem::size_of_val(
+                    DataType::Bytes => mem::size_of_val(
                         Self::as_builder::<GenericBinaryBuilder<i32>>(builder.as_ref())
                             .values_slice(),
                     ),
@@ -462,139 +462,139 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             let field = self.schema.field(idx + USER_COLUMN_OFFSET);
             let is_nullable = field.is_nullable();
             match datatype {
-                Datatype::UInt8 => {
+                DataType::UInt8 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<UInt8Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::UInt8,
+                        datatype: DataType::UInt8,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::UInt16 => {
+                DataType::UInt16 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<UInt16Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::UInt16,
+                        datatype: DataType::UInt16,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::UInt32 => {
+                DataType::UInt32 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<UInt32Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::UInt32,
+                        datatype: DataType::UInt32,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::UInt64 => {
+                DataType::UInt64 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<UInt64Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::UInt64,
+                        datatype: DataType::UInt64,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::Int8 => {
+                DataType::Int8 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<Int8Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::Int8,
+                        datatype: DataType::Int8,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::Int16 => {
+                DataType::Int16 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<Int16Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::Int16,
+                        datatype: DataType::Int16,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::Int32 => {
+                DataType::Int32 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<Int32Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::Int32,
+                        datatype: DataType::Int32,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::Int64 => {
+                DataType::Int64 => {
                     let value = Arc::new(
                         Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::Int64,
+                        datatype: DataType::Int64,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::String => {
+                DataType::String => {
                     let value =
                         Arc::new(Self::as_builder_mut::<StringBuilder>(builder.as_mut()).finish());
                     columns.push(Value {
-                        datatype: Datatype::String,
+                        datatype: DataType::String,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::Boolean => {
+                DataType::Boolean => {
                     let value =
                         Arc::new(Self::as_builder_mut::<BooleanBuilder>(builder.as_mut()).finish());
                     columns.push(Value {
-                        datatype: Datatype::Boolean,
+                        datatype: DataType::Boolean,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
                     });
                     array_refs.push(value);
                 }
-                Datatype::Bytes => {
+                DataType::Bytes => {
                     let value = Arc::new(
                         Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                             .finish(),
                     );
                     columns.push(Value {
-                        datatype: Datatype::Bytes,
+                        datatype: DataType::Bytes,
                         name: field.name().to_owned(),
                         value: value.clone(),
                         is_nullable,
@@ -632,41 +632,41 @@ impl DynRecordBuilder {
         let datatype = self.datatypes.get_mut(primary_key_index).unwrap();
         let col = key.value;
         match datatype {
-            Datatype::UInt8 => {
+            DataType::UInt8 => {
                 Self::as_builder_mut::<PrimitiveBuilder<UInt8Type>>(builder.as_mut())
                     .append_value(*col.value.as_ref().downcast_ref::<u8>().unwrap())
             }
-            Datatype::UInt16 => {
+            DataType::UInt16 => {
                 Self::as_builder_mut::<PrimitiveBuilder<UInt16Type>>(builder.as_mut())
                     .append_value(*col.value.as_ref().downcast_ref::<u16>().unwrap())
             }
-            Datatype::UInt32 => {
+            DataType::UInt32 => {
                 Self::as_builder_mut::<PrimitiveBuilder<UInt32Type>>(builder.as_mut())
                     .append_value(*col.value.as_ref().downcast_ref::<u32>().unwrap())
             }
-            Datatype::UInt64 => {
+            DataType::UInt64 => {
                 Self::as_builder_mut::<PrimitiveBuilder<UInt64Type>>(builder.as_mut())
                     .append_value(*col.value.as_ref().downcast_ref::<u64>().unwrap())
             }
-            Datatype::Int8 => Self::as_builder_mut::<PrimitiveBuilder<Int8Type>>(builder.as_mut())
+            DataType::Int8 => Self::as_builder_mut::<PrimitiveBuilder<Int8Type>>(builder.as_mut())
                 .append_value(*col.value.as_ref().downcast_ref::<i8>().unwrap()),
-            Datatype::Int16 => {
+            DataType::Int16 => {
                 Self::as_builder_mut::<PrimitiveBuilder<Int16Type>>(builder.as_mut())
                     .append_value(*col.value.as_ref().downcast_ref::<i16>().unwrap())
             }
-            Datatype::Int32 => {
+            DataType::Int32 => {
                 Self::as_builder_mut::<PrimitiveBuilder<Int32Type>>(builder.as_mut())
                     .append_value(*col.value.as_ref().downcast_ref::<i32>().unwrap())
             }
-            Datatype::Int64 => {
+            DataType::Int64 => {
                 Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(builder.as_mut())
                     .append_value(*col.value.as_ref().downcast_ref::<i64>().unwrap())
             }
-            Datatype::String => Self::as_builder_mut::<StringBuilder>(builder.as_mut())
+            DataType::String => Self::as_builder_mut::<StringBuilder>(builder.as_mut())
                 .append_value(col.value.as_ref().downcast_ref::<String>().unwrap()),
-            Datatype::Boolean => Self::as_builder_mut::<BooleanBuilder>(builder.as_mut())
+            DataType::Boolean => Self::as_builder_mut::<BooleanBuilder>(builder.as_mut())
                 .append_value(*col.value.as_ref().downcast_ref::<bool>().unwrap()),
-            Datatype::Bytes => Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
+            DataType::Bytes => Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                 .append_value(col.value.as_ref().downcast_ref::<Vec<u8>>().unwrap()),
         };
     }

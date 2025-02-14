@@ -957,7 +957,7 @@ pub(crate) mod tests {
         record::{
             internal::InternalRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
-            Datatype, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
+            DataType, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
             Schema as RecordSchema, Value,
         },
         trigger::{TriggerFactory, TriggerType},
@@ -1890,7 +1890,7 @@ pub(crate) mod tests {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Value::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx.get(&key, Projection::All).await.unwrap();
                 if i == 28 {
                     assert!(option1.is_none());
@@ -1984,8 +1984,8 @@ pub(crate) mod tests {
         // test scan
         {
             let tx = db.transaction().await;
-            let lower = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(0_i64), false);
-            let upper = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(49_i64), false);
+            let lower = Value::new(DataType::Int64, "id".to_owned(), Arc::new(0_i64), false);
+            let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 2, 7])
@@ -2003,7 +2003,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.datatype, DataType::Int64);
                 assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -2015,7 +2015,7 @@ pub(crate) mod tests {
                 );
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::Int16);
+                assert_eq!(col.datatype, DataType::Int16);
                 assert_eq!(col.name, "height".to_string());
                 let height = *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
                 if i < 45 {
@@ -2030,28 +2030,28 @@ pub(crate) mod tests {
                 }
 
                 let col = columns.get(3).unwrap();
-                assert_eq!(col.datatype, Datatype::Int32);
+                assert_eq!(col.datatype, DataType::Int32);
                 assert_eq!(col.name, "weight".to_string());
                 let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), None);
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype, Datatype::String);
+                assert_eq!(col.datatype, DataType::String);
                 assert_eq!(col.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &None);
 
                 let col = columns.get(6).unwrap();
-                assert_eq!(col.datatype, Datatype::Boolean);
+                assert_eq!(col.datatype, DataType::Boolean);
                 assert_eq!(col.name, "enabled".to_string());
                 let enabled = col.value.as_ref().downcast_ref::<Option<bool>>();
                 assert!(enabled.is_some());
                 assert_eq!(*enabled.unwrap(), None);
 
                 let col = columns.get(7).unwrap();
-                assert_eq!(col.datatype, Datatype::Bytes);
+                assert_eq!(col.datatype, DataType::Bytes);
                 assert_eq!(col.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
@@ -2128,7 +2128,7 @@ pub(crate) mod tests {
             let tx3 = db3.transaction().await;
 
             for i in 0..50 {
-                let key = Value::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx1.get(&key, Projection::All).await.unwrap();
                 let option2 = tx2.get(&key, Projection::All).await.unwrap();
                 let option3 = tx3.get(&key, Projection::All).await.unwrap();
@@ -2186,8 +2186,8 @@ pub(crate) mod tests {
         // test scan
         {
             let tx1 = db1.transaction().await;
-            let lower = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(8_i64), false);
-            let upper = Value::new(Datatype::Int64, "id".to_owned(), Arc::new(43_i64), false);
+            let lower = Value::new(DataType::Int64, "id".to_owned(), Arc::new(8_i64), false);
+            let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(43_i64), false);
             let mut scan = tx1
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 1])
@@ -2200,7 +2200,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.datatype, DataType::Int64);
                 assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -2227,7 +2227,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.datatype, DataType::Int64);
                 assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -2254,7 +2254,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
+                assert_eq!(primary_key_col.datatype, DataType::Int64);
                 assert_eq!(primary_key_col.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
