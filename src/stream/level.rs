@@ -224,7 +224,7 @@ mod tests {
     use fusio::path::Path;
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
-    use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
+    use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
     use parquet_lru::NoCache;
     use tempfile::TempDir;
 
@@ -265,7 +265,9 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                    &ArrowSchemaConverter::new()
+                        .convert(TestSchema {}.arrow_schema())
+                        .unwrap(),
                     [0, 1, 2, 3],
                 ),
                 manager.base_fs().clone(),
@@ -302,7 +304,9 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                    &ArrowSchemaConverter::new()
+                        .convert(TestSchema {}.arrow_schema())
+                        .unwrap(),
                     [0, 1, 2, 4],
                 ),
                 manager.base_fs().clone(),
@@ -339,7 +343,9 @@ mod tests {
                 1_u32.into(),
                 None,
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                    &ArrowSchemaConverter::new()
+                        .convert(TestSchema {}.arrow_schema())
+                        .unwrap(),
                     [0, 1, 2],
                 ),
                 manager.base_fs().clone(),

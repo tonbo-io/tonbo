@@ -125,7 +125,7 @@ pub(crate) mod tests {
     use futures_util::StreamExt;
     use parquet::{
         arrow::{
-            arrow_to_parquet_schema, arrow_writer::ArrowWriterOptions, AsyncArrowWriter,
+            arrow_writer::ArrowWriterOptions, ArrowSchemaConverter, AsyncArrowWriter,
             ProjectionMask,
         },
         basic::{Compression, ZstdLevel},
@@ -218,7 +218,9 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 3],
                     ),
                 )
@@ -235,7 +237,9 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 4],
                     ),
                 )
@@ -252,7 +256,9 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2],
                     ),
                 )
@@ -296,7 +302,9 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 3],
                     ),
                 )
@@ -321,7 +329,9 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 4],
                     ),
                 )
@@ -346,7 +356,9 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(TestSchema {}.arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2],
                     ),
                 )
