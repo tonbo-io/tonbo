@@ -230,7 +230,7 @@ mod tests {
     use super::Mutable;
     use crate::{
         inmem::immutable::tests::TestSchema,
-        record::{test::StringSchema, Datatype, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
         tests::{Test, TestRef},
         timestamp::Timestamped,
         trigger::TriggerFactory,
@@ -388,8 +388,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let schema = DynSchema::new(
             vec![
-                ValueDesc::new("age".to_string(), Datatype::Int8, false),
-                ValueDesc::new("height".to_string(), Datatype::Int16, true),
+                ValueDesc::new("age".to_string(), DataType::Int8, false),
+                ValueDesc::new("height".to_string(), DataType::Int16, true),
             ],
             0,
         );
@@ -413,9 +413,9 @@ mod tests {
                 LogType::Full,
                 DynRecord::new(
                     vec![
-                        Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
+                        Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
                         Value::new(
-                            Datatype::Int16,
+                            DataType::Int16,
                             "height".to_string(),
                             Arc::new(1236_i16),
                             true,
@@ -434,7 +434,7 @@ mod tests {
             assert_eq!(
                 entry.key(),
                 &Timestamped::new(
-                    Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
+                    Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
                     0_u32.into()
                 )
             );

@@ -256,7 +256,7 @@ mod tests {
         fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema,
         record::{
-            runtime::{test::test_dyn_item_schema, Datatype, DynRecord, Value},
+            runtime::{test::test_dyn_item_schema, DataType, DynRecord, Value},
             test::StringSchema,
         },
         tests::{build_db, build_schema, Test},
@@ -828,15 +828,15 @@ mod tests {
 
         db.insert(DynRecord::new(
             vec![
-                Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false),
+                Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
                 Value::new(
-                    Datatype::Int16,
+                    DataType::Int16,
                     "height".to_string(),
                     Arc::new(Some(180_i16)),
                     true,
                 ),
                 Value::new(
-                    Datatype::Int32,
+                    DataType::Int32,
                     "weight".to_string(),
                     Arc::new(56_i32),
                     false,
@@ -849,7 +849,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Value::new(Datatype::Int8, "age".to_string(), Arc::new(1_i8), false);
+            let key = Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());
@@ -858,7 +858,7 @@ mod tests {
 
             assert_eq!(record_ref.columns.len(), 3);
             let col = record_ref.columns.first().unwrap();
-            assert_eq!(col.datatype, Datatype::Int8);
+            assert_eq!(col.datatype, DataType::Int8);
             let name = col.value.as_ref().downcast_ref::<i8>();
             assert!(name.is_some());
             assert_eq!(*name.unwrap(), 1);
@@ -887,21 +887,21 @@ mod tests {
                 dbg!(columns.clone());
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int8);
+                assert_eq!(primary_key_col.datatype, DataType::Int8);
                 assert_eq!(
                     *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
                     1
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, Datatype::Int16);
+                assert_eq!(col.datatype, DataType::Int16);
                 assert_eq!(
                     *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
                     Some(180)
                 );
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::Int32);
+                assert_eq!(col.datatype, DataType::Int32);
                 let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), Some(56_i32));

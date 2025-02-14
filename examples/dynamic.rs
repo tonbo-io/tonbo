@@ -3,7 +3,7 @@ use std::{fs, sync::Arc};
 use fusio::path::Path;
 use tonbo::{
     executor::tokio::TokioExecutor,
-    record::{Datatype, DynRecord, DynSchema, Value, ValueDesc},
+    record::{DataType, DynRecord, DynSchema, Value, ValueDesc},
     DbOption, DB,
 };
 
@@ -13,8 +13,8 @@ async fn main() {
 
     let schema = DynSchema::new(
         vec![
-            ValueDesc::new("foo".into(), Datatype::String, false),
-            ValueDesc::new("bar".into(), Datatype::Int32, true),
+            ValueDesc::new("foo".into(), DataType::String, false),
+            ValueDesc::new("bar".into(), DataType::Int32, true),
         ],
         0,
     );
@@ -32,12 +32,12 @@ async fn main() {
         txn.insert(DynRecord::new(
             vec![
                 Value::new(
-                    Datatype::String,
+                    DataType::String,
                     "foo".into(),
                     Arc::new("hello".to_owned()),
                     false,
                 ),
-                Value::new(Datatype::Int32, "bar".into(), Arc::new(1), true),
+                Value::new(DataType::Int32, "bar".into(), Arc::new(1), true),
             ],
             0,
         ));
@@ -47,7 +47,7 @@ async fn main() {
 
     db.get(
         &Value::new(
-            Datatype::String,
+            DataType::String,
             "foo".into(),
             Arc::new("hello".to_owned()),
             false,
