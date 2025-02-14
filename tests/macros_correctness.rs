@@ -150,7 +150,7 @@ mod tests {
                 UserSchema {}.arrow_schema(),
             );
             assert_eq!(
-                record_ref.value(),
+                record_ref.key(),
                 Timestamped {
                     ts: 9.into(),
                     value: "cat",
@@ -189,7 +189,7 @@ mod tests {
                 UserSchema {}.arrow_schema(),
             );
             assert_eq!(
-                record_ref.value(),
+                record_ref.key(),
                 Timestamped {
                     ts: 9.into(),
                     value: "cat",
