@@ -150,7 +150,7 @@ use magic::USER_COLUMN_OFFSET;
 pub use once_cell;
 pub use parquet;
 use parquet::{
-    arrow::{arrow_to_parquet_schema, ProjectionMask},
+    arrow::{ArrowSchemaConverter, ProjectionMask},
     errors::ParquetError,
 };
 use parquet_lru::{DynLruCache, NoCache};
@@ -629,7 +629,9 @@ where
                 fixed_projection.dedup();
 
                 ProjectionMask::roots(
-                    &arrow_to_parquet_schema(self.record_schema.arrow_schema()).unwrap(),
+                    &ArrowSchemaConverter::new()
+                        .convert(self.record_schema.arrow_schema())
+                        .unwrap(),
                     fixed_projection,
                 )
             }
@@ -764,7 +766,9 @@ where
         fixed_projection.dedup();
 
         let mask = ProjectionMask::roots(
-            &arrow_to_parquet_schema(self.schema.record_schema.arrow_schema()).unwrap(),
+            &ArrowSchemaConverter::new()
+                .convert(self.schema.record_schema.arrow_schema())
+                .unwrap(),
             fixed_projection.clone(),
         );
 

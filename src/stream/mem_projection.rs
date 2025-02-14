@@ -60,7 +60,7 @@ mod tests {
 
     use fusio::{disk::TokioFs, path::Path, DynFs};
     use futures_util::StreamExt;
-    use parquet::arrow::{arrow_to_parquet_schema, ProjectionMask};
+    use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
         inmem::{immutable::tests::TestSchema, mutable::Mutable},
@@ -127,7 +127,9 @@ mod tests {
             .unwrap();
 
         let mask = ProjectionMask::roots(
-            &arrow_to_parquet_schema(TestSchema.arrow_schema()).unwrap(),
+            &ArrowSchemaConverter::new()
+                .convert(TestSchema.arrow_schema())
+                .unwrap(),
             vec![0, 1, 2, 4],
         );
 
