@@ -10,7 +10,7 @@ use arrow::{
 use once_cell::sync::Lazy;
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 
-use super::{internal::InternalRecordRef, Key, Record, RecordRef, Schema};
+use super::{option::OptionRecordRef, Key, Record, RecordRef, Schema};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic,
@@ -91,7 +91,7 @@ impl<'r> RecordRef<'r> for &'r str {
         offset: usize,
         _: &'r ProjectionMask,
         _: &'r Arc<ArrowSchema>,
-    ) -> InternalRecordRef<'r, Self> {
+    ) -> OptionRecordRef<'r, Self> {
         let ts = record_batch
             .column(1)
             .as_primitive::<UInt32Type>()
@@ -100,7 +100,7 @@ impl<'r> RecordRef<'r> for &'r str {
         let vstring = record_batch.column(2).as_string::<i32>().value(offset);
         let null = record_batch.column(0).as_boolean().value(offset);
 
-        InternalRecordRef::new(ts, vstring, null)
+        OptionRecordRef::new(ts, vstring, null)
     }
 }
 

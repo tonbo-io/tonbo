@@ -34,7 +34,7 @@ pub(crate) type MutableScan<'scan, R> = Range<
     Option<R>,
 >;
 
-pub struct Mutable<R>
+pub(crate) struct Mutable<R>
 where
     R: Record,
 {

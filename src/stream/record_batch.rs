@@ -9,7 +9,7 @@ use arrow::{array::RecordBatch, datatypes::Schema};
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{internal::InternalRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
+    record::{option::OptionRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
     timestamp::Timestamped,
 };
 
@@ -18,7 +18,7 @@ where
     R: Record,
 {
     _record_batch: RecordBatch,
-    record_ref: InternalRecordRef<'static, R::Ref<'static>>,
+    record_ref: OptionRecordRef<'static, R::Ref<'static>>,
 }
 
 impl<R> RecordBatchEntry<R>
@@ -27,7 +27,7 @@ where
 {
     pub(crate) fn new(
         _record_batch: RecordBatch,
-        record_ref: InternalRecordRef<'static, R::Ref<'static>>,
+        record_ref: OptionRecordRef<'static, R::Ref<'static>>,
     ) -> Self {
         Self {
             _record_batch,
@@ -38,11 +38,11 @@ where
     pub(crate) fn internal_key(
         &self,
     ) -> Timestamped<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {
-        self.record_ref.value()
+        self.record_ref.key()
     }
 
     pub fn key(&self) -> <<R::Schema as RecordSchema>::Key as Key>::Ref<'_> {
-        self.record_ref.value().value().clone()
+        self.internal_key().value().clone()
     }
 
     pub fn get(&self) -> Option<R::Ref<'_>> {
@@ -108,10 +108,9 @@ where
         );
         let entry = RecordBatchEntry::new(record_batch, unsafe {
             // Safety: self-referring lifetime is safe
-            transmute::<
-                InternalRecordRef<'_, R::Ref<'_>>,
-                InternalRecordRef<'static, R::Ref<'static>>,
-            >(record)
+            transmute::<OptionRecordRef<'_, R::Ref<'_>>, OptionRecordRef<'static, R::Ref<'static>>>(
+                record,
+            )
         });
         self.offset += 1;
         Some(entry)

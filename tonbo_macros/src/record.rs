@@ -483,7 +483,7 @@ fn trait_decode_ref_codegen(
                 offset: usize,
                 projection_mask: &'r ::tonbo::parquet::arrow::ProjectionMask,
                 _: &::std::sync::Arc<::tonbo::arrow::datatypes::Schema>,
-            ) -> ::tonbo::record::internal::InternalRecordRef<'r, Self> {
+            ) -> ::tonbo::record::option::OptionRecordRef<'r, Self> {
                 use ::tonbo::arrow::array::AsArray;
 
                 let mut column_i = 2;
@@ -500,7 +500,7 @@ fn trait_decode_ref_codegen(
                 let record = #struct_ref_name {
                     #(#field_names)*
                 };
-                ::tonbo::record::internal::InternalRecordRef::new(ts, record, null)
+                ::tonbo::record::option::OptionRecordRef::new(ts, record, null)
             }
         }
     }

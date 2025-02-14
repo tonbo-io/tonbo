@@ -13,7 +13,7 @@ use fusio_log::Encode;
 use super::{Datatype, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
-    record::{internal::InternalRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema},
+    record::{option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema},
 };
 
 #[derive(Clone)]
@@ -73,7 +73,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         offset: usize,
         projection_mask: &'r parquet::arrow::ProjectionMask,
         full_schema: &'r Arc<ArrowSchema>,
-    ) -> InternalRecordRef<'r, Self> {
+    ) -> OptionRecordRef<'r, Self> {
         let null = record_batch.column(0).as_boolean().value(offset);
         let metadata = full_schema.metadata();
 
@@ -211,7 +211,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             primary_index,
             _marker: PhantomData,
         };
-        InternalRecordRef::new(ts, record, null)
+        OptionRecordRef::new(ts, record, null)
     }
 
     fn projection(&mut self, projection_mask: &parquet::arrow::ProjectionMask) {
