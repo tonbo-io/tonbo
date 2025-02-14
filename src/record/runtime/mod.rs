@@ -4,6 +4,7 @@ mod record_ref;
 mod schema;
 mod value;
 
+pub use array::*;
 use arrow::datatypes::DataType;
 pub use record::*;
 pub use record_ref::*;
