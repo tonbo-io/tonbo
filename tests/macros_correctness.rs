@@ -15,7 +15,7 @@ mod tests {
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array, UInt8Array};
     use fusio_log::{Decode, Encode};
     use parquet::{
-        arrow::{arrow_to_parquet_schema, ProjectionMask},
+        arrow::{ArrowSchemaConverter, ProjectionMask},
         format::SortingColumn,
         schema::types::ColumnPath,
     };
@@ -63,7 +63,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(UserSchema {}.arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![2, 3],
             ));
 
@@ -75,7 +77,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(UserSchema {}.arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![],
             ));
 
@@ -87,7 +91,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(UserSchema {}.arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![2],
             ));
 
@@ -99,7 +105,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(UserSchema {}.arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![3],
             ));
 
@@ -130,7 +138,9 @@ mod tests {
             .unwrap();
 
             let project_mask = ProjectionMask::roots(
-                &arrow_to_parquet_schema(UserSchema {}.arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![0, 1, 2, 3, 4],
             );
             let record_ref = UserRef::from_record_batch(
@@ -167,7 +177,9 @@ mod tests {
             .unwrap();
 
             let project_mask = ProjectionMask::roots(
-                &arrow_to_parquet_schema(UserSchema {}.arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![0, 1, 3, 4],
             );
             let record_ref = UserRef::from_record_batch(
