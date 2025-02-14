@@ -18,7 +18,8 @@ use datafusion::{
     execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext},
     physical_expr::EquivalenceProperties,
     physical_plan::{
-        execute_stream, DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
+        execute_stream, execution_plan::Boundedness, DisplayAs, DisplayFormatType, ExecutionPlan,
+        PlanProperties,
     },
     prelude::*,
     sql::parser::DFParser,
@@ -28,10 +29,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
 use tonbo::{
-    executor::tokio::TokioExecutor,
-    inmem::immutable::ArrowArrays,
-    record::{Record, Schema},
-    DbOption, DB,
+    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Schema, DbOption, DB,
 };
 use tonbo_macros::Record;
 
@@ -60,6 +58,14 @@ struct MusicExec {
 
 struct MusicStream {
     stream: Pin<Box<dyn Stream<Item = Result<RecordBatch, DataFusionError>> + Send>>,
+}
+
+impl Debug for MusicProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MusicProvider")
+            .field("db", &"Music")
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -113,7 +119,8 @@ impl MusicExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new_with_orderings(schema, &[]),
                 datafusion::physical_expr::Partitioning::UnknownPartitioning(1),
-                ExecutionMode::Unbounded,
+                datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+                Boundedness::Bounded,
             ),
             db,
             projection: None,
