@@ -94,7 +94,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> Result<SsTableScan<R>, parquet::errors::ParquetError> {
+    ) -> Result<SsTableScan<'scan, R>, parquet::errors::ParquetError> {
         let builder = self
             .into_parquet_builder(limit, projection_mask.clone())
             .await?;
