@@ -4,39 +4,42 @@ use super::{Key, Record, RecordRef, Schema};
 use crate::timestamp::{Timestamp, Timestamped};
 
 #[derive(Debug)]
-pub struct InternalRecordRef<'r, R>
+pub struct OptionRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
-    ts: Timestamp,
-    record: R,
+    record: Timestamped<R>,
     null: bool,
     _marker: PhantomData<&'r ()>,
 }
 
-impl<'r, R> InternalRecordRef<'r, R>
+impl<'r, R> OptionRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
     pub fn new(ts: Timestamp, record: R, null: bool) -> Self {
         Self {
-            ts,
-            record,
+            record: Timestamped::new(record, ts),
             null,
             _marker: PhantomData,
         }
     }
 }
 
-impl<'r, R> InternalRecordRef<'r, R>
+impl<'r, R> OptionRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
-    pub fn value(
+    pub fn key(
         &self,
     ) -> Timestamped<<<<R::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>> {
         // Safety: shorter lifetime of the value must be safe
-        unsafe { transmute(Timestamped::new(self.record.clone().key(), self.ts)) }
+        unsafe {
+            transmute(Timestamped::new(
+                self.record.value().clone().key(),
+                self.record.ts(),
+            ))
+        }
     }
 
     pub fn get(&self) -> Option<R> {
@@ -44,6 +47,6 @@ where
             return None;
         }
 
-        Some(self.record.clone())
+        Some(self.record.value().clone())
     }
 }

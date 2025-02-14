@@ -1,4 +1,4 @@
-pub mod internal;
+pub mod option;
 mod key;
 pub mod runtime;
 #[cfg(test)]
@@ -8,7 +8,7 @@ use std::{error::Error, fmt::Debug, io, sync::Arc};
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
 use fusio_log::{Decode, Encode};
-use internal::InternalRecordRef;
+use option::OptionRecordRef;
 pub use key::{Key, KeyRef};
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 pub use runtime::*;
@@ -58,7 +58,7 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
         offset: usize,
         projection_mask: &'r ProjectionMask,
         full_schema: &'r Arc<ArrowSchema>,
-    ) -> InternalRecordRef<'r, Self>;
+    ) -> OptionRecordRef<'r, Self>;
 }
 
 #[derive(Debug, Error)]

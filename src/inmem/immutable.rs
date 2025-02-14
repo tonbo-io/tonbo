@@ -10,7 +10,7 @@ use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{internal::InternalRecordRef, Key, Record, RecordRef, Schema},
+    record::{option::OptionRecordRef, Key, Record, RecordRef, Schema},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Timestamped, TimestampedRef, EPOCH},
 };
@@ -161,7 +161,7 @@ where
     }
 }
 
-pub struct ImmutableScan<'iter, R>
+pub(crate) struct ImmutableScan<'iter, R>
 where
     R: Record,
 {
@@ -206,7 +206,7 @@ where
             RecordBatchEntry::new(self.record_batch.clone(), {
                 // Safety: record_ref self-references the record batch
                 unsafe {
-                    transmute::<InternalRecordRef<R::Ref<'_>>, InternalRecordRef<R::Ref<'static>>>(
+                    transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
                         record_ref,
                     )
                 }

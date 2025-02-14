@@ -955,7 +955,7 @@ pub(crate) mod tests {
         fs::{generate_file_id, manager::StoreManager},
         inmem::{immutable::tests::TestSchema, mutable::Mutable},
         record::{
-            internal::InternalRecordRef,
+            option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
             DataType, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
             Schema as RecordSchema, Value,
@@ -1103,7 +1103,7 @@ pub(crate) mod tests {
             offset: usize,
             projection_mask: &'r ProjectionMask,
             _: &Arc<Schema>,
-        ) -> InternalRecordRef<'r, Self> {
+        ) -> OptionRecordRef<'r, Self> {
             let mut column_i = 2;
             let null = record_batch.column(0).as_boolean().value(offset);
 
@@ -1146,7 +1146,7 @@ pub(crate) mod tests {
                 vu32,
                 vbool,
             };
-            InternalRecordRef::new(ts, record, null)
+            OptionRecordRef::new(ts, record, null)
         }
     }
 
@@ -1385,208 +1385,15 @@ pub(crate) mod tests {
     }
 
     fn test_items() -> Vec<Test> {
-        vec![
-            Test {
-                vstring: 0.to_string(),
-                vu32: 0,
+        let mut items = Vec::new();
+        for i in 0..32 {
+            items.push(Test {
+                vstring: i.to_string(),
+                vu32: i,
                 vbool: Some(true),
-            },
-            Test {
-                vstring: 1.to_string(),
-                vu32: 1,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 2.to_string(),
-                vu32: 2,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 3.to_string(),
-                vu32: 3,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 4.to_string(),
-                vu32: 4,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 5.to_string(),
-                vu32: 5,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 6.to_string(),
-                vu32: 6,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 7.to_string(),
-                vu32: 7,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 8.to_string(),
-                vu32: 8,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 9.to_string(),
-                vu32: 9,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 10.to_string(),
-                vu32: 0,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 11.to_string(),
-                vu32: 1,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 12.to_string(),
-                vu32: 2,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 13.to_string(),
-                vu32: 3,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 14.to_string(),
-                vu32: 4,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 15.to_string(),
-                vu32: 5,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 16.to_string(),
-                vu32: 6,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 17.to_string(),
-                vu32: 7,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 18.to_string(),
-                vu32: 8,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 19.to_string(),
-                vu32: 9,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 20.to_string(),
-                vu32: 0,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 21.to_string(),
-                vu32: 1,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 22.to_string(),
-                vu32: 2,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 23.to_string(),
-                vu32: 3,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 24.to_string(),
-                vu32: 4,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 25.to_string(),
-                vu32: 5,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 26.to_string(),
-                vu32: 6,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 27.to_string(),
-                vu32: 7,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 28.to_string(),
-                vu32: 8,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 29.to_string(),
-                vu32: 9,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 30.to_string(),
-                vu32: 0,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 31.to_string(),
-                vu32: 1,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 32.to_string(),
-                vu32: 2,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 33.to_string(),
-                vu32: 3,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 34.to_string(),
-                vu32: 4,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 35.to_string(),
-                vu32: 5,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 36.to_string(),
-                vu32: 6,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 37.to_string(),
-                vu32: 7,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 38.to_string(),
-                vu32: 8,
-                vbool: Some(true),
-            },
-            Test {
-                vstring: 39.to_string(),
-                vu32: 9,
-                vbool: Some(true),
-            },
-        ]
+            });
+        }
+        items
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1629,7 +1436,7 @@ pub(crate) mod tests {
         assert!(!version.level_slice[1].is_empty());
 
         assert_eq!(option1.get().vstring, "20");
-        assert_eq!(option1.get().vu32, Some(0));
+        assert_eq!(option1.get().vu32, Some(20));
         assert_eq!(option1.get().vbool, Some(true));
     }
 
@@ -1840,7 +1647,7 @@ pub(crate) mod tests {
             }
         }
 
-        for i in 0..40 {
+        for i in 0..32 {
             let vstring = db
                 .get(&i.to_string(), |e| Some(e.get().vstring.to_string()))
                 .await
