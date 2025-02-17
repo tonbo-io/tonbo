@@ -218,7 +218,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         for (idx, col) in self.columns.iter_mut().enumerate() {
             if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
             {
-                match col.datatype {
+                match col.datatype() {
                     DataType::UInt8 => col.value = Arc::<Option<u8>>::new(None),
                     DataType::UInt16 => col.value = Arc::<Option<u16>>::new(None),
                     DataType::UInt32 => col.value = Arc::<Option<u32>>::new(None),

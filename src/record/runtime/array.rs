@@ -118,9 +118,9 @@ impl ArrowArrays for DynRecordImmutableArrays {
 
         let mut columns = vec![];
         for (idx, col) in self.columns.iter().enumerate() {
-            if projection_mask.leaf_included(idx + USER_COLUMN_OFFSET) && !col.is_nullable {
-                let datatype = col.datatype;
-                let name = col.name.to_string();
+            if projection_mask.leaf_included(idx + USER_COLUMN_OFFSET) && !col.is_nullable() {
+                let datatype = col.datatype();
+                let name = col.desc.name.to_string();
                 let value: Arc<dyn Any + Send + Sync> = match datatype {
                     DataType::UInt8 => Arc::new(Self::primitive_value::<UInt8Type>(col, offset)),
                     DataType::UInt16 => Arc::new(Self::primitive_value::<UInt16Type>(col, offset)),
@@ -154,12 +154,7 @@ impl ArrowArrays for DynRecordImmutableArrays {
                             .to_owned(),
                     ),
                 };
-                columns.push(Value {
-                    datatype,
-                    name,
-                    value,
-                    is_nullable: true,
-                });
+                columns.push(Value::new(datatype, name, value, true));
             }
 
             columns.push(col.clone());
@@ -218,7 +213,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     if idx == primary_key_index {
                         continue;
                     }
-                    let datatype = col.datatype;
+                    let datatype = col.datatype();
                     match datatype {
                         DataType::UInt8 => {
                             let bd = Self::as_builder_mut::<PrimitiveBuilder<UInt8Type>>(
@@ -467,12 +462,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt8Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::UInt8,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::UInt8,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::UInt16 => {
@@ -480,12 +475,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt16Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::UInt16,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::UInt16,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::UInt32 => {
@@ -493,12 +488,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt32Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::UInt32,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::UInt32,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::UInt64 => {
@@ -506,12 +501,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<UInt64Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::UInt64,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::UInt64,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::Int8 => {
@@ -519,12 +514,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int8Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::Int8,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::Int8,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::Int16 => {
@@ -532,12 +527,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int16Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::Int16,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::Int16,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::Int32 => {
@@ -545,12 +540,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int32Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::Int32,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::Int32,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::Int64 => {
@@ -558,34 +553,34 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::Int64,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::Int64,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::String => {
                     let value =
                         Arc::new(Self::as_builder_mut::<StringBuilder>(builder.as_mut()).finish());
-                    columns.push(Value {
-                        datatype: DataType::String,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::String,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::Boolean => {
                     let value =
                         Arc::new(Self::as_builder_mut::<BooleanBuilder>(builder.as_mut()).finish());
-                    columns.push(Value {
-                        datatype: DataType::Boolean,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::Boolean,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
                 DataType::Bytes => {
@@ -593,12 +588,12 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                             .finish(),
                     );
-                    columns.push(Value {
-                        datatype: DataType::Bytes,
-                        name: field.name().to_owned(),
-                        value: value.clone(),
+                    columns.push(Value::new(
+                        DataType::Bytes,
+                        field.name().to_owned(),
+                        value.clone(),
                         is_nullable,
-                    });
+                    ));
                     array_refs.push(value);
                 }
             };

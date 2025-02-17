@@ -49,10 +49,7 @@ impl ValueDesc {
 
 #[derive(Clone)]
 pub struct Value {
-    pub datatype: DataType,
-    pub is_nullable: bool,
-    pub name: String,
-
+    pub desc: ValueDesc,
     pub value: Arc<dyn Any + Send + Sync>,
 }
 
@@ -64,10 +61,8 @@ impl Value {
         is_nullable: bool,
     ) -> Self {
         Self {
-            datatype,
-            name,
+            desc: ValueDesc::new(name, datatype, is_nullable),
             value,
-            is_nullable,
         }
     }
 
@@ -110,6 +105,18 @@ impl Value {
             ),
         }
     }
+
+    pub fn datatype(&self) -> DataType {
+        self.desc.datatype
+    }
+
+    pub fn is_nullable(&self) -> bool {
+        self.desc.is_nullable
+    }
+
+    pub fn name(&self) -> String {
+        self.desc.name.clone()
+    }
 }
 
 impl Eq for Value {}
@@ -124,7 +131,7 @@ macro_rules! implement_col {
     ([], $({$Type:ty, $DataType:ident}), *) => {
         impl Ord for Value {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                match self.datatype {
+                match self.datatype() {
                     $(
                         DataType::$DataType => self
                             .value
@@ -137,9 +144,9 @@ macro_rules! implement_col {
 
         impl PartialEq for Value {
             fn eq(&self, other: &Self) -> bool {
-                self.datatype == other.datatype
-                    && self.is_nullable == other.is_nullable
-                    && match self.datatype {
+                self.datatype() == other.datatype()
+                && self.is_nullable() == other.is_nullable()
+                && match self.datatype() {
                         $(
                             DataType::$DataType => self
                                 .value
@@ -152,7 +159,7 @@ macro_rules! implement_col {
 
         impl Hash for Value {
             fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-                match self.datatype {
+                match self.datatype() {
                     $(
                         DataType::$DataType => self.value.downcast_ref::<$Type>().hash(state),
                     )*
@@ -163,7 +170,7 @@ macro_rules! implement_col {
         impl Debug for Value {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let mut debug_struct = f.debug_struct("Value");
-                match self.datatype {
+                match self.datatype() {
                     $(
                         DataType::$DataType => {
                             debug_struct.field("datatype", &stringify!($Type));
@@ -178,7 +185,7 @@ macro_rules! implement_col {
                         }
                     )*
                 }
-                debug_struct.field("nullable", &self.is_nullable).finish()
+                debug_struct.field("nullable", &self.is_nullable()).finish()
             }
         }
 
@@ -195,7 +202,7 @@ macro_rules! implement_key_col {
             }
 
             fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-                match self.datatype {
+                match self.datatype() {
                     $(
                         DataType::$DataType => Arc::new($Array::new_scalar(
                             *self
@@ -269,12 +276,12 @@ macro_rules! implement_decode_col {
                         )*
                     };
                 let name = String::decode(reader).await?;
-                Ok(Value {
+                Ok(Value::new(
                     datatype,
-                    is_nullable,
                     name,
                     value,
-                })
+                    is_nullable,
+                ))
             }
         }
     }
@@ -289,9 +296,9 @@ macro_rules! implement_encode_col {
             where
                 W: Write,
             {
-                Self::tag(self.datatype).encode(writer).await?;
-                self.is_nullable.encode(writer).await?;
-                match self.datatype {
+                Self::tag(self.datatype()).encode(writer).await?;
+                self.is_nullable().encode(writer).await?;
+                match self.datatype() {
                         $(
                             DataType::$DataType => {
                                 if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
@@ -310,12 +317,12 @@ macro_rules! implement_encode_col {
                             }
                         )*
                 };
-                self.name.encode(writer).await?;
+                self.desc.name.encode(writer).await?;
                 Ok(())
             }
 
             fn size(&self) -> usize {
-                3 + self.name.size() + match self.datatype {
+                3 + self.desc.name.size() + match self.desc.datatype {
                     $(
                         DataType::$DataType => {
                             if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {

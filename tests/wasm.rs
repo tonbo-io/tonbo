@@ -183,8 +183,8 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, DataType::Int64);
-                assert_eq!(primary_key_col.name, "id".to_string());
+                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
                         .value
@@ -195,22 +195,22 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, DataType::Int8);
-                assert_eq!(col.name, "age".to_string());
+                assert_eq!(col.datatype(), DataType::Int8);
+                assert_eq!(col.desc.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &None);
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, DataType::String);
-                assert_eq!(col.name, "name".to_string());
+                assert_eq!(col.datatype(), DataType::String);
+                assert_eq!(col.desc.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype, DataType::Bytes);
-                assert_eq!(col.name, "bytes".to_string());
+                assert_eq!(col.datatype(), DataType::Bytes);
+                assert_eq!(col.desc.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
                 assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
@@ -350,8 +350,8 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, DataType::Int64);
-                assert_eq!(primary_key_col.name, "id".to_string());
+                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
                         .value
@@ -362,22 +362,22 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, DataType::Int8);
-                assert_eq!(col.name, "age".to_string());
+                assert_eq!(col.datatype(), DataType::Int8);
+                assert_eq!(col.desc.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &Some(i as i8));
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, DataType::String);
-                assert_eq!(col.name, "name".to_string());
+                assert_eq!(col.datatype(), DataType::String);
+                assert_eq!(col.desc.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype, DataType::Bytes);
-                assert_eq!(col.name, "bytes".to_string());
+                assert_eq!(col.datatype(), DataType::Bytes);
+                assert_eq!(col.desc.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.unwrap().is_none());
                 i += 1
