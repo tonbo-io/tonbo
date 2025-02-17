@@ -36,7 +36,6 @@
 //! use fusio::path::Path;
 //! use futures_util::stream::StreamExt;
 //! use tokio::fs;
-//! use tokio_util::bytes::Bytes;
 //! use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
 //!
 //! // use macro to define schema of column family just like ORM
