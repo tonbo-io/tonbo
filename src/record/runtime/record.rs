@@ -35,8 +35,8 @@ impl Decode for DynRecord {
         // keep invariant for record: nullable --> Some(v); non-nullable --> v
         for i in 0..len {
             let mut col = Value::decode(reader).await?;
-            if i != primary_index && !col.is_nullable {
-                match col.datatype {
+            if i != primary_index && !col.is_nullable() {
+                match col.datatype() {
                     DataType::UInt8 => {
                         let value = col.value.as_ref().downcast_ref::<Option<u8>>().unwrap();
                         col.value = Arc::new(value.unwrap());
@@ -105,8 +105,8 @@ impl Record for DynRecord {
     fn as_record_ref(&self) -> Self::Ref<'_> {
         let mut columns = vec![];
         for (idx, col) in self.values.iter().enumerate() {
-            let datatype = col.datatype;
-            let is_nullable = col.is_nullable;
+            let datatype = col.datatype();
+            let is_nullable = col.is_nullable();
             let mut value = col.value.clone();
             if idx != self.primary_index && !is_nullable {
                 value = match datatype {
@@ -156,7 +156,7 @@ impl Record for DynRecord {
 
             columns.push(Value::new(
                 datatype,
-                col.name.to_owned(),
+                col.desc.name.to_owned(),
                 value,
                 is_nullable,
             ));

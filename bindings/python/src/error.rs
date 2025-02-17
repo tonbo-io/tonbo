@@ -63,7 +63,7 @@ impl From<CommitError> for PyErr {
             tonbo::transaction::CommitError::Parquet(err) => InnerError::new_err(err.to_string()),
             tonbo::transaction::CommitError::Database(err) => DbError::from(err).into(),
             tonbo::transaction::CommitError::WriteConflict(key) => {
-                WriteConflictError::new_err(key.name)
+                WriteConflictError::new_err(key.name())
             }
             tonbo::transaction::CommitError::SendCompactTaskError(err) => {
                 InnerError::new_err(err.to_string())
