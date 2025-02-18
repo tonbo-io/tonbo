@@ -4,8 +4,7 @@ mod str;
 use std::{hash::Hash, sync::Arc};
 
 use arrow::array::Datum;
-
-use crate::serdes::{Decode, Encode};
+use fusio_log::{Decode, Encode};
 
 pub trait Key:
     'static + Encode + Decode + Ord + Clone + Send + Sync + Hash + std::fmt::Debug

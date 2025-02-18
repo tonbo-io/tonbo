@@ -3,7 +3,7 @@ use std::{mem::transmute, sync::Arc};
 use futures::StreamExt;
 use js_sys::Object;
 use tonbo::{
-    record::{ColumnDesc, DynRecord},
+    record::{DynRecord, ValueDesc},
     transaction, Projection,
 };
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
@@ -16,14 +16,14 @@ use crate::{
 #[wasm_bindgen]
 pub struct Transaction {
     txn: Option<transaction::Transaction<'static, DynRecord>>,
-    desc: Arc<Vec<ColumnDesc>>,
+    desc: Arc<Vec<ValueDesc>>,
     primary_key_index: usize,
 }
 
 impl Transaction {
     pub(crate) fn new<'txn>(
         txn: transaction::Transaction<'txn, DynRecord>,
-        desc: Arc<Vec<ColumnDesc>>,
+        desc: Arc<Vec<ValueDesc>>,
         primary_key_index: usize,
     ) -> Self {
         Transaction {
@@ -124,14 +124,14 @@ impl Transaction {
             .scan((
                 unsafe {
                     transmute::<
-                        std::ops::Bound<&tonbo::record::Column>,
-                        std::ops::Bound<&'static tonbo::record::Column>,
+                        std::ops::Bound<&tonbo::record::Value>,
+                        std::ops::Bound<&'static tonbo::record::Value>,
                     >(lower.as_ref())
                 },
                 unsafe {
                     transmute::<
-                        std::ops::Bound<&tonbo::record::Column>,
-                        std::ops::Bound<&'static tonbo::record::Column>,
+                        std::ops::Bound<&tonbo::record::Value>,
+                        std::ops::Bound<&'static tonbo::record::Value>,
                     >(high.as_ref())
                 },
             ))

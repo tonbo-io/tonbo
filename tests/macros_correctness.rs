@@ -13,20 +13,21 @@ mod tests {
     use std::{io::Cursor, sync::Arc};
 
     use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array, UInt8Array};
+    use fusio_log::{Decode, Encode};
     use parquet::{
-        arrow::{arrow_to_parquet_schema, ProjectionMask},
+        arrow::{ArrowSchemaConverter, ProjectionMask},
         format::SortingColumn,
         schema::types::ColumnPath,
     };
     use tokio::io::AsyncSeekExt;
     use tonbo::{
         inmem::immutable::{ArrowArrays, Builder},
-        record::{Record, RecordRef},
-        serdes::{Decode, Encode},
+        magic,
+        record::{Record, RecordRef, Schema},
         timestamp::timestamped::Timestamped,
     };
 
-    use crate::{User, UserImmutableArrays, UserRef};
+    use crate::{User, UserImmutableArrays, UserRef, UserSchema};
 
     #[tokio::test]
     async fn test_record_info() {
@@ -38,11 +39,11 @@ mod tests {
 
         assert_eq!(user.key(), "cat");
         assert_eq!(user.size(), 20);
-        assert_eq!(User::primary_key_index(), 4);
+        assert_eq!(UserSchema {}.primary_key_index(), 4);
         assert_eq!(
-            User::primary_key_path(),
+            UserSchema {}.primary_key_path(),
             (
-                ColumnPath::new(vec!["_ts".to_string(), "name".to_string()]),
+                ColumnPath::new(vec![magic::TS.to_string(), "name".to_string()]),
                 vec![
                     SortingColumn::new(1, true, true),
                     SortingColumn::new(4, false, true),
@@ -62,7 +63,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![2, 3],
             ));
 
@@ -74,7 +77,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![],
             ));
 
@@ -86,7 +91,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![2],
             ));
 
@@ -98,7 +105,9 @@ mod tests {
             let mut user_ref = user.as_record_ref();
 
             user_ref.projection(&ProjectionMask::roots(
-                &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![3],
             ));
 
@@ -112,7 +121,12 @@ mod tests {
     async fn test_record_from_record_batch() {
         {
             let record_batch = RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&[0, 1, 2, 3, 4]).unwrap()),
+                Arc::new(
+                    UserSchema {}
+                        .arrow_schema()
+                        .project(&[0, 1, 2, 3, 4])
+                        .unwrap(),
+                ),
                 vec![
                     Arc::new(BooleanArray::from(vec![false])),
                     Arc::new(UInt32Array::from(vec![9])),
@@ -124,13 +138,19 @@ mod tests {
             .unwrap();
 
             let project_mask = ProjectionMask::roots(
-                &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![0, 1, 2, 3, 4],
             );
-            let record_ref =
-                UserRef::from_record_batch(&record_batch, 0, &project_mask, User::arrow_schema());
+            let record_ref = UserRef::from_record_batch(
+                &record_batch,
+                0,
+                &project_mask,
+                UserSchema {}.arrow_schema(),
+            );
             assert_eq!(
-                record_ref.value(),
+                record_ref.key(),
                 Timestamped {
                     ts: 9.into(),
                     value: "cat",
@@ -146,7 +166,7 @@ mod tests {
         }
         {
             let record_batch = RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&[0, 1, 3, 4]).unwrap()),
+                Arc::new(UserSchema {}.arrow_schema().project(&[0, 1, 3, 4]).unwrap()),
                 vec![
                     Arc::new(BooleanArray::from(vec![false])),
                     Arc::new(UInt32Array::from(vec![9])),
@@ -157,13 +177,19 @@ mod tests {
             .unwrap();
 
             let project_mask = ProjectionMask::roots(
-                &arrow_to_parquet_schema(User::arrow_schema()).unwrap(),
+                &ArrowSchemaConverter::new()
+                    .convert(UserSchema {}.arrow_schema())
+                    .unwrap(),
                 vec![0, 1, 3, 4],
             );
-            let record_ref =
-                UserRef::from_record_batch(&record_batch, 0, &project_mask, User::arrow_schema());
+            let record_ref = UserRef::from_record_batch(
+                &record_batch,
+                0,
+                &project_mask,
+                UserSchema {}.arrow_schema(),
+            );
             assert_eq!(
-                record_ref.value(),
+                record_ref.key(),
                 Timestamped {
                     ts: 9.into(),
                     value: "cat",
@@ -200,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_arrays() {
-        let mut builder = UserImmutableArrays::builder(User::arrow_schema(), 10);
+        let mut builder = UserImmutableArrays::builder(UserSchema {}.arrow_schema().clone(), 10);
 
         let cat = User {
             email: Some("cat@example.com".to_string()),
@@ -242,7 +268,12 @@ mod tests {
         assert_eq!(
             arrays.as_record_batch(),
             &RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&[0, 1, 2, 3, 4]).unwrap(),),
+                Arc::new(
+                    UserSchema {}
+                        .arrow_schema()
+                        .project(&[0, 1, 2, 3, 4])
+                        .unwrap(),
+                ),
                 vec![
                     Arc::new(BooleanArray::from(vec![false, false, true])),
                     Arc::new(UInt32Array::from(vec![0, 1, 2])),
@@ -261,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_arrays_projection() {
-        let mut builder = UserImmutableArrays::builder(User::arrow_schema(), 10);
+        let mut builder = UserImmutableArrays::builder(UserSchema {}.arrow_schema().clone(), 10);
 
         let cat = User {
             email: Some("cat@example.com".to_string()),
@@ -303,7 +334,7 @@ mod tests {
         assert_eq!(
             arrays.as_record_batch(),
             &RecordBatch::try_new(
-                Arc::new(User::arrow_schema().project(&[0, 1, 3, 4]).unwrap(),),
+                Arc::new(UserSchema {}.arrow_schema().project(&[0, 1, 3, 4]).unwrap(),),
                 vec![
                     Arc::new(BooleanArray::from(vec![false, false, true])),
                     Arc::new(UInt32Array::from(vec![0, 1, 2])),

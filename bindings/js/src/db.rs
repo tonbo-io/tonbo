@@ -4,7 +4,7 @@ use futures::TryStreamExt;
 use js_sys::{Array, Function, JsString, Object, Reflect};
 use tonbo::{
     executor::opfs::OpfsExecutor,
-    record::{ColumnDesc, DynRecord},
+    record::{DynRecord, DynSchema, ValueDesc},
     DB,
 };
 use wasm_bindgen::prelude::*;
@@ -21,13 +21,13 @@ type JsExecutor = OpfsExecutor;
 
 #[wasm_bindgen]
 pub struct TonboDB {
-    desc: Arc<Vec<ColumnDesc>>,
+    desc: Arc<Vec<ValueDesc>>,
     primary_key_index: usize,
     db: Arc<DB<DynRecord, JsExecutor>>,
 }
 
 impl TonboDB {
-    fn parse_schema(schema: Object) -> (Vec<ColumnDesc>, usize) {
+    fn parse_schema(schema: Object) -> (Vec<ValueDesc>, usize) {
         let mut desc = vec![];
         let mut primary_index = None;
 
@@ -61,7 +61,7 @@ impl TonboDB {
                 }
                 primary_index = Some(i);
             }
-            desc.push(ColumnDesc::new(
+            desc.push(ValueDesc::new(
                 name.into(),
                 to_datatype(datatype.as_str()),
                 nullable,
@@ -78,16 +78,11 @@ impl TonboDB {
     #[wasm_bindgen(constructor)]
     pub async fn new(option: DbOption, schema: Object) -> Self {
         let (desc, primary_key_index) = Self::parse_schema(schema);
-        let primary_key_name = desc[primary_key_index].name.clone();
+        let schema = DynSchema::new(desc.clone(), primary_key_index);
 
-        let db = DB::with_schema(
-            option.into_option(primary_key_index, primary_key_name),
-            JsExecutor::new(),
-            desc.clone(),
-            primary_key_index,
-        )
-        .await
-        .unwrap();
+        let db = DB::new(option.into_option(&schema), JsExecutor::new(), schema)
+            .await
+            .unwrap();
 
         Self {
             desc: Arc::new(desc),
@@ -164,14 +159,14 @@ impl TonboDB {
                 (
                     unsafe {
                         transmute::<
-                            std::ops::Bound<&tonbo::record::Column>,
-                            std::ops::Bound<&'static tonbo::record::Column>,
+                            std::ops::Bound<&tonbo::record::Value>,
+                            std::ops::Bound<&'static tonbo::record::Value>,
                         >(lower.as_ref())
                     },
                     unsafe {
                         transmute::<
-                            std::ops::Bound<&tonbo::record::Column>,
-                            std::ops::Bound<&'static tonbo::record::Column>,
+                            std::ops::Bound<&tonbo::record::Value>,
+                            std::ops::Bound<&'static tonbo::record::Value>,
                         >(high.as_ref())
                     },
                 ),

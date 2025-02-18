@@ -5,7 +5,7 @@ use std::{
 };
 
 use pyo3::{pyclass, PyObject, Python, ToPyObject};
-use tonbo::record::Datatype;
+use tonbo::record::DataType as TonboDataType;
 
 #[pyclass]
 #[derive(PartialEq, Clone)]
@@ -75,38 +75,38 @@ impl DataType {
     }
 }
 
-impl From<DataType> for Datatype {
+impl From<DataType> for TonboDataType {
     fn from(datatype: DataType) -> Self {
         match datatype {
-            DataType::UInt8 => Datatype::UInt8,
-            DataType::UInt16 => Datatype::UInt16,
-            DataType::UInt32 => Datatype::UInt32,
-            DataType::UInt64 => Datatype::UInt64,
-            DataType::Int8 => Datatype::Int8,
-            DataType::Int16 => Datatype::Int16,
-            DataType::Int32 => Datatype::Int32,
-            DataType::Int64 => Datatype::Int64,
-            DataType::String => Datatype::String,
-            DataType::Boolean => Datatype::Boolean,
-            DataType::Bytes => Datatype::Bytes,
+            DataType::UInt8 => TonboDataType::UInt8,
+            DataType::UInt16 => TonboDataType::UInt16,
+            DataType::UInt32 => TonboDataType::UInt32,
+            DataType::UInt64 => TonboDataType::UInt64,
+            DataType::Int8 => TonboDataType::Int8,
+            DataType::Int16 => TonboDataType::Int16,
+            DataType::Int32 => TonboDataType::Int32,
+            DataType::Int64 => TonboDataType::Int64,
+            DataType::String => TonboDataType::String,
+            DataType::Boolean => TonboDataType::Boolean,
+            DataType::Bytes => TonboDataType::Bytes,
         }
     }
 }
 
-impl From<&DataType> for Datatype {
+impl From<&DataType> for TonboDataType {
     fn from(datatype: &DataType) -> Self {
         match datatype {
-            DataType::UInt8 => Datatype::UInt8,
-            DataType::UInt16 => Datatype::UInt16,
-            DataType::UInt32 => Datatype::UInt32,
-            DataType::UInt64 => Datatype::UInt64,
-            DataType::Int8 => Datatype::Int8,
-            DataType::Int16 => Datatype::Int16,
-            DataType::Int32 => Datatype::Int32,
-            DataType::Int64 => Datatype::Int64,
-            DataType::String => Datatype::String,
-            DataType::Boolean => Datatype::Boolean,
-            DataType::Bytes => Datatype::Bytes,
+            DataType::UInt8 => TonboDataType::UInt8,
+            DataType::UInt16 => TonboDataType::UInt16,
+            DataType::UInt32 => TonboDataType::UInt32,
+            DataType::UInt64 => TonboDataType::UInt64,
+            DataType::Int8 => TonboDataType::Int8,
+            DataType::Int16 => TonboDataType::Int16,
+            DataType::Int32 => TonboDataType::Int32,
+            DataType::Int64 => TonboDataType::Int64,
+            DataType::String => TonboDataType::String,
+            DataType::Boolean => TonboDataType::Boolean,
+            DataType::Bytes => TonboDataType::Bytes,
         }
     }
 }

@@ -4,9 +4,8 @@ use flume::{Receiver, Sender};
 
 use crate::{
     fs::{manager::StoreManager, FileId},
-    record::Record,
     timestamp::Timestamp,
-    DbError, DbOption,
+    DbOption,
 };
 
 pub enum CleanTag {
@@ -23,22 +22,16 @@ pub enum CleanTag {
     },
 }
 
-pub(crate) struct Cleaner<R>
-where
-    R: Record,
-{
+pub(crate) struct Cleaner {
     tag_recv: Receiver<CleanTag>,
     gens_map: BTreeMap<Timestamp, (Vec<(FileId, usize)>, bool)>,
-    option: Arc<DbOption<R>>,
+    option: Arc<DbOption>,
     manager: Arc<StoreManager>,
 }
 
-impl<R> Cleaner<R>
-where
-    R: Record,
-{
+impl Cleaner {
     pub(crate) fn new(
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         manager: Arc<StoreManager>,
     ) -> (Self, Sender<CleanTag>) {
         let (tag_send, tag_recv) = flume::bounded(option.clean_channel_buffer);
@@ -54,7 +47,7 @@ where
         )
     }
 
-    pub(crate) async fn listen(&mut self) -> Result<(), DbError<R>> {
+    pub(crate) async fn listen(&mut self) -> Result<(), fusio::Error> {
         while let Ok(tag) = self.tag_recv.recv_async().await {
             match tag {
                 CleanTag::Add { ts, gens } => {
@@ -107,7 +100,7 @@ pub(crate) mod tests {
     use crate::{
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager, FileType},
-        tests::Test,
+        inmem::immutable::tests::TestSchema,
         version::cleaner::{CleanTag, Cleaner},
         DbOption,
     };
@@ -116,8 +109,9 @@ pub(crate) mod tests {
     async fn test_cleaner() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
         ));
 
         let gen_0 = generate_file_id();
@@ -155,9 +149,9 @@ pub(crate) mod tests {
             .unwrap();
         }
 
-        let (mut cleaner, tx) = Cleaner::<Test>::new(option.clone(), manager.clone());
+        let (mut cleaner, tx) = Cleaner::new(option.clone(), manager.clone());
 
-        let executor = TokioExecutor::new();
+        let executor = TokioExecutor::current();
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {

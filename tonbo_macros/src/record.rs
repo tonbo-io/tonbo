@@ -107,15 +107,15 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
     let builder_append_primary_key = &primary_key_definitions.builder_append_value;
 
-    let record_codegen = trait_record_codegen(
-        &data_struct.fields,
-        struct_name,
-        primary_key_definitions.clone(),
-    );
+    let record_codegen =
+        trait_record_codegen(&data_struct.fields, struct_name, &primary_key_definitions);
 
     let decode_codegen = trait_decode_codegen(struct_name, &data_struct.fields);
 
     let struct_ref_codegen = struct_ref_codegen(struct_name, &data_struct.fields);
+
+    let struct_schema_codegen =
+        struct_schema_codegen(struct_name, &data_struct.fields, &primary_key_definitions);
 
     let decode_ref_codegen =
         trait_decode_ref_codegen(&struct_name, primary_key_ident, &data_struct.fields);
@@ -138,6 +138,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
         #struct_ref_codegen
 
+        #struct_schema_codegen
+
         #decode_ref_codegen
 
         #encode_codegen
@@ -156,12 +158,11 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 fn trait_record_codegen(
     fields: &[RecordStructFieldOpt],
     struct_name: &Ident,
-    primary_key: PrimaryKey,
+    primary_key: &PrimaryKey,
 ) -> TokenStream {
     let mut size_fields: Vec<TokenStream> = Vec::new();
 
     let mut to_ref_init_fields: Vec<TokenStream> = Vec::new();
-    let mut schema_fields: Vec<TokenStream> = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -170,12 +171,7 @@ fn trait_record_codegen(
 
         let is_string = matches!(data_type, DataType::String);
         let is_bytes = matches!(data_type, DataType::Bytes);
-        let mapped_type = data_type.to_mapped_type();
         let size_field = data_type.to_size_field(field_name, is_nullable);
-
-        schema_fields.push(quote! {
-                    ::tonbo::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
-                });
 
         size_fields.push(quote! {
             + #size_field
@@ -205,58 +201,30 @@ fn trait_record_codegen(
         }
     }
 
-    let struct_arrays_name = struct_name.to_immutable_array_ident();
     let struct_ref_name = struct_name.to_ref_ident();
+    let struct_schema_name = struct_name.to_schema_ident();
 
     let PrimaryKey {
-        name: primary_key_name,
-        base_ty: primary_key_ty,
         fn_key: fn_primary_key,
-        builder_append_value: _builder_append_primary_key,
-        index: primary_key_index,
+        ..
     } = primary_key;
 
     quote! {
         impl ::tonbo::record::Record for #struct_name {
-            type Columns = #struct_arrays_name;
-
-            type Key = #primary_key_ty;
+            type Schema = #struct_schema_name;
 
             type Ref<'r> = #struct_ref_name<'r>
             where
                 Self: 'r;
 
-            fn key(&self) -> <<Self as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'_> {
+            fn key(&self) -> <<Self::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_> {
                 #fn_primary_key
-            }
-
-            fn primary_key_index() -> usize {
-                #primary_key_index
-            }
-
-            fn primary_key_path() -> (::tonbo::parquet::schema::types::ColumnPath, Vec<::tonbo::parquet::format::SortingColumn>) {
-                (
-                    ::tonbo::parquet::schema::types::ColumnPath::new(vec!["_ts".to_string(), stringify!(#primary_key_name).to_string()]),
-                    vec![::tonbo::parquet::format::SortingColumn::new(1_i32, true, true), ::tonbo::parquet::format::SortingColumn::new(#primary_key_index as i32, false, true)]
-                )
             }
 
             fn as_record_ref(&self) -> Self::Ref<'_> {
                 #struct_ref_name {
                     #(#to_ref_init_fields)*
                 }
-            }
-
-            fn arrow_schema() -> &'static ::std::sync::Arc<::tonbo::arrow::datatypes::Schema> {
-                static SCHEMA: ::tonbo::once_cell::sync::Lazy<::std::sync::Arc<::tonbo::arrow::datatypes::Schema>> = ::tonbo::once_cell::sync::Lazy::new(|| {
-                    ::std::sync::Arc::new(::tonbo::arrow::datatypes::Schema::new(vec![
-                        ::tonbo::arrow::datatypes::Field::new("_null", ::tonbo::arrow::datatypes::DataType::Boolean, false),
-                        ::tonbo::arrow::datatypes::Field::new("_ts", ::tonbo::arrow::datatypes::DataType::UInt32, false),
-                        #(#schema_fields)*
-                    ]))
-                });
-
-                &SCHEMA
             }
 
             fn size(&self) -> usize {
@@ -305,7 +273,7 @@ fn trait_decode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
     }
     quote! {
 
-        impl ::tonbo::serdes::Decode for #struct_name {
+        impl ::fusio_log::Decode for #struct_name {
             type Error = ::tonbo::record::RecordDecodeError;
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
@@ -357,6 +325,71 @@ fn struct_ref_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> T
         #[derive(Debug, PartialEq, Eq, Clone, Copy)]
         pub struct #struct_ref_name<'r> {
             #(#ref_fields)*
+        }
+    }
+}
+
+fn struct_schema_codegen(
+    struct_name: &Ident,
+    fields: &[RecordStructFieldOpt],
+    primary_key: &PrimaryKey,
+) -> TokenStream {
+    let struct_schema_name = struct_name.to_schema_ident();
+    let struct_arrays_name = struct_name.to_immutable_array_ident();
+    let mut schema_fields: Vec<TokenStream> = Vec::new();
+
+    let PrimaryKey {
+        name: primary_key_name,
+        base_ty: primary_key_ty,
+        builder_append_value: _builder_append_primary_key,
+        index: primary_key_index,
+        ..
+    } = primary_key;
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+        let mapped_type = data_type.to_mapped_type();
+
+        schema_fields.push(quote! {
+                    ::tonbo::arrow::datatypes::Field::new(stringify!(#field_name), #mapped_type, #is_nullable),
+                });
+    }
+
+    quote! {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+        pub struct #struct_schema_name;
+
+        impl ::tonbo::record::Schema for #struct_schema_name {
+            type Record = #struct_name;
+
+            type Columns = #struct_arrays_name;
+
+            type Key = #primary_key_ty;
+
+            fn primary_key_index(&self) -> usize {
+                #primary_key_index
+            }
+
+            fn primary_key_path(&self) -> (::tonbo::parquet::schema::types::ColumnPath, Vec<::tonbo::parquet::format::SortingColumn>) {
+                (
+                    ::tonbo::parquet::schema::types::ColumnPath::new(vec![::tonbo::magic::TS.to_string(), stringify!(#primary_key_name).to_string()]),
+                    vec![::tonbo::parquet::format::SortingColumn::new(1_i32, true, true), ::tonbo::parquet::format::SortingColumn::new(#primary_key_index as i32, false, true)]
+                )
+            }
+
+            fn arrow_schema(&self) -> &'static ::std::sync::Arc<::tonbo::arrow::datatypes::Schema> {
+                static SCHEMA: ::tonbo::once_cell::sync::Lazy<::std::sync::Arc<::tonbo::arrow::datatypes::Schema>> = ::tonbo::once_cell::sync::Lazy::new(|| {
+                    ::std::sync::Arc::new(::tonbo::arrow::datatypes::Schema::new(vec![
+                        ::tonbo::arrow::datatypes::Field::new("_null", ::tonbo::arrow::datatypes::DataType::Boolean, false),
+                        ::tonbo::arrow::datatypes::Field::new(::tonbo::magic::TS, ::tonbo::arrow::datatypes::DataType::UInt32, false),
+                        #(#schema_fields)*
+                    ]))
+                });
+
+                &SCHEMA
+            }
         }
     }
 }
@@ -437,7 +470,7 @@ fn trait_decode_ref_codegen(
         impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_name<'r> {
             type Record = #struct_name;
 
-            fn key(self) -> <<Self::Record as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'r> {
+            fn key(self) -> <<<<#struct_ref_name<'r> as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'r> {
                 self.#primary_key_name
             }
 
@@ -450,7 +483,7 @@ fn trait_decode_ref_codegen(
                 offset: usize,
                 projection_mask: &'r ::tonbo::parquet::arrow::ProjectionMask,
                 _: &::std::sync::Arc<::tonbo::arrow::datatypes::Schema>,
-            ) -> ::tonbo::record::internal::InternalRecordRef<'r, Self> {
+            ) -> ::tonbo::record::option::OptionRecordRef<'r, Self> {
                 use ::tonbo::arrow::array::AsArray;
 
                 let mut column_i = 2;
@@ -467,7 +500,7 @@ fn trait_decode_ref_codegen(
                 let record = #struct_ref_name {
                     #(#field_names)*
                 };
-                ::tonbo::record::internal::InternalRecordRef::new(ts, record, null)
+                ::tonbo::record::option::OptionRecordRef::new(ts, record, null)
             }
         }
     }
@@ -481,7 +514,7 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
         let field_name = field.ident.as_ref().unwrap();
 
         encode_method_fields.push(quote! {
-                    ::tonbo::serdes::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
+                    ::fusio_log::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
                         field_name: stringify!(#field_name).to_string(),
                         error: Box::new(err),
                     })?;
@@ -494,7 +527,7 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
     let struct_ref_name = struct_name.to_ref_ident();
 
     quote! {
-        impl<'r> ::tonbo::serdes::Encode for #struct_ref_name<'r> {
+        impl<'r> ::fusio_log::Encode for #struct_ref_name<'r> {
             type Error = ::tonbo::record::RecordEncodeError;
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
@@ -599,7 +632,7 @@ fn trait_arrow_array_codegen(
 
             type Builder = #struct_builder_name;
 
-            fn builder(schema: &::std::sync::Arc<::tonbo::arrow::datatypes::Schema>, capacity: usize) -> Self::Builder {
+            fn builder(schema: ::std::sync::Arc<::tonbo::arrow::datatypes::Schema>, capacity: usize) -> Self::Builder {
                 #struct_builder_name {
                     #(#builder_init_fields)*
 
@@ -642,6 +675,7 @@ fn struct_builder_codegen(
 
     fields: &[RecordStructFieldOpt],
 ) -> TokenStream {
+    let struct_schema_name = struct_name.to_schema_ident();
     let struct_builder_name = struct_name.to_builder_ident();
     let mut field_names: Vec<TokenStream> = Vec::new();
 
@@ -723,7 +757,7 @@ fn struct_builder_codegen(
         }
 
         impl ::tonbo::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
-            fn push(&mut self, key: ::tonbo::timestamp::timestamped::Timestamped<<<#struct_name as ::tonbo::record::Record>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
+            fn push(&mut self, key: ::tonbo::timestamp::timestamped::Timestamped<<<<#struct_name as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {
                     Some(row) => {
@@ -750,10 +784,10 @@ fn struct_builder_codegen(
 
                 let _null = ::std::sync::Arc::new(::tonbo::arrow::array::BooleanArray::new(self._null.finish(), None));
                 let _ts = ::std::sync::Arc::new(self._ts.finish());
+                let schema = #struct_schema_name {};
+
                 let mut record_batch = ::tonbo::arrow::record_batch::RecordBatch::try_new(
-                    ::std::sync::Arc::clone(
-                        <<#struct_arrays_name as ::tonbo::inmem::immutable::ArrowArrays>::Record as ::tonbo::record::Record>::arrow_schema(),
-                    ),
+                    ::std::sync::Arc::clone(::tonbo::record::Schema::arrow_schema(&schema)),
                     vec![
                         ::std::sync::Arc::clone(&_null) as ::std::sync::Arc<dyn ::tonbo::arrow::array::Array>,
                         ::std::sync::Arc::clone(&_ts) as ::std::sync::Arc<dyn ::tonbo::arrow::array::Array>,

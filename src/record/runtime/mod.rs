@@ -1,15 +1,18 @@
-mod array;
-mod column;
+pub(crate) mod array;
 mod record;
 mod record_ref;
+mod schema;
+mod value;
 
-use arrow::datatypes::DataType;
-pub use column::*;
+pub use array::*;
+use arrow::datatypes::DataType as ArrowDataType;
 pub use record::*;
 pub use record_ref::*;
+pub use schema::*;
+pub use value::*;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Datatype {
+pub enum DataType {
     UInt8,
     UInt16,
     UInt32,
@@ -23,20 +26,20 @@ pub enum Datatype {
     Bytes,
 }
 
-impl From<&DataType> for Datatype {
-    fn from(datatype: &DataType) -> Self {
+impl From<&ArrowDataType> for DataType {
+    fn from(datatype: &ArrowDataType) -> Self {
         match datatype {
-            DataType::UInt8 => Datatype::UInt8,
-            DataType::UInt16 => Datatype::UInt16,
-            DataType::UInt32 => Datatype::UInt32,
-            DataType::UInt64 => Datatype::UInt64,
-            DataType::Int8 => Datatype::Int8,
-            DataType::Int16 => Datatype::Int16,
-            DataType::Int32 => Datatype::Int32,
-            DataType::Int64 => Datatype::Int64,
-            DataType::Utf8 => Datatype::String,
-            DataType::Boolean => Datatype::Boolean,
-            DataType::Binary => Datatype::Bytes,
+            ArrowDataType::UInt8 => DataType::UInt8,
+            ArrowDataType::UInt16 => DataType::UInt16,
+            ArrowDataType::UInt32 => DataType::UInt32,
+            ArrowDataType::UInt64 => DataType::UInt64,
+            ArrowDataType::Int8 => DataType::Int8,
+            ArrowDataType::Int16 => DataType::Int16,
+            ArrowDataType::Int32 => DataType::Int32,
+            ArrowDataType::Int64 => DataType::Int64,
+            ArrowDataType::Utf8 => DataType::String,
+            ArrowDataType::Boolean => DataType::Boolean,
+            ArrowDataType::Binary => DataType::Bytes,
             _ => todo!(),
         }
     }

@@ -7,55 +7,54 @@ mod tests {
     use futures::StreamExt;
     use tonbo::{
         executor::opfs::OpfsExecutor,
-        record::{Column, ColumnDesc, Datatype, DynRecord, Record},
+        record::{DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
         DbOption, Projection, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    fn test_dyn_item_schema() -> (Vec<ColumnDesc>, usize) {
+    fn test_dyn_item_schema() -> DynSchema {
         let descs = vec![
-            ColumnDesc::new("id".to_string(), Datatype::Int64, false),
-            ColumnDesc::new("age".to_string(), Datatype::Int8, true),
-            ColumnDesc::new("name".to_string(), Datatype::String, false),
-            ColumnDesc::new("email".to_string(), Datatype::String, true),
-            ColumnDesc::new("bytes".to_string(), Datatype::Bytes, true),
+            ValueDesc::new("id".to_string(), DataType::Int64, false),
+            ValueDesc::new("age".to_string(), DataType::Int8, true),
+            ValueDesc::new("name".to_string(), DataType::String, false),
+            ValueDesc::new("email".to_string(), DataType::String, true),
+            ValueDesc::new("bytes".to_string(), DataType::Bytes, true),
         ];
-        (descs, 0)
+        DynSchema::new(descs, 0)
     }
 
     fn test_dyn_items() -> Vec<DynRecord> {
         let mut items = vec![];
         for i in 0..50 {
             let columns = vec![
-                Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false),
-                Column::new(
-                    Datatype::Int8,
+                Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false),
+                Value::new(
+                    DataType::Int8,
                     "age".to_string(),
                     Arc::new(Some(i as i8)),
                     true,
                 ),
-                Column::new(
-                    Datatype::String,
+                Value::new(
+                    DataType::String,
                     "name".to_string(),
                     Arc::new(i.to_string()),
                     false,
                 ),
-                Column::new(
-                    Datatype::String,
+                Value::new(
+                    DataType::String,
                     "email".to_string(),
                     Arc::new(Some(format!("{}@tonbo.io", i))),
                     true,
                 ),
-                Column::new(
-                    Datatype::Bytes,
+                Value::new(
+                    DataType::Bytes,
                     "bytes".to_string(),
                     Arc::new(Some((i as i32).to_le_bytes().to_vec())),
                     true,
                 ),
             ];
 
-            let record = DynRecord::new(columns, 0);
-            items.push(record);
+            items.push(DynRecord::new(columns, 0));
         }
         items
     }
@@ -69,21 +68,15 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_wasm_read_write() {
-        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+        let schema = test_dyn_item_schema();
         let path = Path::from_opfs_path("opfs_dir_rw").unwrap();
         let fs = fusio::disk::LocalFs {};
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir_rw").unwrap(),
-            "id".to_string(),
-            primary_key_index,
-        );
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir_rw").unwrap(), &schema);
 
         let db: DB<DynRecord, OpfsExecutor> =
-            DB::with_schema(option, OpfsExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         for item in test_dyn_items().into_iter() {
             db.insert(item).await.unwrap();
@@ -94,7 +87,7 @@ mod tests {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Column::new(Datatype::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false);
                 let option1 = tx.get(&key, Projection::All).await.unwrap();
                 let entry = option1.unwrap();
                 let record_ref = entry.get();
@@ -154,22 +147,16 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_wasm_transaction() {
-        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+        let schema = test_dyn_item_schema();
 
         let fs = fusio::disk::LocalFs {};
         let path = Path::from_opfs_path("opfs_dir_txn").unwrap();
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir_txn").unwrap(),
-            "id".to_string(),
-            primary_key_index,
-        );
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir_txn").unwrap(), &schema);
 
         let db: DB<DynRecord, OpfsExecutor> =
-            DB::with_schema(option, OpfsExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         {
             let mut txn = db.transaction().await;
@@ -182,8 +169,8 @@ mod tests {
         // test scan
         {
             let txn = db.transaction().await;
-            let lower = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(5_i64), false);
-            let upper = Column::new(Datatype::Int64, "id".to_owned(), Arc::new(47_i64), false);
+            let lower = Value::new(DataType::Int64, "id".to_owned(), Arc::new(5_i64), false);
+            let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(47_i64), false);
             let mut scan = txn
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(vec![0, 2, 4])
@@ -196,8 +183,8 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
-                assert_eq!(primary_key_col.name, "id".to_string());
+                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
                         .value
@@ -208,22 +195,22 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, Datatype::Int8);
-                assert_eq!(col.name, "age".to_string());
+                assert_eq!(col.datatype(), DataType::Int8);
+                assert_eq!(col.desc.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &None);
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::String);
-                assert_eq!(col.name, "name".to_string());
+                assert_eq!(col.datatype(), DataType::String);
+                assert_eq!(col.desc.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype, Datatype::Bytes);
-                assert_eq!(col.name, "bytes".to_string());
+                assert_eq!(col.datatype(), DataType::Bytes);
+                assert_eq!(col.desc.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
                 assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
@@ -239,22 +226,16 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn test_wasm_schema_recover() {
-        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+        let schema = test_dyn_item_schema();
         let path = Path::from_opfs_path("opfs_dir").unwrap();
         let fs = fusio::disk::LocalFs {};
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir").unwrap(),
-            "id".to_string(),
-            primary_key_index,
-        );
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap(), &schema);
 
         {
             let db: DB<DynRecord, OpfsExecutor> =
-                DB::with_schema(option, OpfsExecutor::new(), cols_desc, primary_key_index)
-                    .await
-                    .unwrap();
+                DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
             for item in test_dyn_items().into_iter() {
                 db.insert(item).await.unwrap();
@@ -263,16 +244,10 @@ mod tests {
             db.flush_wal().await.unwrap();
         }
 
-        let (cols_desc, primary_key_index) = test_dyn_item_schema();
-        let option = DbOption::with_path(
-            Path::from_opfs_path("opfs_dir").unwrap(),
-            "id".to_string(),
-            primary_key_index,
-        );
+        let schema = test_dyn_item_schema();
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap(), &schema);
         let db: DB<DynRecord, OpfsExecutor> =
-            DB::with_schema(option, OpfsExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         let mut sort_items = BTreeMap::new();
         for item in test_dyn_items() {
@@ -299,6 +274,7 @@ mod tests {
                 }
             }
         }
+        db.flush_wal().await.unwrap();
         drop(db);
         remove("opfs_dir").await;
     }
@@ -315,7 +291,7 @@ mod tests {
         let key_id = option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
         let secret_key = option_env!("AWS_SECRET_ACCESS_KEY").unwrap().to_string();
 
-        let (cols_desc, primary_key_index) = test_dyn_item_schema();
+        let schema = test_dyn_item_schema();
 
         let fs_option = FsOptions::S3 {
             bucket: "wasm-data".to_string(),
@@ -330,33 +306,27 @@ mod tests {
             region: Some("ap-southeast-2".to_string()),
         };
 
-        let option = DbOption::with_path(
-            Path::from_opfs_path("s3_rw").unwrap(),
-            "id".to_string(),
-            primary_key_index,
-        )
-        .level_path(
-            0,
-            Path::from_url_path("tonbo/l0").unwrap(),
-            fs_option.clone(),
-        )
-        .unwrap()
-        .level_path(
-            1,
-            Path::from_url_path("tonbo/l1").unwrap(),
-            fs_option.clone(),
-        )
-        .unwrap()
-        .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
-        .unwrap()
-        .major_threshold_with_sst_size(3)
-        .level_sst_magnification(1)
-        .max_sst_file_size(1 * 1024);
+        let option = DbOption::new(Path::from_opfs_path("s3_rw").unwrap(), &schema)
+            .level_path(
+                0,
+                Path::from_url_path("tonbo/l0").unwrap(),
+                fs_option.clone(),
+            )
+            .unwrap()
+            .level_path(
+                1,
+                Path::from_url_path("tonbo/l1").unwrap(),
+                fs_option.clone(),
+            )
+            .unwrap()
+            .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
+            .unwrap()
+            .major_threshold_with_sst_size(3)
+            .level_sst_magnification(1)
+            .max_sst_file_size(1 * 1024);
 
         let db: DB<DynRecord, OpfsExecutor> =
-            DB::with_schema(option, OpfsExecutor::new(), cols_desc, primary_key_index)
-                .await
-                .unwrap();
+            DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             db.insert(item).await.unwrap();
@@ -380,8 +350,8 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype, Datatype::Int64);
-                assert_eq!(primary_key_col.name, "id".to_string());
+                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
                         .value
@@ -392,22 +362,22 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype, Datatype::Int8);
-                assert_eq!(col.name, "age".to_string());
+                assert_eq!(col.datatype(), DataType::Int8);
+                assert_eq!(col.desc.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &Some(i as i8));
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype, Datatype::String);
-                assert_eq!(col.name, "name".to_string());
+                assert_eq!(col.datatype(), DataType::String);
+                assert_eq!(col.desc.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype, Datatype::Bytes);
-                assert_eq!(col.name, "bytes".to_string());
+                assert_eq!(col.datatype(), DataType::Bytes);
+                assert_eq!(col.desc.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.unwrap().is_none());
                 i += 1
