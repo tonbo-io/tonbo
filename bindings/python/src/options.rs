@@ -1,6 +1,6 @@
 use fusio::path::Path;
 use pyo3::{pyclass, pymethods, PyResult};
-use tonbo::record::DynRecord;
+use tonbo::record::Schema;
 
 use crate::{ExceedsMaxLevelError, FsOptions};
 
@@ -72,21 +72,16 @@ impl DbOption {
 }
 
 impl DbOption {
-    pub(crate) fn into_option(
-        self,
-        primary_key_index: usize,
-        primary_key_name: String,
-    ) -> tonbo::DbOption<DynRecord> {
-        let mut opt =
-            tonbo::DbOption::with_path(Path::from(self.path), primary_key_name, primary_key_index)
-                .clean_channel_buffer(self.clean_channel_buffer)
-                .immutable_chunk_num(self.immutable_chunk_num)
-                .level_sst_magnification(self.level_sst_magnification)
-                .major_default_oldest_table_num(self.major_default_oldest_table_num)
-                .major_threshold_with_sst_size(self.major_threshold_with_sst_size)
-                .max_sst_file_size(self.max_sst_file_size)
-                .version_log_snapshot_threshold(self.version_log_snapshot_threshold)
-                .base_fs(fusio_dispatch::FsOptions::from(self.base_fs));
+    pub(crate) fn into_option<S: Schema>(self, schema: &S) -> tonbo::DbOption {
+        let mut opt = tonbo::DbOption::new(Path::from(self.path), schema)
+            .clean_channel_buffer(self.clean_channel_buffer)
+            .immutable_chunk_num(self.immutable_chunk_num)
+            .level_sst_magnification(self.level_sst_magnification)
+            .major_default_oldest_table_num(self.major_default_oldest_table_num)
+            .major_threshold_with_sst_size(self.major_threshold_with_sst_size)
+            .max_sst_file_size(self.max_sst_file_size)
+            .version_log_snapshot_threshold(self.version_log_snapshot_threshold)
+            .base_fs(fusio_dispatch::FsOptions::from(self.base_fs));
         for (level, path) in self.level_paths.into_iter().enumerate() {
             if let Some((path, fs_options)) = path {
                 opt = opt

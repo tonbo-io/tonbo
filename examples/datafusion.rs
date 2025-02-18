@@ -18,7 +18,8 @@ use datafusion::{
     execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext},
     physical_expr::EquivalenceProperties,
     physical_plan::{
-        execute_stream, DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
+        execute_stream, execution_plan::Boundedness, DisplayAs, DisplayFormatType, ExecutionPlan,
+        PlanProperties,
     },
     prelude::*,
     sql::parser::DFParser,
@@ -28,7 +29,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
 use tonbo::{
-    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DbOption, DB,
+    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Schema, DbOption, DB,
 };
 use tonbo_macros::Record;
 
@@ -49,11 +50,22 @@ struct MusicExec {
     db: Arc<DB<Music, TokioExecutor>>,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
-    range: (Bound<<Music as Record>::Key>, Bound<<Music as Record>::Key>),
+    range: (
+        Bound<<MusicSchema as Schema>::Key>,
+        Bound<<MusicSchema as Schema>::Key>,
+    ),
 }
 
 struct MusicStream {
     stream: Pin<Box<dyn Stream<Item = Result<RecordBatch, DataFusionError>> + Send>>,
+}
+
+impl Debug for MusicProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MusicProvider")
+            .field("db", &"Music")
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -63,7 +75,7 @@ impl TableProvider for MusicProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        Music::arrow_schema().clone()
+        MusicSchema {}.arrow_schema().clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -96,7 +108,7 @@ impl TableProvider for MusicProvider {
 
 impl MusicExec {
     fn new(db: Arc<DB<Music, TokioExecutor>>, projection: Option<&Vec<usize>>) -> Self {
-        let schema = Music::arrow_schema();
+        let schema = MusicSchema {}.arrow_schema();
         let schema = if let Some(projection) = &projection {
             Arc::new(schema.project(projection).unwrap())
         } else {
@@ -107,7 +119,8 @@ impl MusicExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new_with_orderings(schema, &[]),
                 datafusion::physical_expr::Partitioning::UnknownPartitioning(1),
-                ExecutionMode::Unbounded,
+                datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+                Boundedness::Bounded,
             ),
             db,
             projection: None,
@@ -127,7 +140,7 @@ impl Stream for MusicStream {
 
 impl RecordBatchStream for MusicStream {
     fn schema(&self) -> SchemaRef {
-        Music::arrow_schema().clone()
+        MusicSchema {}.arrow_schema().clone()
     }
 }
 
@@ -215,9 +228,14 @@ async fn main() -> Result<()> {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/music").await;
 
-    let options = DbOption::from(Path::from_filesystem_path("./db_path/music").unwrap());
+    let options = DbOption::new(
+        Path::from_filesystem_path("./db_path/music").unwrap(),
+        &MusicSchema,
+    );
 
-    let db = DB::new(options, TokioExecutor::default()).await.unwrap();
+    let db = DB::new(options, TokioExecutor::current(), MusicSchema)
+        .await
+        .unwrap();
     for (id, name, like) in [
         (0, "welcome".to_string(), 0),
         (1, "tonbo".to_string(), 999),

@@ -5,9 +5,9 @@ use arrow::{
     datatypes::UInt32Type,
 };
 use fusio::{SeqRead, Write};
+use fusio_log::{Decode, Encode};
 
 pub(crate) use self::timestamped::*;
-use crate::serdes::{Decode, Encode};
 
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]

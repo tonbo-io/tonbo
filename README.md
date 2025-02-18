@@ -54,7 +54,7 @@ pub struct User {
 #[tokio::main]
 async fn main() {
     // pluggable async runtime and I/O
-    let db = DB::new("./db_path/users".into(), TokioExecutor::default())
+    let db = DB::new("./db_path/users".into(), TokioExecutor::current())
         .await
         .unwrap();
 

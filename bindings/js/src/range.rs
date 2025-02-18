@@ -1,4 +1,4 @@
-use tonbo::record::{Column, ColumnDesc};
+use tonbo::record::{Value, ValueDesc};
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 
 use crate::utils::parse_key;
@@ -48,7 +48,7 @@ impl Bound {
 }
 
 impl Bound {
-    pub(crate) fn into_bound(self, desc: &ColumnDesc) -> Result<std::ops::Bound<Column>, JsValue> {
+    pub(crate) fn into_bound(self, desc: &ValueDesc) -> Result<std::ops::Bound<Value>, JsValue> {
         Ok(match self.inner {
             BoundInner::Included(key) => std::ops::Bound::Included(parse_key(desc, key, true)?),
             BoundInner::Exculuded(key) => std::ops::Bound::Excluded(parse_key(desc, key, true)?),

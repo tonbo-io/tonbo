@@ -16,7 +16,7 @@ use ulid::Ulid;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    record::Record,
+    record::{Record, Schema},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TimestampedRef},
 };
@@ -70,7 +70,7 @@ where
 
     pub(crate) async fn get(
         self,
-        key: &TimestampedRef<R::Key>,
+        key: &TimestampedRef<<R::Schema as Schema>::Key>,
         projection_mask: ProjectionMask,
     ) -> ParquetResult<Option<RecordBatchEntry<R>>> {
         self.scan(
@@ -87,11 +87,14 @@ where
 
     pub(crate) async fn scan<'scan>(
         self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        range: (
+            Bound<&'scan <R::Schema as Schema>::Key>,
+            Bound<&'scan <R::Schema as Schema>::Key>,
+        ),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> Result<SsTableScan<R>, parquet::errors::ParquetError> {
+    ) -> Result<SsTableScan<'scan, R>, parquet::errors::ParquetError> {
         let builder = self
             .into_parquet_builder(limit, projection_mask.clone())
             .await?;
@@ -122,7 +125,7 @@ pub(crate) mod tests {
     use futures_util::StreamExt;
     use parquet::{
         arrow::{
-            arrow_to_parquet_schema, arrow_writer::ArrowWriterOptions, AsyncArrowWriter,
+            arrow_writer::ArrowWriterOptions, ArrowSchemaConverter, AsyncArrowWriter,
             ProjectionMask,
         },
         basic::{Compression, ZstdLevel},
@@ -134,7 +137,8 @@ pub(crate) mod tests {
     use crate::{
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileType},
-        record::Record,
+        inmem::immutable::tests::TestSchema,
+        record::{Record, Schema},
         tests::{get_test_record_batch, Test},
         timestamp::Timestamped,
         DbOption,
@@ -153,7 +157,7 @@ pub(crate) mod tests {
         );
         let mut writer = AsyncArrowWriter::try_new_with_options(
             AsyncWriter::new(file),
-            Test::arrow_schema().clone(),
+            TestSchema {}.arrow_schema().clone(),
             options,
         )
         .expect("Failed to create writer");
@@ -189,8 +193,11 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-            TokioExecutor::new(),
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            ),
+            TokioExecutor::current(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_query_test.parquet");
@@ -211,7 +218,9 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 3],
                     ),
                 )
@@ -228,7 +237,9 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 4],
                     ),
                 )
@@ -245,7 +256,9 @@ pub(crate) mod tests {
                 .get(
                     key.borrow(),
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2],
                     ),
                 )
@@ -264,8 +277,11 @@ pub(crate) mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-            TokioExecutor::new(),
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            ),
+            TokioExecutor::current(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_scan_test.parquet");
@@ -286,7 +302,9 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 3],
                     ),
                 )
@@ -311,7 +329,9 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2, 4],
                     ),
                 )
@@ -336,7 +356,9 @@ pub(crate) mod tests {
                     1_u32.into(),
                     None,
                     ProjectionMask::roots(
-                        &arrow_to_parquet_schema(Test::arrow_schema()).unwrap(),
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
                         [0, 1, 2],
                     ),
                 )

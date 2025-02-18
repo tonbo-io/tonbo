@@ -5,88 +5,99 @@ use arrow::{
         BooleanArray, GenericBinaryArray, Int16Array, Int32Array, Int64Array, Int8Array,
         StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     },
-    datatypes::{DataType, Field},
+    datatypes::{DataType as ArrowDataType, Field},
 };
 use fusio::{SeqRead, Write};
+use fusio_log::{Decode, DecodeError, Encode};
 
-use super::Datatype;
-use crate::{
-    record::{Key, KeyRef},
-    serdes::{option::DecodeError, Decode, Encode},
-};
+use super::DataType;
+use crate::record::{Key, KeyRef};
 
 #[derive(Debug, Clone)]
-pub struct ColumnDesc {
-    pub datatype: Datatype,
+pub struct ValueDesc {
+    pub datatype: DataType,
     pub is_nullable: bool,
     pub name: String,
 }
 
-impl ColumnDesc {
-    pub fn new(name: String, datatype: Datatype, is_nullable: bool) -> Self {
+impl ValueDesc {
+    pub fn new(name: String, datatype: DataType, is_nullable: bool) -> Self {
         Self {
             name,
             datatype,
             is_nullable,
         }
     }
+
+    pub(crate) fn arrow_field(&self) -> Field {
+        let arrow_type = match self.datatype {
+            DataType::UInt8 => ArrowDataType::UInt8,
+            DataType::UInt16 => ArrowDataType::UInt16,
+            DataType::UInt32 => ArrowDataType::UInt32,
+            DataType::UInt64 => ArrowDataType::UInt64,
+            DataType::Int8 => ArrowDataType::Int8,
+            DataType::Int16 => ArrowDataType::Int16,
+            DataType::Int32 => ArrowDataType::Int32,
+            DataType::Int64 => ArrowDataType::Int64,
+            DataType::String => ArrowDataType::Utf8,
+            DataType::Boolean => ArrowDataType::Boolean,
+            DataType::Bytes => ArrowDataType::Binary,
+        };
+        Field::new(&self.name, arrow_type, self.is_nullable)
+    }
 }
 
 #[derive(Clone)]
-pub struct Column {
-    pub datatype: Datatype,
+pub struct Value {
+    pub desc: ValueDesc,
     pub value: Arc<dyn Any + Send + Sync>,
-    pub is_nullable: bool,
-    pub name: String,
 }
 
-impl Column {
+impl Value {
     pub fn new(
-        datatype: Datatype,
+        datatype: DataType,
         name: String,
         value: Arc<dyn Any + Send + Sync>,
         is_nullable: bool,
     ) -> Self {
         Self {
-            datatype,
-            name,
+            desc: ValueDesc::new(name, datatype, is_nullable),
             value,
-            is_nullable,
         }
     }
 
-    pub(crate) fn with_none_value(datatype: Datatype, name: String, is_nullable: bool) -> Self {
+    pub(crate) fn with_none_value(datatype: DataType, name: String, is_nullable: bool) -> Self {
         match datatype {
-            Datatype::UInt8 => Self::new(datatype, name, Arc::<Option<u8>>::new(None), is_nullable),
-            Datatype::UInt16 => {
+            DataType::UInt8 => Self::new(datatype, name, Arc::<Option<u8>>::new(None), is_nullable),
+            DataType::UInt16 => {
                 Self::new(datatype, name, Arc::<Option<u16>>::new(None), is_nullable)
             }
-            Datatype::UInt32 => {
+            DataType::UInt32 => {
                 Self::new(datatype, name, Arc::<Option<u32>>::new(None), is_nullable)
             }
-            Datatype::UInt64 => {
+            DataType::UInt64 => {
                 Self::new(datatype, name, Arc::<Option<u64>>::new(None), is_nullable)
             }
-            Datatype::Int8 => Self::new(datatype, name, Arc::<Option<i8>>::new(None), is_nullable),
-            Datatype::Int16 => {
+            DataType::Int8 => Self::new(datatype, name, Arc::<Option<i8>>::new(None), is_nullable),
+            DataType::Int16 => {
                 Self::new(datatype, name, Arc::<Option<i16>>::new(None), is_nullable)
             }
-            Datatype::Int32 => {
+            DataType::Int32 => {
                 Self::new(datatype, name, Arc::<Option<i32>>::new(None), is_nullable)
             }
-            Datatype::Int64 => {
+            DataType::Int64 => {
                 Self::new(datatype, name, Arc::<Option<i64>>::new(None), is_nullable)
             }
-            Datatype::String => Self::new(
+            DataType::String => Self::new(
                 datatype,
                 name,
                 Arc::<Option<String>>::new(None),
                 is_nullable,
             ),
-            Datatype::Boolean => {
+            DataType::Boolean => {
                 Self::new(datatype, name, Arc::<Option<bool>>::new(None), is_nullable)
             }
-            Datatype::Bytes => Self::new(
+            DataType::Bytes => Self::new(
                 datatype,
                 name,
                 Arc::<Option<Vec<u8>>>::new(None),
@@ -94,23 +105,35 @@ impl Column {
             ),
         }
     }
+
+    pub fn datatype(&self) -> DataType {
+        self.desc.datatype
+    }
+
+    pub fn is_nullable(&self) -> bool {
+        self.desc.is_nullable
+    }
+
+    pub fn name(&self) -> String {
+        self.desc.name.clone()
+    }
 }
 
-impl Eq for Column {}
+impl Eq for Value {}
 
-impl PartialOrd for Column {
+impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 macro_rules! implement_col {
-    ([], $({$Type:ty, $Datatype:ident}), *) => {
-        impl Ord for Column {
+    ([], $({$Type:ty, $DataType:ident}), *) => {
+        impl Ord for Value {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                match self.datatype {
+                match self.datatype() {
                     $(
-                        Datatype::$Datatype => self
+                        DataType::$DataType => self
                             .value
                             .downcast_ref::<$Type>()
                             .cmp(&other.value.downcast_ref::<$Type>()),
@@ -119,13 +142,13 @@ macro_rules! implement_col {
             }
         }
 
-        impl PartialEq for Column {
+        impl PartialEq for Value {
             fn eq(&self, other: &Self) -> bool {
-                self.datatype == other.datatype
-                    && self.is_nullable == other.is_nullable
-                    && match self.datatype {
+                self.datatype() == other.datatype()
+                && self.is_nullable() == other.is_nullable()
+                && match self.datatype() {
                         $(
-                            Datatype::$Datatype => self
+                            DataType::$DataType => self
                                 .value
                                 .downcast_ref::<$Type>()
                                 .eq(&other.value.downcast_ref::<$Type>()),
@@ -134,22 +157,22 @@ macro_rules! implement_col {
             }
         }
 
-        impl Hash for Column {
+        impl Hash for Value {
             fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-                match self.datatype {
+                match self.datatype() {
                     $(
-                        Datatype::$Datatype => self.value.downcast_ref::<$Type>().hash(state),
+                        DataType::$DataType => self.value.downcast_ref::<$Type>().hash(state),
                     )*
                 }
             }
         }
 
-        impl Debug for Column {
+        impl Debug for Value {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let mut debug_struct = f.debug_struct("Column");
-                match self.datatype {
+                let mut debug_struct = f.debug_struct("Value");
+                match self.datatype() {
                     $(
-                        Datatype::$Datatype => {
+                        DataType::$DataType => {
                             debug_struct.field("datatype", &stringify!($Type));
                             if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
                                 debug_struct.field("value", value);
@@ -162,7 +185,7 @@ macro_rules! implement_col {
                         }
                     )*
                 }
-                debug_struct.field("nullable", &self.is_nullable).finish()
+                debug_struct.field("nullable", &self.is_nullable()).finish()
             }
         }
 
@@ -170,18 +193,18 @@ macro_rules! implement_col {
 }
 
 macro_rules! implement_key_col {
-    ($({$Type:ident, $Datatype:ident, $Array:ident}), *) => {
-        impl Key for Column {
-            type Ref<'a> = Column;
+    ($({$Type:ident, $DataType:ident, $Array:ident}), *) => {
+        impl Key for Value {
+            type Ref<'a> = Value;
 
             fn as_key_ref(&self) -> Self::Ref<'_> {
                 self.clone()
             }
 
             fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-                match self.datatype {
+                match self.datatype() {
                     $(
-                        Datatype::$Datatype => Arc::new($Array::new_scalar(
+                        DataType::$DataType => Arc::new($Array::new_scalar(
                             *self
                                 .value
                                 .as_ref()
@@ -189,21 +212,21 @@ macro_rules! implement_key_col {
                                 .expect(stringify!("unexpected datatype, expected " $Type))
                         )),
                     )*
-                    Datatype::String => Arc::new(StringArray::new_scalar(
+                    DataType::String => Arc::new(StringArray::new_scalar(
                         self
                             .value
                             .as_ref()
                             .downcast_ref::<String>()
                                 .expect("unexpected datatype, expected String"),
                     )),
-                    Datatype::Boolean => Arc::new(BooleanArray::new_scalar(
+                    DataType::Boolean => Arc::new(BooleanArray::new_scalar(
                         *self
                             .value
                             .as_ref()
                             .downcast_ref::<bool>()
                             .expect("unexpected datatype, expected bool"),
                     )),
-                    Datatype::Bytes => Arc::new(GenericBinaryArray::<i32>::new_scalar(
+                    DataType::Bytes => Arc::new(GenericBinaryArray::<i32>::new_scalar(
                         self
                             .value
                             .as_ref()
@@ -216,8 +239,8 @@ macro_rules! implement_key_col {
     }
 }
 
-impl<'r> KeyRef<'r> for Column {
-    type Key = Column;
+impl<'r> KeyRef<'r> for Value {
+    type Key = Value;
 
     fn to_key(self) -> Self::Key {
         self
@@ -225,8 +248,8 @@ impl<'r> KeyRef<'r> for Column {
 }
 
 macro_rules! implement_decode_col {
-    ([], $({$Type:ty, $Datatype:ident}), *) => {
-        impl Decode for Column {
+    ([], $({$Type:ty, $DataType:ident}), *) => {
+        impl Decode for Value {
             type Error = fusio::Error;
 
             async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
@@ -240,7 +263,7 @@ macro_rules! implement_decode_col {
                 let value =
                     match datatype {
                         $(
-                            Datatype::$Datatype => match is_some {
+                            DataType::$DataType => match is_some {
                                 true => Arc::new(Option::<$Type>::decode(reader).await.map_err(
                                     |err| match err {
                                         DecodeError::Io(error) => fusio::Error::Io(error),
@@ -253,31 +276,31 @@ macro_rules! implement_decode_col {
                         )*
                     };
                 let name = String::decode(reader).await?;
-                Ok(Column {
+                Ok(Value::new(
                     datatype,
-                    is_nullable,
                     name,
                     value,
-                })
+                    is_nullable,
+                ))
             }
         }
     }
 }
 
 macro_rules! implement_encode_col {
-    ([], $({$Type:ty, $Datatype:ident}), *) => {
-        impl Encode for Column {
+    ([], $({$Type:ty, $DataType:ident}), *) => {
+        impl Encode for Value {
             type Error = fusio::Error;
 
             async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
             where
                 W: Write,
             {
-                Self::tag(self.datatype).encode(writer).await?;
-                self.is_nullable.encode(writer).await?;
-                match self.datatype {
+                Self::tag(self.datatype()).encode(writer).await?;
+                self.is_nullable().encode(writer).await?;
+                match self.datatype() {
                         $(
-                            Datatype::$Datatype => {
+                            DataType::$DataType => {
                                 if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
                                     true.encode(writer).await?;
                                     value.encode(writer).await?
@@ -294,14 +317,14 @@ macro_rules! implement_encode_col {
                             }
                         )*
                 };
-                self.name.encode(writer).await?;
+                self.desc.name.encode(writer).await?;
                 Ok(())
             }
 
             fn size(&self) -> usize {
-                3 + self.name.size() + match self.datatype {
+                3 + self.desc.name.size() + match self.desc.datatype {
                     $(
-                        Datatype::$Datatype => {
+                        DataType::$DataType => {
                             if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
                                 value.size()
                             } else {
@@ -319,55 +342,55 @@ macro_rules! implement_encode_col {
     }
 }
 
-impl Column {
-    fn tag(datatype: Datatype) -> u8 {
+impl Value {
+    fn tag(datatype: DataType) -> u8 {
         match datatype {
-            Datatype::UInt8 => 0,
-            Datatype::UInt16 => 1,
-            Datatype::UInt32 => 2,
-            Datatype::UInt64 => 3,
-            Datatype::Int8 => 4,
-            Datatype::Int16 => 5,
-            Datatype::Int32 => 6,
-            Datatype::Int64 => 7,
-            Datatype::String => 8,
-            Datatype::Boolean => 9,
-            Datatype::Bytes => 10,
+            DataType::UInt8 => 0,
+            DataType::UInt16 => 1,
+            DataType::UInt32 => 2,
+            DataType::UInt64 => 3,
+            DataType::Int8 => 4,
+            DataType::Int16 => 5,
+            DataType::Int32 => 6,
+            DataType::Int64 => 7,
+            DataType::String => 8,
+            DataType::Boolean => 9,
+            DataType::Bytes => 10,
         }
     }
 
-    fn tag_to_datatype(tag: u8) -> Datatype {
+    fn tag_to_datatype(tag: u8) -> DataType {
         match tag {
-            0 => Datatype::UInt8,
-            1 => Datatype::UInt16,
-            2 => Datatype::UInt32,
-            3 => Datatype::UInt64,
-            4 => Datatype::Int8,
-            5 => Datatype::Int16,
-            6 => Datatype::Int32,
-            7 => Datatype::Int64,
-            8 => Datatype::String,
-            9 => Datatype::Boolean,
-            10 => Datatype::Bytes,
+            0 => DataType::UInt8,
+            1 => DataType::UInt16,
+            2 => DataType::UInt32,
+            3 => DataType::UInt64,
+            4 => DataType::Int8,
+            5 => DataType::Int16,
+            6 => DataType::Int32,
+            7 => DataType::Int64,
+            8 => DataType::String,
+            9 => DataType::Boolean,
+            10 => DataType::Bytes,
             _ => panic!("invalid datatype tag"),
         }
     }
 }
 
-impl From<&Column> for Field {
-    fn from(col: &Column) -> Self {
+impl From<&ValueDesc> for Field {
+    fn from(col: &ValueDesc) -> Self {
         match col.datatype {
-            Datatype::UInt8 => Field::new(&col.name, DataType::UInt8, col.is_nullable),
-            Datatype::UInt16 => Field::new(&col.name, DataType::UInt16, col.is_nullable),
-            Datatype::UInt32 => Field::new(&col.name, DataType::UInt32, col.is_nullable),
-            Datatype::UInt64 => Field::new(&col.name, DataType::UInt64, col.is_nullable),
-            Datatype::Int8 => Field::new(&col.name, DataType::Int8, col.is_nullable),
-            Datatype::Int16 => Field::new(&col.name, DataType::Int16, col.is_nullable),
-            Datatype::Int32 => Field::new(&col.name, DataType::Int32, col.is_nullable),
-            Datatype::Int64 => Field::new(&col.name, DataType::Int64, col.is_nullable),
-            Datatype::String => Field::new(&col.name, DataType::Utf8, col.is_nullable),
-            Datatype::Boolean => Field::new(&col.name, DataType::Boolean, col.is_nullable),
-            Datatype::Bytes => Field::new(&col.name, DataType::Binary, col.is_nullable),
+            DataType::UInt8 => Field::new(&col.name, ArrowDataType::UInt8, col.is_nullable),
+            DataType::UInt16 => Field::new(&col.name, ArrowDataType::UInt16, col.is_nullable),
+            DataType::UInt32 => Field::new(&col.name, ArrowDataType::UInt32, col.is_nullable),
+            DataType::UInt64 => Field::new(&col.name, ArrowDataType::UInt64, col.is_nullable),
+            DataType::Int8 => Field::new(&col.name, ArrowDataType::Int8, col.is_nullable),
+            DataType::Int16 => Field::new(&col.name, ArrowDataType::Int16, col.is_nullable),
+            DataType::Int32 => Field::new(&col.name, ArrowDataType::Int32, col.is_nullable),
+            DataType::Int64 => Field::new(&col.name, ArrowDataType::Int64, col.is_nullable),
+            DataType::String => Field::new(&col.name, ArrowDataType::Utf8, col.is_nullable),
+            DataType::Boolean => Field::new(&col.name, ArrowDataType::Boolean, col.is_nullable),
+            DataType::Bytes => Field::new(&col.name, ArrowDataType::Binary, col.is_nullable),
         }
     }
 }

@@ -1,72 +1,47 @@
-pub mod internal;
 mod key;
+pub mod option;
 pub mod runtime;
 #[cfg(test)]
-mod test;
+pub(crate) mod test;
 
 use std::{error::Error, fmt::Debug, io, sync::Arc};
 
-use arrow::{array::RecordBatch, datatypes::Schema};
-use internal::InternalRecordRef;
+use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use fusio_log::{Decode, Encode};
 pub use key::{Key, KeyRef};
+use option::OptionRecordRef;
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 pub use runtime::*;
 use thiserror::Error;
 
-use crate::{
-    inmem::immutable::ArrowArrays,
-    serdes::{Decode, Encode},
-};
+use crate::inmem::immutable::ArrowArrays;
 
-#[allow(unused)]
-pub(crate) enum RecordInstance {
-    Normal,
-    Runtime(DynRecord),
-}
+pub trait Schema: Debug + Send + Sync {
+    type Record: Record<Schema = Self>;
 
-#[allow(unused)]
-impl RecordInstance {
-    pub(crate) fn primary_key_index<R>(&self) -> usize
-    where
-        R: Record,
-    {
-        match self {
-            RecordInstance::Normal => R::primary_key_index(),
-            RecordInstance::Runtime(record) => record.primary_key_index(),
-        }
-    }
+    type Columns: ArrowArrays<Record = Self::Record>;
 
-    pub(crate) fn arrow_schema<R>(&self) -> Arc<Schema>
-    where
-        R: Record,
-    {
-        match self {
-            RecordInstance::Normal => R::arrow_schema().clone(),
-            RecordInstance::Runtime(record) => record.arrow_schema(),
-        }
-    }
+    type Key: Key;
+
+    fn arrow_schema(&self) -> &Arc<ArrowSchema>;
+
+    fn primary_key_index(&self) -> usize;
+
+    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>);
 }
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
-    type Columns: ArrowArrays<Record = Self>;
-
-    type Key: Key;
+    type Schema: Schema<Record = Self>;
 
     type Ref<'r>: RecordRef<'r, Record = Self>
     where
         Self: 'r;
 
-    fn key(&self) -> <<Self as Record>::Key as Key>::Ref<'_> {
+    fn key(&self) -> <<<Self as Record>::Schema as Schema>::Key as Key>::Ref<'_> {
         self.as_record_ref().key()
     }
 
-    fn primary_key_index() -> usize;
-
-    fn primary_key_path() -> (ColumnPath, Vec<SortingColumn>);
-
     fn as_record_ref(&self) -> Self::Ref<'_>;
-
-    fn arrow_schema() -> &'static Arc<Schema>;
 
     fn size(&self) -> usize;
 }
@@ -74,7 +49,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
 pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
     type Record: Record;
 
-    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;
+    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r>;
 
     fn projection(&mut self, projection_mask: &ProjectionMask);
 
@@ -82,8 +57,8 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
         record_batch: &'r RecordBatch,
         offset: usize,
         projection_mask: &'r ProjectionMask,
-        full_schema: &'r Arc<Schema>,
-    ) -> InternalRecordRef<'r, Self>;
+        full_schema: &'r Arc<ArrowSchema>,
+    ) -> OptionRecordRef<'r, Self>;
 }
 
 #[derive(Debug, Error)]

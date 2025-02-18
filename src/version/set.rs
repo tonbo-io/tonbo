@@ -1,6 +1,5 @@
 use std::{
     collections::BinaryHeap,
-    io::Cursor,
     mem,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -10,14 +9,14 @@ use std::{
 
 use async_lock::RwLock;
 use flume::Sender;
-use fusio::{dynamic::DynFile, fs::FileMeta};
+use fusio::{fs::FileMeta, DynFs};
+use fusio_log::{Logger, Options};
 use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
-    record::Record,
-    serdes::Encode,
+    record::{Record, Schema},
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
@@ -50,7 +49,7 @@ where
     R: Record,
 {
     current: VersionRef<R>,
-    log_with_id: (Box<dyn DynFile>, FileId),
+    log_id: FileId,
 }
 
 pub(crate) struct VersionSet<R>
@@ -60,7 +59,7 @@ where
     inner: Arc<RwLock<VersionSetInner<R>>>,
     clean_sender: Sender<CleanTag>,
     timestamp: Arc<AtomicU32>,
-    option: Arc<DbOption<R>>,
+    option: Arc<DbOption>,
     manager: Arc<StoreManager>,
 }
 
@@ -98,7 +97,7 @@ where
 {
     pub(crate) async fn new(
         clean_sender: Sender<CleanTag>,
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         manager: Arc<StoreManager>,
     ) -> Result<Self, VersionError<R>> {
         let fs = manager.base_fs();
@@ -130,21 +129,24 @@ where
             fs.remove(&log_id.0.path).await?;
         }
 
-        let log_id = second_log_id
+        let mut edits = vec![];
+
+        let log_id = match second_log_id
             .or(latest_log_id)
             .map(|file_meta| parse_file_id(&file_meta.0.path, FileType::Log))
             .transpose()?
             .flatten()
-            .unwrap_or_else(generate_file_id);
-
-        let mut log = fs
-            .open_options(
-                &option.version_log_path(log_id),
-                FileType::Log.open_options(false),
-            )
-            .await?;
-
-        let edits = VersionEdit::recover(&mut Cursor::new(&mut log)).await;
+        {
+            Some(log_id) => {
+                let recover_edits = VersionEdit::<<R::Schema as Schema>::Key>::recover(
+                    option.version_log_path(log_id),
+                )
+                .await;
+                edits = recover_edits;
+                log_id
+            }
+            None => generate_file_id(),
+        };
 
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
@@ -158,7 +160,7 @@ where
                     timestamp: timestamp.clone(),
                     log_length: 0,
                 }),
-                log_with_id: (log, log_id),
+                log_id,
             })),
             clean_sender,
             timestamp,
@@ -176,7 +178,7 @@ where
 
     pub(crate) async fn apply_edits(
         &self,
-        mut version_edits: Vec<VersionEdit<R::Key>>,
+        mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {
@@ -184,19 +186,20 @@ where
         let option = &self.option;
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
-        let (log, log_id) = &mut guard.log_with_id;
+        let log_id = &mut guard.log_id;
         let edit_len = new_version.log_length + version_edits.len() as u32;
+
+        let mut log =
+            Self::open_version_log(&self.option, self.manager.base_fs().clone(), *log_id).await?;
 
         if !is_recover {
             version_edits.push(VersionEdit::NewLogLength { len: edit_len });
+            log.write_batch(version_edits.iter())
+                .await
+                .map_err(VersionError::Logger)?;
         }
+
         for version_edit in version_edits {
-            if !is_recover {
-                version_edit
-                    .encode(log)
-                    .await
-                    .map_err(VersionError::Encode)?;
-            }
             match version_edit {
                 VersionEdit::Add { mut scope, level } => {
                     if let Some(wal_ids) = scope.wal_ids.take() {
@@ -264,29 +267,69 @@ where
         if edit_len >= option.version_log_snapshot_threshold {
             let fs = self.manager.base_fs();
             let old_log_id = mem::replace(log_id, generate_file_id());
-            let new_log = fs
-                .open_options(
-                    &option.version_log_path(*log_id),
-                    FileType::Log.open_options(false),
-                )
-                .await?;
-            let _old_log = mem::replace(log, new_log);
+            let mut log = Self::open_version_log(option, fs.clone(), *log_id).await?;
+            // let _old_log = mem::replace(log, new_log);
 
             new_version.log_length = 0;
-            for new_edit in new_version.to_edits() {
-                new_edit.encode(log).await.map_err(VersionError::Encode)?;
-            }
+            log.write_batch(new_version.to_edits().iter())
+                .await
+                .map_err(VersionError::Logger)?;
             log.close().await?;
             fs.remove(&option.version_log_path(old_log_id)).await?;
         }
         guard.current = Arc::new(new_version);
         Ok(())
     }
+
+    async fn open_version_log(
+        option: &DbOption,
+        fs: Arc<dyn DynFs>,
+        gen: FileId,
+    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
+        Options::new(option.version_log_path(gen))
+            .build_with_fs(fs)
+            .await
+            .map_err(VersionError::Logger)
+    }
+
+    pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
+        let log_dir_path = self.option.version_log_dir_path();
+        let log_fs = self.manager.base_fs();
+        let mut log_stream = log_fs.list(&log_dir_path).await?;
+        while let Ok(meta) = log_stream.next().await.transpose() {
+            match meta {
+                Some(meta) => log_fs.remove(&meta.path).await?,
+                None => break,
+            }
+        }
+
+        for level in 0..MAX_LEVEL {
+            let level_path = self
+                .option
+                .level_fs_path(level)
+                .unwrap_or(&self.option.base_path);
+            let fs = self.manager.get_fs(level_path);
+            let mut stream = fs.list(level_path).await?;
+            while let Ok(meta) = stream.next().await.transpose() {
+                match meta {
+                    Some(meta) => {
+                        let path = std::path::Path::new(meta.path.as_ref());
+                        if path.is_file() {
+                            log_fs.remove(&meta.path).await?;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
-    use std::{io::Cursor, sync::Arc};
+    use std::sync::Arc;
 
     use async_lock::RwLock;
     use flume::{bounded, Sender};
@@ -296,8 +339,8 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        fs::{generate_file_id, manager::StoreManager, FileType},
-        record::Record,
+        fs::{generate_file_id, manager::StoreManager},
+        record::{test::StringSchema, Record},
         scope::Scope,
         version::{
             cleaner::CleanTag,
@@ -311,26 +354,20 @@ pub(crate) mod tests {
     pub(crate) async fn build_version_set<R>(
         version: Version<R>,
         clean_sender: Sender<CleanTag>,
-        option: Arc<DbOption<R>>,
+        option: Arc<DbOption>,
         manager: Arc<StoreManager>,
     ) -> Result<VersionSet<R>, VersionError<R>>
     where
         R: Record,
     {
         let log_id = generate_file_id();
-        let log = manager
-            .base_fs()
-            .open_options(
-                &option.version_log_path(log_id),
-                FileType::Log.open_options(false),
-            )
-            .await?;
+
         let timestamp = version.timestamp.clone();
 
         Ok(VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
-                log_with_id: (log, log_id),
+                log_id,
             })),
             clean_sender,
             timestamp,
@@ -344,8 +381,9 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
         ));
         manager
             .base_fs()
@@ -381,7 +419,10 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
+        );
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -444,10 +485,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let mut guard = version_set.inner.write().await;
-        let log = &mut guard.log_with_id.0;
+        let guard = version_set.inner.write().await;
 
-        let edits = VersionEdit::<String>::recover(&mut Cursor::new(log)).await;
+        let edits = VersionEdit::<String>::recover(option.version_log_path(guard.log_id)).await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(
@@ -478,12 +518,7 @@ pub(crate) mod tests {
         }
         logs.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
 
-        let log = manager
-            .base_fs()
-            .open_options(&logs.pop().unwrap().path, FileType::Log.open_options(false))
-            .await
-            .unwrap();
-        let edits = VersionEdit::<String>::recover(&mut Cursor::new(log)).await;
+        let edits = VersionEdit::<String>::recover(logs.pop().unwrap().path).await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(
@@ -508,8 +543,9 @@ pub(crate) mod tests {
     async fn version_level_sort() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::from(
+        let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &StringSchema,
         ));
 
         let (sender, _) = bounded(1);

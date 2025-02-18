@@ -4,154 +4,118 @@ use pyo3::{
     types::{PyBytes, PyDict, PyDictMethods},
     Bound, Py, PyAny, Python,
 };
-use tonbo::record::Datatype;
+use tonbo::record::{DataType as TonboDataType, Value};
 
 use crate::{column::Column, datatype::DataType, range};
 
-pub(crate) fn to_dict(
-    py: Python,
-    primary_key_index: usize,
-    record: Vec<tonbo::record::Column>,
-) -> Bound<PyDict> {
+pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) -> Bound<PyDict> {
     let dict = PyDict::new_bound(py);
     for (idx, col) in record.iter().enumerate() {
-        match &col.datatype {
-            Datatype::UInt8 => {
+        let name = col.desc.name.clone();
+        match &col.datatype() {
+            TonboDataType::UInt8 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<u8>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<u8>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<u8>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::UInt16 => {
+            TonboDataType::UInt16 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<u16>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<u16>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<u16>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::UInt32 => {
+            TonboDataType::UInt32 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<u32>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<u32>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<u32>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::UInt64 => {
+            TonboDataType::UInt64 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<u64>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<u64>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<u64>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::Int8 => {
+            TonboDataType::Int8 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<i8>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<i8>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<i8>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::Int16 => {
+            TonboDataType::Int16 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<i16>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<i16>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::Int32 => {
+            TonboDataType::Int32 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<i32>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<i32>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<i32>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::Int64 => {
+            TonboDataType::Int64 => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<i64>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<i64>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<i64>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::String => {
+            TonboDataType::String => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<String>(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<String>())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<String>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::Boolean => {
+            TonboDataType::Boolean => {
                 if idx == primary_key_index {
-                    dict.set_item(
-                        col.name.clone(),
-                        col.value.as_ref().downcast_ref::<bool>().unwrap(),
-                    )
-                    .unwrap();
+                    dict.set_item(name, col.value.as_ref().downcast_ref::<bool>().unwrap())
+                        .unwrap();
                 } else {
                     let value = col.value.as_ref().downcast_ref::<Option<bool>>().unwrap();
-                    dict.set_item(col.name.clone(), value).unwrap();
+                    dict.set_item(name, value).unwrap();
                 }
             }
-            Datatype::Bytes => {
+            TonboDataType::Bytes => {
                 if idx == primary_key_index {
                     let value = col.value.as_ref().downcast_ref::<Vec<u8>>().unwrap();
                     let v = PyBytes::new_bound(py, value);
-                    dict.set_item(col.name.clone(), v).unwrap();
+                    dict.set_item(name, v).unwrap();
                 } else {
                     let value = col
                         .value
                         .as_ref()
                         .downcast_ref::<Option<Vec<u8>>>()
                         .unwrap();
-                    dict.set_item(
-                        col.name.clone(),
-                        value.as_ref().map(|v| PyBytes::new_bound(py, v)),
-                    )
-                    .unwrap();
+                    dict.set_item(name, value.as_ref().map(|v| PyBytes::new_bound(py, v)))
+                        .unwrap();
                 }
             }
         }
@@ -185,9 +149,9 @@ pub(crate) fn to_key(
     }
 }
 
-pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> tonbo::record::Column {
-    tonbo::record::Column::new(
-        Datatype::from(&col.datatype),
+pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> Value {
+    Value::new(
+        TonboDataType::from(&col.datatype),
         col.name.to_owned(),
         to_key(py, &col.datatype, key),
         col.nullable,
@@ -199,10 +163,7 @@ pub(crate) fn to_bound(
     col: &Column,
     lower: Option<Py<range::Bound>>,
     high: Option<Py<range::Bound>>,
-) -> (
-    std::ops::Bound<tonbo::record::Column>,
-    std::ops::Bound<tonbo::record::Column>,
-) {
+) -> (std::ops::Bound<Value>, std::ops::Bound<Value>) {
     let lower = match lower {
         Some(bound) => bound.get().to_bound(py, col),
         None => std::ops::Bound::Unbounded,

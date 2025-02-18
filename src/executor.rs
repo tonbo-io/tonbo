@@ -17,19 +17,13 @@ pub mod tokio {
 
     use super::Executor;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct TokioExecutor {
         handle: Handle,
     }
 
-    impl Default for TokioExecutor {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
     impl TokioExecutor {
-        pub fn new() -> Self {
+        pub fn current() -> Self {
             Self {
                 handle: Handle::current(),
             }

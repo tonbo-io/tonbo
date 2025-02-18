@@ -51,6 +51,7 @@ impl From<DbError> for PyErr {
             tonbo::DbError::Recover(err) => RecoverError::new_err(err.to_string()),
             tonbo::DbError::WalWrite(err) => PyIOError::new_err(err.to_string()),
             tonbo::DbError::ExceedsMaxLevel => ExceedsMaxLevelError::new_err("Exceeds max level"),
+            tonbo::DbError::Logger(err) => PyIOError::new_err(err.to_string()),
         }
     }
 }
@@ -62,7 +63,7 @@ impl From<CommitError> for PyErr {
             tonbo::transaction::CommitError::Parquet(err) => InnerError::new_err(err.to_string()),
             tonbo::transaction::CommitError::Database(err) => DbError::from(err).into(),
             tonbo::transaction::CommitError::WriteConflict(key) => {
-                WriteConflictError::new_err(key.name)
+                WriteConflictError::new_err(key.name())
             }
             tonbo::transaction::CommitError::SendCompactTaskError(err) => {
                 InnerError::new_err(err.to_string())

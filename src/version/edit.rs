@@ -1,13 +1,10 @@
 use std::mem::size_of;
 
 use fusio::{SeqRead, Write};
+use fusio_log::{Decode, Encode, Options, Path};
+use futures_util::TryStreamExt;
 
-use crate::{
-    fs::FileId,
-    scope::Scope,
-    serdes::{Decode, Encode},
-    timestamp::Timestamp,
-};
+use crate::{fs::FileId, scope::Scope, timestamp::Timestamp};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum VersionEdit<K> {
@@ -21,11 +18,19 @@ impl<K> VersionEdit<K>
 where
     K: Decode,
 {
-    pub(crate) async fn recover<R: SeqRead>(reader: &mut R) -> Vec<VersionEdit<K>> {
-        let mut edits = Vec::new();
+    pub(crate) async fn recover(path: Path) -> Vec<VersionEdit<K>> {
+        let mut edits = vec![];
 
-        while let Ok(edit) = VersionEdit::decode(reader).await {
-            edits.push(edit)
+        let mut edits_stream = Options::new(path)
+            .disable_buf()
+            .recover::<VersionEdit<K>>()
+            .await
+            .unwrap();
+        while let Ok(batch) = edits_stream.try_next().await {
+            match batch {
+                Some(mut batch) => edits.append(&mut batch),
+                None => break,
+            }
         }
         edits
     }
@@ -121,9 +126,10 @@ where
 mod tests {
     use std::io::Cursor;
 
+    use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
 
-    use crate::{fs::generate_file_id, scope::Scope, serdes::Encode, version::edit::VersionEdit};
+    use crate::{fs::generate_file_id, scope::Scope, version::edit::VersionEdit};
 
     #[tokio::test]
     async fn encode_and_decode() {
@@ -153,7 +159,12 @@ mod tests {
         }
 
         cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-        let decode_edits = { VersionEdit::<String>::recover(&mut cursor).await };
+
+        let mut decode_edits = Vec::new();
+
+        while let Ok(edit) = VersionEdit::decode(&mut cursor).await {
+            decode_edits.push(edit);
+        }
 
         assert_eq!(edits, decode_edits);
     }

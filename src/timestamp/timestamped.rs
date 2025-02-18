@@ -1,11 +1,9 @@
 use std::{borrow::Borrow, cmp::Ordering, marker::PhantomData, mem::size_of, ptr};
 
 use fusio::{SeqRead, Write};
+use fusio_log::{Decode, Encode};
 
-use crate::{
-    serdes::{Decode, Encode},
-    timestamp::Timestamp,
-};
+use crate::timestamp::Timestamp;
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Timestamped<V> {

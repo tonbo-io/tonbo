@@ -15,14 +15,14 @@ use crate::{
         mutable::Mutable,
     },
     ondisk::sstable::SsTable,
-    record::{KeyRef, Record, RecordInstance},
+    record::{KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
     transaction::CommitError,
     version::{
         edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError, MAX_LEVEL,
     },
-    DbOption, ParquetLru, Schema,
+    DbOption, DbStorage, ParquetLru,
 };
 
 #[derive(Debug)]
@@ -35,10 +35,11 @@ pub(crate) struct Compactor<R>
 where
     R: Record,
 {
-    pub(crate) option: Arc<DbOption<R>>,
-    pub(crate) schema: Arc<RwLock<Schema<R>>>,
+    pub(crate) option: Arc<DbOption>,
+    pub(crate) schema: Arc<RwLock<DbStorage<R>>>,
     pub(crate) version_set: VersionSet<R>,
     pub(crate) manager: Arc<StoreManager>,
+    pub(crate) record_schema: Arc<R::Schema>,
 }
 
 impl<R> Compactor<R>
@@ -46,8 +47,9 @@ where
     R: Record,
 {
     pub(crate) fn new(
-        schema: Arc<RwLock<Schema<R>>>,
-        option: Arc<DbOption<R>>,
+        schema: Arc<RwLock<DbStorage<R>>>,
+        record_schema: Arc<R::Schema>,
+        option: Arc<DbOption>,
         version_set: VersionSet<R>,
         manager: Arc<StoreManager>,
     ) -> Self {
@@ -56,42 +58,57 @@ where
             schema,
             version_set,
             manager,
+            record_schema,
         }
     }
 
     pub(crate) async fn check_then_compaction(
         &mut self,
         parquet_lru: ParquetLru,
+        is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
 
         guard.trigger.reset();
 
-        if guard.mutable.is_empty() {
+        if !guard.mutable.is_empty() {
+            let trigger_clone = guard.trigger.clone();
+
+            let mutable = mem::replace(
+                &mut guard.mutable,
+                Mutable::new(
+                    &self.option,
+                    trigger_clone,
+                    self.manager.base_fs(),
+                    self.record_schema.clone(),
+                )
+                .await?,
+            );
+            let (file_id, immutable) = mutable.into_immutable().await?;
+            guard.immutables.push((file_id, immutable));
+        } else if !is_manual {
             return Ok(());
         }
 
-        let trigger_clone = guard.trigger.clone();
-        let mutable = mem::replace(
-            &mut guard.mutable,
-            Mutable::new(&self.option, trigger_clone, self.manager.base_fs()).await?,
-        );
-        let (file_id, immutable) = mutable.into_immutable(&guard.record_instance).await?;
-
-        guard.immutables.push((file_id, immutable));
-        if guard.immutables.len() > self.option.immutable_chunk_max_num {
+        if (is_manual && !guard.immutables.is_empty())
+            || guard.immutables.len() > self.option.immutable_chunk_max_num
+        {
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
             let guard = self.schema.upgradable_read().await;
-            let chunk_num = self.option.immutable_chunk_num;
+            let chunk_num = if is_manual {
+                guard.immutables.len()
+            } else {
+                self.option.immutable_chunk_num
+            };
             let excess = &guard.immutables[0..chunk_num];
 
             if let Some(scope) = Self::minor_compaction(
                 &self.option,
                 recover_wal_ids,
                 excess,
-                &guard.record_instance,
+                &guard.record_schema,
                 &self.manager,
             )
             .await?
@@ -108,7 +125,7 @@ where
                         &scope.max,
                         &mut version_edits,
                         &mut delete_gens,
-                        &guard.record_instance,
+                        &guard.record_schema,
                         &self.manager,
                         parquet_lru,
                     )
@@ -131,12 +148,15 @@ where
     }
 
     pub(crate) async fn minor_compaction(
-        option: &DbOption<R>,
+        option: &DbOption,
         recover_wal_ids: Option<Vec<FileId>>,
-        batches: &[(Option<FileId>, Immutable<R::Columns>)],
-        instance: &RecordInstance,
+        batches: &[(
+            Option<FileId>,
+            Immutable<<R::Schema as RecordSchema>::Columns>,
+        )],
+        schema: &R::Schema,
         manager: &StoreManager,
-    ) -> Result<Option<Scope<R::Key>>, CompactionError<R>> {
+    ) -> Result<Option<Scope<<R::Schema as RecordSchema>::Key>>, CompactionError<R>> {
         if !batches.is_empty() {
             let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
             let level_0_fs = manager.get_fs(level_0_path);
@@ -156,7 +176,7 @@ where
                         )
                         .await?,
                 ),
-                instance.arrow_schema::<R>().clone(),
+                schema.arrow_schema().clone(),
                 Some(option.write_parquet_properties.clone()),
             )?;
 
@@ -191,12 +211,12 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn major_compaction(
         version: &Version<R>,
-        option: &DbOption<R>,
-        mut min: &R::Key,
-        mut max: &R::Key,
-        version_edits: &mut Vec<VersionEdit<R::Key>>,
+        option: &DbOption,
+        mut min: &<R::Schema as RecordSchema>::Key,
+        mut max: &<R::Schema as RecordSchema>::Key,
+        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         delete_gens: &mut Vec<(FileId, usize)>,
-        instance: &RecordInstance,
+        instance: &R::Schema,
         manager: &StoreManager,
         parquet_lru: ParquetLru,
     ) -> Result<(), CompactionError<R>> {
@@ -301,7 +321,7 @@ where
                     level: (level + 1) as u8,
                     gen: scope.gen,
                 });
-                delete_gens.push((scope.gen, level));
+                delete_gens.push((scope.gen, level + 1));
             }
             level += 1;
         }
@@ -311,11 +331,18 @@ where
 
     fn next_level_scopes<'a>(
         version: &'a Version<R>,
-        min: &mut &'a <R as Record>::Key,
-        max: &mut &'a <R as Record>::Key,
+        min: &mut &'a <R::Schema as RecordSchema>::Key,
+        max: &mut &'a <R::Schema as RecordSchema>::Key,
         level: usize,
-        meet_scopes_l: &[&'a Scope<<R as Record>::Key>],
-    ) -> Result<(Vec<&'a Scope<<R as Record>::Key>>, usize, usize), CompactionError<R>> {
+        meet_scopes_l: &[&'a Scope<<R::Schema as RecordSchema>::Key>],
+    ) -> Result<
+        (
+            Vec<&'a Scope<<R::Schema as RecordSchema>::Key>>,
+            usize,
+            usize,
+        ),
+        CompactionError<R>,
+    > {
         let mut meet_scopes_ll = Vec::new();
         let mut start_ll = 0;
         let mut end_ll = 0;
@@ -351,10 +378,14 @@ where
 
     fn this_level_scopes<'a>(
         version: &'a Version<R>,
-        min: &<R as Record>::Key,
-        max: &<R as Record>::Key,
+        min: &<R::Schema as RecordSchema>::Key,
+        max: &<R::Schema as RecordSchema>::Key,
         level: usize,
-    ) -> (Vec<&'a Scope<<R as Record>::Key>>, usize, usize) {
+    ) -> (
+        Vec<&'a Scope<<R::Schema as RecordSchema>::Key>>,
+        usize,
+        usize,
+    ) {
         let mut meet_scopes_l = Vec::new();
         let mut start_l = Version::<R>::scope_search(min, &version.level_slice[level]);
         let mut end_l = start_l;
@@ -388,17 +419,18 @@ where
     }
 
     async fn build_tables<'scan>(
-        option: &DbOption<R>,
-        version_edits: &mut Vec<VersionEdit<<R as Record>::Key>>,
+        option: &DbOption,
+        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'scan, R>>,
-        instance: &RecordInstance,
+        schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
-        let mut builder = R::Columns::builder(&instance.arrow_schema::<R>(), 8192);
+        let mut builder =
+            <R::Schema as RecordSchema>::Columns::builder(schema.arrow_schema().clone(), 8192);
         let mut min = None;
         let mut max = None;
 
@@ -420,7 +452,7 @@ where
                     &mut builder,
                     &mut min,
                     &mut max,
-                    instance,
+                    schema,
                     fs,
                 )
                 .await?;
@@ -434,7 +466,7 @@ where
                 &mut builder,
                 &mut min,
                 &mut max,
-                instance,
+                schema,
                 fs,
             )
             .await?;
@@ -443,8 +475,14 @@ where
     }
 
     fn full_scope<'a>(
-        meet_scopes: &[&'a Scope<<R as Record>::Key>],
-    ) -> Result<(&'a <R as Record>::Key, &'a <R as Record>::Key), CompactionError<R>> {
+        meet_scopes: &[&'a Scope<<R::Schema as RecordSchema>::Key>],
+    ) -> Result<
+        (
+            &'a <R::Schema as RecordSchema>::Key,
+            &'a <R::Schema as RecordSchema>::Key,
+        ),
+        CompactionError<R>,
+    > {
         let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
         let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
         Ok((lower, upper))
@@ -452,13 +490,13 @@ where
 
     #[allow(clippy::too_many_arguments)]
     async fn build_table(
-        option: &DbOption<R>,
-        version_edits: &mut Vec<VersionEdit<R::Key>>,
+        option: &DbOption,
+        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
-        builder: &mut <R::Columns as ArrowArrays>::Builder,
-        min: &mut Option<R::Key>,
-        max: &mut Option<R::Key>,
-        instance: &RecordInstance,
+        builder: &mut <<R::Schema as RecordSchema>::Columns as ArrowArrays>::Builder,
+        min: &mut Option<<R::Schema as RecordSchema>::Key>,
+        max: &mut Option<<R::Schema as RecordSchema>::Key>,
+        schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         debug_assert!(min.is_some());
@@ -474,7 +512,7 @@ where
                 )
                 .await?,
             ),
-            instance.arrow_schema::<R>().clone(),
+            schema.arrow_schema().clone(),
             Some(option.write_parquet_properties.clone()),
         )?;
         writer.write(columns.as_record_batch()).await?;
@@ -505,6 +543,8 @@ where
     Fusio(#[from] fusio::Error),
     #[error("compaction version error: {0}")]
     Version(#[from] VersionError<R>),
+    #[error("compaction logger error: {0}")]
+    Logger(#[from] fusio_log::error::LogError),
     #[error("compaction channel is closed")]
     ChannelClose,
     #[error("database error: {0}")]
@@ -529,8 +569,11 @@ pub(crate) mod tests {
         compaction::Compactor,
         executor::tokio::TokioExecutor,
         fs::{generate_file_id, manager::StoreManager, FileId, FileType},
-        inmem::{immutable::Immutable, mutable::Mutable},
-        record::{Column, ColumnDesc, Datatype, DynRecord, Record, RecordInstance},
+        inmem::{
+            immutable::{tests::TestSchema, Immutable},
+            mutable::Mutable,
+        },
+        record::{DataType, DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -541,36 +584,36 @@ pub(crate) mod tests {
     };
 
     async fn build_immutable<R>(
-        option: &DbOption<R>,
+        option: &DbOption,
         records: Vec<(LogType, R, Timestamp)>,
-        instance: &RecordInstance,
+        schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<R::Columns>, DbError<R>>
+    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
     where
         R: Record + Send,
     {
-        let trigger = Arc::new(TriggerFactory::create(option.trigger_type));
+        let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable: Mutable<R> = Mutable::new(option, trigger, fs).await?;
+        let mutable: Mutable<R> = Mutable::new(option, trigger, fs, schema.clone()).await?;
 
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
         }
-        Ok(Immutable::from((mutable.data, instance)))
+        Ok(Immutable::new(mutable.data, schema.arrow_schema().clone()))
     }
 
     pub(crate) async fn build_parquet_table<R>(
-        option: &DbOption<R>,
+        option: &DbOption,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
-        instance: &RecordInstance,
+        schema: &Arc<R::Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), DbError<R>>
     where
         R: Record + Send,
     {
-        let immutable = build_immutable::<R>(option, records, instance, fs).await?;
+        let immutable = build_immutable::<R>(option, records, schema, fs).await?;
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
                 fs.open_options(
@@ -579,7 +622,7 @@ pub(crate) mod tests {
                 )
                 .await?,
             ),
-            R::arrow_schema().clone(),
+            schema.arrow_schema().clone(),
             None,
         )?;
         writer.write(immutable.as_record_batch()).await?;
@@ -593,13 +636,16 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_dir_l0 = tempfile::tempdir().unwrap();
 
-        let option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .level_path(
-                0,
-                Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
-                FsOptions::Local,
-            )
-            .unwrap();
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        )
+        .level_path(
+            0,
+            Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
+            FsOptions::Local,
+        )
+        .unwrap();
         let manager =
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
         manager
@@ -639,7 +685,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &RecordInstance::Normal,
+            &Arc::new(TestSchema),
             manager.base_fs(),
         )
         .await
@@ -676,7 +722,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &RecordInstance::Normal,
+            &Arc::new(TestSchema),
             manager.base_fs(),
         )
         .await
@@ -689,7 +735,7 @@ pub(crate) mod tests {
                 (Some(generate_file_id()), batch_1),
                 (Some(generate_file_id()), batch_2),
             ],
-            &RecordInstance::Normal,
+            &TestSchema,
             &manager,
         )
         .await
@@ -703,10 +749,13 @@ pub(crate) mod tests {
     async fn dyn_minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let option = DbOption::with_path(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            "id".to_string(),
+        let schema = DynSchema::new(
+            vec![ValueDesc::new("id".to_owned(), DataType::Int32, false)],
             0,
+        );
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &schema,
         );
         manager
             .base_fs()
@@ -714,16 +763,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let empty_record = DynRecord::empty_record(
-            vec![ColumnDesc::new("id".to_owned(), Datatype::Int32, false)],
-            0,
-        );
-        let instance = RecordInstance::Runtime(empty_record);
+        let instance = Arc::new(schema);
 
         let mut batch1_data = vec![];
         let mut batch2_data = vec![];
         for i in 0..40 {
-            let col = Column::new(Datatype::Int32, "id".to_owned(), Arc::new(i), false);
+            let col = Value::new(DataType::Int32, "id".to_owned(), Arc::new(i), false);
             if i % 4 == 0 {
                 continue;
             }
@@ -761,11 +806,11 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(
             scope.min,
-            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(2), false)
+            Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
         );
         assert_eq!(
             scope.max,
-            Column::new(Datatype::Int32, "id".to_owned(), Arc::new(39), false)
+            Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false)
         );
     }
 
@@ -775,19 +820,22 @@ pub(crate) mod tests {
         let temp_dir_l0 = TempDir::new().unwrap();
         let temp_dir_l1 = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap())
-            .level_path(
-                0,
-                Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
-                FsOptions::Local,
-            )
-            .unwrap()
-            .level_path(
-                1,
-                Path::from_filesystem_path(temp_dir_l1.path()).unwrap(),
-                FsOptions::Local,
-            )
-            .unwrap();
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        )
+        .level_path(
+            0,
+            Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
+            FsOptions::Local,
+        )
+        .unwrap()
+        .level_path(
+            1,
+            Path::from_filesystem_path(temp_dir_l1.path()).unwrap(),
+            FsOptions::Local,
+        )
+        .unwrap();
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
         let manager =
@@ -805,7 +853,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let ((table_gen_1, table_gen_2, table_gen_3, table_gen_4, _), version) =
-            build_version(&option, &manager).await;
+            build_version(&option, &manager, &Arc::new(TestSchema)).await;
 
         let min = 2.to_string();
         let max = 5.to_string();
@@ -818,7 +866,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
-            &RecordInstance::Normal,
+            &TestSchema,
             &manager,
             Arc::new(NoCache::default()),
         )
@@ -854,8 +902,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn build_version(
-        option: &Arc<DbOption<Test>>,
+        option: &Arc<DbOption>,
         manager: &StoreManager,
+        schema: &Arc<TestSchema>,
     ) -> ((FileId, FileId, FileId, FileId, FileId), Version<Test>) {
         let level_0_fs = option
             .level_fs_path(0)
@@ -901,7 +950,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &RecordInstance::Normal,
+            schema,
             0,
             level_0_fs,
         )
@@ -939,7 +988,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &RecordInstance::Normal,
+            schema,
             0,
             level_0_fs,
         )
@@ -982,7 +1031,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &RecordInstance::Normal,
+            schema,
             1,
             level_1_fs,
         )
@@ -1020,7 +1069,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &RecordInstance::Normal,
+            schema,
             1,
             level_1_fs,
         )
@@ -1058,7 +1107,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &RecordInstance::Normal,
+            schema,
             1,
             level_1_fs,
         )
@@ -1115,7 +1164,10 @@ pub(crate) mod tests {
     pub(crate) async fn major_panic() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
         option.major_threshold_with_sst_size = 1;
         option.level_sst_magnification = 1;
         let manager =
@@ -1165,7 +1217,7 @@ pub(crate) mod tests {
             &option,
             table_gen0,
             records0,
-            &RecordInstance::Normal,
+            &Arc::new(TestSchema),
             0,
             level_0_fs,
         )
@@ -1175,7 +1227,7 @@ pub(crate) mod tests {
             &option,
             table_gen1,
             records1,
-            &RecordInstance::Normal,
+            &Arc::new(TestSchema),
             1,
             level_1_fs,
         )
@@ -1210,7 +1262,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
-            &RecordInstance::Normal,
+            &TestSchema,
             &manager,
             Arc::new(NoCache::default()),
         )
@@ -1223,7 +1275,10 @@ pub(crate) mod tests {
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::from(Path::from_filesystem_path(temp_dir.path()).unwrap());
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 0;
         option.major_threshold_with_sst_size = 2;
@@ -1233,7 +1288,9 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::new()).await.unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
 
         for i in 5..9 {
             let item = Test {

@@ -5,7 +5,7 @@ use std::{
 };
 
 use pyo3::{pyclass, pymethods};
-use tonbo::record::{ColumnDesc, Datatype};
+use tonbo::record::{DataType as TonboDataType, Value, ValueDesc};
 
 use crate::datatype::DataType;
 
@@ -58,15 +58,15 @@ impl Display for Column {
     }
 }
 
-impl From<Column> for ColumnDesc {
+impl From<Column> for ValueDesc {
     fn from(col: Column) -> Self {
-        let datatype = Datatype::from(col.datatype);
-        ColumnDesc::new(col.name, datatype, col.nullable)
+        let datatype = TonboDataType::from(col.datatype);
+        ValueDesc::new(col.name, datatype, col.nullable)
     }
 }
-impl From<Column> for tonbo::record::Column {
+impl From<Column> for Value {
     fn from(col: Column) -> Self {
-        let datatype = Datatype::from(col.datatype);
-        tonbo::record::Column::new(datatype, col.name, col.value, col.nullable)
+        let datatype = TonboDataType::from(col.datatype);
+        Value::new(datatype, col.name, col.value, col.nullable)
     }
 }
