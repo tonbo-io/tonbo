@@ -1,0 +1,40 @@
+[package]
+name = "tonbo-js"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[workspace]
+
+[dependencies]
+
+fusio = { version = "0.3.5", package = "fusio", features = [
+  "aws",
+  "opfs",
+] }
+fusio-dispatch = { version = "0.3.5", package = "fusio-dispatch", features = [
+  "aws",
+  "opfs",
+] }
+futures = { version = "0.3" }
+js-sys = { version = "0.3.72" }
+tonbo = { version = "0.2.0", path = "../../", default-features = false, features = [
+  "bytes",
+  "wasm",
+] }
+
+wasm-bindgen = "0.2.95"
+wasm-bindgen-futures = { version = "0.4.45" }
+wasm-streams = "0.4.2"
+
+[dev-dependencies]
+wasm-bindgen = "0.2.95"
+wasm-bindgen-futures = { version = "0.4.45" }
+wasm-bindgen-test = "0.3.9"
+web-sys = { version = "0.3", features = ["console"] }
+wasm-streams = "0.4.2"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
