@@ -16,8 +16,7 @@ use crate::{
     compaction::CompactTask,
     record::{Key, KeyRef, Schema as RecordSchema},
     snapshot::Snapshot,
-    stream,
-    stream::mem_projection::MemProjectionStream,
+    stream::{self, mem_projection::MemProjectionStream},
     timestamp::{Timestamp, Timestamped},
     wal::log::LogType,
     DbError, DbStorage, LockMap, Projection, Record, Scan,
@@ -261,7 +260,6 @@ mod tests {
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
-        version::TransactionTs,
         DbOption, Projection, DB,
     };
 
@@ -342,7 +340,7 @@ mod tests {
         .unwrap();
 
         {
-            let _ = db.version_set.increase_ts();
+            let _ = db.ctx.increase_ts();
         }
         let name = "erika".to_string();
         {
@@ -512,7 +510,7 @@ mod tests {
 
         {
             // to increase timestamps to 1 because the data ts built in advance is 1
-            db.version_set.increase_ts();
+            db.ctx.increase_ts();
         }
         let mut txn = db.transaction().await;
         txn.insert(Test {
@@ -608,7 +606,7 @@ mod tests {
         .unwrap();
         {
             // to increase timestamps to 1 because the data ts built in advance is 1
-            db.version_set.increase_ts();
+            db.ctx.increase_ts();
         }
 
         // skip timestamp
