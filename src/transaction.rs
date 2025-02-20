@@ -9,12 +9,16 @@ use std::{
 
 use flume::SendError;
 use lockable::AsyncLimit;
-use parquet::{arrow::ProjectionMask, errors::ParquetError};
+use parquet::{
+    arrow::{ArrowSchemaConverter, ProjectionMask},
+    errors::ParquetError,
+};
 use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
-    record::{Key, KeyRef, Schema as RecordSchema},
+    magic::USER_COLUMN_OFFSET,
+    record::{Key, KeyRef, RecordRef, Schema as RecordSchema},
     snapshot::Snapshot,
     stream::{self, mem_projection::MemProjectionStream},
     timestamp::{Timestamp, Timestamped},
@@ -76,7 +80,28 @@ where
         projection: Projection,
     ) -> Result<Option<TransactionEntry<'get, R>>, DbError<R>> {
         Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
-            Some(v) => Some(TransactionEntry::Local(v.as_record_ref())),
+            Some(v) => {
+                let mut record_ref = v.as_record_ref();
+                if let Projection::Parts(mut projection) = projection {
+                    let schema = self.snapshot.schema().record_schema.as_ref();
+                    for p in &mut projection {
+                        *p += USER_COLUMN_OFFSET;
+                    }
+                    let primary_key_index = schema.primary_key_index();
+                    let mut fixed_projection = vec![0, 1, primary_key_index];
+                    fixed_projection.append(&mut projection);
+                    fixed_projection.dedup();
+
+                    let mask = ProjectionMask::roots(
+                        &ArrowSchemaConverter::new()
+                            .convert(schema.arrow_schema())
+                            .unwrap(),
+                        fixed_projection.clone(),
+                    );
+                    record_ref.projection(&mask);
+                }
+                Some(TransactionEntry::Local(record_ref))
+            }
             None => self
                 .snapshot
                 .get(key, projection)
@@ -457,6 +482,17 @@ mod tests {
         assert_eq!(entry.get().vstring, 0.to_string());
         assert_eq!(entry.get().vu32, Some(0));
         assert_eq!(entry.get().vbool, Some(true));
+        drop(entry);
+
+        let entry = txn1
+            .get(&key, Projection::Parts(vec![0, 1]))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(entry.get().vstring, 0.to_string());
+        assert_eq!(entry.get().vu32, Some(0));
+        assert_eq!(entry.get().vbool, None);
         drop(entry);
 
         txn1.commit().await.unwrap();
