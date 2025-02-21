@@ -1,3 +1,3 @@
-# Integrate with Datafusio
+# Integrate with Datafusion
 
 TODO
