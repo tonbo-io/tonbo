@@ -93,7 +93,7 @@ async fn main() {
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 .await
                 // tonbo supports pushing down projection
-                .projection(vec![1])
+                .projection(&["email"])
                 .take()
                 .await
                 .unwrap();

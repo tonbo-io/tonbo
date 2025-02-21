@@ -523,7 +523,7 @@ mod tests {
 
         let mut stream = txn
             .scan((Bound::Unbounded, Bound::Unbounded))
-            .projection(vec![1])
+            .projection(&["vu32"])
             .take()
             .await
             .unwrap();
@@ -623,7 +623,7 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -640,7 +640,7 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Included(&lower), Bound::Excluded(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -654,7 +654,7 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Excluded(&lower), Bound::Included(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -667,7 +667,7 @@ mod tests {
             {
                 let mut stream = txn2
                     .scan((Bound::Excluded(&lower), Bound::Excluded(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -684,7 +684,7 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -700,7 +700,7 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Included(&lower), Bound::Excluded(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -713,7 +713,7 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Excluded(&lower), Bound::Included(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -726,7 +726,7 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Excluded(&lower), Bound::Excluded(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -736,7 +736,7 @@ mod tests {
             {
                 let mut stream = txn3
                     .scan((Bound::Unbounded, Bound::Excluded(&upper)))
-                    .projection(vec![1])
+                    .projection(&["vu32"])
                     .take()
                     .await
                     .unwrap();
@@ -876,7 +876,7 @@ mod tests {
         {
             let mut scan = txn
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(vec![0, 1, 2])
+                .projection(&["id", "age", "height"])
                 .take()
                 .await
                 .unwrap();

@@ -66,7 +66,7 @@ async fn main() {
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 // tonbo supports pushing down projection
-                .projection(vec![1, 3])
+                .projection(&["email", "bytes"])
                 // push down limitation
                 .limit(1)
                 .take()

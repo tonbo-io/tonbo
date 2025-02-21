@@ -211,7 +211,7 @@ impl ExecutionPlan for MusicExec {
                     scan = scan.limit(limit);
                 }
                 if let Some(projection) = projection {
-                    scan = scan.projection(projection.clone());
+                    scan = scan.projection_with_index(projection.clone());
                 }
                 let mut scan = scan.package(8192).await.map_err(|err| DataFusionError::Internal(err.to_string()))?;
 
