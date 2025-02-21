@@ -3,8 +3,6 @@ name: Doc CI
 on:
   push:
     branches: main
-  pull_request:
-    branches: main
     paths:
       - "guide/**"
 jobs:
@@ -12,8 +10,8 @@ jobs:
     name: Build, Test and Deploy
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # To push a branch
-      pull-requests: write  # To create a PR from that branch
+      contents: write # To push a branch
+      pull-requests: write # To create a PR from that branch
     steps:
       - name: Checkout️
         uses: actions/checkout@v4
