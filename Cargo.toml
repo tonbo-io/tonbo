@@ -84,8 +84,8 @@ crossbeam-skiplist = "0.1"
 datafusion = { version = "45", optional = true }
 flume = { version = "0.11", features = ["async"] }
 fusio = { version = "0.3.6", package = "fusio", features = ["dyn", "fs"] }
-fusio-dispatch = { version = "0.3.5", package = "fusio-dispatch" }
-fusio-log = { version = "0.3.5", package = "fusio-log", default-features = false, features = [
+fusio-dispatch = { version = "0.3.6", package = "fusio-dispatch" }
+fusio-log = { version = "0.3.6", package = "fusio-log", default-features = false, features = [
     "bytes",
 ] }
 fusio-parquet = { version = "0.3.6", package = "fusio-parquet" }
