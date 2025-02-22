@@ -101,7 +101,7 @@ parquet = { version = "54", default-features = false, features = [
     "lz4",
     "snap",
 ] }
-parquet-lru = { version = "0.2.0", path = "parquet-lru" }
+parquet-lru = { version = "0.3.0", path = "parquet-lru" }
 pin-project-lite = "0.2"
 thiserror = "2.0.3"
 tokio = { version = "1", features = ["io-util"], default-features = false }
