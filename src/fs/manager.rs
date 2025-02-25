@@ -1,10 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
-use fusio::{dynamic::DynFs, path::Path, Error};
+use fusio::{disk::LocalFs, dynamic::DynFs, path::Path, Error};
 use fusio_dispatch::FsOptions;
 
 pub struct StoreManager {
     base_fs: Arc<dyn DynFs>,
+    local_fs: Arc<dyn DynFs>,
     fs_map: HashMap<Path, Arc<dyn DynFs>>,
 }
 
@@ -20,11 +21,19 @@ impl StoreManager {
         }
         let base_fs = base_options.parse()?;
 
-        Ok(StoreManager { base_fs, fs_map })
+        Ok(StoreManager {
+            base_fs,
+            fs_map,
+            local_fs: Arc::new(LocalFs {}),
+        })
     }
 
     pub fn base_fs(&self) -> &Arc<dyn DynFs> {
         &self.base_fs
+    }
+
+    pub fn local_fs(&self) -> &Arc<dyn DynFs> {
+        &self.local_fs
     }
 
     pub fn get_fs(&self, path: &Path) -> &Arc<dyn DynFs> {

@@ -232,6 +232,16 @@ where
         )?);
         {
             manager
+                .local_fs()
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+            manager
+                .local_fs()
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+            manager
                 .base_fs()
                 .create_dir_all(&option.wal_dir_path())
                 .await

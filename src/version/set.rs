@@ -190,7 +190,7 @@ where
         let edit_len = new_version.log_length + version_edits.len() as u32;
 
         let mut log =
-            Self::open_version_log(&self.option, self.manager.base_fs().clone(), *log_id).await?;
+            Self::open_version_log(&self.option, self.manager.local_fs().clone(), *log_id).await?;
 
         if !is_recover {
             version_edits.push(VersionEdit::NewLogLength { len: edit_len });
@@ -264,20 +264,57 @@ where
                 .map_err(VersionError::Send)?;
         }
         log.close().await?;
-        if edit_len >= option.version_log_snapshot_threshold {
-            let fs = self.manager.base_fs();
-            let old_log_id = mem::replace(log_id, generate_file_id());
-            let mut log = Self::open_version_log(option, fs.clone(), *log_id).await?;
-            // let _old_log = mem::replace(log, new_log);
 
-            new_version.log_length = 0;
-            log.write_batch(new_version.to_edits().iter())
-                .await
-                .map_err(VersionError::Logger)?;
-            log.close().await?;
-            fs.remove(&option.version_log_path(old_log_id)).await?;
-        }
         guard.current = Arc::new(new_version);
+
+        drop(guard);
+        if edit_len >= option.version_log_snapshot_threshold {
+            self.rewrite().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn rewrite(&self) -> Result<(), VersionError<R>> {
+        let mut guard = self.inner.write().await;
+        let mut new_version = Version::clone(&guard.current);
+        let fs = self.manager.local_fs();
+        let log_id = &mut guard.log_id;
+        let old_log_id = mem::replace(log_id, generate_file_id());
+
+        new_version.log_length = 0;
+        let edits = new_version.to_edits();
+        let mut log = Self::open_version_log(&self.option, fs.clone(), *log_id).await?;
+        log.write_batch(edits.iter())
+            .await
+            .map_err(VersionError::Logger)?;
+        log.close().await?;
+
+        fs.remove(&self.option.version_log_path(old_log_id)).await?;
+        self.sync(*log_id, old_log_id, edits.iter()).await?;
+
+        guard.current = Arc::new(new_version);
+
+        Ok(())
+    }
+
+    async fn sync<'r>(
+        &self,
+        log_id: FileId,
+        old_log_id: FileId,
+        edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
+    ) -> Result<(), VersionError<R>> {
+        if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
+            // push local manifest to base file system
+            let base_fs = self.manager.base_fs();
+            let mut log = Self::open_version_log(&self.option, base_fs.clone(), log_id).await?;
+
+            log.write_batch(edits).await?;
+            log.close().await?;
+            base_fs
+                .remove(&self.option.version_log_path(old_log_id))
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -287,6 +324,7 @@ where
         gen: FileId,
     ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
         Options::new(option.version_log_path(gen))
+            .truncate(true)
             .build_with_fs(fs)
             .await
             .map_err(VersionError::Logger)
@@ -414,10 +452,9 @@ pub(crate) mod tests {
         assert_eq!(version_set.load_ts(), 20_u32.into());
     }
 
-    #[tokio::test]
-    async fn version_log_snap_shot() {
+    async fn version_log_snap_shot(base_option: FsOptions) {
         let temp_dir = TempDir::new().unwrap();
-        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+        let manager = Arc::new(StoreManager::new(base_option, vec![]).unwrap());
         let (sender, _) = bounded(1);
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -426,6 +463,11 @@ pub(crate) mod tests {
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
+        manager
+            .local_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
         manager
             .base_fs()
             .create_dir_all(&option.version_log_dir_path())
@@ -537,6 +579,42 @@ pub(crate) mod tests {
                 VersionEdit::NewLogLength { len: 0 }
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_version_log_snap_shot() {
+        version_log_snap_shot(FsOptions::Local).await;
+    }
+
+    #[ignore = "s3"]
+    #[tokio::test]
+    async fn test_s3_version_log_snap_shot() {
+        use fusio::remotes::aws::AwsCredential;
+
+        if option_env!("AWS_ACCESS_KEY_ID").is_none()
+            || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
+        {
+            eprintln!("can not get `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`");
+            return;
+        }
+        let key_id = std::option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
+        let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
+            .unwrap()
+            .to_string();
+
+        let fs_option = FsOptions::S3 {
+            bucket: "fusio-test".to_string(),
+            credential: Some(AwsCredential {
+                key_id,
+                secret_key,
+                token: None,
+            }),
+            endpoint: None,
+            sign_payload: None,
+            checksum: None,
+            region: Some("ap-southeast-1".to_string()),
+        };
+        version_log_snap_shot(fs_option).await;
     }
 
     #[tokio::test]
