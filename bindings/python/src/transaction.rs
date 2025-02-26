@@ -198,7 +198,7 @@ impl Transaction {
             if let Some(limit) = limit {
                 scan = scan.limit(limit);
             }
-            scan = scan.projection(projection);
+            scan = scan.projection_with_index(projection);
             let stream = scan.take().await.map_err(DbError::from)?;
 
             let stream = ScanStream::new(stream);
