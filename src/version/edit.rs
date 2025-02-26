@@ -16,7 +16,7 @@ pub(crate) enum VersionEdit<K> {
 
 impl<K> VersionEdit<K>
 where
-    K: Decode,
+    K: Decode + Send,
 {
     pub(crate) async fn recover(path: Path) -> Vec<VersionEdit<K>> {
         let mut edits = vec![];
@@ -85,7 +85,7 @@ where
 
 impl<K> Decode for VersionEdit<K>
 where
-    K: Decode,
+    K: Decode + Send,
 {
     type Error = <K as Decode>::Error;
 

@@ -115,7 +115,7 @@ where
 
 impl<K> Decode for Scope<K>
 where
-    K: Decode,
+    K: Decode + Send,
 {
     type Error = <K as Decode>::Error;
 
