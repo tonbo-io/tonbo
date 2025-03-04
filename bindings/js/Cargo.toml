@@ -17,7 +17,7 @@ fusio-dispatch = { version = "0.3.7", package = "fusio-dispatch", features = [
 ] }
 futures = { version = "0.3" }
 js-sys = { version = "0.3.72" }
-tonbo = { version = "0.3.0", path = "../../", default-features = false, features = [
+tonbo = { version = "0.3.1", path = "../../", default-features = false, features = [
   "bytes",
   "wasm",
 ] }
