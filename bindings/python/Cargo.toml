@@ -9,8 +9,8 @@ crate-type = ["cdylib"]
 [workspace]
 
 [dependencies]
-fusio = { version = "0.3.5", package = "fusio", features = ["aws", "tokio"] }
-fusio-dispatch = { version = "0.3.5", package = "fusio-dispatch", features = [
+fusio = { version = "0.3.7", package = "fusio", features = ["aws", "tokio"] }
+fusio-dispatch = { version = "0.3.7", package = "fusio-dispatch", features = [
     "aws",
     "tokio",
 ] }
@@ -24,4 +24,4 @@ pyo3-asyncio = { package = "pyo3-asyncio-0-21", version = "0.21", features = [
     "tokio-runtime",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
-tonbo = { version = "0.3.0", path = "../../" }
+tonbo = { version = "0.3.1", path = "../../" }

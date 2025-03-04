@@ -8,7 +8,7 @@ license = "Apache-2.0"
 name = "tonbo"
 readme = "README.md"
 resolver = "2"
-version = "0.3.0"
+version = "0.3.1"
 
 [package.metadata]
 msrv = "1.79.0"
@@ -83,12 +83,12 @@ crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "45", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { git = "https://github.com/tonbo-io/fusio", rev = "e5656ad97ead36cc5a32f6536ebe0a020232c621", version = "0.3.6", package = "fusio", features = ["dyn", "fs"] }
-fusio-dispatch = {  git = "https://github.com/tonbo-io/fusio", rev = "e5656ad97ead36cc5a32f6536ebe0a020232c621", version = "0.3.6", package = "fusio-dispatch" }
-fusio-log = {  git = "https://github.com/tonbo-io/fusio", rev = "e5656ad97ead36cc5a32f6536ebe0a020232c621", version = "0.3.6", package = "fusio-log", default-features = false, features = [
+fusio = { version = "0.3.6", package = "fusio", features = ["dyn", "fs"] }
+fusio-dispatch = { version = "0.3.6", package = "fusio-dispatch" }
+fusio-log = { version = "0.3.6", package = "fusio-log", default-features = false, features = [
     "bytes",
 ] }
-fusio-parquet = { git = "https://github.com/tonbo-io/fusio", rev = "e5656ad97ead36cc5a32f6536ebe0a020232c621", version = "0.3.6", package = "fusio-parquet" }
+fusio-parquet = { version = "0.3.7", package = "fusio-parquet" }
 futures-core = "0.3"
 futures-util = "0.3"
 lockable = "0.1.1"
@@ -105,7 +105,7 @@ parquet-lru = { version = "0.3.0", path = "parquet-lru" }
 pin-project-lite = "0.2"
 thiserror = "2.0.3"
 tokio = { version = "1", features = ["io-util"], default-features = false }
-tonbo_macros = { version = "0.3.0", path = "tonbo_macros" }
+tonbo_macros = { version = "0.3.1", path = "tonbo_macros" }
 tracing = "0.1"
 ulid = { version = "1", features = ["serde"] }
 

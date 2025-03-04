@@ -10,14 +10,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 
-fusio = { version = "0.3.5", package = "fusio", features = ["aws", "opfs"] }
-fusio-dispatch = { version = "0.3.5", package = "fusio-dispatch", features = [
+fusio = { version = "0.3.7", package = "fusio", features = ["aws", "opfs"] }
+fusio-dispatch = { version = "0.3.7", package = "fusio-dispatch", features = [
   "aws",
   "opfs",
 ] }
 futures = { version = "0.3" }
 js-sys = { version = "0.3.72" }
-tonbo = { version = "0.3.0", path = "../../", default-features = false, features = [
+tonbo = { version = "0.3.1", path = "../../", default-features = false, features = [
   "bytes",
   "wasm",
 ] }
