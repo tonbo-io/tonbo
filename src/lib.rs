@@ -140,7 +140,7 @@ use async_lock::RwLock;
 use async_stream::stream;
 use flume::{bounded, Sender};
 use fs::FileId;
-use fusio_log::Decode;
+pub use fusio_log::{Decode, Encode};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::Mutable};
