@@ -4,13 +4,12 @@ use async_lock::RwLockReadGuard;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    fs::manager::StoreManager,
+    context::Context,
     record::{Record, Schema as RecordSchema},
-    stream,
-    stream::ScanStream,
+    stream::{self, ScanStream},
     timestamp::Timestamp,
     version::{TransactionTs, VersionRef},
-    DbError, DbStorage, ParquetLru, Projection, Scan,
+    DbError, DbStorage, Projection, Scan,
 };
 
 pub struct Snapshot<'s, R>
@@ -20,8 +19,7 @@ where
     ts: Timestamp,
     share: RwLockReadGuard<'s, DbStorage<R>>,
     version: VersionRef<R>,
-    manager: Arc<StoreManager>,
-    parquet_lru: ParquetLru,
+    ctx: Arc<Context<R>>,
 }
 
 impl<'s, R> Snapshot<'s, R>
@@ -35,14 +33,7 @@ where
     ) -> Result<Option<stream::Entry<'get, R>>, DbError<R>> {
         Ok(self
             .share
-            .get(
-                &self.version,
-                &self.manager,
-                key,
-                self.ts,
-                projection,
-                self.parquet_lru.clone(),
-            )
+            .get(&self.ctx, &self.version, key, self.ts, projection)
             .await?
             .and_then(|entry| {
                 if entry.value().is_none() {
@@ -62,27 +53,24 @@ where
     ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
-            &self.manager,
             range,
             self.ts,
             &self.version,
             Box::new(move |_: Option<ProjectionMask>| None),
-            self.parquet_lru.clone(),
+            self.ctx.clone(),
         )
     }
 
     pub(crate) fn new(
         share: RwLockReadGuard<'s, DbStorage<R>>,
         version: VersionRef<R>,
-        manager: Arc<StoreManager>,
-        parquet_lru: ParquetLru,
+        ctx: Arc<Context<R>>,
     ) -> Self {
         Self {
             ts: version.load_ts(),
             share,
             version,
-            manager,
-            parquet_lru,
+            ctx,
         }
     }
 
@@ -110,12 +98,11 @@ where
     ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
-            &self.manager,
             range,
             self.ts,
             &self.version,
             fn_pre_stream,
-            self.parquet_lru.clone(),
+            self.ctx.clone(),
         )
     }
 }
@@ -135,7 +122,6 @@ mod tests {
         fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema,
         tests::{build_db, build_schema},
-        version::TransactionTs,
         DbOption,
     };
 
@@ -177,7 +163,7 @@ mod tests {
 
         {
             // to increase timestamps to 1 because the data ts built in advance is 1
-            db.version_set.increase_ts();
+            db.ctx.increase_ts();
         }
         let snapshot = db.snapshot().await;
 
