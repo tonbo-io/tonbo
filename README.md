@@ -126,20 +126,20 @@ async fn main() {
       - [x] [Customizable async runtime and file system](https://github.com/from-the-basement/tonbo/blob/main/src/executor.rs#L5).
       - [x] [Tokio and Tokio fs](https://github.com/tokio-rs/tokio).
       - [ ] [Async-std](https://github.com/async-rs/async-std).
-    - [ ] Python library (via [PyO3](https://github.com/PyO3/pyo3) & [pydantic](https://github.com/pydantic/pydantic)):
-      - [ ] asyncio (via [pyo3-asyncio](https://github.com/awestlake87/pyo3-asyncio)).
-    - [ ] JavaScript library:
-      - [ ] WASM and OPFS.
+    - [x] Python library (via [PyO3](https://github.com/PyO3/pyo3) & [pydantic](https://github.com/pydantic/pydantic)):
+      - [x] asyncio (via [pyo3-asyncio](https://github.com/awestlake87/pyo3-asyncio)).
+    - [x] JavaScript library:
+      - [x] WASM and OPFS.
     - [ ] Dynamic library with a C interface.
   - [x] Most lightweight implementation to Arrow / Parquet LSM Trees:
     - [x] Define schema using just Arrow schema and store data in Parquet files.
     - [x] (Optimistic) Transactions.
     - [x] Leveled compaction strategy.
     - [x] Push down filter, limit and projection.
-- [ ] Runtime schema definition (*in next release*).
+- [x] Runtime schema definition.
 - [ ] SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
 - [ ] Fusion storage across RAM, flash, SSD, and remote Object Storage Service (OSS) for each column-family, balancing performance and cost efficiency per data block:
-  - [ ] Remote storage (via [Arrow object_store](https://github.com/apache/arrow-rs/tree/master/object_store) or [Apache OpenDAL](https://github.com/apache/opendal)).
+  - [x] Remote storage (via [Arrow object_store](https://github.com/apache/arrow-rs/tree/master/object_store) or [Apache OpenDAL](https://github.com/apache/opendal)).
   - [ ] Distributed query and compaction.
 - [ ] Blob storage (like [BlobDB in RocksDB](https://github.com/facebook/rocksdb/wiki/BlobDB)).
 
