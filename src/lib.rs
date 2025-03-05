@@ -1485,6 +1485,92 @@ pub(crate) mod tests {
         assert!(!version.level_slice[0].is_empty());
     }
 
+    #[ignore = "s3"]
+    #[tokio::test]
+    async fn test_recover_from_s3() {
+        let temp_dir = TempDir::new().unwrap();
+
+        if option_env!("AWS_ACCESS_KEY_ID").is_none()
+            || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
+        {
+            eprintln!("can not get `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`");
+            return;
+        }
+        let key_id = std::option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
+        let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
+            .unwrap()
+            .to_string();
+
+        let s3_option = FsOptions::S3 {
+            bucket: "fusio-test".to_string(),
+            credential: Some(fusio::remotes::aws::AwsCredential {
+                key_id,
+                secret_key,
+                token: None,
+            }),
+            endpoint: None,
+            region: Some("ap-southeast-1".to_string()),
+            sign_payload: None,
+            checksum: None,
+        };
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema {},
+        )
+        .base_fs(s3_option.clone());
+        {
+            let db = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                .await
+                .unwrap();
+
+            for item in &test_items()[0..10] {
+                db.insert(item.clone()).await.unwrap();
+            }
+            // flush to s3
+            db.flush().await.unwrap();
+            drop(db);
+        }
+        {
+            // remove files in local disk
+            let wal_path = option.wal_dir_path().to_string();
+            let path = std::path::Path::new(wal_path.as_str());
+            if path.exists() {
+                std::fs::remove_dir_all(path).unwrap();
+            }
+            let version_path = option.version_log_dir_path().to_string();
+            let path = std::path::Path::new(version_path.as_str());
+            if path.exists() {
+                std::fs::remove_dir_all(path).unwrap();
+            }
+        }
+        // test recover from s3
+        {
+            let db: DB<Test, TokioExecutor> =
+                DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                    .await
+                    .unwrap();
+            let mut sort_items = BTreeMap::new();
+            for item in test_items()[0..10].iter() {
+                sort_items.insert(item.vstring.clone(), item.clone());
+            }
+            let tx = db.transaction().await;
+            let mut scan = tx
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(vec![0, 1, 2])
+                .take()
+                .await
+                .unwrap();
+
+            while let Some(actual) = scan.next().await.transpose().unwrap() {
+                let (expected_key, expected) = sort_items.pop_first().unwrap();
+                assert_eq!(actual.key().value, expected_key);
+                assert_eq!(actual.value().as_ref().unwrap().vstring, expected.vstring);
+                assert_eq!(actual.value().as_ref().unwrap().vu32, Some(expected.vu32));
+                assert_eq!(actual.value().as_ref().unwrap().vbool, expected.vbool);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn schema_recover() {
         let temp_dir = TempDir::new().unwrap();

@@ -50,6 +50,8 @@ where
 {
     current: VersionRef<R>,
     log_id: FileId,
+    deleted_wal: Vec<FileId>,
+    deleted_sst: Vec<(FileId, usize)>,
 }
 
 pub(crate) struct VersionSet<R>
@@ -150,7 +152,7 @@ where
 
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
-        let set = VersionSet::<R> {
+        let mut set = VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(Version::<R> {
                     ts: Timestamp::from(0),
@@ -161,6 +163,8 @@ where
                     log_length: 0,
                 }),
                 log_id,
+                deleted_wal: Default::default(),
+                deleted_sst: Default::default(),
             })),
             clean_sender,
             timestamp,
@@ -177,7 +181,7 @@ where
     }
 
     pub(crate) async fn apply_edits(
-        &self,
+        &mut self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
@@ -202,15 +206,9 @@ where
         for version_edit in version_edits {
             match version_edit {
                 VersionEdit::Add { mut scope, level } => {
+                    // TODO: remove after apply
                     if let Some(wal_ids) = scope.wal_ids.take() {
-                        for wal_id in wal_ids {
-                            // may have been removed after multiple starts
-                            let _ = self
-                                .manager
-                                .base_fs()
-                                .remove(&option.wal_path(wal_id))
-                                .await;
-                        }
+                        guard.deleted_wal.extend(wal_ids);
                     }
                     if level == 0 {
                         new_version.level_slice[level as usize].push(scope);
@@ -232,14 +230,7 @@ where
                     }
                     if is_recover {
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
-                        new_version
-                            .clean_sender
-                            .send_async(CleanTag::RecoverClean {
-                                wal_id: gen,
-                                level: level as usize,
-                            })
-                            .await
-                            .map_err(VersionError::Send)?;
+                        guard.deleted_sst.push((gen, level as usize));
                     }
                 }
                 VersionEdit::LatestTimeStamp { ts } => {
@@ -254,14 +245,7 @@ where
             }
         }
         if let Some(delete_gens) = delete_gens {
-            new_version
-                .clean_sender
-                .send_async(CleanTag::Add {
-                    ts: new_version.ts,
-                    gens: delete_gens,
-                })
-                .await
-                .map_err(VersionError::Send)?;
+            guard.deleted_sst.extend(delete_gens);
         }
         log.close().await?;
 
@@ -270,6 +254,7 @@ where
         drop(guard);
         if edit_len >= option.version_log_snapshot_threshold {
             self.rewrite().await?;
+            self.clean().await?;
         }
         Ok(())
     }
@@ -294,6 +279,36 @@ where
 
         guard.current = Arc::new(new_version);
 
+        Ok(())
+    }
+
+    async fn clean(&self) -> Result<(), VersionError<R>> {
+        let mut guard = self.inner.write().await;
+        let version = Version::clone(&guard.current);
+        if !guard.deleted_wal.is_empty() {
+            for wal_id in guard.deleted_wal.iter() {
+                // may have been removed after multiple starts
+                let _ = self
+                    .manager
+                    .base_fs()
+                    .remove(&self.option.wal_path(*wal_id))
+                    .await;
+            }
+            guard.deleted_wal.clear();
+        }
+        if !guard.deleted_sst.is_empty() {
+            version
+                .clean_sender
+                .send_async(CleanTag::Add {
+                    ts: version.ts,
+                    gens: guard.deleted_sst.clone(),
+                })
+                .await
+                .map_err(VersionError::Send)?;
+            guard.deleted_sst.clear();
+        }
+
+        guard.current = Arc::new(version);
         Ok(())
     }
 
@@ -406,6 +421,8 @@ pub(crate) mod tests {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(version),
                 log_id,
+                deleted_wal: Default::default(),
+                deleted_sst: Default::default(),
             })),
             clean_sender,
             timestamp,
@@ -429,7 +446,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let mut version_set: VersionSet<String> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -474,7 +491,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let mut version_set: VersionSet<String> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -633,7 +650,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let mut version_set: VersionSet<String> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
