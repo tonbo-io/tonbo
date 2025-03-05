@@ -136,7 +136,7 @@ async fn main() {
     - [x] (Optimistic) Transactions.
     - [x] Leveled compaction strategy.
     - [x] Push down filter, limit and projection.
-- [x] Runtime schema definition (*in next release*).
+- [x] Runtime schema definition.
 - [ ] SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
 - [ ] Fusion storage across RAM, flash, SSD, and remote Object Storage Service (OSS) for each column-family, balancing performance and cost efficiency per data block:
   - [x] Remote storage (via [Arrow object_store](https://github.com/apache/arrow-rs/tree/master/object_store) or [Apache OpenDAL](https://github.com/apache/opendal)).
