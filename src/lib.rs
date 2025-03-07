@@ -95,7 +95,7 @@
 //!             let mut scan = txn
 //!                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
 //!                 // tonbo supports pushing down projection
-//!                 .projection(vec![1])
+//!                 .projection(&["email"])
 //!                 .take()
 //!                 .await
 //!                 .unwrap();
@@ -740,7 +740,35 @@ where
     }
 
     /// fields in projection Record by field indices
-    pub fn projection(self, mut projection: Vec<usize>) -> Self {
+    pub fn projection(self, projection: &[&str]) -> Self {
+        let schema = self.schema.record_schema.arrow_schema();
+        let mut projection = projection
+            .iter()
+            .map(|name| {
+                schema
+                    .index_of(name)
+                    .unwrap_or_else(|_| panic!("unexpected field {}", name))
+            })
+            .collect::<Vec<usize>>();
+        let primary_key_index = self.schema.record_schema.primary_key_index();
+        let mut fixed_projection = vec![0, 1, primary_key_index];
+        fixed_projection.append(&mut projection);
+        fixed_projection.dedup();
+
+        let mask = ProjectionMask::roots(
+            &ArrowSchemaConverter::new().convert(schema).unwrap(),
+            fixed_projection.clone(),
+        );
+
+        Self {
+            projection: mask,
+            projection_indices: Some(fixed_projection),
+            ..self
+        }
+    }
+
+    /// fields in projection Record by field indices
+    pub fn projection_with_index(self, mut projection: Vec<usize>) -> Self {
         // skip two columns: _null and _ts
         for p in &mut projection {
             *p += USER_COLUMN_OFFSET;
@@ -1583,7 +1611,7 @@ pub(crate) mod tests {
             let tx = db.transaction().await;
             let mut scan = tx
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(vec![0, 1, 2])
+                .projection(&["id", "age", "height"])
                 .take()
                 .await
                 .unwrap();
@@ -1772,7 +1800,7 @@ pub(crate) mod tests {
             let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 2, 7])
+                .projection(&["id", "height", "bytes"])
                 .take()
                 .await
                 .unwrap();
@@ -1974,7 +2002,7 @@ pub(crate) mod tests {
             let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(43_i64), false);
             let mut scan = tx1
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 1])
+                .projection(&["id", "age"])
                 .take()
                 .await
                 .unwrap();
@@ -2001,7 +2029,7 @@ pub(crate) mod tests {
             let tx2 = db2.transaction().await;
             let mut scan = tx2
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 1])
+                .projection(&["id", "age"])
                 .take()
                 .await
                 .unwrap();
@@ -2028,7 +2056,7 @@ pub(crate) mod tests {
             let tx3 = db3.transaction().await;
             let mut scan = tx3
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 1])
+                .projection(&["id", "age"])
                 .take()
                 .await
                 .unwrap();

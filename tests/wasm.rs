@@ -173,7 +173,7 @@ mod tests {
             let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(47_i64), false);
             let mut scan = txn
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(vec![0, 2, 4])
+                .projection(&["id", "name", "bytes"])
                 .take()
                 .await
                 .unwrap();
@@ -258,7 +258,7 @@ mod tests {
             let tx = db.transaction().await;
             let mut scan = tx
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(vec![0, 1, 2])
+                .projection(&["id", "age", "name"])
                 .take()
                 .await
                 .unwrap();
@@ -340,7 +340,7 @@ mod tests {
 
             let mut scan = tx
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(vec![0, 1, 2])
+                .projection(&["id", "age", "name"])
                 .take()
                 .await
                 .unwrap();
