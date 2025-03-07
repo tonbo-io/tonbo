@@ -18,6 +18,7 @@ use thiserror::Error;
 use tracing::error;
 
 use crate::{
+    context::Context,
     fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
     record::{Record, Schema},
@@ -217,7 +218,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn streams<'streams>(
         &self,
-        manager: &StoreManager,
+        ctx: &Context<R>,
         streams: &mut Vec<ScanStream<'streams, R>>,
         range: (
             Bound<&'streams <R::Schema as Schema>::Key>,
@@ -226,13 +227,12 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-        parquet_lru: ParquetLru,
     ) -> Result<(), VersionError<R>> {
         let level_0_path = self
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
-        let level_0_fs = manager.get_fs(level_0_path);
+        let level_0_fs = ctx.manager.get_fs(level_0_path);
         for scope in self.level_slice[0].iter() {
             if !scope.meets_range(range) {
                 continue;
@@ -244,7 +244,7 @@ where
                 )
                 .await
                 .map_err(VersionError::Fusio)?;
-            let table = SsTable::open(parquet_lru.clone(), scope.gen, file).await?;
+            let table = SsTable::open(ctx.parquet_lru.clone(), scope.gen, file).await?;
 
             streams.push(ScanStream::SsTable {
                 inner: table
@@ -261,7 +261,7 @@ where
                 .option
                 .level_fs_path(i + 1)
                 .unwrap_or(&self.option.base_path);
-            let level_fs = manager.get_fs(level_path);
+            let level_fs = ctx.manager.get_fs(level_path);
 
             let (mut start, mut end) = (None, None);
 
@@ -289,7 +289,7 @@ where
                     limit,
                     projection_mask.clone(),
                     level_fs.clone(),
-                    parquet_lru.clone(),
+                    ctx.parquet_lru.clone(),
                 )
                 .unwrap(),
             });

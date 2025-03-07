@@ -117,6 +117,7 @@
 //! }
 //! ```
 mod compaction;
+mod context;
 pub mod executor;
 pub mod fs;
 pub mod inmem;
@@ -138,6 +139,7 @@ use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::p
 pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
+use context::Context;
 use flume::{bounded, Sender};
 use fs::FileId;
 pub use fusio::{SeqRead, Write};
@@ -161,6 +163,7 @@ use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
+use trigger::Trigger;
 use wal::log::Log;
 
 pub use crate::option::*;
@@ -174,7 +177,7 @@ use crate::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
         ScanStream,
     },
-    trigger::{Trigger, TriggerFactory},
+    trigger::TriggerFactory,
     version::{cleaner::Cleaner, set::VersionSet, TransactionTs, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
 };
@@ -185,10 +188,8 @@ where
     E: Executor,
 {
     schema: Arc<RwLock<DbStorage<R>>>,
-    version_set: VersionSet<R>,
+    ctx: Arc<Context<R>>,
     lock_map: LockMap<<R::Schema as Schema>::Key>,
-    manager: Arc<StoreManager>,
-    parquet_lru: ParquetLru,
     _p: PhantomData<E>,
 }
 
@@ -258,13 +259,14 @@ where
             )
             .await?,
         ));
-        let mut compactor = Compactor::<R>::new(
-            schema.clone(),
-            record_schema,
-            option.clone(),
-            version_set.clone(),
-            manager.clone(),
-        );
+        let ctx = Arc::new(Context::new(
+            manager,
+            lru_cache.clone(),
+            version_set,
+            record_schema.arrow_schema().clone(),
+        ));
+        let mut compactor =
+            Compactor::<R>::new(schema.clone(), record_schema, option.clone(), ctx.clone());
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -272,19 +274,12 @@ where
             }
         });
 
-        let compact_task_cache = lru_cache.clone();
         executor.spawn(async move {
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => {
-                        compactor
-                            .check_then_compaction(compact_task_cache.clone(), false)
-                            .await
-                    }
+                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
                     CompactTask::Flush(option_tx) => {
-                        let mut result = compactor
-                            .check_then_compaction(compact_task_cache.clone(), true)
-                            .await;
+                        let mut result = compactor.check_then_compaction(true).await;
                         if let Some(tx) = option_tx {
                             if result.is_ok() {
                                 result = tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -300,10 +295,8 @@ where
 
         Ok(Self {
             schema,
-            version_set,
             lock_map: Arc::new(Default::default()),
-            manager,
-            parquet_lru: lru_cache,
+            ctx,
             _p: Default::default(),
         })
     }
@@ -316,15 +309,14 @@ where
     pub async fn snapshot(&self) -> Snapshot<'_, R> {
         Snapshot::new(
             self.schema.read().await,
-            self.version_set.current().await,
-            self.manager.clone(),
-            self.parquet_lru.clone(),
+            self.ctx.version_set().current().await,
+            self.ctx.clone(),
         )
     }
 
     /// insert a single tonbo record
     pub async fn insert(&self, record: R) -> Result<(), CommitError<R>> {
-        Ok(self.write(record, self.version_set.increase_ts()).await?)
+        Ok(self.write(record, self.ctx.increase_ts()).await?)
     }
 
     /// insert a sequence of data as a single batch
@@ -332,9 +324,7 @@ where
         &self,
         records: impl ExactSizeIterator<Item = R>,
     ) -> Result<(), CommitError<R>> {
-        Ok(self
-            .write_batch(records, self.version_set.increase_ts())
-            .await?)
+        Ok(self.write_batch(records, self.ctx.increase_ts()).await?)
     }
 
     /// delete the record with the primary key as the `key`
@@ -343,7 +333,7 @@ where
             .schema
             .read()
             .await
-            .remove(LogType::Full, key, self.version_set.increase_ts())
+            .remove(LogType::Full, key, self.ctx.increase_ts())
             .await?)
     }
 
@@ -370,12 +360,11 @@ where
             .read()
             .await
             .get(
-                &*self.version_set.current().await,
-                &self.manager,
+                &self.ctx,
+                &*self.ctx.version_set.current().await,
                 key,
-                self.version_set.load_ts(),
+                self.ctx.load_ts(),
                 Projection::All,
-                self.parquet_lru.clone(),
             )
             .await?
             .and_then(|entry| {
@@ -398,15 +387,14 @@ where
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
-            let current = self.version_set.current().await;
+            let current = self.ctx.version_set.current().await;
             let mut scan = Scan::new(
                 &schema,
-                &self.manager,
                 range,
-                self.version_set.load_ts(),
+                self.ctx.load_ts(),
                 &*current,
                 Box::new(|_| None),
-                self.parquet_lru.clone(),
+                self.ctx.clone(),
             ).take().await?;
 
             while let Some(record) = scan.next().await {
@@ -461,8 +449,10 @@ where
     }
 
     pub async fn destroy(self) -> Result<(), DbError<R>> {
-        self.schema.write().await.destroy(&self.manager).await?;
-        self.version_set.destroy().await?;
+        self.schema.write().await.destroy(&self.ctx.manager).await?;
+        if let Some(ctx) = Arc::into_inner(self.ctx) {
+            ctx.version_set.destroy().await?;
+        }
 
         Ok(())
     }
@@ -610,12 +600,11 @@ where
 
     async fn get<'get>(
         &'get self,
+        ctx: &Context<R>,
         version: &'get Version<R>,
-        manager: &StoreManager,
         key: &'get <R::Schema as Schema>::Key,
         ts: Timestamp,
         projection: Projection,
-        parquet_lru: ParquetLru,
     ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
         let primary_key_index = self.record_schema.primary_key_index();
 
@@ -630,7 +619,7 @@ where
 
                 ProjectionMask::roots(
                     &ArrowSchemaConverter::new()
-                        .convert(self.record_schema.arrow_schema())
+                        .convert(ctx.arrow_schema())
                         .unwrap(),
                     fixed_projection,
                 )
@@ -652,10 +641,10 @@ where
 
         Ok(version
             .query(
-                manager,
+                ctx.storage_manager(),
                 TimestampedRef::new(key, ts),
                 projection,
-                parquet_lru,
+                ctx.cache().clone(),
             )
             .await?
             .map(|entry| Entry::RecordBatch(entry)))
@@ -697,7 +686,6 @@ where
     'range: 'scan,
 {
     schema: &'scan DbStorage<R>,
-    manager: &'scan StoreManager,
     lower: Bound<&'range <R::Schema as Schema>::Key>,
     upper: Bound<&'range <R::Schema as Schema>::Key>,
     ts: Timestamp,
@@ -709,8 +697,7 @@ where
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
-
-    parquet_lru: ParquetLru,
+    ctx: Arc<Context<R>>,
 }
 
 impl<'scan, 'range, R> Scan<'scan, 'range, R>
@@ -719,7 +706,6 @@ where
 {
     fn new(
         schema: &'scan DbStorage<R>,
-        manager: &'scan StoreManager,
         (lower, upper): (
             Bound<&'range <R::Schema as Schema>::Key>,
             Bound<&'range <R::Schema as Schema>::Key>,
@@ -729,11 +715,10 @@ where
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
-        parquet_lru: ParquetLru,
+        ctx: Arc<Context<R>>,
     ) -> Self {
         Self {
             schema,
-            manager,
             lower,
             upper,
             ts,
@@ -742,7 +727,7 @@ where
             limit: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
-            parquet_lru,
+            ctx,
         }
     }
 
@@ -814,13 +799,12 @@ where
         }
         self.version
             .streams(
-                self.manager,
+                &self.ctx,
                 &mut streams,
                 (self.lower, self.upper),
                 self.ts,
                 self.limit,
                 self.projection,
-                self.parquet_lru,
             )
             .await?;
 
@@ -870,13 +854,12 @@ where
         }
         self.version
             .streams(
-                self.manager,
+                &self.ctx,
                 &mut streams,
                 (self.lower, self.upper),
                 self.ts,
                 self.limit,
                 self.projection,
-                self.parquet_lru,
             )
             .await?;
         let merge_stream = MergeStream::from_vec(streams, self.ts).await?;
@@ -885,7 +868,7 @@ where
             batch_size,
             merge_stream,
             self.projection_indices,
-            self.schema.record_schema.arrow_schema().clone(),
+            self.ctx.arrow_schema().clone(),
         ))
     }
 }
@@ -951,6 +934,7 @@ pub(crate) mod tests {
 
     use crate::{
         compaction::{CompactTask, CompactionError, Compactor},
+        context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
         inmem::{immutable::tests::TestSchema, mutable::Mutable},
@@ -1157,7 +1141,7 @@ pub(crate) mod tests {
         let db: DB<Test, E> = DB::new(option.clone(), executor, TestSchema {})
             .await
             .unwrap();
-        let base_fs = db.manager.base_fs();
+        let base_fs = db.ctx.manager.base_fs();
 
         db.write(
             Test {
@@ -1334,13 +1318,14 @@ pub(crate) mod tests {
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let version_set =
             build_version_set(version, clean_sender, option.clone(), manager.clone()).await?;
-        let mut compactor = Compactor::<R>::new(
-            schema.clone(),
-            record_schema,
-            option.clone(),
-            version_set.clone(),
-            manager.clone(),
-        );
+        let ctx = Arc::new(Context::new(
+            manager,
+            Arc::new(NoCache::default()),
+            version_set,
+            TestSchema.arrow_schema().clone(),
+        ));
+        let mut compactor =
+            Compactor::<R>::new(schema.clone(), record_schema, option.clone(), ctx.clone());
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -1350,15 +1335,9 @@ pub(crate) mod tests {
         executor.spawn(async move {
             while let Ok(task) = compaction_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => {
-                        compactor
-                            .check_then_compaction(Arc::new(NoCache::default()), false)
-                            .await
-                    }
+                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
                     CompactTask::Flush(option_tx) => {
-                        let mut result = compactor
-                            .check_then_compaction(Arc::new(NoCache::default()), true)
-                            .await;
+                        let mut result = compactor.check_then_compaction(true).await;
                         if let Some(tx) = option_tx {
                             let channel_result =
                                 tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -1376,10 +1355,8 @@ pub(crate) mod tests {
 
         Ok(DB {
             schema,
-            version_set,
             lock_map: Arc::new(Default::default()),
-            manager,
-            parquet_lru: Arc::new(NoCache::default()),
+            ctx,
             _p: Default::default(),
         })
     }
@@ -1430,9 +1407,9 @@ pub(crate) mod tests {
         let key = 20.to_string();
         let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
 
-        dbg!(db.version_set.current().await);
+        dbg!(db.ctx.version_set.current().await);
 
-        let version = db.version_set.current().await;
+        let version = db.ctx.version_set.current().await;
         assert!(!version.level_slice[1].is_empty());
 
         assert_eq!(option1.get().vstring, "20");
@@ -1468,11 +1445,11 @@ pub(crate) mod tests {
             db.write(item.clone(), 0.into()).await.unwrap();
         }
 
-        dbg!(db.version_set.current().await);
+        dbg!(db.ctx.version_set.current().await);
         db.flush().await.unwrap();
-        dbg!(db.version_set.current().await);
+        dbg!(db.ctx.version_set.current().await);
 
-        let version = db.version_set.current().await;
+        let version = db.ctx.version_set.current().await;
         assert!(!version.level_slice[0].is_empty());
     }
 
@@ -1691,7 +1668,7 @@ pub(crate) mod tests {
             }
         }
 
-        dbg!(db.version_set.current().await);
+        dbg!(db.ctx.version_set.current().await);
         // test get
         {
             let tx = db.transaction().await;
