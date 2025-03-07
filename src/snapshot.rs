@@ -169,7 +169,7 @@ mod tests {
 
         let mut stream = snapshot
             .scan((Bound::Unbounded, Bound::Unbounded))
-            .projection(vec![1])
+            .projection(&["vu32"])
             .take()
             .await
             .unwrap();

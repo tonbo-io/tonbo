@@ -135,7 +135,7 @@ impl Transaction {
                     >(high.as_ref())
                 },
             ))
-            .projection(projection);
+            .projection_with_index(projection);
 
         if let Some(limit) = limit {
             scan = scan.limit(limit);
