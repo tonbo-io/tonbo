@@ -17,6 +17,11 @@ use crate::{
 
 const DEFAULT_WAL_BUFFER_SIZE: usize = 4 * 1024;
 
+#[derive(Clone)]
+pub enum CompactionOption {
+    Leveled,
+}
+
 /// configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Clone)]
 pub struct DbOption {
@@ -36,6 +41,7 @@ pub struct DbOption {
     pub(crate) use_wal: bool,
     pub(crate) wal_buffer_size: usize,
     pub(crate) write_parquet_properties: WriterProperties,
+    pub(crate) compaction_option: CompactionOption,
 }
 
 impl DbOption {
@@ -67,6 +73,7 @@ impl DbOption {
             version_log_snapshot_threshold: 200,
             level_paths: vec![None; MAX_LEVEL],
             base_fs: FsOptions::Local,
+            compaction_option: CompactionOption::Leveled,
         }
     }
 }
@@ -180,6 +187,13 @@ impl DbOption {
     pub fn base_fs(mut self, base_fs: FsOptions) -> Self {
         self.base_fs = base_fs;
         self
+    }
+
+    pub fn compaction_option(self, compaction_option: CompactionOption) -> Self {
+        Self {
+            compaction_option,
+            ..self
+        }
     }
 }
 

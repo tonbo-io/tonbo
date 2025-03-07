@@ -139,6 +139,7 @@ use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::p
 pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
+use compaction::leveled::LeveledCompactor;
 use context::Context;
 use flume::{bounded, Sender};
 use fs::FileId;
@@ -265,8 +266,14 @@ where
             version_set,
             record_schema.arrow_schema().clone(),
         ));
-        let mut compactor =
-            Compactor::<R>::new(schema.clone(), record_schema, option.clone(), ctx.clone());
+        let mut compactor = match option.compaction_option {
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+                schema.clone(),
+                record_schema,
+                option.clone(),
+                ctx.clone(),
+            )),
+        };
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -961,7 +968,7 @@ pub(crate) mod tests {
     use tracing::error;
 
     use crate::{
-        compaction::{CompactTask, CompactionError, Compactor},
+        compaction::{leveled::LeveledCompactor, CompactTask, CompactionError, Compactor},
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
@@ -975,7 +982,7 @@ pub(crate) mod tests {
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
-        DbError, DbOption, Immutable, Projection, Record, DB,
+        CompactionOption, DbError, DbOption, Immutable, Projection, Record, DB,
     };
 
     #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1352,8 +1359,14 @@ pub(crate) mod tests {
             version_set,
             TestSchema.arrow_schema().clone(),
         ));
-        let mut compactor =
-            Compactor::<R>::new(schema.clone(), record_schema, option.clone(), ctx.clone());
+        let mut compactor = match option.compaction_option {
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+                schema.clone(),
+                record_schema,
+                option.clone(),
+                ctx.clone(),
+            )),
+        };
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
