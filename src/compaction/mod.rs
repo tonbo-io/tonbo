@@ -9,6 +9,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    context::Context,
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
@@ -19,10 +20,8 @@ use crate::{
     scope::Scope,
     stream::{level::LevelStream, merge::MergeStream, ScanStream},
     transaction::CommitError,
-    version::{
-        edit::VersionEdit, set::VersionSet, TransactionTs, Version, VersionError, MAX_LEVEL,
-    },
-    DbOption, DbStorage, ParquetLru,
+    version::{edit::VersionEdit, TransactionTs, Version, VersionError, MAX_LEVEL},
+    DbOption, DbStorage,
 };
 
 #[derive(Debug)]
@@ -37,8 +36,7 @@ where
 {
     pub(crate) option: Arc<DbOption>,
     pub(crate) schema: Arc<RwLock<DbStorage<R>>>,
-    pub(crate) version_set: VersionSet<R>,
-    pub(crate) manager: Arc<StoreManager>,
+    pub(crate) ctx: Arc<Context<R>>,
     pub(crate) record_schema: Arc<R::Schema>,
 }
 
@@ -50,21 +48,18 @@ where
         schema: Arc<RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
         option: Arc<DbOption>,
-        version_set: VersionSet<R>,
-        manager: Arc<StoreManager>,
+        ctx: Arc<Context<R>>,
     ) -> Self {
         Compactor::<R> {
-            option,
             schema,
-            version_set,
-            manager,
+            option,
+            ctx,
             record_schema,
         }
     }
 
     pub(crate) async fn check_then_compaction(
         &mut self,
-        parquet_lru: ParquetLru,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
         let mut guard = self.schema.write().await;
@@ -79,7 +74,7 @@ where
                 Mutable::new(
                     &self.option,
                     trigger_clone,
-                    self.manager.base_fs(),
+                    self.ctx.manager.base_fs(),
                     self.record_schema.clone(),
                 )
                 .await?,
@@ -109,11 +104,11 @@ where
                 recover_wal_ids,
                 excess,
                 &guard.record_schema,
-                &self.manager,
+                &self.ctx.manager,
             )
             .await?
             {
-                let version_ref = self.version_set.current().await;
+                let version_ref = self.ctx.version_set.current().await;
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
@@ -126,8 +121,7 @@ where
                         &mut version_edits,
                         &mut delete_gens,
                         &guard.record_schema,
-                        &self.manager,
-                        parquet_lru,
+                        &self.ctx,
                     )
                     .await?;
                 }
@@ -136,7 +130,8 @@ where
                     ts: version_ref.increase_ts(),
                 });
 
-                self.version_set
+                self.ctx
+                    .version_set
                     .apply_edits(version_edits, Some(delete_gens), false)
                     .await?;
             }
@@ -217,8 +212,7 @@ where
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &R::Schema,
-        manager: &StoreManager,
-        parquet_lru: ParquetLru,
+        ctx: &Context<R>,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
@@ -231,7 +225,7 @@ where
                 Self::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
 
             let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
-            let level_fs = manager.get_fs(level_path);
+            let level_fs = ctx.manager.get_fs(level_path);
             let mut streams = Vec::with_capacity(meet_scopes_l.len() + meet_scopes_ll.len());
             // This Level
             if level == 0 {
@@ -244,7 +238,7 @@ where
                         .await?;
 
                     streams.push(ScanStream::SsTable {
-                        inner: SsTable::open(parquet_lru.clone(), scope.gen, file)
+                        inner: SsTable::open(ctx.parquet_lru.clone(), scope.gen, file)
                             .await?
                             .scan(
                                 (Bound::Unbounded, Bound::Unbounded),
@@ -267,7 +261,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
-                    parquet_lru.clone(),
+                    ctx.parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -288,7 +282,7 @@ where
                     None,
                     ProjectionMask::all(),
                     level_fs.clone(),
-                    parquet_lru.clone(),
+                    ctx.parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -298,7 +292,7 @@ where
             }
 
             let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
-            let level_l_fs = manager.get_fs(level_l_path);
+            let level_l_fs = ctx.manager.get_fs(level_l_path);
             Self::build_tables(
                 option,
                 version_edits,
@@ -567,6 +561,7 @@ pub(crate) mod tests {
 
     use crate::{
         compaction::Compactor,
+        context::Context,
         executor::tokio::TokioExecutor,
         fs::{generate_file_id, manager::StoreManager, FileId, FileType},
         inmem::{
@@ -578,7 +573,7 @@ pub(crate) mod tests {
         tests::Test,
         timestamp::Timestamp,
         trigger::{TriggerFactory, TriggerType},
-        version::{edit::VersionEdit, Version, MAX_LEVEL},
+        version::{cleaner::Cleaner, edit::VersionEdit, set::VersionSet, Version, MAX_LEVEL},
         wal::log::LogType,
         DbError, DbOption, DB,
     };
@@ -838,8 +833,9 @@ pub(crate) mod tests {
         .unwrap();
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
-        let manager =
-            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
+        let manager = Arc::new(
+            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap(),
+        );
 
         manager
             .base_fs()
@@ -859,6 +855,17 @@ pub(crate) mod tests {
         let max = 5.to_string();
         let mut version_edits = Vec::new();
 
+        let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
+        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
+            .await
+            .unwrap();
+
+        let ctx = Context::new(
+            manager.clone(),
+            Arc::new(NoCache::default()),
+            version_set,
+            TestSchema.arrow_schema().clone(),
+        );
         Compactor::<Test>::major_compaction(
             &version,
             &option,
@@ -867,8 +874,7 @@ pub(crate) mod tests {
             &mut version_edits,
             &mut vec![],
             &TestSchema,
-            &manager,
-            Arc::new(NoCache::default()),
+            &ctx,
         )
         .await
         .unwrap();
@@ -1170,8 +1176,9 @@ pub(crate) mod tests {
         );
         option.major_threshold_with_sst_size = 1;
         option.level_sst_magnification = 1;
-        let manager =
-            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
+        let manager = Arc::new(
+            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap(),
+        );
 
         manager
             .base_fs()
@@ -1255,6 +1262,16 @@ pub(crate) mod tests {
         let min = 6.to_string();
         let max = 9.to_string();
 
+        let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
+        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
+            .await
+            .unwrap();
+        let ctx = Context::new(
+            manager.clone(),
+            Arc::new(NoCache::default()),
+            version_set,
+            TestSchema.arrow_schema().clone(),
+        );
         Compactor::<Test>::major_compaction(
             &version,
             &option,
@@ -1263,8 +1280,7 @@ pub(crate) mod tests {
             &mut version_edits,
             &mut vec![],
             &TestSchema,
-            &manager,
-            Arc::new(NoCache::default()),
+            &ctx,
         )
         .await
         .unwrap();
@@ -1360,7 +1376,7 @@ pub(crate) mod tests {
         .unwrap();
         db.flush().await.unwrap();
 
-        let version = db.version_set.current().await;
+        let version = db.ctx.version_set.current().await;
 
         for level in 0..MAX_LEVEL {
             let sort_runs = &version.level_slice[level];
