@@ -2,6 +2,9 @@
 edition = "2021"
 name = "tonbo-python"
 version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/tonbo-io/tonbo"
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib"]
