@@ -9,17 +9,11 @@ crate-type = ["cdylib", "rlib"]
 [workspace]
 
 [dependencies]
-
-fusio = { version = "0.3.7", package = "fusio", features = ["aws", "opfs"] }
-fusio-dispatch = { version = "0.3.7", package = "fusio-dispatch", features = [
-  "aws",
-  "opfs",
-] }
 futures = { version = "0.3" }
 js-sys = { version = "0.3.72" }
 tonbo = { version = "0.3.1", path = "../../", default-features = false, features = [
-  "bytes",
-  "wasm",
+    "bytes",
+    "wasm",
 ] }
 
 wasm-bindgen = "0.2.95"

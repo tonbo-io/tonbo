@@ -1,6 +1,5 @@
-use fusio::path::Path;
 use pyo3::{pyclass, pymethods, PyResult};
-use tonbo::record::Schema;
+use tonbo::{option::Path, record::Schema};
 
 use crate::{ExceedsMaxLevelError, FsOptions};
 
@@ -81,14 +80,14 @@ impl DbOption {
             .major_threshold_with_sst_size(self.major_threshold_with_sst_size)
             .max_sst_file_size(self.max_sst_file_size)
             .version_log_snapshot_threshold(self.version_log_snapshot_threshold)
-            .base_fs(fusio_dispatch::FsOptions::from(self.base_fs));
+            .base_fs(tonbo::option::FsOptions::from(self.base_fs));
         for (level, path) in self.level_paths.into_iter().enumerate() {
             if let Some((path, fs_options)) = path {
                 opt = opt
                     .level_path(
                         level,
                         Path::from(path),
-                        fusio_dispatch::FsOptions::from(fs_options),
+                        tonbo::option::FsOptions::from(fs_options),
                     )
                     .unwrap();
             }
