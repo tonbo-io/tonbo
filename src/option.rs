@@ -1,7 +1,9 @@
 use std::fmt::{Debug, Formatter};
 
 pub use fusio::path::Path;
-use fusio_dispatch::FsOptions;
+#[cfg(feature = "aws")]
+pub use fusio::remotes::aws::AwsCredential;
+pub use fusio_dispatch::FsOptions;
 use parquet::{
     basic::Compression,
     file::properties::{EnabledStatistics, WriterProperties},

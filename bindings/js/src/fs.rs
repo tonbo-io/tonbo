@@ -1,4 +1,4 @@
-use fusio::path::Path;
+use tonbo::option::Path;
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 
 #[wasm_bindgen]
@@ -12,9 +12,9 @@ pub struct AwsCredential {
     pub token: Option<String>,
 }
 
-impl From<AwsCredential> for fusio::remotes::aws::AwsCredential {
+impl From<AwsCredential> for tonbo::option::AwsCredential {
     fn from(cred: AwsCredential) -> Self {
-        fusio::remotes::aws::AwsCredential {
+        tonbo::option::AwsCredential {
             key_id: cred.key_id,
             secret_key: cred.secret_key,
             token: cred.token,
@@ -158,9 +158,9 @@ impl FsOptions {
 }
 
 impl FsOptions {
-    pub(crate) fn into_fs_options(self) -> fusio_dispatch::FsOptions {
+    pub(crate) fn into_fs_options(self) -> tonbo::option::FsOptions {
         match self.inner {
-            FsOptionsInner::Local => fusio_dispatch::FsOptions::Local,
+            FsOptionsInner::Local => tonbo::option::FsOptions::Local,
             FsOptionsInner::S3 {
                 bucket,
                 credential,
@@ -168,9 +168,9 @@ impl FsOptions {
                 sign_payload,
                 checksum,
                 endpoint,
-            } => fusio_dispatch::FsOptions::S3 {
+            } => tonbo::option::FsOptions::S3 {
                 bucket,
-                credential: credential.map(fusio::remotes::aws::AwsCredential::from),
+                credential: credential.map(tonbo::option::AwsCredential::from),
                 endpoint,
                 region,
                 sign_payload,
