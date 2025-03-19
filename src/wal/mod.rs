@@ -1,12 +1,12 @@
 pub(crate) mod log;
 
-use std::sync::Arc;
+use std::{pin::pin, sync::Arc};
 
 use async_stream::stream;
-use fusio::DynFs;
+use fusio::{disk::LocalFs, DynFs};
 use fusio_log::{error::LogError, Decode, FsOptions, Logger, Options, Path};
 use futures_core::Stream;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use thiserror::Error;
 
 use crate::{fs::FileId, record::Record, wal::log::Log};
@@ -20,6 +20,7 @@ where
     path: Path,
     wal_buffer_size: usize,
     fs: Arc<dyn DynFs>,
+    local_fs: Arc<dyn DynFs>,
 }
 
 impl<R> WalFile<R>
@@ -32,9 +33,11 @@ where
         wal_buffer_size: usize,
         file_id: FileId,
     ) -> Self {
+        let local_fs = Arc::new(LocalFs {});
         let file = Options::new(path.clone())
             .buf_size(wal_buffer_size)
-            .build_with_fs::<Log<R>>(fs.clone())
+            .truncate(true)
+            .build_with_fs::<Log<R>>(local_fs.clone())
             .await
             .unwrap();
 
@@ -44,6 +47,7 @@ where
             path,
             wal_buffer_size,
             fs,
+            local_fs,
         }
     }
 
@@ -61,7 +65,7 @@ where
             self.file = Some(
                 Options::new(self.path.clone())
                     .buf_size(self.wal_buffer_size)
-                    .build_with_fs::<Log<R>>(self.fs.clone())
+                    .build_with_fs::<Log<R>>(self.local_fs.clone())
                     .await?,
             );
         }
@@ -71,7 +75,27 @@ where
 
     pub(crate) async fn flush(&mut self) -> Result<(), LogError> {
         match self.file.take() {
-            Some(mut file) => file.close().await,
+            Some(mut file) => {
+                file.close().await?;
+                if self.fs.file_system() != self.local_fs.file_system() {
+                    let mut log = Options::new(self.path.clone())
+                        .buf_size(self.wal_buffer_size)
+                        .truncate(true)
+                        .build_with_fs::<Log<R>>(self.fs.clone())
+                        .await
+                        .unwrap();
+
+                    let mut log_stream =
+                        pin!(Self::recover(FsOptions::Local, self.path.clone()).await);
+                    while let Some(record) = log_stream.next().await {
+                        let record_batch = record.unwrap();
+                        log.write_batch(record_batch.iter()).await?;
+                    }
+
+                    log.close().await?;
+                }
+                Ok(())
+            }
             None => Ok(()),
         }
     }
@@ -125,10 +149,9 @@ pub enum RecoverError<E: std::error::Error> {
 
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
-    use std::{pin::pin, sync::Arc};
+    use std::pin::pin;
 
-    use fusio::disk::TokioFs;
-    use fusio_log::Path;
+    use fusio_log::{FsOptions, Path};
     use futures_util::StreamExt;
     use tempfile::TempDir;
 
@@ -139,16 +162,16 @@ mod tests {
         wal::log::Log,
     };
 
-    #[tokio::test]
-    async fn write_and_recover() {
+    async fn write_and_recover(fs_option: FsOptions) {
         let temp_dir = TempDir::new().unwrap();
 
         let wal_id = generate_file_id();
+        let fs = fs_option.clone().parse().unwrap();
         let wal_path = Path::from_filesystem_path(temp_dir.path())
             .unwrap()
             .child(format!("{}.{}", wal_id, FileType::Wal));
-        let fs_option = fusio_log::FsOptions::Local;
-        let mut wal = WalFile::<String>::new(Arc::new(TokioFs), wal_path.clone(), 0, wal_id).await;
+        let mut wal = WalFile::<String>::new(fs.clone(), wal_path.clone(), 0, wal_id).await;
+
         {
             wal.write(&Log::new(
                 Timestamped::new("hello".into(), 0.into()),
@@ -176,10 +199,16 @@ mod tests {
             ))
             .await
             .unwrap();
+            wal.flush().await.unwrap();
         }
 
         {
             {
+                let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
+                let file_stream = fs.list(&path).await.unwrap();
+                let file_number = file_stream.count().await;
+                assert_eq!(file_number, 1);
+
                 let mut stream = pin!(WalFile::<String>::recover(fs_option, wal_path).await);
                 for log in stream.next().await.unwrap().unwrap() {
                     assert_eq!(log.key.ts, 0.into());
@@ -191,5 +220,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_local_write_and_recover() {
+        write_and_recover(FsOptions::Local).await
+    }
+
+    #[ignore = "s3"]
+    #[tokio::test]
+    async fn test_s3_write_and_recover() {
+        use fusio::remotes::aws::AwsCredential;
+
+        if option_env!("AWS_ACCESS_KEY_ID").is_none()
+            || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
+        {
+            eprintln!("can not get `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`");
+            return;
+        }
+        let key_id = std::option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
+        let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
+            .unwrap()
+            .to_string();
+
+        let fs_option = fusio_log::FsOptions::S3 {
+            bucket: "fusio-test".to_string(),
+            credential: Some(AwsCredential {
+                key_id,
+                secret_key,
+                token: None,
+            }),
+            endpoint: None,
+            sign_payload: None,
+            checksum: None,
+            region: Some("ap-southeast-1".to_string()),
+        };
+
+        write_and_recover(fs_option).await
     }
 }
