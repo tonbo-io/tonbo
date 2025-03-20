@@ -9,6 +9,7 @@
   - [JavaScript API](./usage/wasm.md)
   - [Advance](./usage/advance.md)
   - [Configuration](./usage/conf.md)
+  - [FAQ](./usage/faq.md)
 - [Examples](./examples/index.md)
   - [Using Tonbo](./examples/declare.md)
   - [Integrate with Datafusio](./examples/datafusion.md)
