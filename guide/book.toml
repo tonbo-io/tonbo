@@ -9,3 +9,7 @@ title = "The Tonbo Guide"
 git-repository-url = "https://github.com/tonbo-io/tonbo"
 [output.html.playground]
 runnable = false
+
+[preprocessor.toc]
+command = "mdbook-toc"
+renderer = ["html"]
