@@ -141,6 +141,8 @@ impl DbOption {
     }
 
     /// Maximum size of WAL buffer, default value is 4KB
+    ///
+    /// Set to 0 to disable WAL buffer
     pub fn wal_buffer_size(self, wal_buffer_size: usize) -> Self {
         DbOption {
             wal_buffer_size,
@@ -165,7 +167,7 @@ impl DbOption {
             ..self
         }
     }
-
+    /// set the path where files will be stored in the level.
     pub fn level_path(
         mut self,
         level: usize,
@@ -179,6 +181,10 @@ impl DbOption {
         Ok(self)
     }
 
+    /// set the base path option.
+    ///
+    /// This will be the default option for all wal, manifest and SSTables. Use
+    /// [`DbOption::level_path`] to set the option for SStables.
     pub fn base_fs(mut self, base_fs: FsOptions) -> Self {
         self.base_fs = base_fs;
         self
