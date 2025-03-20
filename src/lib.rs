@@ -614,23 +614,26 @@ where
         version: &'get Version<R>,
         key: &'get <R::Schema as Schema>::Key,
         ts: Timestamp,
-        projection: Projection,
+        projection: Projection<'get>,
     ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
         let primary_key_index = self.record_schema.primary_key_index();
+        let schema = ctx.arrow_schema();
 
         let projection = match projection {
             Projection::All => ProjectionMask::all(),
             Projection::Parts(projection) => {
                 let mut fixed_projection: Vec<usize> = [0, 1, primary_key_index]
                     .into_iter()
-                    .chain(projection.into_iter().map(|p| p + USER_COLUMN_OFFSET))
+                    .chain(projection.into_iter().map(|name| {
+                        schema
+                            .index_of(name)
+                            .unwrap_or_else(|_| panic!("unexpected field {}", name))
+                    }))
                     .collect();
                 fixed_projection.dedup();
 
                 ProjectionMask::roots(
-                    &ArrowSchemaConverter::new()
-                        .convert(ctx.arrow_schema())
-                        .unwrap(),
+                    &ArrowSchemaConverter::new().convert(schema).unwrap(),
                     fixed_projection,
                 )
             }
@@ -940,9 +943,9 @@ where
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-pub enum Projection {
+pub enum Projection<'r> {
     All,
-    Parts(Vec<usize>),
+    Parts(Vec<&'r str>),
 }
 
 pub type ParquetLru = Arc<dyn DynLruCache<FileId> + Send + Sync>;

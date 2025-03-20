@@ -82,7 +82,6 @@ impl Transaction {
 
         let col_desc = self.desc.get(self.primary_key_index).unwrap();
         let col = to_col(py, col_desc, key);
-        let projection = self.projection(projection);
 
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
@@ -95,10 +94,16 @@ impl Transaction {
         let primary_key_index = self.primary_key_index;
 
         future_into_py(py, async move {
-            let entry = txn
-                .get(&col, Projection::Parts(projection))
-                .await
-                .map_err(DbError::from)?;
+            let projection = if projection.contains(&"*".to_string()) {
+                Projection::All
+            } else {
+                let mut projections = Vec::<&str>::with_capacity(projection.len());
+                for name in projection.iter() {
+                    projections.push(name);
+                }
+                Projection::Parts(projections)
+            };
+            let entry = txn.get(&col, projection).await.map_err(DbError::from)?;
 
             Python::with_gil(|py| {
                 Ok(match entry {

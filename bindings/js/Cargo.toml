@@ -26,6 +26,11 @@ wasm-bindgen-futures = { version = "0.4.45" }
 wasm-bindgen-test = "0.3.9"
 wasm-streams = "0.4.2"
 web-sys = { version = "0.3", features = ["console"] }
+fusio = { version = "0.3.7", default-features = false, features = [
+    "dyn",
+    "bytes",
+    "opfs",
+] }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
