@@ -29,7 +29,7 @@ where
     pub async fn get<'get>(
         &'get self,
         key: &'get <R::Schema as RecordSchema>::Key,
-        projection: Projection,
+        projection: Projection<'get>,
     ) -> Result<Option<stream::Entry<'get, R>>, DbError<R>> {
         Ok(self
             .share
