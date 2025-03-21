@@ -1,6 +1,8 @@
-/target
+target
 /.idea
 Cargo.lock
 db_path
-bindings/python/target
 guide/book
+__pycache__
+
+.DS_Store

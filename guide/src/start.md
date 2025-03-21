@@ -1,21 +1,32 @@
+# Getting started
+
 ## Installation
 
-To get started using tonbo you should make sure you have Rust installed on your system. If you haven't alreadly done yet, try following the instructions [here](https://www.rust-lang.org/tools/install).
+### Prerequisite
+To get started using tonbo you should make sure you have [Rust](https://www.rust-lang.org/tools/install) installed on your system. If you haven't alreadly done yet, try following the instructions [here](https://www.rust-lang.org/tools/install).
 
-## Adding dependencies
+### Installation
+
+To use local disk as storage backend, you should import [tokio](https://github.com/tokio-rs/tokio) crate and enable "tokio" feature (enabled by default)
 
 ```toml
-fusio = { git = "https://github.com/tonbo-io/fusio.git", rev = "216eb446fb0a0c6e5e85bfac51a6f6ed8e5ed606", package = "fusio", version = "0.3.3", features = [
-  "dyn",
-  "fs",
-] }
 tokio = { version = "1", features = ["full"] }
 tonbo = { git = "https://github.com/tonbo-io/tonbo" }
 ```
 
-## Defining Schema
+If you want to use tonbo in browser(use OPFS as storage backend), you should disable "tokio" feature and enable "wasm" feature. If you want to use S3 as backend, you also should enable "wasm-http" feature.
 
-You can use `Record` macro to define schema of column family just like ORM. Tonbo will generate all relevant files for you at compile time.
+```toml
+tonbo = { git = "https://github.com/tonbo-io/tonbo", default-features = false, features = [
+    "wasm",
+    "wasm-http",
+] }
+```
+## Using Tonbo
+
+### Defining Schema
+
+Tonbo provides ORM-like macro for ease of use, you can use `Record` macro to define schema of column family. Tonbo will generate all relevant code for you at compile time.
 
 ```rust
 use tonbo::Record;
@@ -26,7 +37,6 @@ pub struct User {
     name: String,
     email: Option<String>,
     age: u8,
-    bytes: Bytes,
 }
 ```
 
@@ -41,7 +51,7 @@ Now, Tonbo support these types:
 - String type: `String`
 - Bytes: `bytes::Bytes`
 
-## Create DB
+### Creating database
 
 After define you schema, you can create `DB` with a customized `DbOption`
 
@@ -65,23 +75,31 @@ async fn main() {
 }
 ```
 
-`UserSchema` is a struct that tonbo generates for you in the compile time, so you do not need to import it.
+`UserSchema` is a struct that tonbo generates for you in the compile time, so you do not need to import it.  One thing you need to pay attention to is: you should **make sure the path exists** before creating `DBOption`.
 
-## Read/Write data
+> **Note:** If you use tonbo in WASM, you should use `Path::from_opfs_path` rather than `Path::from_filesystem_path`.
+>
 
-After create `DB`, you can execute `insert`, `remove`, `get` now. But remember that you will get a `UserRef` object rather than the `User`, if you get record from tonbo. This is a struct that tonbo generates for you in the compile time.
+### Operations on Database
+
+After create `DB`, you can execute `insert`, `remove`, `get` and other operations now. But remember that you will get a **`UserRef` instance** rather than the `User`, if you get record from tonbo. This is a struct that tonbo generates for you in the compile time. It may look like:
 
 ```rust
-db.insert(User {
-    name: "Alice".into(),
-    email: Some("alice@gmail.com".into()),
-    age: 22,
-})
-.await
-.unwrap();
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct UserRef<'r> {
+    pub name: &'r str,
+    pub email: Option<&'r str>,
+    pub age: Option<u8>,
+}
+```
 
-let age = db
-    .get(&"Alice".into(), |entry| {
+Then, you can start using tonbo like this:
+
+```rust
+db.insert(User { /* ... */ }).await.unwrap();
+
+let age = db.get(&"Alice".into(),
+    |entry| {
         // entry.get() will get a `UserRef`
         let user = entry.get();
         println!("{:#?}", user);
@@ -89,78 +107,41 @@ let age = db
     })
     .await
     .unwrap();
-assert!(age.is_some());
-assert_eq!(age, Some(22));
+
+db.remove("Alice".into()).await.unwrap();
 ```
 
-## Using transaction
+#### Using transaction
 
 Tonbo supports transaction. You can also push down filter, limit and projection operators in query.
 
 ```rust
+// create transaction
 let txn = db.transaction().await;
 
-// get from primary key
 let name = "Alice".into();
 
-// get the zero-copy reference of record without any allocations.
+txn.insert(User { /* ... */ });
 let user = txn.get(&name, Projection::All).await.unwrap();
 
 let upper = "Blob".into();
 // range scan of user
 let mut scan = txn
     .scan((Bound::Included(&name), Bound::Excluded(&upper)))
-    // tonbo supports pushing down projection
-    .projection(vec![1])
-    // push down limitation
-    .limit(1)
     .take()
     .await
     .unwrap();
 
 while let Some(entry) = scan.next().await.transpose().unwrap() {
-    assert_eq!(
-        entry.value(),
-        Some(UserRef {
-            name: "Alice",
-            email: Some("alice@gmail.com"),
-            age: None,
-        })
-    );
+    let data = entry.value(); // type of UserRef
+    // ......
 }
 ```
 
-## Using S3 backends
-
-Tonbo supports various storage backends, such as OPFS, S3, and maybe more in the future. You can use `DbOption::level_path` to specify which backend to use.
-
-For local storage, you can use `FsOptions::Local` as the parameter. And you can use `FsOptions::S3` for S3 storage. After create `DB`, you can then operator it like normal.
-
-```rust
-use fusio::{path::Path, remotes::aws::AwsCredential};
-use fusio_dispatch::FsOptions;
-use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
-
-#[tokio::main]
-async fn main() {
-    let fs_option = FsOptions::S3 {
-        bucket: "wasm-data".to_string(),
-        credential: Some(AwsCredential {
-            key_id: "key_id".to_string(),
-            secret_key: "secret_key".to_string(),
-            token: None,
-        }),
-        endpoint: None,
-        sign_payload: None,
-        checksum: None,
-        region: Some("region".to_string()),
-    };
-
-    let options = DbOption::new(Path::from_filesystem_path("s3_path").unwrap(), &UserSchema)
-        .level_path(2, "l2", fs_option);
-
-    let db = DB::<User, TokioExecutor>::new(options, TokioExecutor::current(), UserSchema)
-        .await
-        .unwrap();
-}
-```
+## What next?
+- To learn more about tonbo in Rust or in WASM, you can refer to [Tonbo API](./usage/tonbo.md)
+- To use tonbo in python, you can refer to [Python API](./usage/python.md)
+- To learn more about tonbo in brower, you can refer to [WASM API](./usage/wasm.md)
+- To learn more configuration about tonbo, you can refer to [Configuration](./usage/conf.md)
+- There are some data structures for runtime schema, you can use them to [expole tonbo](./usage/advance.md). You can also refer to our [python](https://github.com/tonbo-io/tonbo/tree/main/bindings/python), [wasm](https://github.com/tonbo-io/tonbo/tree/main/bindings/js) bindings and [Tonbolite(a SQLite extension)](https://github.com/tonbo-io/tonbolite)
+- To learn more about tonbo by examples, you can refer to [examples](https://github.com/tonbo-io/tonbo/tree/main/examples)
