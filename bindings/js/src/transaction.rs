@@ -60,13 +60,20 @@ impl Transaction {
         }
 
         let key = parse_key(self.desc.get(self.primary_key_index).unwrap(), key, true)?;
-        let projection = self.projection(projection);
-
+        let projection = if projection.contains(&"*".to_string()) {
+            Projection::All
+        } else {
+            let mut projections = Vec::<&str>::with_capacity(projection.len());
+            for name in projection.iter() {
+                projections.push(name);
+            }
+            Projection::Parts(projections)
+        };
         let entry = self
             .txn
             .as_ref()
             .unwrap()
-            .get(&key, Projection::Parts(projection))
+            .get(&key, projection)
             .await
             .map_err(|err| JsValue::from(err.to_string()))?;
 
