@@ -302,6 +302,32 @@ where
     }
 
     /// open an optimistic ACID transaction
+    ///
+    /// ## Examples
+    /// ```ignore
+    /// #[derive(Record, Debug)]
+    /// pub struct User {
+    ///     #[record(primary_key)]
+    ///     name: String,
+    ///     age: u8,
+    /// }
+    /// ```
+    /// ```ignore
+    /// let mut txn = db.transaction().await;
+    /// txn.insert(User {
+    ///     name: "Alice".into(),
+    ///     eamil: None,
+    ///     age: 20,
+    /// });
+    /// txn.scan((Bound::Included("Alice"), Bound::Excluded("Bob")))
+    ///     .projection(&["age"])
+    ///     .limit(10)
+    ///     .take()
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// txn.commit().await.unwrap();
+    /// ```
     pub async fn transaction(&self) -> Transaction<'_, R> {
         Transaction::new(self.snapshot().await, self.lock_map.clone())
     }
@@ -443,11 +469,15 @@ where
         Ok(())
     }
 
+    /// flush wal to stable storage
     pub async fn flush_wal(&self) -> Result<(), DbError<R>> {
         self.schema.write().await.flush_wal().await?;
         Ok(())
     }
 
+    /// destory [`DB`].
+    ///
+    /// **Note:** This will remove all wal and manifest file in the directory.
     pub async fn destroy(self) -> Result<(), DbError<R>> {
         self.schema.write().await.destroy(&self.ctx.manager).await?;
         if let Some(ctx) = Arc::into_inner(self.ctx) {
