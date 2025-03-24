@@ -2,7 +2,7 @@
 
 [Introduction](./introduction.md)
 
-- [Getting started](./start.md)
+- [Getting Started](./start.md)
 - [Usage](./usage/index.md)
   - [Tonbo](./usage/tonbo.md)
   - [Python Binding](./usage/python.md)
@@ -18,5 +18,6 @@
   - [Building](./contribution/build.md)
   - [Testing](./contribution/testing.md)
 - [TonboLite](./tonbolite/index.md)
+  - [Getting Started](./tonbolite/start.md)
   - [Building](./tonbolite/build.md)
   - [Usage](./tonbolite/usage.md)

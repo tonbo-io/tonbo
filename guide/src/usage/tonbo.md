@@ -183,7 +183,7 @@ Transactions support easily reading the state of keys that are currently batched
 
 You can use `get` method to get a record by key, and `get` method will return a `UserRef` instance. This `UserRef` instance is a struct that tonbo generates for you in the compile time. All fields except primary key are `Option` type, because you may not have set them when you create the record. You can also pass a `Projection` to specify which fields you want to get. `Projection::All` will get all fields, `Projection::Parts(Vec<&str>)` will get only primary key, `email` and `bytes` fields(other fields will be `None`).
 
-You can use `scan` method to scan all records that in the specified range. `scan` method will return a `Scan` instance. You can use `taken` method to get a `Stream` instance and iterate all records that satisfied. Tonbo also supports pushing down filters and projections. You can use `Scan::projection(vec!["id", "email"])` to specify which fields you want to get and use `Scan::limit(10)` to limit the number of records you want to get.
+You can use `scan` method to scan all records that in the specified range. `scan` method will return a `Scan` instance. You can use `take` method to get a `Stream` instance and iterate all records that satisfied. Tonbo also supports pushing down filters and projections. You can use `Scan::projection(vec!["id", "email"])` to specify which fields you want to get and use `Scan::limit(10)` to limit the number of records you want to get.
 
 ```rust
 let txn = db.transaction().await;
