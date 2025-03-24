@@ -342,6 +342,6 @@ where
     UlidDecode(#[from] ulid::DecodeError),
     #[error("version send error: {0}")]
     Send(#[from] SendError<CleanTag>),
-    #[error("recover error: {0}")]
+    #[error("log error: {0}")]
     Logger(#[from] LogError),
 }

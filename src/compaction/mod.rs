@@ -139,6 +139,9 @@ where
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
+        if is_manual {
+            self.version_set.rewrite().await.unwrap();
+        }
         Ok(())
     }
 
@@ -555,6 +558,7 @@ pub(crate) mod tests {
     use fusio::{path::Path, DynFs};
     use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
+    use futures::StreamExt;
     use parquet::arrow::AsyncArrowWriter;
     use parquet_lru::NoCache;
     use tempfile::TempDir;
@@ -594,7 +598,7 @@ pub(crate) mod tests {
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
         }
-        Ok(Immutable::new(mutable.data, schema.arrow_schema().clone()))
+        Ok(mutable.into_immutable().await.unwrap().1)
     }
 
     pub(crate) async fn build_parquet_table<R>(
@@ -1398,5 +1402,164 @@ pub(crate) mod tests {
             }
         }
         dbg!(version);
+    }
+
+    #[ignore = "s3"]
+    #[tokio::test]
+    async fn test_recover_before_flush_from_s3() {
+        if option_env!("AWS_ACCESS_KEY_ID").is_none()
+            || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
+        {
+            return;
+        }
+        let key_id = std::option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
+        let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
+            .unwrap()
+            .to_string();
+
+        let s3_option = FsOptions::S3 {
+            bucket: "fusio-test".to_string(),
+            credential: Some(fusio::remotes::aws::AwsCredential {
+                key_id,
+                secret_key,
+                token: None,
+            }),
+            endpoint: None,
+            region: Some("ap-southeast-1".to_string()),
+            sign_payload: None,
+            checksum: None,
+        };
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        )
+        .base_fs(s3_option);
+        option.version_log_snapshot_threshold = 100000;
+        {
+            let manager =
+                StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
+            manager
+                .base_fs()
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .unwrap();
+            manager
+                .local_fs()
+                .create_dir_all(&option.wal_dir_path())
+                .await
+                .unwrap();
+
+            let batch_1 = build_immutable::<Test>(
+                &option,
+                vec![
+                    (
+                        LogType::Full,
+                        Test {
+                            vstring: 3.to_string(),
+                            vu32: 0,
+                            vbool: None,
+                        },
+                        0.into(),
+                    ),
+                    (
+                        LogType::Full,
+                        Test {
+                            vstring: 5.to_string(),
+                            vu32: 0,
+                            vbool: None,
+                        },
+                        0.into(),
+                    ),
+                    (
+                        LogType::Full,
+                        Test {
+                            vstring: 6.to_string(),
+                            vu32: 0,
+                            vbool: None,
+                        },
+                        0.into(),
+                    ),
+                ],
+                &Arc::new(TestSchema),
+                manager.base_fs(),
+            )
+            .await
+            .unwrap();
+
+            let batch_2 = build_immutable::<Test>(
+                &option,
+                vec![
+                    (
+                        LogType::Full,
+                        Test {
+                            vstring: 4.to_string(),
+                            vu32: 0,
+                            vbool: None,
+                        },
+                        0.into(),
+                    ),
+                    (
+                        LogType::Full,
+                        Test {
+                            vstring: 2.to_string(),
+                            vu32: 0,
+                            vbool: None,
+                        },
+                        0.into(),
+                    ),
+                    (
+                        LogType::Full,
+                        Test {
+                            vstring: 1.to_string(),
+                            vu32: 0,
+                            vbool: None,
+                        },
+                        0.into(),
+                    ),
+                ],
+                &Arc::new(TestSchema),
+                manager.base_fs(),
+            )
+            .await
+            .unwrap();
+
+            let scope = Compactor::<Test>::minor_compaction(
+                &option,
+                None,
+                &vec![
+                    (Some(generate_file_id()), batch_1),
+                    (Some(generate_file_id()), batch_2),
+                ],
+                &TestSchema,
+                &manager,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(scope.min, 1.to_string());
+            assert_eq!(scope.max, 6.to_string());
+        }
+        // test recover from s3
+        {
+            let db: DB<Test, TokioExecutor> =
+                DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                    .await
+                    .unwrap();
+            let mut expected_key = (1..=6).map(|v| v.to_string()).collect::<Vec<String>>();
+            let tx = db.transaction().await;
+            let mut scan = tx
+                .scan((std::ops::Bound::Unbounded, std::ops::Bound::Unbounded))
+                .take()
+                .await
+                .unwrap();
+
+            while let Some(actual) = scan.next().await.transpose().unwrap() {
+                let expected = expected_key.remove(0);
+                assert_eq!(actual.key().value, &expected);
+            }
+            assert!(expected_key.is_empty());
+        }
     }
 }
