@@ -1562,7 +1562,7 @@ pub(crate) mod tests {
             let tx = db.transaction().await;
             let mut scan = tx
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(vec![0, 1, 2])
+                .projection(&["vstring", "vu32", "vbool"])
                 .take()
                 .await
                 .unwrap();
