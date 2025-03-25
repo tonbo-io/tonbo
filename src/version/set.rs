@@ -152,7 +152,7 @@ where
 
         let timestamp = Arc::new(AtomicU32::default());
         drop(log_stream);
-        let mut set = VersionSet::<R> {
+        let set = VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(Version::<R> {
                     ts: Timestamp::from(0),
@@ -181,7 +181,7 @@ where
     }
 
     pub(crate) async fn apply_edits(
-        &mut self,
+        &self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
@@ -446,7 +446,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let mut version_set: VersionSet<String> =
+        let version_set: VersionSet<String> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -491,7 +491,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let mut version_set: VersionSet<String> =
+        let version_set: VersionSet<String> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -650,7 +650,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let mut version_set: VersionSet<String> =
+        let version_set: VersionSet<String> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();

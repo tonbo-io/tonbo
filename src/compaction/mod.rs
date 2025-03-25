@@ -140,7 +140,7 @@ where
             let _ = mem::replace(&mut guard.immutables, sources);
         }
         if is_manual {
-            self.version_set.rewrite().await.unwrap();
+            self.ctx.version_set.rewrite().await.unwrap();
         }
         Ok(())
     }
