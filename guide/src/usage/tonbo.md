@@ -130,20 +130,22 @@ while let Some(entry) = scan.next().await.transpose().unwrap() {
 ```
 ### Insert/Remove
 
-You can use `db.insert(record)` or `db.insert_batch(records)` to insert new records into the database and use `db.remove(key)` to remove a record from the database. Here is an example of how to use transaction to update the state of database:
+You can use `db.insert(record)` or `db.insert_batch(records)` to insert new records into the database and use `db.remove(key)` to remove a record from the database. Here is an example of updating the state of database:
 ```rust
-
-/// insert a single tonbo record
-db.insert(User {
+let user = User {
     name: "Alice".into(),
     email: Some("alice@gmail.com".into()),
     age: 22,
     bytes: Bytes::from(vec![0, 1, 2]),
-})
-.await
-.unwrap();
+};
+
+/// insert a single tonbo record
+db.insert(user).await.unwrap();
 
 /// insert a sequence of data as a single batch
+db.insert_batch("Alice".into()).await.unwrap();
+
+/// remove the specified record from the database
 db.remove("Alice".into()).await.unwrap();
 ```
 ### Transaction
