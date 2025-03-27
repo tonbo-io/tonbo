@@ -431,7 +431,7 @@ pub(crate) mod tests {
         })
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn timestamp_persistence() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());

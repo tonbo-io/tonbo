@@ -125,7 +125,7 @@ mod tests {
         DbOption,
     };
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn snapshot_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());

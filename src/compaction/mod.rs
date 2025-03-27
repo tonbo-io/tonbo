@@ -630,7 +630,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_dir_l0 = tempfile::tempdir().unwrap();
@@ -744,7 +744,7 @@ pub(crate) mod tests {
         assert_eq!(scope.max, 6.to_string());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dyn_minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
@@ -813,7 +813,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn major_compaction() {
         let temp_dir = TempDir::new().unwrap();
         let temp_dir_l0 = TempDir::new().unwrap();
@@ -1170,7 +1170,7 @@ pub(crate) mod tests {
     }
 
     // https://github.com/tonbo-io/tonbo/pull/139
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     pub(crate) async fn major_panic() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -1291,7 +1291,7 @@ pub(crate) mod tests {
     }
 
     // issue: https://github.com/tonbo-io/tonbo/issues/152
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
 

@@ -1455,7 +1455,7 @@ pub(crate) mod tests {
         assert_eq!(option1.get().vbool, Some(true));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_flush() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -1577,7 +1577,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn schema_recover() {
         let temp_dir = TempDir::new().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
@@ -1643,7 +1643,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dyn_schema_recover() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
@@ -1723,7 +1723,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_get_removed() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -1762,7 +1762,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_read_write_dyn() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -1969,7 +1969,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_dyn_multiple_db() {
         let temp_dir1 = TempDir::with_prefix("db1").unwrap();
 

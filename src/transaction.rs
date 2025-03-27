@@ -288,7 +288,7 @@ mod tests {
         DbOption, Projection, DB,
     };
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -328,7 +328,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn transaction_get() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
@@ -421,7 +421,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::new(
@@ -457,7 +457,7 @@ mod tests {
         unreachable!();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn transaction_projection() {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::new(
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(entry.get().vbool, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn transaction_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(entry_15.key().value, "king");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_transaction_scan_bound() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
@@ -783,7 +783,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_transaction_scan_limit() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
@@ -848,7 +848,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_dyn_record() {
         let temp_dir = TempDir::new().unwrap();
         let schema = test_dyn_item_schema();

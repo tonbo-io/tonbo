@@ -233,7 +233,7 @@ mod tests {
         inmem::immutable::tests::TestSchema, record::Schema, stream::level::LevelStream, DbOption,
     };
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn projection_scan() {
         let temp_dir = TempDir::new().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();

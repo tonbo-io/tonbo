@@ -40,9 +40,9 @@ tokio = [
     "parquet/default",
     "tokio/fs",
 ]
-tokio-http = ["fusio/tokio-http"]
+tokio-http = ["fusio/tokio-http", "fusio-log/tokio-http"]
 wasm = ["aws", "bytes", "opfs", "wasm-http"]
-wasm-http = ["fusio/wasm-http"]
+wasm-http = ["fusio/wasm-http", "fusio-log/web-http"]
 
 [[example]]
 name = "declare"
