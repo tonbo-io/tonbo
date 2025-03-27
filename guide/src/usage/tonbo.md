@@ -88,7 +88,15 @@ Tonbo provides an `Executor` trait that you can implement to execute asynchronou
 
 ```rust
 pub struct TokioExecutor {
-    runtime: tokio::runtime::Runtime,
+    handle: Handle,
+}
+
+impl TokioExecutor {
+    pub fn current() -> Self {
+        Self {
+            handle: Handle::current(),
+        }
+    }
 }
 
 impl Executor for TokioExecutor {
@@ -96,7 +104,7 @@ impl Executor for TokioExecutor {
     where
         F: Future<Output = ()> + MaybeSend + 'static,
     {
-        self.runtime.spawn(future);
+        self.handle.spawn(future);
     }
 }
 ```
