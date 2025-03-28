@@ -71,6 +71,10 @@ Manifest is used to store the metadata of the database. Whenever the compaction 
 pub fn version_log_snapshot_threshold(self, version_log_snapshot_threshold: u32) -> DbOption;
 ```
 
+If you want to persist metadata files to S3, you can configure `DbOption::base_fs` with `FsOptions::S3{...}`. This will enable Tonbo to upload metadata files and WAL files to the specified S3 bucket.
+
+> **Note**: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest metadata is uploaded, you can use `DB::flush` to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust `DbOption::version_log_snapshot_threshold` to a smaller value. The default value is 200.
+
 ## WAL Configuration
 
 Tonbo use WAL(Write-ahead log) to ensure data durability and consistency. It is a mechanism that ensures that data is written to the log before being written to the database. This helps to prevent data loss in case of a system failure.

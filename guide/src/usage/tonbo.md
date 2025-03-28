@@ -267,3 +267,9 @@ async fn main() {
         .unwrap();
 }
 ```
+
+If you want to persist metadata files to S3, you can configure `DbOption::base_fs` with `FsOptions::S3{...}`. This will enable Tonbo to upload metadata files and WAL files to the specified S3 bucket.
+
+> **Note**: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest WAL is uploaded, you can use `DB::flush_wal`. If you want to ensure the latest metadata is uploaded, you can use `DB::flush` to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust `DbOption::version_log_snapshot_threshold` to a smaller value. The default value is 200.
+
+See more details in [Configuration](./conf.md#manifest-configuration).
