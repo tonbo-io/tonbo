@@ -222,6 +222,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<u8>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -232,6 +233,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<u16>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -242,6 +244,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<u32>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -252,6 +255,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<u64>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -262,6 +266,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<i8>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -272,6 +277,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -282,6 +288,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<i32>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -292,6 +299,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<i64>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -301,6 +309,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 col.value.as_ref().downcast_ref::<Option<String>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(""),
                             }
                         }
@@ -309,6 +318,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             let value = col.value.as_ref().downcast_ref::<Option<bool>>().unwrap();
                             match value {
                                 Some(value) => bd.append_value(*value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(Default::default()),
                             }
                         }
@@ -322,6 +332,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 .unwrap();
                             match value {
                                 Some(value) => bd.append_value(value),
+                                None if col.is_nullable() => bd.append_null(),
                                 None => bd.append_value(vec![]),
                             }
                         }
