@@ -7,5 +7,10 @@ title = "The Tonbo Guide"
 
 [output.html]
 git-repository-url = "https://github.com/tonbo-io/tonbo"
+mathjax-support = true
 [output.html.playground]
 runnable = false
+
+[preprocessor.toc]
+command = "mdbook-toc"
+renderer = ["html"]
