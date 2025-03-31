@@ -47,6 +47,9 @@ where
 }
 /// optimistic ACID transaction, open with
 /// [`DB::transaction`](crate::DB::transaction) method
+///
+/// Transaction will store all mutations in local [`BTreeMap`] and only write to memtable when
+/// committed successfully. Otherwise, all mutations will be rolled back.
 pub struct Transaction<'txn, R>
 where
     R: Record,
@@ -114,7 +117,28 @@ where
         })
     }
 
-    /// scan records with primary keys in the `range`
+    /// scan records with primary keys in the `range`, return a [`Scan`] that can be convert to a
+    /// [`futures_core::Stream`] by using [`Scan::take`].
+    ///
+    /// [`Scan::projection`] and [`Scan::limit`] can be used to push down projection and limit.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut txn = db.transaction().await;
+    /// txn.scan((Bound::Included("Alice"), Bound::Excluded("Bob")))
+    ///     // only read primary key and `age`
+    ///     .projection(&["age"])
+    ///     // read at most 10 records
+    ///     .limit(10)
+    ///     .take()
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// while let Some(entry) = scan_stream.next().await.transpose().unwrap() {
+    ///     println!("{:#?}", entry.value())
+    /// }
+    /// ```
     pub fn scan<'scan, 'range>(
         &'scan self,
         range: (
@@ -157,6 +181,10 @@ where
 
     /// commit the data in the [`Transaction`] to the corresponding
     /// [`DB`](crate::DB)
+    ///
+    /// # Error
+    /// This function will return an error if the mutation in the transaction conflict with
+    /// other committed transaction
     pub async fn commit(mut self) -> Result<(), CommitError<R>> {
         let mut _key_guards = Vec::new();
 
@@ -239,6 +267,7 @@ impl<'entry, R> TransactionEntry<'entry, R>
 where
     R: Record,
 {
+    /// get the [`RecordRef`] inside the entry.
     pub fn get(&self) -> R::Ref<'_> {
         match self {
             TransactionEntry::Stream(entry) => entry.value().unwrap(),

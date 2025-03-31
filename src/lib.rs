@@ -312,6 +312,32 @@ where
     }
 
     /// open an optimistic ACID transaction
+    ///
+    /// ## Examples
+    /// ```ignore
+    /// #[derive(Record, Debug)]
+    /// pub struct User {
+    ///     #[record(primary_key)]
+    ///     name: String,
+    ///     age: u8,
+    /// }
+    /// ```
+    /// ```ignore
+    /// let mut txn = db.transaction().await;
+    /// txn.insert(User {
+    ///     name: "Alice".into(),
+    ///     email: None,
+    ///     age: 20,
+    /// });
+    /// txn.scan((Bound::Included("Alice"), Bound::Excluded("Bob")))
+    ///     .projection(&["age"])
+    ///     .limit(10)
+    ///     .take()
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// txn.commit().await.unwrap();
+    /// ```
     pub async fn transaction(&self) -> Transaction<'_, R> {
         Transaction::new(self.snapshot().await, self.lock_map.clone())
     }
@@ -347,6 +373,7 @@ where
             .await?)
     }
 
+    /// trigger compaction manually. This will flush the WAL and trigger compaction
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
         let (tx, rx) = oneshot::channel();
         let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
@@ -453,11 +480,19 @@ where
         Ok(())
     }
 
+    /// flush WAL to the stable storage. If WAL is disabled, this method will do nothing.
+    ///
+    /// There is no guarantee that the data will be flushed to WAL because of the buffer. So it is
+    /// necessary to call this method before exiting if data loss is not acceptable. See also
+    /// [`DbOption::disable_wal`] and [`DbOption::wal_buffer_size`].
     pub async fn flush_wal(&self) -> Result<(), DbError<R>> {
         self.schema.write().await.flush_wal().await?;
         Ok(())
     }
 
+    /// destroy [`DB`].
+    ///
+    /// **Note:** This will remove all wal and manifest file in the directory.
     pub async fn destroy(self) -> Result<(), DbError<R>> {
         self.schema.write().await.destroy(&self.ctx.manager).await?;
         if let Some(ctx) = Arc::into_inner(self.ctx) {
