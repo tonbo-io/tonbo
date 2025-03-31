@@ -44,7 +44,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     where
         Self: 'r;
 
-    /// Returns the primary key of the record. This should be the type that defined in the
+    /// Returns the primary key of the record. This should be the type defined in the
     /// [`Schema`].
     fn key(&self) -> <<<Self as Record>::Schema as Schema>::Key as Key>::Ref<'_> {
         self.as_record_ref().key()

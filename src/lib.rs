@@ -316,7 +316,7 @@ where
     /// let mut txn = db.transaction().await;
     /// txn.insert(User {
     ///     name: "Alice".into(),
-    ///     eamil: None,
+    ///     email: None,
     ///     age: 20,
     /// });
     /// txn.scan((Bound::Included("Alice"), Bound::Excluded("Bob")))
@@ -480,7 +480,7 @@ where
         Ok(())
     }
 
-    /// destory [`DB`].
+    /// destroy [`DB`].
     ///
     /// **Note:** This will remove all wal and manifest file in the directory.
     pub async fn destroy(self) -> Result<(), DbError<R>> {
