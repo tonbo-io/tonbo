@@ -1,7 +1,6 @@
 # What is Tonbo?
 
-[Tonbo](https://github.com/tonbo-io/tonbo) is an in-process KV database that can be embedded in data-intensive applications written in Rust, Python, or JavaScript (WebAssembly/Deno), it designed for analytical processing. Tonbo can efficiently write data in real time in edge environments such as browsers and AWS Lambda, with the data stored in memory, on local disks, or in S3 using Apache Parquet format.
-
+[Tonbo](https://github.com/tonbo-io/tonbo) is an in-process KV database that can be embedded in data-intensive applications written in Rust, Python, or JavaScript (WebAssembly/Deno). It is designed for analytical processing. Tonbo can efficiently write data in real time in edge environments such as browsers and AWS Lambda, with the data stored in memory, on local disks, or in S3 using Apache Parquet format.
 Building data-intensive applications in Rust using Tonbo is very convenient. You just need to declare the dependency in your `Cargo.toml` file and then create the embedded database:
 ```rust
 #[derive(tonbo::Record)]
