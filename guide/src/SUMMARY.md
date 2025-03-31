@@ -1,18 +1,16 @@
 # Summary
 
-[Introduction](./introduction.md)
+[What is Tonbo?](./introduction.md)
 
 - [Getting Started](./start.md)
 - [Usage]()
   - [Tonbo](./usage/tonbo.md)
   - [Python Binding](./usage/python.md)
-  - [JavaScript Binding](./usage/wasm.md)
   - [Configuration](./usage/conf.md)
   - [Advance](./usage/advance.md)
   - [FAQ](./usage/faq.md)
 - [Examples](./examples/index.md)
   - [Using Tonbo](./examples/declare.md)
-  - [Integrate with Datafusio](./examples/datafusion.md)
   - [Using under Wasm](./examples/wasm.md)
 - [Contribution]()
   - [Building](./contribution/build.md)
