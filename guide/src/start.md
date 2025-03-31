@@ -4,8 +4,7 @@
 ## Installation
 
 ### Prerequisite
-To get started using tonbo you should make sure you have [Rust](https://www.rust-lang.org/tools/install) installed on your system. If you haven't alreadly done yet, try following the instructions [here](https://www.rust-lang.org/tools/install).
-
+To get started using tonbo you should make sure you have [Rust](https://www.rust-lang.org/tools/install) installed on your system. If you haven't already done yet, try following the instructions [here](https://www.rust-lang.org/tools/install).
 ### Installation
 
 To use local disk as storage backend, you should import [tokio](https://github.com/tokio-rs/tokio) crate and enable "tokio" feature (enabled by default) in the *Cargo.toml* file.

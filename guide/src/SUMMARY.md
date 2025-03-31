@@ -16,7 +16,7 @@
   - [Using under Wasm](./examples/wasm.md)
 - [Contribution]()
   - [Building](./contribution/build.md)
-  - [Submiting PR](./contribution/pr.md)
+  - [Submitting PR](./contribution/pr.md)
 - [TonboLite](./tonbolite/index.md)
   - [Getting Started](./tonbolite/start.md)
   - [Building and Testing](./tonbolite/build.md)
