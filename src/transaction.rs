@@ -49,8 +49,8 @@ where
 /// optimistic ACID transaction, open with
 /// [`DB::transaction`](crate::DB::transaction) method
 ///
-/// Transaction will store all mutation in local [`BTreeMap`] and only write to memtable when
-/// committed successfully. Otherwise all mutation will be rollback.
+/// Transaction will store all mutations in local [`BTreeMap`] and only write to memtable when
+/// committed successfully. Otherwise, all mutations will be rolled back.
 pub struct Transaction<'txn, R>
 where
     R: Record,
