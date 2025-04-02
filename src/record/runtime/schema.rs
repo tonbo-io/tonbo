@@ -63,3 +63,40 @@ impl Schema for DynSchema {
         )
     }
 }
+
+/// Creates a [`DynSchema`] from literal slice of values and primary key index, suitable for rapid
+/// testing and development.
+///
+/// ## Example:
+///
+/// ```no_run
+/// // dyn_schema!(
+/// //      (name, type, nullable),
+/// //         ......
+/// //      (name, type, nullable),
+/// //      primary_key_index
+/// // );
+/// use tonbo::dyn_schema;
+///
+/// let schema = dyn_schema!(
+///     ("foo", String, false),
+///     ("bar", Int32, true),
+///     ("baz", UInt64, true),
+///     0
+/// );
+/// ```
+#[macro_export]
+macro_rules! dyn_schema {
+    ($(($name: expr, $type: ident, $nullable: expr )),*, $primary: literal) => {
+        {
+            $crate::record::DynSchema::new(
+                vec![
+                    $(
+                        $crate::record::ValueDesc::new($name.into(), $crate::record::DataType::$type, $nullable),
+                    )*
+                ],
+                $primary,
+            )
+        }
+    }
+}
