@@ -1,11 +1,40 @@
-# The Tonbo user guide
-Welcome to the tonbo user guide! This book is about [tonbo](https://github.com/tonbo-io/tonbo). Tonbo is an embedded, persistent database offering fast KV-like methods for conveniently writing and scanning type-safe structured data. Tonbo can be used to build data-intensive applications, including other types of databases.
+# What is Tonbo?
 
+[Tonbo](https://github.com/tonbo-io/tonbo) is an in-process KV database that can be embedded in data-intensive applications written in Rust, Python, or JavaScript (WebAssembly/Deno). It is designed for analytical processing. Tonbo can efficiently write data in real time in edge environments such as browsers and AWS Lambda, with the data stored in memory, on local disks, or in S3 using Apache Parquet format.
+Building data-intensive applications in Rust using Tonbo is very convenient. You just need to declare the dependency in your `Cargo.toml` file and then create the embedded database:
+```rust
+#[derive(tonbo::Record)]
+pub struct User {
+    #[record(primary_key)]
+    name: String,
+    email: Option<String>,
+    age: u8,
+}
 
-The rough order of material in this user guide is as follows:
-1. Getting started
-2. Examples on using tonbo
-3. How to make contributions to Tonbo
+async fn main() {
+    let db = tonbo::DB::new("./db_path/users".into(), TokioExecutor::current())
+        .await
+        .unwrap();
+}
+```
 
+Compared to other analytical databases, Tonbo is extremely lightweight—only 1.3MB when compressed. In addition to being embedded directly as a KV database within applications, Tonbo can also serve as an analytical enhancement for existing OLTP databases. For example, Tonbolite is a SQLite plugin built on Tonbo that provides SQLite with highly compressed, analytical-ready tables using Arrow/Parquet to boost query efficiency. Moreover, it can run alongside SQLite in various environments such as browsers and Linux:
+```
+sqlite> .load target/release/libsqlite_tonbo
 
-If you want to learn the design of tonbo, you can see this [blog](https://tonbo.io/blog/introducing-tonbo).
+sqlite> CREATE VIRTUAL TABLE temp.tonbo USING tonbo(
+    create_sql = 'create table tonbo(id bigint primary key, name varchar, like int)',
+    path = 'db_path/tonbo'
+);
+
+sqlite> insert into tonbo (id, name, like) values (0, 'tonbo', 100);
+
+sqlite> select * from tonbo;
+0|tonbo|100
+```
+
+We are committed to providing the most convenient and efficient real-time analytical database for edge-first scenarios. In addition to Tonbolite, we will offer the following based on Tonbo:
+1. Time-series data writing and querying for observability and other scenarios.
+2. Real-time index building and search based on BM25 or vectors.
+
+We are passionate about establishing Tonbo as an open-source, community-contributed project and are dedicated to building a community around it to develop features for all use cases.
