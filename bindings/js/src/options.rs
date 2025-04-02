@@ -1,5 +1,4 @@
-use fusio::path::Path;
-use tonbo::record::Schema;
+use tonbo::{option::Path, record::Schema};
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 
 use crate::FsOptions;

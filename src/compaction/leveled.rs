@@ -127,6 +127,9 @@ where
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
+        if is_manual {
+            self.ctx.version_set.rewrite().await.unwrap();
+        }
         Ok(())
     }
 

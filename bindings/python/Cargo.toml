@@ -2,6 +2,9 @@
 edition = "2021"
 name = "tonbo-python"
 version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/tonbo-io/tonbo"
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib"]
@@ -9,11 +12,6 @@ crate-type = ["cdylib"]
 [workspace]
 
 [dependencies]
-fusio = { version = "0.3.7", package = "fusio", features = ["aws", "tokio"] }
-fusio-dispatch = { version = "0.3.7", package = "fusio-dispatch", features = [
-    "aws",
-    "tokio",
-] }
 futures = { version = "0.3" }
 pyo3 = { version = "0.21.2", features = [
     "abi3",

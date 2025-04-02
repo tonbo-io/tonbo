@@ -222,7 +222,7 @@ pub(crate) mod tests {
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
         }
-        Ok(Immutable::new(mutable.data, schema.arrow_schema().clone()))
+        Ok(mutable.into_immutable().await.unwrap().1)
     }
 
     pub(crate) async fn build_parquet_table<R>(

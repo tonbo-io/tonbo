@@ -296,6 +296,7 @@ mod tests {
         let schema = schema();
         let db = TonboDB::new(option, schema).await;
 
+        db.flush_wal().await.unwrap();
         drop(db);
         remove("open").await;
     }
@@ -310,6 +311,7 @@ mod tests {
         for item in test_items() {
             db.insert(item).await.unwrap();
         }
+        db.flush_wal().await.unwrap();
 
         drop(db);
         remove("write").await;

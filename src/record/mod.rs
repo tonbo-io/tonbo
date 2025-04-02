@@ -23,10 +23,17 @@ pub trait Schema: Debug + Send + Sync {
 
     type Key: Key;
 
+    /// Returns the [`arrow::datatypes::Schema`] of the record.
+    ///
+    /// **Note**: The first column should be `_null`, and the second column should be `_ts`.
     fn arrow_schema(&self) -> &Arc<ArrowSchema>;
 
+    /// Returns the index of the primary key column.
     fn primary_key_index(&self) -> usize;
 
+    /// Returns the ([`ColumnPath`], [`Vec<SortingColumn>`]) of the primary key column, representing
+    /// the location of the primary key column in the parquet schema and the sort order within a
+    /// RowGroup of a leaf column
     fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>);
 }
 
@@ -37,22 +44,34 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     where
         Self: 'r;
 
+    /// Returns the primary key of the record. This should be the type defined in the
+    /// [`Schema`].
     fn key(&self) -> <<<Self as Record>::Schema as Schema>::Key as Key>::Ref<'_> {
         self.as_record_ref().key()
     }
 
+    /// Returns a reference to the record.
     fn as_record_ref(&self) -> Self::Ref<'_>;
 
+    /// Returns the size of the record in bytes.
     fn size(&self) -> usize;
 }
 
 pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
     type Record: Record;
 
+    /// Returns the primary key of the record. This should be the type that defined in the
+    /// [`Schema`].
     fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r>;
 
+    /// Do projection on the record. Only keep the columns specified in the projection mask.
+    ///
+    /// **Note**: Primary key column are always kept.
     fn projection(&mut self, projection_mask: &ProjectionMask);
 
+    /// Get the [`RecordRef`] from the [`RecordBatch`] at the given offset.
+    ///
+    /// `full_schema` is the combination of `_null`, `_ts` and all fields defined in the [`Schema`].
     fn from_record_batch(
         record_batch: &'r RecordBatch,
         offset: usize,

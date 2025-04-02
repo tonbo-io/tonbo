@@ -9,17 +9,11 @@ crate-type = ["cdylib", "rlib"]
 [workspace]
 
 [dependencies]
-
-fusio = { version = "0.3.7", package = "fusio", features = ["aws", "opfs"] }
-fusio-dispatch = { version = "0.3.7", package = "fusio-dispatch", features = [
-  "aws",
-  "opfs",
-] }
 futures = { version = "0.3" }
 js-sys = { version = "0.3.72" }
 tonbo = { version = "0.3.1", path = "../../", default-features = false, features = [
-  "bytes",
-  "wasm",
+    "bytes",
+    "wasm",
 ] }
 
 wasm-bindgen = "0.2.95"
@@ -32,6 +26,11 @@ wasm-bindgen-futures = { version = "0.4.45" }
 wasm-bindgen-test = "0.3.9"
 wasm-streams = "0.4.2"
 web-sys = { version = "0.3", features = ["console"] }
+fusio = { version = "0.3.7", default-features = false, features = [
+    "dyn",
+    "bytes",
+    "opfs",
+] }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

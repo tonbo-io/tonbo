@@ -1,5 +1,5 @@
-use fusio::path::Path;
 use pyo3::{pyclass, pyfunction, pymethods, types::PyString, Bound, PyResult, Python};
+use tonbo::option::Path;
 
 use crate::PathParseError;
 
@@ -11,9 +11,9 @@ pub struct AwsCredential {
     pub token: Option<String>,
 }
 
-impl From<AwsCredential> for fusio::remotes::aws::AwsCredential {
+impl From<AwsCredential> for tonbo::option::AwsCredential {
     fn from(cred: AwsCredential) -> Self {
-        fusio::remotes::aws::AwsCredential {
+        tonbo::option::AwsCredential {
             key_id: cred.key_id,
             secret_key: cred.secret_key,
             token: cred.token,
@@ -47,10 +47,10 @@ pub enum FsOptions {
     },
 }
 
-impl From<FsOptions> for fusio_dispatch::FsOptions {
+impl From<FsOptions> for tonbo::option::FsOptions {
     fn from(opt: FsOptions) -> Self {
         match opt {
-            FsOptions::Local {} => fusio_dispatch::FsOptions::Local,
+            FsOptions::Local {} => tonbo::option::FsOptions::Local,
             FsOptions::S3 {
                 bucket,
                 credential,
@@ -58,9 +58,9 @@ impl From<FsOptions> for fusio_dispatch::FsOptions {
                 sign_payload,
                 checksum,
                 endpoint,
-            } => fusio_dispatch::FsOptions::S3 {
+            } => tonbo::option::FsOptions::S3 {
                 bucket,
-                credential: credential.map(fusio::remotes::aws::AwsCredential::from),
+                credential: credential.map(tonbo::option::AwsCredential::from),
                 region,
                 sign_payload,
                 checksum,
