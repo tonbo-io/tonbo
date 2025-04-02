@@ -1009,6 +1009,7 @@ pub(crate) mod tests {
     use tracing::error;
 
     use crate::{
+        cast_arc_value,
         compaction::{CompactTask, CompactionError, Compactor},
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
@@ -1846,82 +1847,33 @@ pub(crate) mod tests {
                 let record_ref = entry.get();
 
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .first()
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<i64>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.first().unwrap().value, i64),
                     i as i64
                 );
-                let height = record_ref
-                    .columns
-                    .get(2)
-                    .unwrap()
-                    .value
-                    .as_ref()
-                    .downcast_ref::<Option<i16>>()
-                    .unwrap();
+                let height = cast_arc_value!(record_ref.columns.get(2).unwrap().value, Option<i16>);
                 if i < 45 {
                     assert_eq!(*height, Some(20 * i as i16),);
                 } else {
                     assert!(height.is_none());
                 }
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .get(3)
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<i32>>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.get(3).unwrap().value, Option<i32>),
                     Some(200 * i),
                 );
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .get(4)
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<String>>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.get(4).unwrap().value, Option<String>),
                     Some(i.to_string()),
                 );
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .get(5)
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<String>>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.get(5).unwrap().value, Option<String>),
                     Some(format!("{}@tonbo.io", i)),
                 );
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .get(6)
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<bool>>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.get(6).unwrap().value, Option<bool>),
                     Some(i % 2 == 0),
                 );
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .get(7)
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<Vec<u8>>>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.get(7).unwrap().value, Option<Vec<u8>>),
                     Some(i.to_le_bytes().to_vec()),
                 );
             }
@@ -2094,36 +2046,15 @@ pub(crate) mod tests {
                 let record_ref = entry.get();
 
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .first()
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<i64>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.first().unwrap().value, i64),
                     i as i64
                 );
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .get(3)
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<i32>>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.get(3).unwrap().value, Option<i32>),
                     Some(200 * i),
                 );
                 assert_eq!(
-                    *record_ref
-                        .columns
-                        .get(4)
-                        .unwrap()
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<String>>()
-                        .unwrap(),
+                    *cast_arc_value!(record_ref.columns.get(4).unwrap().value, Option<String>),
                     Some(i.to_string()),
                 );
             }
@@ -2148,14 +2079,7 @@ pub(crate) mod tests {
                 let primary_key_col = columns.first().unwrap();
                 assert_eq!(primary_key_col.datatype(), DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
-                assert_eq!(
-                    *primary_key_col
-                        .value
-                        .as_ref()
-                        .downcast_ref::<i64>()
-                        .unwrap(),
-                    i
-                );
+                assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
 
                 i += 2
             }
@@ -2175,14 +2099,7 @@ pub(crate) mod tests {
                 let primary_key_col = columns.first().unwrap();
                 assert_eq!(primary_key_col.datatype(), DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
-                assert_eq!(
-                    *primary_key_col
-                        .value
-                        .as_ref()
-                        .downcast_ref::<i64>()
-                        .unwrap(),
-                    i
-                );
+                assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
 
                 i += 2
             }
@@ -2202,14 +2119,7 @@ pub(crate) mod tests {
                 let primary_key_col = columns.first().unwrap();
                 assert_eq!(primary_key_col.datatype(), DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
-                assert_eq!(
-                    *primary_key_col
-                        .value
-                        .as_ref()
-                        .downcast_ref::<i64>()
-                        .unwrap(),
-                    i
-                );
+                assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
 
                 i += 1
             }
