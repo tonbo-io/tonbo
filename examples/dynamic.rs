@@ -2,8 +2,9 @@ use std::{fs, sync::Arc};
 
 use fusio::path::Path;
 use tonbo::{
+    dyn_record, dyn_schema,
     executor::tokio::TokioExecutor,
-    record::{DataType, DynRecord, DynSchema, Value, ValueDesc},
+    record::{DataType, Value},
     DbOption, DB,
 };
 
@@ -11,13 +12,7 @@ use tonbo::{
 async fn main() {
     fs::create_dir_all("./db_path/users").unwrap();
 
-    let schema = DynSchema::new(
-        vec![
-            ValueDesc::new("foo".into(), DataType::String, false),
-            ValueDesc::new("bar".into(), DataType::Int32, true),
-        ],
-        0,
-    );
+    let schema = dyn_schema!(("foo", String, false), ("bar", Int32, true), 0);
 
     let options = DbOption::new(
         Path::from_filesystem_path("./db_path/users").unwrap(),
@@ -29,17 +24,10 @@ async fn main() {
 
     {
         let mut txn = db.transaction().await;
-        txn.insert(DynRecord::new(
-            vec![
-                Value::new(
-                    DataType::String,
-                    "foo".into(),
-                    Arc::new("hello".to_owned()),
-                    false,
-                ),
-                Value::new(DataType::Int32, "bar".into(), Arc::new(1), true),
-            ],
-            0,
+        txn.insert(dyn_record!(
+            ("foo", String, false, "hello".to_owned()),
+            ("bar", Int32, true, 1),
+            0
         ));
 
         txn.commit().await.unwrap();
