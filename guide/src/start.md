@@ -4,17 +4,20 @@
 ## Installation
 
 ### Prerequisite
-To get started using tonbo you should make sure you have [Rust](https://www.rust-lang.org/tools/install) installed on your system. If you haven't already done yet, try following the instructions [here](https://www.rust-lang.org/tools/install).
+
+To get started with Tonbo, ensure that Rust is installed on your system. If you haven't installed it yet, please follow the [installation instructions](https://www.rust-lang.org/tools/install).
+
 ### Installation
 
-To use local disk as storage backend, you should import [tokio](https://github.com/tokio-rs/tokio) crate and enable "tokio" feature (enabled by default) in the *Cargo.toml* file.
+Tonbo supports various target platforms (native, AWS Lambda, browsers, etc.) and storage backends (memory, local disk, S3, etc.). Built on asynchronous Rust, Tonbo improves database operation efficiency, which means you must configure an async runtime for your target platform.
 
+For native platforms, [Tokio](https://github.com/tokio-rs/tokio) is the most popular async runtime in Rust. To use Tonbo with Tokio, ensure the tokio feature is enabled in your `Cargo.toml` file (enabled by default):
 ```toml
 tokio = { version = "1", features = ["full"] }
 tonbo = { git = "https://github.com/tonbo-io/tonbo" }
 ```
 
-If you want to use tonbo in browser(use OPFS as storage backend), you should disable "*tokio*" feature and enable "*wasm*" feature(As "*tokio*" is enabled by default, you should also disable `default-features`). If you want to use S3 as backend, you also should enable "*wasm-http*" feature.
+For browser targets using OPFS as the storage backend, disable the `tokio` feature and enable the `wasm` feature because Tokio is incompatible with OPFS. Since `tokio` is enabled by default, you must disable default features. If you plan to use S3 as the backend, also enable the `wasm-http` feature:
 
 ```toml
 tonbo = { git = "https://github.com/tonbo-io/tonbo", default-features = false, features = [
@@ -22,12 +25,12 @@ tonbo = { git = "https://github.com/tonbo-io/tonbo", default-features = false, f
     "wasm-http",
 ] }
 ```
+
 ## Using Tonbo
 
 ### Defining Schema
 
-Tonbo provides ORM-like macro for ease of use, you can use `Record` macro to define schema of column family. Tonbo will generate all relevant code for you at compile time.
-
+Tonbo offers an ORM-like macro that simplifies working with column families. Use the Record macro to define your column family's schema, and Tonbo will automatically generate all necessary code at compile time:
 ```rust
 use tonbo::Record;
 
@@ -40,20 +43,20 @@ pub struct User {
 }
 ```
 
-- `Record`: Declare this struct as a Tonbo Schema
-- `#[record(primary_key)]`: Declare this key as primary key. Compound primary key is not supported now.
-- `Option` type represents this field can be null, otherwise it can not be null.
+Further explanation of this example:
+- `Record`: This attribute marks the struct as a Tonbo schema definition, meaning it represents the structure of a column family.
+- `#[record(primary_key)]`: This attribute designates the corresponding field as the primary key. Note that Tonbo currently does not support compound primary keys, so the primary key must be unique.
+- `Option`: When a field is wrapped in Option, it indicates that the field is nullable.
 
-Now, Tonbo support these types:
-
-- Number type: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
-- Boolean type: `bool`
-- String type: `String`
-- Bytes: `bytes::Bytes`
+Tonbo supports the following data types:
+- Number types: i8, i16, i32, i64, u8, u16, u32, u64
+- Boolean type: bool
+- String type: String
+- Bytes type: bytes::Bytes
 
 ### Creating database
 
-After define you schema, you can create `DB` with a customized `DbOption`
+After defining your schema, you can create a `DB` instance using a customized `DbOption`.
 
 ```rust
 use std::fs;
@@ -75,15 +78,13 @@ async fn main() {
 }
 ```
 
-`UserSchema` is a struct that tonbo generates for you in the compile time, so you do not need to import it.  One thing you need to pay attention to is: you should **make sure the path exists** before creating `DBOption`.
+Tonbo automatically generates the `UserSchema` struct at compile time, so you don’t need to handle it manually. However, ensure that the specified path exists before creating your DBOption.
 
-> **Note:** If you use tonbo in WASM, you should use `Path::from_opfs_path` rather than `Path::from_filesystem_path`.
->
+When using Tonbo in a WASM environment, use `Path::from_opfs_path` instead of `Path::from_filesystem_path`.
 
 ### Operations on Database
 
-After creating `DB`, you can execute `insert`, `remove`, `get` and other operations now. But remember that you will get a **`UserRef` instance** that implements `RecordRef` trait rather than the `User`, if you get record from tonbo. This is a struct that tonbo generates for you in the compile time. It may look like:
-
+After creating the DB, you can perform operations like `insert`, `remove`, and `get`. However, when you retrieve a record from Tonbo, you'll receive a `UserRef` instance—not a direct `User` instance. The `UserRef` struct, which implements the `RecordRef` trait, is automatically generated by Tonbo at compile time. It might look something like this:
 ```rust
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct UserRef<'r> {
@@ -98,22 +99,21 @@ impl RecordRef for UserRef<'_> {
 
 ### Insert
 
-`DB::insert` receives a `Record` instance which is the instance of struct you defined with `#[derive(Record)]`.
-
+`DB::insert` takes a `Record` instance—specifically, an instance of the struct you've defined with `#[derive(Record)]`:
 ```rust
 db.insert(User { /* ... */ }).await.unwrap();
 ```
 
 ### Remove
-`DB::remove` receives a `Key` which is the type of `#[record(primary_key)]`. This method will remove the record that specified by the given `Key`.
 
+`DB::remove` accepts a Key, where the type of the key is defined by the field annotated with `#[record(primary_key)]`. This method removes the record associated with the provided key:
 ```rust
 db.remove("Alice".into()).await.unwrap();
 ```
 
 ### Get
-`DB::get` receives a `Key` and process the record with a closure that receives a `TransactionEntry`. You can use `TransactionEntry::get` to get the record which is the type of `RecordRef`.
 
+`DB::get` accepts a `Key` and processes the corresponding record using a closure that receives a `TransactionEntry`. Within the closure, you can call `TransactionEntry::get` to retrieve the record as a `RecordRef` instance:
 ```rust
 let age = db.get(&"Alice".into(),
     |entry| {
@@ -125,9 +125,9 @@ let age = db.get(&"Alice".into(),
     .await
     .unwrap();
 ```
-### Scan
-Like `DB::get`, `DB::scan` receives a closure that process `TransactionEntry`. The difference is that `DB::scan` receives a range of `Key`s and process all data that satisfied with the closure.
 
+### Scan
+Similar to `DB::get`, `DB::scan` accepts a closure that processes a `TransactionEntry`. However, instead of a single key, `DB::scan` operates over a range of keys, applying the closure to every record that falls within that range:
 ```rust
 let lower = "Alice".into();
 let upper = "Bob".into();
@@ -175,9 +175,10 @@ while let Some(entry) = scan.next().await.transpose().unwrap() {
 ```
 
 ### Persistence
-As Tonbo uses LSM(Log-Structured-Merge Tree) as the underlying data structure, some data are in the memory(mem). If you want to persist these data, you can use the `flush` method.
 
-If WAL is enabled, the data will be persisted to disk automatically. But as tonbo has buffer for WAL by default, you need to call `flush_wal` method if you want to ensure that all the data will be recovered. If you don not want to use buffer for WAL, you can disable it by setting `wal_buffer_size` to 0.
+Tonbo employs a Log-Structured Merge Tree (LSM) as its underlying data structure, meaning that some data may reside in memory. To persist this in-memory data, use the flush method.
+
+When Write-Ahead Logging (WAL) is enabled, data is automatically written to disk. However, since Tonbo buffers WAL data by default, you should call the `flush_wal` method to ensure all data is recovered. If you prefer not to use WAL buffering, you can disable it by setting `wal_buffer_size` to 0:
 
 ```rust
 let options = DbOption::new(
@@ -186,7 +187,7 @@ let options = DbOption::new(
 ).wal_buffer_size(0);
 ```
 
-If you don't want to use WAL, you can disable it by setting the `DbOption::disable_wal`. But please ensure that losing data is acceptable for you.
+If you don't want to use WAL, you can disable it by setting the `DbOption::disable_wal`.
 ```rust
 let options = DbOption::new(
     Path::from_filesystem_path("./db_path/users").unwrap(),
@@ -196,11 +197,11 @@ let options = DbOption::new(
 
 > **Note**: If you disable WAL, there is nothing to do with `flush_wal`. You need to call `flush` method to persist the memory data.
 >
-> If you enable WAL and set `wal_buffer_size` to 0, you do not need to call `flush_wal` method, since WAL will be flushed to disk before writing.
+> Conversely, if WAL is enabled and `wal_buffer_size` is set to 0, WAL data is flushed to disk immediately, so calling `flush_wal` is unnecessary.
 
-### Using in S3
+### Using with S3
 
-If you want to use Tonbo in S3, you can configure `DbOption` to specify which part of the data to store in S3 and which part to store in local disk. Here is an example:
+If you want to use Tonbo with S3, you can configure `DbOption` to determine which portions of your data are stored in S3 and which remain on the local disk. The example below demonstrates how to set up this configuration:
 
 ```rust
 let s3_option = FsOptions::S3 {
@@ -222,7 +223,7 @@ let options = DbOption::new(
 ).level_path(3, "l3", s3_option);
 ```
 
-In this example, the data of level 2 and level 3 will be stored in S3 and the rest of the data will be stored in local disk. If there are data in level 2 and level 3, you can find them in S3 like this:
+In this example, data for level 2 and level 3 will be stored in S3, while all other levels remain on the local disk. If there is data in level 2 and level 3, you can verify and access it in S3:
 
 ```bash
 s3://bucket/l2/
@@ -236,6 +237,7 @@ s3://bucket/l3/
 For more configuration options, please refer to the [Configuration](./usage/conf.md) section.
 
 ## What next?
+
 - To learn more about tonbo in Rust or in WASM, you can refer to [Tonbo API](./usage/tonbo.md)
 - To use tonbo in python, you can refer to [Python API](./usage/python.md)
 - To learn more about tonbo in brower, you can refer to [WASM API](./usage/wasm.md)

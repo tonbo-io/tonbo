@@ -1,7 +1,9 @@
 # What is Tonbo?
 
-[Tonbo](https://github.com/tonbo-io/tonbo) is an in-process KV database that can be embedded in data-intensive applications written in Rust, Python, or JavaScript (WebAssembly/Deno). It is designed for analytical processing. Tonbo can efficiently write data in real time in edge environments such as browsers and AWS Lambda, with the data stored in memory, on local disks, or in S3 using Apache Parquet format.
-Building data-intensive applications in Rust using Tonbo is very convenient. You just need to declare the dependency in your `Cargo.toml` file and then create the embedded database:
+[Tonbo](https://github.com/tonbo-io/tonbo) is an in-process KV database that can be embedded in data-intensive applications written in Rust, Python, or JavaScript (WebAssembly / Deno). It is designed for analytical processing. Tonbo can efficiently write data in real time in edge environments such as browsers and AWS Lambda, with the data stored in memory, on local disks, or in S3 using Apache Parquet format.
+
+## Build with schema
+Building data-intensive applications in Rust using Tonbo is convenient. You just need to declare the dependency in your `Cargo.toml` file and then create the embedded database. Tonbo supports:
 ```rust
 #[derive(tonbo::Record)]
 pub struct User {
@@ -18,7 +20,39 @@ async fn main() {
 }
 ```
 
-Compared to other analytical databases, Tonbo is extremely lightweight—only 1.3MB when compressed. In addition to being embedded directly as a KV database within applications, Tonbo can also serve as an analytical enhancement for existing OLTP databases. For example, Tonbolite is a SQLite plugin built on Tonbo that provides SQLite with highly compressed, analytical-ready tables using Arrow/Parquet to boost query efficiency. Moreover, it can run alongside SQLite in various environments such as browsers and Linux:
+## All in Parquet
+
+Tonbo organizes all stored data as Apache Parquet files. At each level, these files can reside in memory, on disk, or in S3. This design lets users process their data without any vendor lock-in, including with Tonbo.
+
+```
+			╔═tonbo═════════════════════════════════════════════════════╗
+			║                                                           ║
+			║    ┌──────╂─client storage─┐  ┌──────╂─client storage─┐   ║
+			║    │ ┏━━━━▼━━━━┓           │  │ ┏━━━━▼━━━━┓           │   ║
+			║    │ ┃ parquet ┃           │  │ ┃ parquet ┃           │   ║
+			║    │ ┗━━━━┳━━━━┛           │  │ ┗━━━━┳━━━━┛           │   ║
+			║    └──────╂────────────────┘  └──────╂────────────────┘   ║
+			║           ┣━━━━━━━━━━━━━━━━━━━━━━━━━━┛                    ║
+			║    ┌──────╂────────────────────────────────server ssd─┐   ║
+			║    │      ┣━━━━━━━━━━━┓                               │   ║
+			║    │ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓                          │   ║
+			║    │ ┃ parquet ┃ ┃ parquet ┃                          │   ║
+			║    │ ┗━━━━┳━━━━┛ ┗━━━━┳━━━━┛                          │   ║
+			║    └──────╂───────────╂───────────────────────────────┘   ║
+			║    ┌──────╂───────────╂────────object storage service─┐   ║
+			║    │      ┣━━━━━━━━━━━╋━━━━━━━━━━━┳━━━━━━━━━━━┓       │   ║
+			║    │ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓  │   ║
+			║    │ ┃ parquet ┃ ┃ parquet ┃ ┃ parquet ┃ ┃ parquet ┃  │   ║
+			║    │ ┗━━━━━━━━━┛ ┗━━━━━━━━━┛ ┗━━━━━━━━━┛ ┗━━━━━━━━━┛  │   ║
+			║    └──────────────────────────────────────────────────┘   ║
+			║                                                           ║
+			╚═══════════════════════════════════════════════════════════╝
+```
+
+## Easy to be integrated
+Compared to other analytical databases, Tonbo is extremely lightweight—only 1.3MB when compressed. In addition to being embedded directly as a KV database within applications, Tonbo can also serve as an analytical enhancement for existing OLTP databases.
+
+For example, [Tonbolite](https://github.com/tonbo-io/tonbolite) is a SQLite plugin built on Tonbo that provides SQLite with highly compressed, analytical-ready tables using Arrow/Parquet to boost query efficiency. Moreover, it can run alongside SQLite in various environments such as browsers and Linux:
 ```
 sqlite> .load target/release/libsqlite_tonbo
 
