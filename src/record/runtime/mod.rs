@@ -44,3 +44,11 @@ impl From<&ArrowDataType> for DataType {
         }
     }
 }
+
+/// Cast the `Arc<dyn Any>` to the value of given type.
+#[macro_export]
+macro_rules! cast_arc_value {
+    ($value:expr, $type:ty) => {
+        $value.as_ref().downcast_ref::<$type>().unwrap()
+    };
+}
