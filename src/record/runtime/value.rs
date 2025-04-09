@@ -1,23 +1,70 @@
-use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
+use core::hash::{Hash, Hasher};
+use std::{any::Any, fmt::Debug, sync::Arc};
 
 use arrow::{
     array::{
-        BooleanArray, GenericBinaryArray, Int16Array, Int32Array, Int64Array, Int8Array,
-        StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        Array, BooleanArray, GenericBinaryArray, Int16Array, Int32Array, Int64Array, Int8Array,
+        ListArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     },
-    datatypes::{DataType as ArrowDataType, Field},
+    buffer::OffsetBuffer,
+    datatypes::{DataType as ArrowDataType, Field, FieldRef},
 };
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, DecodeError, Encode};
 
 use super::DataType;
-use crate::record::{Key, KeyRef};
+use crate::{
+    cast_arc_value,
+    record::{Key, KeyRef},
+};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {
     pub datatype: DataType,
     pub is_nullable: bool,
     pub name: String,
+}
+
+impl PartialEq for ValueDesc {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.datatype == other.datatype
+            && self.is_nullable == other.is_nullable
+    }
+}
+impl Eq for ValueDesc {}
+
+impl PartialOrd for ValueDesc {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ValueDesc {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name
+            .cmp(&other.name)
+            .then_with(|| self.datatype.cmp(&other.datatype))
+            .then_with(|| self.is_nullable.cmp(&other.is_nullable))
+    }
+}
+
+impl Hash for ValueDesc {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.datatype.hash(state);
+        self.is_nullable.hash(state);
+    }
+}
+
+impl From<&Field> for ValueDesc {
+    fn from(field: &Field) -> Self {
+        Self {
+            datatype: field.data_type().into(),
+            is_nullable: field.is_nullable(),
+            name: field.name().to_owned(),
+        }
+    }
 }
 
 impl ValueDesc {
@@ -30,7 +77,7 @@ impl ValueDesc {
     }
 
     pub(crate) fn arrow_field(&self) -> Field {
-        let arrow_type = match self.datatype {
+        let arrow_type = match &self.datatype {
             DataType::UInt8 => ArrowDataType::UInt8,
             DataType::UInt16 => ArrowDataType::UInt16,
             DataType::UInt32 => ArrowDataType::UInt32,
@@ -42,6 +89,29 @@ impl ValueDesc {
             DataType::String => ArrowDataType::Utf8,
             DataType::Boolean => ArrowDataType::Boolean,
             DataType::Bytes => ArrowDataType::Binary,
+            DataType::List(desc) => {
+                let array_ty = match &desc.datatype {
+                    DataType::UInt8 => ArrowDataType::UInt8,
+                    DataType::UInt16 => ArrowDataType::UInt16,
+                    DataType::UInt32 => ArrowDataType::UInt32,
+                    DataType::UInt64 => ArrowDataType::UInt64,
+                    DataType::Int8 => ArrowDataType::Int8,
+                    DataType::Int16 => ArrowDataType::Int16,
+                    DataType::Int32 => ArrowDataType::Int32,
+                    DataType::Int64 => ArrowDataType::Int64,
+                    DataType::String => ArrowDataType::Utf8,
+                    DataType::Boolean => ArrowDataType::Boolean,
+                    DataType::Bytes => ArrowDataType::Binary,
+                    DataType::List(_) => {
+                        unimplemented!("`Vec<Vec<T>> is not supported now")
+                    }
+                };
+                ArrowDataType::List(FieldRef::new(Field::new(
+                    &desc.name,
+                    array_ty,
+                    desc.is_nullable,
+                )))
+            }
         };
         Field::new(&self.name, arrow_type, self.is_nullable)
     }
@@ -67,7 +137,7 @@ impl Value {
     }
 
     pub(crate) fn with_none_value(datatype: DataType, name: String, is_nullable: bool) -> Self {
-        match datatype {
+        match &datatype {
             DataType::UInt8 => Self::new(datatype, name, Arc::<Option<u8>>::new(None), is_nullable),
             DataType::UInt16 => {
                 Self::new(datatype, name, Arc::<Option<u16>>::new(None), is_nullable)
@@ -103,11 +173,80 @@ impl Value {
                 Arc::<Option<Vec<u8>>>::new(None),
                 is_nullable,
             ),
+            DataType::List(desc) => match &desc.datatype {
+                DataType::UInt8 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<u8>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::UInt16 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<u16>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::UInt32 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<u32>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::UInt64 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<u64>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::Int8 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<i8>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::Int16 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<i16>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::Int32 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<i32>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::Int64 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<i64>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::String => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<String>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::Boolean => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<bool>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::Bytes => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<Vec<u8>>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+            },
         }
     }
 
-    pub fn datatype(&self) -> DataType {
-        self.desc.datatype
+    pub fn datatype(&self) -> &DataType {
+        &self.desc.datatype
     }
 
     pub fn is_nullable(&self) -> bool {
@@ -116,6 +255,42 @@ impl Value {
 
     pub fn name(&self) -> String {
         self.desc.name.clone()
+    }
+}
+
+/// transform `Arc<T>` to `Arc<Option<T>>`
+pub(crate) fn wrapped_value(
+    datatype: &DataType,
+    value: &Arc<dyn Any + Send + Sync>,
+) -> Arc<dyn Any + Send + Sync> {
+    match datatype {
+        DataType::UInt8 => Arc::new(Some(*cast_arc_value!(value, u8))),
+        DataType::UInt16 => Arc::new(Some(*cast_arc_value!(value, u16))),
+        DataType::UInt32 => Arc::new(Some(*cast_arc_value!(value, u32))),
+        DataType::UInt64 => Arc::new(Some(*cast_arc_value!(value, u64))),
+        DataType::Int8 => Arc::new(Some(*cast_arc_value!(value, i8))),
+        DataType::Int16 => Arc::new(Some(*cast_arc_value!(value, i16))),
+        DataType::Int32 => Arc::new(Some(*cast_arc_value!(value, i32))),
+        DataType::Int64 => Arc::new(Some(*cast_arc_value!(value, i64))),
+        DataType::String => Arc::new(Some(cast_arc_value!(value, String).to_owned())),
+        DataType::Boolean => Arc::new(Some(*cast_arc_value!(value, bool))),
+        DataType::Bytes => Arc::new(Some(cast_arc_value!(value, Vec<u8>).to_owned())),
+        DataType::List(desc) => match desc.datatype {
+            DataType::UInt8 => Arc::new(Some(cast_arc_value!(value, Vec<u8>).to_owned())),
+            DataType::UInt16 => Arc::new(Some(cast_arc_value!(value, Vec<u16>).to_owned())),
+            DataType::UInt32 => Arc::new(Some(cast_arc_value!(value, Vec<u32>).to_owned())),
+            DataType::UInt64 => Arc::new(Some(cast_arc_value!(value, Vec<u64>).to_owned())),
+            DataType::Int8 => Arc::new(Some(cast_arc_value!(value, Vec<i8>).to_owned())),
+            DataType::Int16 => Arc::new(Some(cast_arc_value!(value, Vec<i16>).to_owned())),
+            DataType::Int32 => Arc::new(Some(cast_arc_value!(value, Vec<i32>).to_owned())),
+            DataType::Int64 => Arc::new(Some(cast_arc_value!(value, Vec<i64>).to_owned())),
+            DataType::String => Arc::new(Some(cast_arc_value!(value, Vec<String>).to_owned())),
+            DataType::Boolean => Arc::new(Some(cast_arc_value!(value, Vec<bool>).to_owned())),
+            DataType::Bytes => Arc::new(Some(cast_arc_value!(value, Vec<Vec<u8>>).to_owned())),
+            DataType::List(_) => {
+                unimplemented!("Vec<Vec<T>> is not supporte yet")
+            }
+        },
     }
 }
 
@@ -138,6 +313,17 @@ macro_rules! implement_col {
                             .downcast_ref::<$Type>()
                             .cmp(&other.value.downcast_ref::<$Type>()),
                     )*
+                    DataType::List(field) => {
+                        match &field.datatype {
+                            $(
+                                DataType::$DataType => self
+                                    .value
+                                    .downcast_ref::<Vec<$Type>>()
+                                    .cmp(&other.value.downcast_ref::<Vec<$Type>>()),
+                            )*
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                        }
+                    }
                 }
             }
         }
@@ -148,11 +334,40 @@ macro_rules! implement_col {
                 && self.is_nullable() == other.is_nullable()
                 && match self.datatype() {
                         $(
-                            DataType::$DataType => self
+                            DataType::$DataType => {
+                                if let Some(v) = self
                                 .value
-                                .downcast_ref::<$Type>()
-                                .eq(&other.value.downcast_ref::<$Type>()),
+                                .downcast_ref::<$Type>() {
+                                    v.eq(other.value.downcast_ref::<$Type>().unwrap())
+                                } else {
+                                    self.value.downcast_ref::<Option<$Type>>().unwrap().eq(other.value.downcast_ref::<Option<$Type>>().unwrap())
+                                }
+                            }
                         )*
+                        DataType::List(field) => {
+                            match &field.datatype {
+                                $(
+                                    DataType::$DataType => {
+                                        if let Some(v) = self
+                                        .value
+                                        .downcast_ref::<Vec<$Type>>() {
+                                            v.eq(other.value.downcast_ref::<Vec<$Type>>().unwrap())
+                                        } else {
+                                            self.value
+                                                .downcast_ref::<Option<Vec<$Type>>>()
+                                                .expect(stringify!("unexpected datatype, can not convert to " Vec<$Type>))
+                                                .eq(other.value.downcast_ref::<Option<Vec<$Type>>>()
+                                                .expect(stringify!("unexpected datatype, can not convert to " Vec<$Type>)))
+                                        }
+                                        // self
+                                        // .value
+                                        // .downcast_ref::<Vec<$Type>>()
+                                        // .eq(&other.value.downcast_ref::<Vec<$Type>>()),
+                                    }
+                                )*
+                                DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                            }
+                        }
                     }
             }
         }
@@ -163,6 +378,14 @@ macro_rules! implement_col {
                     $(
                         DataType::$DataType => self.value.downcast_ref::<$Type>().hash(state),
                     )*
+                    DataType::List(field) => {
+                        match &field.datatype {
+                            $(
+                                DataType::$DataType => self.value.downcast_ref::<Vec<$Type>>().hash(state),
+                            )*
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                        }
+                    }
                 }
             }
         }
@@ -179,11 +402,29 @@ macro_rules! implement_col {
                             } else {
                                 debug_struct.field(
                                     "value",
-                                    self.value.as_ref().downcast_ref::<Option<$Type>>().unwrap(),
+                                    self.value.as_ref().downcast_ref::<Option<$Type>>().expect("can not convert value to {}"),
                                 );
                             }
                         }
                     )*
+                    DataType::List(field) => {
+                        match &field.datatype {
+                            $(
+                                DataType::$DataType => {
+                                    debug_struct.field("datatype", &stringify!(Vec<$Type>));
+                                    if let Some(value) = self.value.as_ref().downcast_ref::<Vec<$Type>>() {
+                                        debug_struct.field("value", value);
+                                    } else {
+                                        debug_struct.field(
+                                            "value",
+                                            self.value.as_ref().downcast_ref::<Option<Vec<$Type>>>().unwrap(),
+                                        );
+                                    }
+                                }
+                            )*
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                        }
+                    }
                 }
                 debug_struct.field("nullable", &self.is_nullable()).finish()
             }
@@ -233,6 +474,31 @@ macro_rules! implement_key_col {
                             .downcast_ref::<Vec<u8>>()
                             .expect("unexpected datatype, expected bytes"),
                     )),
+                    DataType::List(desc) => {
+                        let arr: Arc<dyn Array> = match &desc.datatype {
+                            $(
+                                DataType::$DataType => {
+                                    Arc::new($Array::from_iter_values(cast_arc_value!(self.value, Vec<$Type>).clone()))
+                                }
+                            )*
+                            DataType::Boolean => {
+                                Arc::new(BooleanArray::from(cast_arc_value!(self.value, Vec<bool>).clone()))
+                            },
+                            DataType::String => {
+                                Arc::new(StringArray::from(cast_arc_value!(self.value, Vec<String>).clone()))
+                            },
+                            DataType::Bytes => {
+                                Arc::new(GenericBinaryArray::<i32>::from_vec(vec![cast_arc_value!(self.value, Vec<u8>)]))
+                            },
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                        };
+                        Arc::new(ListArray::new(
+                            Arc::new(Field::new("", (&desc.datatype).into(), desc.is_nullable)),
+                            OffsetBuffer::from_lengths([arr.len()]),
+                            arr,
+                            None
+                        ))
+                    },
                 }
             }
         }
@@ -256,12 +522,11 @@ macro_rules! implement_decode_col {
             where
                 R: SeqRead,
             {
-                let tag = u8::decode(reader).await?;
-                let datatype = Self::tag_to_datatype(tag);
+                let datatype = DataType::decode(reader).await?;
                 let is_nullable = bool::decode(reader).await?;
                 let is_some = !bool::decode(reader).await?;
                 let value =
-                    match datatype {
+                    match &datatype {
                         $(
                             DataType::$DataType => match is_some {
                                 true => Arc::new(Option::<$Type>::decode(reader).await.map_err(
@@ -274,6 +539,23 @@ macro_rules! implement_decode_col {
                                 false => Arc::new(<$Type>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
                             },
                         )*
+                        DataType::List(field) => {
+                            match &field.datatype {
+                                $(
+                                    DataType::$DataType => match is_some {
+                                        true => Arc::new(Option::<Vec<$Type>>::decode(reader).await.map_err(
+                                            |err| match err {
+                                                DecodeError::Io(error) => fusio::Error::Io(error),
+                                                DecodeError::Fusio(error) => error,
+                                                DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
+                                            },
+                                        )?) as Arc<dyn Any + Send + Sync>,
+                                        false => Arc::new(<Vec<$Type>>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
+                                    },
+                                )*
+                                DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                            }
+                        },
                     };
                 let name = String::decode(reader).await?;
                 Ok(Value::new(
@@ -296,7 +578,7 @@ macro_rules! implement_encode_col {
             where
                 W: Write,
             {
-                Self::tag(self.datatype()).encode(writer).await?;
+                self.datatype().encode(writer).await?;
                 self.is_nullable().encode(writer).await?;
                 match self.datatype() {
                         $(
@@ -316,13 +598,35 @@ macro_rules! implement_encode_col {
                                 }
                             }
                         )*
+                        DataType::List(field) => {
+                            match &field.datatype {
+                                $(
+                                    DataType::$DataType =>  {
+                                        if let Some(value) = self.value.as_ref().downcast_ref::<Vec<$Type>>() {
+                                            true.encode(writer).await?;
+                                            value.encode(writer).await?
+                                        } else {
+                                            false.encode(writer).await?;
+                                            self.value
+                                                .as_ref()
+                                                .downcast_ref::<Option<Vec<$Type>>>()
+                                                .unwrap()
+                                                .encode(writer)
+                                                .await
+                                                .map_err(|err| fusio::Error::Other(Box::new(err)))?;
+                                        }
+                                    }
+                                )*
+                                DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                            }
+                        },
                 };
                 self.desc.name.encode(writer).await?;
                 Ok(())
             }
 
             fn size(&self) -> usize {
-                3 + self.desc.name.size() + match self.desc.datatype {
+                2 + self.desc.name.size() + self.datatype().size() + match self.datatype() {
                     $(
                         DataType::$DataType => {
                             if let Some(value) = self.value.as_ref().downcast_ref::<$Type>() {
@@ -336,63 +640,41 @@ macro_rules! implement_encode_col {
                             }
                         }
                     )*
+                    DataType::List(field) => {
+                        match &field.datatype {
+                            $(
+                                DataType::$DataType => {
+                                    if let Some(value) = self.value.as_ref().downcast_ref::<Vec<$Type>>() {
+                                        value.size()
+                                    } else {
+                                        self.value
+                                            .as_ref()
+                                            .downcast_ref::<Option<Vec<$Type>>>()
+                                            .unwrap()
+                                            .size()
+                                    }
+                                }
+                            )*
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supported yet")
+                        }
+                    },
                 }
             }
         }
     }
 }
 
-impl Value {
-    fn tag(datatype: DataType) -> u8 {
-        match datatype {
-            DataType::UInt8 => 0,
-            DataType::UInt16 => 1,
-            DataType::UInt32 => 2,
-            DataType::UInt64 => 3,
-            DataType::Int8 => 4,
-            DataType::Int16 => 5,
-            DataType::Int32 => 6,
-            DataType::Int64 => 7,
-            DataType::String => 8,
-            DataType::Boolean => 9,
-            DataType::Bytes => 10,
-        }
-    }
-
-    fn tag_to_datatype(tag: u8) -> DataType {
-        match tag {
-            0 => DataType::UInt8,
-            1 => DataType::UInt16,
-            2 => DataType::UInt32,
-            3 => DataType::UInt64,
-            4 => DataType::Int8,
-            5 => DataType::Int16,
-            6 => DataType::Int32,
-            7 => DataType::Int64,
-            8 => DataType::String,
-            9 => DataType::Boolean,
-            10 => DataType::Bytes,
-            _ => panic!("invalid datatype tag"),
-        }
+impl From<&ValueDesc> for Field {
+    fn from(col: &ValueDesc) -> Self {
+        col.arrow_field()
     }
 }
 
-impl From<&ValueDesc> for Field {
-    fn from(col: &ValueDesc) -> Self {
-        match col.datatype {
-            DataType::UInt8 => Field::new(&col.name, ArrowDataType::UInt8, col.is_nullable),
-            DataType::UInt16 => Field::new(&col.name, ArrowDataType::UInt16, col.is_nullable),
-            DataType::UInt32 => Field::new(&col.name, ArrowDataType::UInt32, col.is_nullable),
-            DataType::UInt64 => Field::new(&col.name, ArrowDataType::UInt64, col.is_nullable),
-            DataType::Int8 => Field::new(&col.name, ArrowDataType::Int8, col.is_nullable),
-            DataType::Int16 => Field::new(&col.name, ArrowDataType::Int16, col.is_nullable),
-            DataType::Int32 => Field::new(&col.name, ArrowDataType::Int32, col.is_nullable),
-            DataType::Int64 => Field::new(&col.name, ArrowDataType::Int64, col.is_nullable),
-            DataType::String => Field::new(&col.name, ArrowDataType::Utf8, col.is_nullable),
-            DataType::Boolean => Field::new(&col.name, ArrowDataType::Boolean, col.is_nullable),
-            DataType::Bytes => Field::new(&col.name, ArrowDataType::Binary, col.is_nullable),
-        }
-    }
+#[macro_export]
+macro_rules! value {
+    ($name: expr, $ty: expr, $nullable: expr, $value: expr) => {{
+        $crate::record::Value::new($ty, $name.into(), std::sync::Arc::new($value), $nullable)
+    }};
 }
 
 macro_rules! for_datatype {
@@ -421,3 +703,161 @@ implement_key_col!(
 for_datatype! { implement_col }
 for_datatype! { implement_decode_col }
 for_datatype! { implement_encode_col }
+
+#[cfg(test)]
+mod tests {
+    use std::{io::Cursor, sync::Arc};
+
+    use arrow::{
+        array::{AsArray, BooleanArray, PrimitiveArray, StringArray},
+        datatypes::UInt64Type,
+    };
+    use fusio_log::{Decode, Encode};
+
+    use crate::record::{DataType, Key, Value, ValueDesc};
+
+    #[tokio::test]
+    async fn test_encode_decode_list() {
+        use tokio::io::AsyncSeekExt;
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new("".into(), DataType::UInt64, false))),
+                "u64s".into(),
+                Arc::new(vec![1_u64, 2, 3, 4]),
+                false,
+            );
+
+            let mut source = vec![];
+            let mut cursor = Cursor::new(&mut source);
+            v.encode(&mut cursor).await.unwrap();
+
+            cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            let decoded = Value::decode(&mut cursor).await.unwrap();
+            assert_eq!(v, decoded);
+        }
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new("".into(), DataType::UInt64, false))),
+                "u64s".into(),
+                Arc::new(Some(vec![1_u64, 2, 3, 4])),
+                true,
+            );
+
+            let mut source = vec![];
+            let mut cursor = Cursor::new(&mut source);
+            v.encode(&mut cursor).await.unwrap();
+
+            cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            let decoded = Value::decode(&mut cursor).await.unwrap();
+            assert_eq!(v, decoded);
+        }
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Bytes, false))),
+                "bytes".into(),
+                Arc::new(Some(vec![
+                    vec![1_u8, 2, 3, 4],
+                    vec![72, 83, 94],
+                    vec![112, 113, 124],
+                ])),
+                true,
+            );
+
+            let mut source = vec![];
+            let mut cursor = Cursor::new(&mut source);
+            v.encode(&mut cursor).await.unwrap();
+
+            cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            let decoded = Value::decode(&mut cursor).await.unwrap();
+            assert_eq!(v, decoded);
+        }
+    }
+
+    #[test]
+    fn test_key_ref_list() {
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new("".into(), DataType::UInt64, false))),
+                "u64s".into(),
+                Arc::new(vec![1_u64, 2, 3, 4]),
+                false,
+            );
+
+            let vref = v.as_key_ref();
+            assert_eq!(v, vref);
+        }
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new("".into(), DataType::UInt64, true))),
+                "u64s".into(),
+                Arc::new(Some(vec![1_u64, 2, 3, 4])),
+                false,
+            );
+
+            let vref = v.as_key_ref();
+            assert_eq!(v, vref);
+        }
+    }
+
+    #[test]
+    fn test_key_list_datum() {
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new("".into(), DataType::UInt64, false))),
+                "u64s".into(),
+                Arc::new(vec![1_u64, 2, 3, 4]),
+                false,
+            );
+            let datum = v.to_arrow_datum();
+            assert_eq!(
+                datum
+                    .get()
+                    .0
+                    .as_list::<i32>()
+                    .value(0)
+                    .as_primitive::<UInt64Type>(),
+                &PrimitiveArray::from_iter([1_u64, 2, 3, 4])
+            );
+        }
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new("".into(), DataType::String, false))),
+                "u64s".into(),
+                Arc::new(vec![
+                    "1_u64".to_string(),
+                    "2".to_string(),
+                    "3".to_string(),
+                    "4".to_string(),
+                ]),
+                false,
+            );
+            let datum = v.to_arrow_datum();
+            assert_eq!(
+                datum.get().0.as_list::<i32>().value(0).as_string(),
+                &StringArray::from(vec![
+                    "1_u64".to_string(),
+                    "2".to_string(),
+                    "3".to_string(),
+                    "4".to_string()
+                ])
+            );
+        }
+        {
+            let v = Value::new(
+                DataType::List(Arc::new(ValueDesc::new(
+                    "".into(),
+                    DataType::Boolean,
+                    false,
+                ))),
+                "u64s".into(),
+                Arc::new(vec![true, false, false, true]),
+                false,
+            );
+            let datum = v.to_arrow_datum();
+            assert_eq!(
+                datum.get().0.as_list::<i32>().value(0).as_boolean(),
+                &BooleanArray::from(vec![true, false, false, true])
+            );
+        }
+    }
+}

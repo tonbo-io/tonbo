@@ -3,8 +3,9 @@ use std::{any::Any, mem, sync::Arc};
 use arrow::{
     array::{
         Array, ArrayBuilder, ArrayRef, ArrowPrimitiveType, BooleanArray, BooleanBufferBuilder,
-        BooleanBuilder, GenericBinaryArray, GenericBinaryBuilder, PrimitiveArray, PrimitiveBuilder,
-        StringArray, StringBuilder, UInt32Builder,
+        BooleanBuilder, GenericBinaryArray, GenericBinaryBuilder, GenericListArray,
+        GenericListBuilder, PrimitiveArray, PrimitiveBuilder, StringArray, StringBuilder,
+        UInt32Builder,
     },
     datatypes::{
         Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type,
@@ -12,7 +13,7 @@ use arrow::{
     },
 };
 
-use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, DataType};
+use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, DataType, ValueDesc};
 use crate::{
     cast_arc_value,
     inmem::immutable::{ArrowArrays, Builder},
@@ -91,6 +92,104 @@ impl ArrowArrays for DynRecordImmutableArrays {
                         capacity, 0,
                     )));
                 }
+                DataType::List(field) => match &field.datatype {
+                    DataType::UInt8 => {
+                        let bd = PrimitiveBuilder::<UInt8Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<UInt8Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::UInt16 => {
+                        let bd = PrimitiveBuilder::<UInt16Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<UInt16Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::UInt32 => {
+                        let bd = PrimitiveBuilder::<UInt32Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<UInt32Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::UInt64 => {
+                        let bd = PrimitiveBuilder::<UInt64Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<UInt64Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::Int8 => {
+                        let bd = PrimitiveBuilder::<Int8Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<Int8Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::Int16 => {
+                        let bd = PrimitiveBuilder::<Int16Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<Int16Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::Int32 => {
+                        let bd = PrimitiveBuilder::<Int32Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<Int32Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::Int64 => {
+                        let bd = PrimitiveBuilder::<Int64Type>::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, PrimitiveBuilder<Int64Type>>::with_capacity(
+                                bd, 0,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::String => {
+                        let bd = StringBuilder::with_capacity(capacity, 0);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, StringBuilder>::with_capacity(bd, 0)
+                                .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::Boolean => {
+                        let bd = BooleanBuilder::with_capacity(capacity);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, BooleanBuilder>::with_capacity(bd, 0)
+                                .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::Bytes => {
+                        let bd = GenericBinaryBuilder::with_capacity(capacity, 0);
+                        builders.push(Box::new(
+                            GenericListBuilder::<i32, GenericBinaryBuilder<i32>>::with_capacity(
+                                bd, capacity,
+                            )
+                            .with_field(field.arrow_field()),
+                        ))
+                    }
+                    DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                },
             }
             datatypes.push(datatype);
         }
@@ -223,9 +322,159 @@ impl ArrowArrays for DynRecordImmutableArrays {
                             Arc::new(Some(v))
                         }
                     }
+                    DataType::List(desc) => {
+                        let array = cast_arc_value!(col.value, GenericListArray<i32>).value(offset);
+
+                        match &desc.datatype {
+                            DataType::UInt8 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<UInt8Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::UInt16 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<UInt16Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::UInt32 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<UInt32Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::UInt64 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<UInt64Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::Int8 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<Int8Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::Int16 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<Int16Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::Int32 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<Int32Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::Int64 => {
+                                let v = array
+                                    .as_any()
+                                    .downcast_ref::<PrimitiveArray<Int64Type>>()
+                                    .unwrap()
+                                    .clone();
+                                let parts = v.into_parts();
+                                if primary_key_index == idx {
+                                    Arc::new(parts.1.to_vec())
+                                } else {
+                                    Arc::new(Some(parts.1.to_vec()))
+                                }
+                            }
+                            DataType::String => {
+                                let data = array.as_any().downcast_ref::<StringArray>().unwrap();
+                                let v = data
+                                    .iter()
+                                    .map(|v| v.unwrap().to_string())
+                                    .collect::<Vec<String>>();
+                                if primary_key_index == idx {
+                                    Arc::new(v)
+                                } else {
+                                    Arc::new(Some(v))
+                                }
+                            }
+                            DataType::Boolean => {
+                                let data = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+                                let v = data.iter().map(|v| v.unwrap()).collect::<Vec<bool>>();
+                                if primary_key_index == idx {
+                                    Arc::new(v)
+                                } else {
+                                    Arc::new(Some(v))
+                                }
+                            }
+                            DataType::Bytes => {
+                                let data = array
+                                    .as_any()
+                                    .downcast_ref::<GenericBinaryArray<i32>>()
+                                    .unwrap();
+
+                                let v = data
+                                    .iter()
+                                    .map(|v| v.unwrap().to_vec())
+                                    .collect::<Vec<Vec<u8>>>();
+                                if primary_key_index == idx {
+                                    Arc::new(v)
+                                } else {
+                                    Arc::new(Some(v))
+                                }
+                            }
+                            DataType::List(_) => {
+                                unimplemented!("Vec<Vec<T>> is not supporte yet")
+                            }
+                        }
+                    }
                 };
 
-                columns.push(Value::new(datatype, name, value, nullable));
+                columns.push(Value::new(datatype.clone(), name, value, nullable));
             } else {
                 columns.push(col.clone());
             }
@@ -387,6 +636,123 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_value(vec![]),
                             }
                         }
+                        DataType::List(field) => match &field.datatype {
+                            DataType::UInt8 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt8Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<u8>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::UInt16 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt16Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<u16>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::UInt32 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt32Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<u32>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::UInt64 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt64Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<u64>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::Int8 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int8Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<i8>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::Int16 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int16Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<i16>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::Int32 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int32Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<i32>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::Int64 => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int64Type>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<i64>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value(vec![]),
+                                }
+                            }
+                            DataType::String => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, StringBuilder>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<String>>) {
+                                    Some(value) => {
+                                        bd.append_value(value.iter().map(|v| Some(v.clone())))
+                                    }
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append(true),
+                                }
+                            }
+                            DataType::Boolean => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, BooleanBuilder>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<bool>>) {
+                                    Some(value) => bd.append_value(value.iter().map(|v| Some(*v))),
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append_value([]),
+                                }
+                            }
+                            DataType::Bytes => {
+                                let bd = Self::as_builder_mut::<
+                                    GenericListBuilder<i32, GenericBinaryBuilder<i32>>,
+                                >(builder.as_mut());
+                                match cast_arc_value!(col.value, Option<Vec<Vec<u8>>>) {
+                                    Some(value) => {
+                                        bd.append_value(value.iter().map(|v| Some(v.clone())))
+                                    }
+                                    None if col.is_nullable() => bd.append_null(),
+                                    None => bd.append(true),
+                                }
+                            }
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                        },
                     }
                 }
             }
@@ -445,6 +811,53 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                                 .append_value(Vec::<u8>::default());
                         }
+                        DataType::List(field) => match field.datatype {
+                            DataType::UInt8 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt8Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::UInt16 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt16Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::UInt32 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt32Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::UInt64 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt64Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::Int8 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int8Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::Int16 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int16Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::Int32 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int32Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::Int64 => Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int64Type>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::String => Self::as_builder_mut::<
+                                GenericListBuilder<i32, StringBuilder>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::Boolean => Self::as_builder_mut::<
+                                GenericListBuilder<i32, BooleanBuilder>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::Bytes => Self::as_builder_mut::<
+                                GenericListBuilder<i32, GenericBinaryBuilder<i32>>,
+                            >(builder.as_mut())
+                            .append(true),
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                        },
                     }
                 }
             }
@@ -500,6 +913,88 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                         Self::as_builder::<GenericBinaryBuilder<i32>>(builder.as_ref())
                             .values_slice(),
                     ),
+                    DataType::List(field) => {
+                        match field.datatype {
+                            DataType::UInt8 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt8Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::UInt16 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt16Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::UInt32 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt32Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::UInt64 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<UInt64Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::Int8 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int8Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::Int16 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int16Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::Int32 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int32Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::Int64 => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, PrimitiveBuilder<Int64Type>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::String => mem::size_of_val(
+                                Self::as_builder::<GenericListBuilder<i32, StringBuilder>>(
+                                    builder.as_ref(),
+                                )
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::Boolean => mem::size_of_val(
+                                Self::as_builder::<GenericListBuilder<i32, BooleanBuilder>>(
+                                    builder.as_ref(),
+                                )
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::Bytes => mem::size_of_val(
+                                Self::as_builder::<
+                                    GenericListBuilder<i32, GenericBinaryBuilder<i32>>,
+                                >(builder.as_ref())
+                                .values_ref()
+                                .values_slice(),
+                            ),
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                        }
+                    }
                 }
             })
     }
@@ -658,6 +1153,88 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     ));
                     array_refs.push(value);
                 }
+                DataType::List(desc) => {
+                    let value = match desc.datatype {
+                        DataType::UInt8 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt8Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::UInt16 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt16Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::UInt32 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt32Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::UInt64 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<UInt64Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::Int8 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int8Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::Int16 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int16Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::Int32 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int32Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::Int64 => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, PrimitiveBuilder<Int64Type>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::String => Arc::new(
+                            Self::as_builder_mut::<GenericListBuilder<i32, StringBuilder>>(
+                                builder.as_mut(),
+                            )
+                            .finish(),
+                        ),
+                        DataType::Boolean => Arc::new(
+                            Self::as_builder_mut::<GenericListBuilder<i32, BooleanBuilder>>(
+                                builder.as_mut(),
+                            )
+                            .finish(),
+                        ),
+                        DataType::Bytes => Arc::new(
+                            Self::as_builder_mut::<
+                                GenericListBuilder<i32, GenericBinaryBuilder<i32>>,
+                            >(builder.as_mut())
+                            .finish(),
+                        ),
+                        DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                    };
+                    columns.push(Value::new(
+                        DataType::List(Arc::new(ValueDesc::new(
+                            desc.name.clone(),
+                            desc.datatype.clone(),
+                            desc.is_nullable,
+                        ))),
+                        field.name().to_owned(),
+                        value.clone(),
+                        is_nullable,
+                    ));
+                    array_refs.push(value);
+                }
             };
         }
 
@@ -725,6 +1302,91 @@ impl DynRecordBuilder {
                 .append_value(*cast_arc_value!(col.value, bool)),
             DataType::Bytes => Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                 .append_value(cast_arc_value!(col.value, Vec<u8>)),
+            DataType::List(field) => {
+                match field.datatype {
+                    DataType::UInt8 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<UInt8Type>>,
+                    >(builder.as_mut())
+                    .append_value(cast_arc_value!(col.value, Vec<u8>).iter().map(|v| Some(*v))),
+                    DataType::UInt16 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<UInt16Type>>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<u16>)
+                            .iter()
+                            .map(|v| Some(*v)),
+                    ),
+                    DataType::UInt32 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<UInt32Type>>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<u32>)
+                            .iter()
+                            .map(|v| Some(*v)),
+                    ),
+                    DataType::UInt64 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<UInt64Type>>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<u64>)
+                            .iter()
+                            .map(|v| Some(*v)),
+                    ),
+                    DataType::Int8 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<Int8Type>>,
+                    >(builder.as_mut())
+                    .append_value(cast_arc_value!(col.value, Vec<i8>).iter().map(|v| Some(*v))),
+                    DataType::Int16 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<Int16Type>>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<i16>)
+                            .iter()
+                            .map(|v| Some(*v)),
+                    ),
+                    DataType::Int32 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<Int32Type>>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<i32>)
+                            .iter()
+                            .map(|v| Some(*v)),
+                    ),
+                    DataType::Int64 => Self::as_builder_mut::<
+                        GenericListBuilder<i32, PrimitiveBuilder<Int64Type>>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<i64>)
+                            .iter()
+                            .map(|v| Some(*v)),
+                    ),
+                    DataType::String => Self::as_builder_mut::<
+                        GenericListBuilder<i32, StringBuilder>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<String>)
+                            .iter()
+                            .map(|v| Some(v.as_str())),
+                    ),
+                    DataType::Boolean => Self::as_builder_mut::<
+                        GenericListBuilder<i32, BooleanBuilder>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<bool>)
+                            .iter()
+                            .map(|v| Some(*v)),
+                    ),
+                    DataType::Bytes => Self::as_builder_mut::<
+                        GenericListBuilder<i32, GenericBinaryBuilder<i32>>,
+                    >(builder.as_mut())
+                    .append_value(
+                        cast_arc_value!(col.value, Vec<Vec<u8>>)
+                            .iter()
+                            .map(|v| Some(v.as_slice())),
+                    ),
+                    DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                }
+            }
         };
     }
 
@@ -746,12 +1408,17 @@ impl DynRecordBuilder {
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
     use parquet::arrow::ProjectionMask;
 
     use crate::{
         dyn_record, dyn_schema,
         inmem::immutable::{ArrowArrays, Builder},
-        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema},
+        record::{
+            DataType, DynRecord, DynRecordImmutableArrays, DynRecordRef, DynSchema, Record,
+            RecordRef, Schema, Value, ValueDesc,
+        },
     };
 
     #[tokio::test]
@@ -805,5 +1472,100 @@ mod tests {
                 record.as_record_ref().columns
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_build_array_list() {
+        let schema = DynSchema::new(
+            vec![
+                ValueDesc::new("id".into(), DataType::UInt32, false),
+                ValueDesc::new(
+                    "bools".into(),
+                    DataType::List(Arc::new(ValueDesc::new(
+                        "".into(),
+                        DataType::Boolean,
+                        false,
+                    ))),
+                    true,
+                ),
+                ValueDesc::new(
+                    "bytes".into(),
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Bytes, false))),
+                    true,
+                ),
+                ValueDesc::new(
+                    "none".into(),
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Int64, false))),
+                    true,
+                ),
+                ValueDesc::new(
+                    "strs".into(),
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::String, false))),
+                    false,
+                ),
+            ],
+            0,
+        );
+
+        let record = DynRecord::new(
+            vec![
+                Value::new(DataType::UInt32, "id".into(), Arc::new(1_u32), false),
+                Value::new(
+                    DataType::List(Arc::new(ValueDesc::new(
+                        "".into(),
+                        DataType::Boolean,
+                        false,
+                    ))),
+                    "bools".to_string(),
+                    Arc::new(Some(vec![true, false, false, false, true])),
+                    true,
+                ),
+                Value::new(
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Bytes, false))),
+                    "bytes".to_string(),
+                    Arc::new(Some(vec![
+                        vec![1_u8, 2, 3, 4],
+                        vec![11, 22, 23, 24],
+                        vec![31, 32, 33, 34],
+                    ])),
+                    true,
+                ),
+                Value::new(
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Int64, false))),
+                    "none".to_string(),
+                    Arc::new(None::<Vec<i64>>),
+                    true,
+                ),
+                Value::new(
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::String, false))),
+                    "strs".to_string(),
+                    Arc::new(vec![
+                        "abc".to_string(),
+                        "xyz".to_string(),
+                        "tonbo".to_string(),
+                    ]),
+                    false,
+                ),
+            ],
+            0,
+        );
+        let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+        let key = crate::timestamp::Timestamped {
+            ts: 0.into(),
+            value: record.key(),
+        };
+
+        builder.push(key.clone(), Some(record.as_record_ref()));
+        builder.push(key.clone(), None);
+        builder.push(key.clone(), Some(record.as_record_ref()));
+        let arrays = builder.finish(None);
+
+        let res = arrays.get(0, &ProjectionMask::all());
+        assert!(res.is_some());
+        let res2 = res.unwrap();
+        assert!(res2.is_some());
+
+        dbg!(res2.clone().unwrap().columns.len());
+        dbg!(res2.unwrap().columns);
     }
 }
