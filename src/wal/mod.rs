@@ -222,13 +222,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_local_write_and_recover() {
         write_and_recover(FsOptions::Local).await
     }
 
     #[ignore = "s3"]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_write_and_recover() {
         use fusio::remotes::aws::AwsCredential;
 
