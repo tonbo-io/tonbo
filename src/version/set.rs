@@ -431,7 +431,7 @@ pub(crate) mod tests {
         })
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn timestamp_persistence() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
@@ -598,13 +598,13 @@ pub(crate) mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_version_log_snap_shot() {
         version_log_snap_shot(FsOptions::Local).await;
     }
 
     #[ignore = "s3"]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_version_log_snap_shot() {
         use fusio::remotes::aws::AwsCredential;
 
@@ -634,7 +634,7 @@ pub(crate) mod tests {
         version_log_snap_shot(fs_option).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn version_level_sort() {
         let temp_dir = TempDir::new().unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
