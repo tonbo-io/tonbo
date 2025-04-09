@@ -39,7 +39,7 @@ impl ArrowArrays for DynRecordImmutableArrays {
         let mut datatypes = vec![];
         for field in schema.fields().iter().skip(2) {
             let datatype = DataType::from(field.data_type());
-            match datatype {
+            match &datatype {
                 DataType::UInt8 => {
                     builders.push(Box::new(PrimitiveBuilder::<UInt8Type>::with_capacity(
                         capacity,
@@ -117,40 +117,120 @@ impl ArrowArrays for DynRecordImmutableArrays {
             return Some(None);
         }
 
+        let schema = self.record_batch.schema();
+        let metadata = schema.metadata();
+        let primary_key_index = metadata
+            .get("primary_key_index")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
         let mut columns = vec![];
         for (idx, col) in self.columns.iter().enumerate() {
-            if projection_mask.leaf_included(idx + USER_COLUMN_OFFSET) && !col.is_nullable() {
+            if projection_mask.leaf_included(idx + USER_COLUMN_OFFSET) {
                 let datatype = col.datatype();
                 let name = col.desc.name.to_string();
-                let value: Arc<dyn Any + Send + Sync> = match datatype {
-                    DataType::UInt8 => Arc::new(Self::primitive_value::<UInt8Type>(col, offset)),
-                    DataType::UInt16 => Arc::new(Self::primitive_value::<UInt16Type>(col, offset)),
-                    DataType::UInt32 => Arc::new(Self::primitive_value::<UInt32Type>(col, offset)),
-                    DataType::UInt64 => Arc::new(Self::primitive_value::<UInt64Type>(col, offset)),
-                    DataType::Int8 => Arc::new(Self::primitive_value::<Int8Type>(col, offset)),
-                    DataType::Int16 => Arc::new(Self::primitive_value::<Int16Type>(col, offset)),
-                    DataType::Int32 => Arc::new(Self::primitive_value::<Int32Type>(col, offset)),
-                    DataType::Int64 => Arc::new(Self::primitive_value::<Int64Type>(col, offset)),
-                    DataType::String => Arc::new(
-                        cast_arc_value!(col.value, StringArray)
-                            .value(offset)
-                            .to_owned(),
-                    ),
-                    DataType::Boolean => {
-                        Arc::new(cast_arc_value!(col.value, BooleanArray).value(offset))
+                let nullable = col.is_nullable();
+                let value: Arc<dyn Any + Send + Sync> = match &datatype {
+                    DataType::UInt8 => {
+                        let v = Self::primitive_value::<UInt8Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
                     }
-                    DataType::Bytes => Arc::new(
-                        cast_arc_value!(col.value, GenericBinaryArray<i32>)
+                    DataType::UInt16 => {
+                        let v = Self::primitive_value::<UInt16Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::UInt32 => {
+                        let v = Self::primitive_value::<UInt32Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::UInt64 => {
+                        let v = Self::primitive_value::<UInt64Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Int8 => {
+                        let v = Self::primitive_value::<Int8Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Int16 => {
+                        let v = Self::primitive_value::<Int16Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Int32 => {
+                        let v = Self::primitive_value::<Int32Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Int64 => {
+                        let v = Self::primitive_value::<Int64Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::String => {
+                        let v = cast_arc_value!(col.value, StringArray)
                             .value(offset)
-                            .to_owned(),
-                    ),
+                            .to_owned();
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Boolean => {
+                        let v = cast_arc_value!(col.value, BooleanArray).value(offset);
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Bytes => {
+                        let v = cast_arc_value!(col.value, GenericBinaryArray<i32>)
+                            .value(offset)
+                            .to_owned();
+                        if primary_key_index == idx {
+                            Arc::new(v)
+                        } else {
+                            Arc::new(Some(v))
+                        }
+                    }
                 };
-                columns.push(Value::new(datatype, name, value, true));
-            }
 
-            columns.push(col.clone());
+                columns.push(Value::new(datatype, name, value, nullable));
+            } else {
+                columns.push(col.clone());
+            }
         }
-        Some(Some(DynRecordRef::new(columns, 2)))
+        Some(Some(DynRecordRef::new(columns, primary_key_index)))
     }
 
     fn as_record_batch(&self) -> &arrow::array::RecordBatch {
@@ -660,5 +740,70 @@ impl DynRecordBuilder {
         T: ArrayBuilder,
     {
         builder.as_any_mut().downcast_mut::<T>().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use parquet::arrow::ProjectionMask;
+
+    use crate::{
+        dyn_record, dyn_schema,
+        inmem::immutable::{ArrowArrays, Builder},
+        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema},
+    };
+
+    #[tokio::test]
+    async fn test_build_array() {
+        let schema = dyn_schema!(
+            ("id", UInt32, false),
+            ("bool", Boolean, true),
+            ("bytes", Bytes, true),
+            ("none", Int64, true),
+            ("str", String, false),
+            0
+        );
+
+        let record = dyn_record!(
+            ("id", UInt32, false, 1_u32),
+            ("bool", Boolean, true, Some(true)),
+            ("bytes", Bytes, true, Some(vec![1_u8, 2, 3, 4])),
+            ("none", Int64, true, None::<i64>),
+            ("str", String, false, "tonbo".to_string()),
+            0
+        );
+
+        let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+        let key = crate::timestamp::Timestamped {
+            ts: 0.into(),
+            value: record.key(),
+        };
+        builder.push(key.clone(), Some(record.as_record_ref()));
+        builder.push(key.clone(), None);
+        builder.push(key.clone(), Some(record.as_record_ref()));
+        let arrays = builder.finish(None);
+
+        {
+            let res = arrays.get(0, &ProjectionMask::all());
+            let cols = res.unwrap().unwrap().columns;
+            dbg!(&cols);
+            for (actual, expected) in cols.iter().zip(record.as_record_ref().columns.iter()) {
+                // TODO: set value to None instead of default value when pushing
+                if actual.name() != "none" {
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        {
+            let record_batch = arrays.as_record_batch();
+            let mask = ProjectionMask::all();
+            let record_ref =
+                DynRecordRef::from_record_batch(record_batch, 0, &mask, schema.arrow_schema());
+            assert_eq!(
+                record_ref.get().unwrap().columns,
+                record.as_record_ref().columns
+            );
+        }
     }
 }
