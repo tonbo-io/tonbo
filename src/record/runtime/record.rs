@@ -3,7 +3,7 @@ use std::sync::Arc;
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
-use super::{schema::DynSchema, DataType, DynRecordRef, Value};
+use super::{schema::DynSchema, wrapped_value, DataType, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
     record::{Record, RecordDecodeError},
@@ -57,6 +57,62 @@ impl Decode for DynRecord {
                     DataType::Bytes => {
                         Arc::new(cast_arc_value!(col.value, Option<Vec<u8>>).clone().unwrap())
                     }
+                    DataType::List(desc) => match desc.datatype {
+                        DataType::UInt8 => {
+                            Arc::new(cast_arc_value!(col.value, Option<Vec<u8>>).clone().unwrap())
+                        }
+                        DataType::UInt16 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<u16>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::UInt32 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<u32>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::UInt64 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<u64>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::Int8 => {
+                            Arc::new(cast_arc_value!(col.value, Option<Vec<i8>>).clone().unwrap())
+                        }
+                        DataType::Int16 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<i16>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::Int32 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<i32>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::Int64 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<i64>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::String => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<String>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::Boolean => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<bool>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::Bytes => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<Vec<u8>>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::List(_) => {
+                            unimplemented!("Vec<Vec<T>> is not supporte yet")
+                        }
+                    },
                 };
             }
             values.push(col);
@@ -79,29 +135,14 @@ impl Record for DynRecord {
         for (idx, col) in self.values.iter().enumerate() {
             let datatype = col.datatype();
             let is_nullable = col.is_nullable();
-            let mut value = col.value.clone();
-            if idx != self.primary_index && !is_nullable {
-                value = match datatype {
-                    DataType::UInt8 => Arc::new(Some(*cast_arc_value!(col.value, u8))),
-                    DataType::UInt16 => Arc::new(Some(*cast_arc_value!(col.value, u16))),
-                    DataType::UInt32 => Arc::new(Some(*cast_arc_value!(col.value, u32))),
-                    DataType::UInt64 => Arc::new(Some(*cast_arc_value!(col.value, u64))),
-                    DataType::Int8 => Arc::new(Some(*cast_arc_value!(col.value, i8))),
-                    DataType::Int16 => Arc::new(Some(*cast_arc_value!(col.value, i16))),
-                    DataType::Int32 => Arc::new(Some(*cast_arc_value!(col.value, i32))),
-                    DataType::Int64 => Arc::new(Some(*cast_arc_value!(col.value, i64))),
-                    DataType::String => {
-                        Arc::new(Some(cast_arc_value!(col.value, String).to_owned()))
-                    }
-                    DataType::Boolean => Arc::new(Some(*cast_arc_value!(col.value, bool))),
-                    DataType::Bytes => {
-                        Arc::new(Some(cast_arc_value!(col.value, Vec<u8>).to_owned()))
-                    }
-                };
-            }
+            let value = if idx != self.primary_index && !is_nullable {
+                wrapped_value(datatype, &col.value)
+            } else {
+                col.value.clone()
+            };
 
             columns.push(Value::new(
-                datatype,
+                datatype.clone(),
                 col.desc.name.to_owned(),
                 value,
                 is_nullable,
@@ -159,10 +200,15 @@ macro_rules! dyn_record {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::sync::Arc;
+    use std::{io::Cursor, sync::Arc};
+
+    use fusio_log::{Decode, Encode};
 
     use super::{DynRecord, DynSchema};
-    use crate::dyn_schema;
+    use crate::{
+        dyn_schema,
+        record::{DataType, Record, Value, ValueDesc},
+    };
 
     #[allow(unused)]
     pub(crate) fn test_dyn_item_schema() -> DynSchema {
@@ -201,5 +247,210 @@ pub(crate) mod test {
             items.push(record);
         }
         items
+    }
+
+    #[test]
+    fn test_dyn_record_ref() {
+        {
+            let desc = ValueDesc::new("".into(), DataType::String, false);
+            let record = DynRecord::new(
+                vec![
+                    Value::new(DataType::UInt32, "id".into(), Arc::new(1_u32), false),
+                    Value::new(
+                        DataType::List(Arc::new(desc.clone())),
+                        "strs".to_string(),
+                        Arc::new(vec![
+                            "abc".to_string(),
+                            "xyz".to_string(),
+                            "tonbo".to_string(),
+                        ]),
+                        false,
+                    ),
+                    Value::new(
+                        DataType::List(Arc::new(desc.clone())),
+                        "strs_option".to_string(),
+                        Arc::new(Some(vec![
+                            "abc".to_string(),
+                            "xyz".to_string(),
+                            "tonbo".to_string(),
+                        ])),
+                        true,
+                    ),
+                ],
+                0,
+            );
+
+            let record_ref = record.as_record_ref();
+            assert_eq!(
+                record_ref.columns.get(1).unwrap(),
+                &Value::new(
+                    DataType::List(Arc::new(desc.clone())),
+                    "strs".to_string(),
+                    Arc::new(Some(vec![
+                        "abc".to_string(),
+                        "xyz".to_string(),
+                        "tonbo".to_string(),
+                    ])),
+                    false,
+                )
+            );
+            assert_eq!(
+                record_ref.columns.get(2).unwrap(),
+                &Value::new(
+                    DataType::List(Arc::new(desc.clone())),
+                    "strs".to_string(),
+                    Arc::new(Some(vec![
+                        "abc".to_string(),
+                        "xyz".to_string(),
+                        "tonbo".to_string(),
+                    ])),
+                    true,
+                )
+            )
+        }
+        {
+            let record = DynRecord::new(
+                vec![
+                    Value::new(DataType::UInt32, "id".into(), Arc::new(1_u32), false),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new(
+                            "".into(),
+                            DataType::Boolean,
+                            false,
+                        ))),
+                        "bools".to_string(),
+                        Arc::new(vec![true, false, false, true]),
+                        false,
+                    ),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Bytes, true))),
+                        "bytes".to_string(),
+                        Arc::new(Some(vec![
+                            vec![0_u8, 1, 2, 3],
+                            vec![10, 11, 12, 13],
+                            vec![20, 21, 22, 23],
+                        ])),
+                        true,
+                    ),
+                ],
+                0,
+            );
+
+            let record_ref = record.as_record_ref();
+            assert_eq!(
+                record_ref.columns.get(1).unwrap(),
+                &Value::new(
+                    DataType::List(Arc::new(ValueDesc::new(
+                        "".into(),
+                        DataType::Boolean,
+                        false,
+                    ))),
+                    "bools".to_string(),
+                    Arc::new(Some(vec![true, false, false, true])),
+                    false,
+                )
+            );
+            assert_eq!(
+                record_ref.columns.get(2).unwrap(),
+                &Value::new(
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Bytes, true))),
+                    "bytes".to_string(),
+                    Arc::new(Some(vec![
+                        vec![0_u8, 1, 2, 3],
+                        vec![10, 11, 12, 13],
+                        vec![20, 21, 22, 23],
+                    ])),
+                    true,
+                )
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_encode_dyn_record_list() {
+        use tokio::io::AsyncSeekExt;
+
+        {
+            let desc = ValueDesc::new("".into(), DataType::String, false);
+            let record = DynRecord::new(
+                vec![
+                    Value::new(DataType::UInt32, "id".into(), Arc::new(1_u32), false),
+                    Value::new(
+                        DataType::List(Arc::new(desc.clone())),
+                        "strs".to_string(),
+                        Arc::new(vec![
+                            "abc".to_string(),
+                            "xyz".to_string(),
+                            "tonbo".to_string(),
+                        ]),
+                        false,
+                    ),
+                    Value::new(
+                        DataType::List(Arc::new(desc.clone())),
+                        "strs_option".to_string(),
+                        Arc::new(Some(vec![
+                            "abc".to_string(),
+                            "xyz".to_string(),
+                            "tonbo".to_string(),
+                        ])),
+                        true,
+                    ),
+                ],
+                0,
+            );
+
+            let mut source = vec![];
+            let mut cursor = Cursor::new(&mut source);
+            let record_ref = record.as_record_ref();
+            record_ref.encode(&mut cursor).await.unwrap();
+
+            cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            let decoded = DynRecord::decode(&mut cursor).await.unwrap();
+            assert_eq!(decoded.values, record.values);
+        }
+
+        {
+            let record = DynRecord::new(
+                vec![
+                    Value::new(DataType::UInt32, "id".into(), Arc::new(1_u32), false),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new(
+                            "".into(),
+                            DataType::Boolean,
+                            false,
+                        ))),
+                        "bools".to_string(),
+                        Arc::new(vec![true, false, false, false, true]),
+                        false,
+                    ),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Bytes, false))),
+                        "bytes".to_string(),
+                        Arc::new(Some(vec![
+                            vec![1_u8, 2, 3, 4],
+                            vec![11, 22, 23, 24],
+                            vec![31, 32, 33, 34],
+                        ])),
+                        true,
+                    ),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Int64, true))),
+                        "none".to_string(),
+                        Arc::new(None::<Vec<i64>>),
+                        true,
+                    ),
+                ],
+                0,
+            );
+
+            let mut source = vec![];
+            let mut cursor = Cursor::new(&mut source);
+            let record_ref = record.as_record_ref();
+            record_ref.encode(&mut cursor).await.unwrap();
+
+            cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            let decoded = DynRecord::decode(&mut cursor).await.unwrap();
+            assert_eq!(decoded.values, record.values);
+        }
     }
 }

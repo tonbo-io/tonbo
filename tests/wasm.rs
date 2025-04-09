@@ -7,7 +7,7 @@ mod tests {
     use futures::StreamExt;
     use tonbo::{
         executor::opfs::OpfsExecutor,
-        record::{DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{DataType, DynRecord, DynSchema, Record, RecordRef, Schema, Value, ValueDesc},
         DbOption, Projection, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;
@@ -183,7 +183,7 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.datatype(), &DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -195,21 +195,21 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype(), DataType::Int8);
+                assert_eq!(col.datatype(), &DataType::Int8);
                 assert_eq!(col.desc.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &None);
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::String);
+                assert_eq!(col.datatype(), &DataType::String);
                 assert_eq!(col.desc.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype(), DataType::Bytes);
+                assert_eq!(col.datatype(), &DataType::Bytes);
                 assert_eq!(col.desc.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
@@ -258,7 +258,6 @@ mod tests {
             let tx = db.transaction().await;
             let mut scan = tx
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(&["id", "age", "name"])
                 .take()
                 .await
                 .unwrap();
@@ -267,6 +266,44 @@ mod tests {
                 let columns1 = entry.value().unwrap().columns;
                 let (_, record) = sort_items.pop_first().unwrap();
                 let columns2 = record.as_record_ref().columns;
+
+                assert_eq!(columns1.len(), columns2.len());
+                for i in 0..columns1.len() {
+                    assert_eq!(columns1.get(i), columns2.get(i));
+                }
+            }
+        }
+        {
+            use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
+            // test projection
+
+            let mut sort_items = BTreeMap::new();
+            for item in test_dyn_items() {
+                sort_items.insert(item.key(), item);
+            }
+
+            let tx = db.transaction().await;
+            let mut scan = tx
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(&["id", "age", "name"])
+                .take()
+                .await
+                .unwrap();
+
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns1 = entry.value().unwrap().columns;
+                let (_, record) = sort_items.pop_first().unwrap();
+
+                let schema = test_dyn_item_schema();
+                let mask = ProjectionMask::roots(
+                    &ArrowSchemaConverter::new()
+                        .convert(schema.arrow_schema())
+                        .unwrap(),
+                    [2, 3, 4],
+                );
+                let mut record_ref = record.as_record_ref();
+                record_ref.projection(&mask);
+                let columns2 = record_ref.columns;
 
                 assert_eq!(columns1.len(), columns2.len());
                 for i in 0..columns1.len() {
@@ -350,7 +387,7 @@ mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.datatype(), &DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -362,21 +399,21 @@ mod tests {
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype(), DataType::Int8);
+                assert_eq!(col.datatype(), &DataType::Int8);
                 assert_eq!(col.desc.name, "age".to_string());
                 let age = col.value.as_ref().downcast_ref::<Option<i8>>();
                 assert!(age.is_some());
                 assert_eq!(age.unwrap(), &Some(i as i8));
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::String);
+                assert_eq!(col.datatype(), &DataType::String);
                 assert_eq!(col.desc.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &Some(i.to_string()));
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype(), DataType::Bytes);
+                assert_eq!(col.datatype(), &DataType::Bytes);
                 assert_eq!(col.desc.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.unwrap().is_none());
