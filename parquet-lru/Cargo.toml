@@ -4,7 +4,7 @@ documentation = "https://docs.rs/parquet-lru"
 edition = "2021"
 license = "Apache-2.0"
 name = "parquet-lru"
-version = "0.3.0"
+version = "0.3.2"
 
 [package.metadata.docs.rs]
 all-features = true
