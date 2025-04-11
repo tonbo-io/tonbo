@@ -85,6 +85,26 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(name, value).unwrap();
                 }
             }
+            TonboDataType::Float32 => {
+                // if idx == primary_key_index {
+                //     dict.set_item(name, col.value.as_ref().downcast_ref::<F32>().unwrap())
+                //         .unwrap();
+                // } else {
+                //     let value = col.value.as_ref().downcast_ref::<Option<F32>>().unwrap();
+                //     dict.set_item(name, value).unwrap();
+                // }
+                todo!()
+            }
+            TonboDataType::Float64 => {
+                // if idx == primary_key_index {
+                //     dict.set_item(name, col.value.as_ref().downcast_ref::<F64>().unwrap())
+                //         .unwrap();
+                // } else {
+                //     let value = col.value.as_ref().downcast_ref::<Option<F64>>().unwrap();
+                //     dict.set_item(name, value).unwrap();
+                // }
+                todo!()
+            }
             TonboDataType::String => {
                 if idx == primary_key_index {
                     dict.set_item(name, col.value.as_ref().downcast_ref::<String>())
