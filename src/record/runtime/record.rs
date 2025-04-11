@@ -6,7 +6,7 @@ use fusio_log::{Decode, Encode};
 use super::{schema::DynSchema, DataType, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
-    record::{Record, RecordDecodeError},
+    record::{Record, RecordDecodeError, F32, F64},
 };
 
 #[derive(Debug)]
@@ -48,6 +48,8 @@ impl Decode for DynRecord {
                     DataType::Int16 => Arc::new(cast_arc_value!(col.value, Option<i16>).unwrap()),
                     DataType::Int32 => Arc::new(cast_arc_value!(col.value, Option<i32>).unwrap()),
                     DataType::Int64 => Arc::new(cast_arc_value!(col.value, Option<i64>).unwrap()),
+                    DataType::Float32 => Arc::new(cast_arc_value!(col.value, Option<F32>).unwrap()),
+                    DataType::Float64 => Arc::new(cast_arc_value!(col.value, Option<F64>).unwrap()),
                     DataType::String => {
                         Arc::new(cast_arc_value!(col.value, Option<String>).clone().unwrap())
                     }
@@ -90,6 +92,8 @@ impl Record for DynRecord {
                     DataType::Int16 => Arc::new(Some(*cast_arc_value!(col.value, i16))),
                     DataType::Int32 => Arc::new(Some(*cast_arc_value!(col.value, i32))),
                     DataType::Int64 => Arc::new(Some(*cast_arc_value!(col.value, i64))),
+                    DataType::Float32 => Arc::new(Some(*cast_arc_value!(col.value, F32))),
+                    DataType::Float64 => Arc::new(Some(*cast_arc_value!(col.value, F64))),
                     DataType::String => {
                         Arc::new(Some(cast_arc_value!(col.value, String).to_owned()))
                     }
@@ -162,7 +166,10 @@ pub(crate) mod test {
     use std::sync::Arc;
 
     use super::{DynRecord, DynSchema};
-    use crate::dyn_schema;
+    use crate::{
+        dyn_schema,
+        record::{F32, F64},
+    };
 
     #[allow(unused)]
     pub(crate) fn test_dyn_item_schema() -> DynSchema {
@@ -175,6 +182,8 @@ pub(crate) mod test {
             ("email", String, true),
             ("enabled", Boolean, false),
             ("bytes", Bytes, true),
+            ("grade", Float32, false),
+            ("price", Float64, true),
             0
         )
     }
@@ -192,6 +201,8 @@ pub(crate) mod test {
                 ("email", String, true, Some(format!("{}@tonbo.io", i))),
                 ("enabled", Boolean, false, i % 2 == 0),
                 ("bytes", Bytes, true, Some(i.to_le_bytes().to_vec())),
+                ("grade", Float32, false, F32::from(i as f32 * 1.11)),
+                ("price", Float64, true, Some(F64::from(i as f64 * 1.01))),
                 0
             );
             if i >= 45 {

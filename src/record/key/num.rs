@@ -121,6 +121,12 @@ macro_rules! implement_float_key {
             }
         }
 
+        impl From<&FloatType<$ty>> for $ty {
+            fn from(value: &FloatType<$ty>) -> Self {
+                value.0
+            }
+        }
+
         impl Deref for FloatType<$ty> {
             type Target = $ty;
 

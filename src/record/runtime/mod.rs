@@ -24,6 +24,8 @@ pub enum DataType {
     String,
     Boolean,
     Bytes,
+    Float32,
+    Float64,
 }
 
 impl From<&ArrowDataType> for DataType {
@@ -37,6 +39,8 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::Int16 => DataType::Int16,
             ArrowDataType::Int32 => DataType::Int32,
             ArrowDataType::Int64 => DataType::Int64,
+            ArrowDataType::Float32 => DataType::Float32,
+            ArrowDataType::Float64 => DataType::Float64,
             ArrowDataType::Utf8 => DataType::String,
             ArrowDataType::Boolean => DataType::Boolean,
             ArrowDataType::Binary => DataType::Bytes,
