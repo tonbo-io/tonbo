@@ -5,6 +5,7 @@ use std::{hash::Hash, sync::Arc};
 
 use arrow::array::Datum;
 use fusio_log::{Decode, Encode};
+pub use num::*;
 
 pub trait Key:
     'static + Encode + Decode + Ord + Clone + Send + Sync + Hash + std::fmt::Debug
