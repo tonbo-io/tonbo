@@ -1,3 +1,4 @@
+use tonbo::record::F32;
 use tonbo_macros::Record;
 
 #[derive(Record, Debug, PartialEq)]
@@ -6,13 +7,16 @@ pub struct User {
     age: u8,
     #[record(primary_key)]
     name: String,
+    grade: F32,
 }
 
 #[cfg(test)]
 mod tests {
     use std::{io::Cursor, sync::Arc};
 
-    use arrow::array::{BooleanArray, RecordBatch, StringArray, UInt32Array, UInt8Array};
+    use arrow::array::{
+        BooleanArray, Float32Array, RecordBatch, StringArray, UInt32Array, UInt8Array,
+    };
     use fusio_log::{Decode, Encode};
     use parquet::{
         arrow::{ArrowSchemaConverter, ProjectionMask},
@@ -35,10 +39,11 @@ mod tests {
             name: "cat".to_string(),
             email: Some("test@example.com".to_string()),
             age: 32,
+            grade: 92.9.into(),
         };
 
         assert_eq!(user.key(), "cat");
-        assert_eq!(user.size(), 20);
+        assert_eq!(user.size(), 24);
         assert_eq!(UserSchema {}.primary_key_index(), 4);
         assert_eq!(
             UserSchema {}.primary_key_path(),
@@ -58,6 +63,7 @@ mod tests {
             name: "cat".to_string(),
             email: Some("test@example.com".to_string()),
             age: 32,
+            grade: 92.9.into(),
         };
         {
             let mut user_ref = user.as_record_ref();
@@ -124,7 +130,7 @@ mod tests {
                 Arc::new(
                     UserSchema {}
                         .arrow_schema()
-                        .project(&[0, 1, 2, 3, 4])
+                        .project(&[0, 1, 2, 3, 4, 5])
                         .unwrap(),
                 ),
                 vec![
@@ -133,6 +139,7 @@ mod tests {
                     Arc::new(StringArray::from(vec!["test@example.com"])),
                     Arc::new(UInt8Array::from(vec![9])),
                     Arc::new(StringArray::from(vec!["cat"])),
+                    Arc::new(Float32Array::from(vec![1.2])),
                 ],
             )
             .unwrap();
@@ -141,7 +148,7 @@ mod tests {
                 &ArrowSchemaConverter::new()
                     .convert(UserSchema {}.arrow_schema())
                     .unwrap(),
-                vec![0, 1, 2, 3, 4],
+                vec![0, 1, 2, 3, 4, 5],
             );
             let record_ref = UserRef::from_record_batch(
                 &record_batch,
@@ -160,18 +167,25 @@ mod tests {
                 assert_eq!(user_ref.email, Some("test@example.com"));
                 assert_eq!(user_ref.age, Some(9));
                 assert_eq!(user_ref.name, "cat");
+                assert_eq!(user_ref.grade, Some(1.2.into()));
             } else {
                 unreachable!();
             }
         }
         {
             let record_batch = RecordBatch::try_new(
-                Arc::new(UserSchema {}.arrow_schema().project(&[0, 1, 3, 4]).unwrap()),
+                Arc::new(
+                    UserSchema {}
+                        .arrow_schema()
+                        .project(&[0, 1, 3, 4, 5])
+                        .unwrap(),
+                ),
                 vec![
                     Arc::new(BooleanArray::from(vec![false])),
                     Arc::new(UInt32Array::from(vec![9])),
                     Arc::new(UInt8Array::from(vec![9])),
                     Arc::new(StringArray::from(vec!["cat"])),
+                    Arc::new(Float32Array::from(vec![1.2])),
                 ],
             )
             .unwrap();
@@ -180,7 +194,7 @@ mod tests {
                 &ArrowSchemaConverter::new()
                     .convert(UserSchema {}.arrow_schema())
                     .unwrap(),
-                vec![0, 1, 3, 4],
+                vec![0, 1, 3, 4, 5],
             );
             let record_ref = UserRef::from_record_batch(
                 &record_batch,
@@ -199,6 +213,7 @@ mod tests {
                 assert_eq!(user_ref.email, None);
                 assert_eq!(user_ref.age, Some(9));
                 assert_eq!(user_ref.name, "cat");
+                assert_eq!(user_ref.grade, Some(1.2.into()));
             } else {
                 unreachable!();
             }
@@ -211,12 +226,13 @@ mod tests {
             name: "cat".to_string(),
             email: Some("test@example.com".to_string()),
             age: 32,
+            grade: 92.9.into(),
         };
         let original_ref = original.as_record_ref();
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
 
-        assert_eq!(original_ref.size(), 26);
+        assert_eq!(original_ref.size(), 31);
         original_ref.encode(&mut cursor).await.unwrap();
 
         cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
@@ -232,11 +248,13 @@ mod tests {
             email: Some("cat@example.com".to_string()),
             age: 0,
             name: "cat".to_string(),
+            grade: 92.9.into(),
         };
         let dog = User {
             email: Some("dog@example.com".to_string()),
             age: 1,
             name: "dog".to_string(),
+            grade: f32::NAN.into(),
         };
 
         builder.push(
@@ -261,9 +279,9 @@ mod tests {
             None,
         );
 
-        assert_eq!(builder.written_size(), 57);
+        assert_eq!(builder.written_size(), 69);
 
-        let arrays = builder.finish(Some(&[0, 1, 2, 3, 4]));
+        let arrays = builder.finish(Some(&[0, 1, 2, 3, 4, 5]));
 
         assert_eq!(
             arrays.as_record_batch(),
@@ -271,7 +289,7 @@ mod tests {
                 Arc::new(
                     UserSchema {}
                         .arrow_schema()
-                        .project(&[0, 1, 2, 3, 4])
+                        .project(&[0, 1, 2, 3, 4, 5])
                         .unwrap(),
                 ),
                 vec![
@@ -284,6 +302,7 @@ mod tests {
                     ])),
                     Arc::new(UInt8Array::from(vec![0, 1, 0])),
                     Arc::new(StringArray::from(vec!["cat", "dog", "human"])),
+                    Arc::new(Float32Array::from(vec![92.9, f32::NAN, 0.0])),
                 ],
             )
             .unwrap()
@@ -298,11 +317,13 @@ mod tests {
             email: Some("cat@example.com".to_string()),
             age: 0,
             name: "cat".to_string(),
+            grade: 92.9.into(),
         };
         let dog = User {
             email: Some("dog@example.com".to_string()),
             age: 1,
             name: "dog".to_string(),
+            grade: 93.1.into(),
         };
 
         builder.push(
@@ -327,19 +348,25 @@ mod tests {
             None,
         );
 
-        assert_eq!(builder.written_size(), 57);
+        assert_eq!(builder.written_size(), 69);
 
-        let arrays = builder.finish(Some(&[0, 1, 3, 4]));
+        let arrays = builder.finish(Some(&[0, 1, 3, 4, 5]));
 
         assert_eq!(
             arrays.as_record_batch(),
             &RecordBatch::try_new(
-                Arc::new(UserSchema {}.arrow_schema().project(&[0, 1, 3, 4]).unwrap(),),
+                Arc::new(
+                    UserSchema {}
+                        .arrow_schema()
+                        .project(&[0, 1, 3, 4, 5])
+                        .unwrap(),
+                ),
                 vec![
                     Arc::new(BooleanArray::from(vec![false, false, true])),
                     Arc::new(UInt32Array::from(vec![0, 1, 2])),
                     Arc::new(UInt8Array::from(vec![0, 1, 0])),
                     Arc::new(StringArray::from(vec!["cat", "dog", "human"])),
+                    Arc::new(Float32Array::from(vec![92.9, 93.1, 0.0])),
                 ],
             )
             .unwrap()

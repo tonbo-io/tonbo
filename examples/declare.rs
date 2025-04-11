@@ -4,7 +4,7 @@ use bytes::Bytes;
 use fusio::path::Path;
 use futures_util::stream::StreamExt;
 use tokio::fs;
-use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
+use tonbo::{executor::tokio::TokioExecutor, record::F32, DbOption, Projection, Record, DB};
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
@@ -15,6 +15,7 @@ pub struct User {
     email: Option<String>,
     age: u8,
     bytes: Bytes,
+    grade: F32,
 }
 
 #[tokio::main]
@@ -37,6 +38,7 @@ async fn main() {
         email: Some("alice@gmail.com".into()),
         age: 22,
         bytes: Bytes::from(vec![0, 1, 2]),
+        grade: 96.5.into(),
     })
     .await
     .unwrap();
@@ -66,7 +68,7 @@ async fn main() {
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
                 // tonbo supports pushing down projection
-                .projection(&["email", "bytes"])
+                .projection(&["email", "bytes", "grade"])
                 // push down limitation
                 .limit(1)
                 .take()
@@ -80,6 +82,7 @@ async fn main() {
                         email: Some("alice@gmail.com"),
                         age: None,
                         bytes: Some(&[0, 1, 2]),
+                        grade: Some(96.5.into()),
                     })
                 );
             }

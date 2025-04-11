@@ -91,10 +91,14 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         .ident
         .as_ref()
         .expect("cannot find primary key ident");
+    let primary_key_value = match primary_key_data_type.0 {
+        DataType::Float32 | DataType::Float64 => quote!(key.value.into()),
+        _ => quote!(key.value),
+    };
     let primary_key_definitions = PrimaryKey {
         name: primary_key_ident.clone(),
         builder_append_value: quote! {
-            self.#primary_key_ident .append_value(key.value);
+            self.#primary_key_ident .append_value(#primary_key_value);
         },
         base_ty: primary_key_field.ty.clone(),
         index: primary_key_field_index + 2,
@@ -420,7 +424,8 @@ fn trait_decode_ref_codegen(
                 let #field_name = record_batch
                     .column(column_i)
                     .#as_method
-                    .value(offset);
+                    .value(offset)
+                    .into();
                 column_i += 1;
             });
         } else {
@@ -441,7 +446,7 @@ fn trait_decode_ref_codegen(
 
                         use ::tonbo::arrow::array::Array;
                         if !#field_array_name.is_null(offset) {
-                            #field_name = Some(#field_array_name.value(offset));
+                            #field_name = Some(#field_array_name.value(offset).into());
                         }
                         column_i += 1;
                     }
@@ -455,7 +460,8 @@ fn trait_decode_ref_codegen(
                             record_batch
                                 .column(column_i)
                                 .#as_method
-                                .value(offset),
+                                .value(offset)
+                                .into(),
                         );
                         column_i += 1;
                     }
@@ -602,7 +608,7 @@ fn trait_arrow_array_codegen(
 
         if field.primary_key.unwrap_or_default() {
             arrays_get_fields.push(quote! {
-               let #field_name = self.#field_name.value(offset);
+               let #field_name = self.#field_name.value(offset).into();
             });
         } else if is_nullable {
             arrays_get_fields.push(quote! {
@@ -610,7 +616,7 @@ fn trait_arrow_array_codegen(
                 if projection_mask.leaf_included(#field_index) {
                     use ::tonbo::arrow::array::Array;
                     if !self.#field_name.is_null(offset) {
-                        #field_name = Some(self.#field_name.value(offset));
+                        #field_name = Some(self.#field_name.value(offset).into());
                     }
                 }
             });
@@ -618,7 +624,7 @@ fn trait_arrow_array_codegen(
             arrays_get_fields.push(quote! {
                 let #field_name = projection_mask
                     .leaf_included(#field_index)
-                    .then(|| self.#field_name.value(offset));
+                    .then(|| self.#field_name.value(offset).into());
             });
         }
     }
@@ -695,6 +701,7 @@ fn struct_builder_codegen(
 
         let is_string = matches!(data_type, DataType::String);
         let is_bytes = matches!(data_type, DataType::Bytes);
+        let is_float = matches!(data_type, DataType::Float32 | DataType::Float64);
         let builder = data_type.to_builder();
         let size_method = data_type.to_size_method(field_name);
 
@@ -714,11 +721,17 @@ fn struct_builder_codegen(
             + #size_method
         });
 
+        let append_val = if is_float {
+            quote!(#field_name.into())
+        } else {
+            quote!(#field_name)
+        };
+
         if field.primary_key.unwrap_or_default() {
         } else if is_nullable {
             builder_push_some_fields.push(quote! {
                 match row.#field_name {
-                    Some(#field_name) => self.#field_name.append_value(#field_name),
+                    Some(#field_name) => self.#field_name.append_value(#append_val),
                     None => self.#field_name.append_null(),
                 }
             });
@@ -735,7 +748,7 @@ fn struct_builder_codegen(
             };
             builder_push_some_fields.push(quote! {
                 match row.#field_name {
-                    Some(#field_name) => self.#field_name.append_value(#field_name),
+                    Some(#field_name) => self.#field_name.append_value(#append_val),
                     None => #append_default,
                 }
             });

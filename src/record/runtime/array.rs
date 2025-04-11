@@ -7,8 +7,8 @@ use arrow::{
         StringArray, StringBuilder, UInt32Builder,
     },
     datatypes::{
-        Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type,
-        UInt64Type, UInt8Type,
+        Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
+        UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
 
@@ -17,7 +17,7 @@ use crate::{
     cast_arc_value,
     inmem::immutable::{ArrowArrays, Builder},
     magic::USER_COLUMN_OFFSET,
-    record::{Key, Record, Schema},
+    record::{Key, Record, Schema, F32, F64},
     timestamp::Timestamped,
 };
 
@@ -77,6 +77,16 @@ impl ArrowArrays for DynRecordImmutableArrays {
                 }
                 DataType::Int64 => {
                     builders.push(Box::new(PrimitiveBuilder::<Int64Type>::with_capacity(
+                        capacity,
+                    )));
+                }
+                DataType::Float32 => {
+                    builders.push(Box::new(PrimitiveBuilder::<Float32Type>::with_capacity(
+                        capacity,
+                    )));
+                }
+                DataType::Float64 => {
+                    builders.push(Box::new(PrimitiveBuilder::<Float64Type>::with_capacity(
                         capacity,
                     )));
                 }
@@ -193,6 +203,22 @@ impl ArrowArrays for DynRecordImmutableArrays {
                             Arc::new(v)
                         } else {
                             Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Float32 => {
+                        let v = Self::primitive_value::<Float32Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(F32::from(v))
+                        } else {
+                            Arc::new(Some(F32::from(v)))
+                        }
+                    }
+                    DataType::Float64 => {
+                        let v = Self::primitive_value::<Float64Type>(col, offset);
+                        if primary_key_index == idx {
+                            Arc::new(F64::from(v))
+                        } else {
+                            Arc::new(Some(F64::from(v)))
                         }
                     }
                     DataType::String => {
@@ -362,6 +388,26 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_value(Default::default()),
                             }
                         }
+                        DataType::Float32 => {
+                            let bd = Self::as_builder_mut::<PrimitiveBuilder<Float32Type>>(
+                                builder.as_mut(),
+                            );
+                            match cast_arc_value!(col.value, Option<F32>) {
+                                Some(value) => bd.append_value(value.into()),
+                                None if col.is_nullable() => bd.append_null(),
+                                None => bd.append_value(Default::default()),
+                            }
+                        }
+                        DataType::Float64 => {
+                            let bd = Self::as_builder_mut::<PrimitiveBuilder<Float64Type>>(
+                                builder.as_mut(),
+                            );
+                            match cast_arc_value!(col.value, Option<F64>) {
+                                Some(value) => bd.append_value(value.into()),
+                                None if col.is_nullable() => bd.append_null(),
+                                None => bd.append_value(Default::default()),
+                            }
+                        }
                         DataType::String => {
                             let bd = Self::as_builder_mut::<StringBuilder>(builder.as_mut());
                             match cast_arc_value!(col.value, Option<String>) {
@@ -433,6 +479,14 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(builder.as_mut())
                                 .append_value(i64::default());
                         }
+                        DataType::Float32 => {
+                            Self::as_builder_mut::<PrimitiveBuilder<Float32Type>>(builder.as_mut())
+                                .append_value(f32::default());
+                        }
+                        DataType::Float64 => {
+                            Self::as_builder_mut::<PrimitiveBuilder<Float64Type>>(builder.as_mut())
+                                .append_value(f64::default());
+                        }
                         DataType::String => {
                             Self::as_builder_mut::<StringBuilder>(builder.as_mut())
                                 .append_value(String::default());
@@ -488,6 +542,14 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     ),
                     DataType::Int64 => mem::size_of_val(
                         Self::as_builder::<PrimitiveBuilder<Int64Type>>(builder.as_ref())
+                            .values_slice(),
+                    ),
+                    DataType::Float32 => mem::size_of_val(
+                        Self::as_builder::<PrimitiveBuilder<Float32Type>>(builder.as_ref())
+                            .values_slice(),
+                    ),
+                    DataType::Float64 => mem::size_of_val(
+                        Self::as_builder::<PrimitiveBuilder<Float64Type>>(builder.as_ref())
                             .values_slice(),
                     ),
                     DataType::String => mem::size_of_val(
@@ -623,6 +685,32 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     ));
                     array_refs.push(value);
                 }
+                DataType::Float32 => {
+                    let value = Arc::new(
+                        Self::as_builder_mut::<PrimitiveBuilder<Float32Type>>(builder.as_mut())
+                            .finish(),
+                    );
+                    columns.push(Value::new(
+                        DataType::Float32,
+                        field.name().to_owned(),
+                        value.clone(),
+                        is_nullable,
+                    ));
+                    array_refs.push(value);
+                }
+                DataType::Float64 => {
+                    let value = Arc::new(
+                        Self::as_builder_mut::<PrimitiveBuilder<Float64Type>>(builder.as_mut())
+                            .finish(),
+                    );
+                    columns.push(Value::new(
+                        DataType::Float64,
+                        field.name().to_owned(),
+                        value.clone(),
+                        is_nullable,
+                    ));
+                    array_refs.push(value);
+                }
                 DataType::String => {
                     let value =
                         Arc::new(Self::as_builder_mut::<StringBuilder>(builder.as_mut()).finish());
@@ -719,6 +807,14 @@ impl DynRecordBuilder {
                 Self::as_builder_mut::<PrimitiveBuilder<Int64Type>>(builder.as_mut())
                     .append_value(*cast_arc_value!(col.value, i64))
             }
+            DataType::Float32 => {
+                Self::as_builder_mut::<PrimitiveBuilder<Float32Type>>(builder.as_mut())
+                    .append_value(*cast_arc_value!(col.value, f32))
+            }
+            DataType::Float64 => {
+                Self::as_builder_mut::<PrimitiveBuilder<Float64Type>>(builder.as_mut())
+                    .append_value(*cast_arc_value!(col.value, f64))
+            }
             DataType::String => Self::as_builder_mut::<StringBuilder>(builder.as_mut())
                 .append_value(cast_arc_value!(col.value, String)),
             DataType::Boolean => Self::as_builder_mut::<BooleanBuilder>(builder.as_mut())
@@ -751,7 +847,7 @@ mod tests {
     use crate::{
         dyn_record, dyn_schema,
         inmem::immutable::{ArrowArrays, Builder},
-        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema},
+        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema, F32, F64},
     };
 
     #[tokio::test]
@@ -762,6 +858,8 @@ mod tests {
             ("bytes", Bytes, true),
             ("none", Int64, true),
             ("str", String, false),
+            ("float32", Float32, false),
+            ("float64", Float64, true),
             0
         );
 
@@ -771,6 +869,8 @@ mod tests {
             ("bytes", Bytes, true, Some(vec![1_u8, 2, 3, 4])),
             ("none", Int64, true, None::<i64>),
             ("str", String, false, "tonbo".to_string()),
+            ("float32", Float32, false, F32::from(1.09_f32)),
+            ("float64", Float64, true, Some(F64::from(3.09_f64))),
             0
         );
 
