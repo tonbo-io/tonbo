@@ -2,8 +2,8 @@ use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
 use arrow::{
     array::{
-        BooleanArray, GenericBinaryArray, Int16Array, Int32Array, Int64Array, Int8Array,
-        StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        BooleanArray, Float32Array, Float64Array, GenericBinaryArray, Int16Array, Int32Array,
+        Int64Array, Int8Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     },
     datatypes::{DataType as ArrowDataType, Field},
 };
@@ -11,7 +11,7 @@ use fusio::{SeqRead, Write};
 use fusio_log::{Decode, DecodeError, Encode};
 
 use super::DataType;
-use crate::record::{Key, KeyRef};
+use crate::record::{Key, KeyRef, F32, F64};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {
@@ -39,6 +39,8 @@ impl ValueDesc {
             DataType::Int16 => ArrowDataType::Int16,
             DataType::Int32 => ArrowDataType::Int32,
             DataType::Int64 => ArrowDataType::Int64,
+            DataType::Float32 => ArrowDataType::Float32,
+            DataType::Float64 => ArrowDataType::Float64,
             DataType::String => ArrowDataType::Utf8,
             DataType::Boolean => ArrowDataType::Boolean,
             DataType::Bytes => ArrowDataType::Binary,
@@ -87,6 +89,12 @@ impl Value {
             }
             DataType::Int64 => {
                 Self::new(datatype, name, Arc::<Option<i64>>::new(None), is_nullable)
+            }
+            DataType::Float32 => {
+                Self::new(datatype, name, Arc::<Option<f32>>::new(None), is_nullable)
+            }
+            DataType::Float64 => {
+                Self::new(datatype, name, Arc::<Option<f64>>::new(None), is_nullable)
             }
             DataType::String => Self::new(
                 datatype,
@@ -212,6 +220,20 @@ macro_rules! implement_key_col {
                                 .expect(stringify!("unexpected datatype, expected " $Type))
                         )),
                     )*
+                    DataType::Float32 => Arc::new(Float32Array::new_scalar(
+                        self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<F32>()
+                                .expect("unexpected datatype, expected String").into(),
+                    )),
+                    DataType::Float64 => Arc::new(Float64Array::new_scalar(
+                        self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<F64>()
+                                .expect("unexpected datatype, expected String").into(),
+                    )),
                     DataType::String => Arc::new(StringArray::new_scalar(
                         self
                             .value
@@ -356,6 +378,8 @@ impl Value {
             DataType::String => 8,
             DataType::Boolean => 9,
             DataType::Bytes => 10,
+            DataType::Float32 => 11,
+            DataType::Float64 => 12,
         }
     }
 
@@ -372,6 +396,8 @@ impl Value {
             8 => DataType::String,
             9 => DataType::Boolean,
             10 => DataType::Bytes,
+            11 => DataType::Float32,
+            12 => DataType::Float64,
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -388,6 +414,8 @@ impl From<&ValueDesc> for Field {
             DataType::Int16 => Field::new(&col.name, ArrowDataType::Int16, col.is_nullable),
             DataType::Int32 => Field::new(&col.name, ArrowDataType::Int32, col.is_nullable),
             DataType::Int64 => Field::new(&col.name, ArrowDataType::Int64, col.is_nullable),
+            DataType::Float32 => Field::new(&col.name, ArrowDataType::Float32, col.is_nullable),
+            DataType::Float64 => Field::new(&col.name, ArrowDataType::Float64, col.is_nullable),
             DataType::String => Field::new(&col.name, ArrowDataType::Utf8, col.is_nullable),
             DataType::Boolean => Field::new(&col.name, ArrowDataType::Boolean, col.is_nullable),
             DataType::Bytes => Field::new(&col.name, ArrowDataType::Binary, col.is_nullable),
@@ -407,6 +435,8 @@ macro_rules! for_datatype {
                 { i16, Int16 },
                 { i32, Int32 },
                 { i64, Int64 },
+                { F32, Float32 },
+                { F64, Float64 },
                 { String, String },
                 { bool, Boolean },
                 { Vec<u8>, Bytes }
@@ -417,6 +447,7 @@ macro_rules! for_datatype {
 implement_key_col!(
     { u8, UInt8, UInt8Array }, { u16, UInt16, UInt16Array }, { u32, UInt32, UInt32Array }, { u64, UInt64, UInt64Array },
     { i8, Int8, Int8Array }, { i16, Int16, Int16Array }, { i32, Int32, Int32Array }, { i64, Int64, Int64Array }
+    // { F32, Float32, Float32Array }, { F64, Float64, Float64Array }
 );
 for_datatype! { implement_col }
 for_datatype! { implement_decode_col }

@@ -21,6 +21,8 @@ fn none_value(datatype: DataType) -> Arc<dyn Any + Send + Sync> {
         DataType::Int16 => Arc::new(Option::<i16>::None),
         DataType::Int32 => Arc::new(Option::<i32>::None),
         DataType::Int64 => Arc::new(Option::<i64>::None),
+        DataType::Float32 => unimplemented!(),
+        DataType::Float64 => unimplemented!(),
         DataType::String => Arc::new(Option::<String>::None),
         DataType::Boolean => Arc::new(Option::<bool>::None),
         DataType::Bytes => Arc::new(Option::<Vec<u8>>::None),
@@ -49,6 +51,8 @@ pub(crate) fn parse_key(desc: &ValueDesc, key: JsValue, primary: bool) -> Result
         DataType::Int8 => to_col_value::<i8>(key.as_f64().unwrap().round() as i8, primary),
         DataType::Int16 => to_col_value::<i16>(key.as_f64().unwrap().round() as i16, primary),
         DataType::Int32 => to_col_value::<i32>(key.as_f64().unwrap().round() as i32, primary),
+        DataType::Float32 => unimplemented!(),
+        DataType::Float64 => unimplemented!(),
         DataType::Int64 => to_col_value::<i64>(key.as_f64().unwrap().round() as i64, primary),
         DataType::String => to_col_value::<String>(key.as_string().unwrap(), primary),
         DataType::Boolean => to_col_value::<bool>(key.as_bool().unwrap(), primary),
@@ -114,6 +118,14 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
             DataType::Int64 => match idx == primary_key_index {
                 true => (*col.value.as_ref().downcast_ref::<i64>().unwrap()).into(),
                 false => (*col.value.as_ref().downcast_ref::<Option<i64>>().unwrap()).into(),
+            },
+            DataType::Float32 => match idx == primary_key_index {
+                true => unimplemented!(),
+                false => unimplemented!(),
+            },
+            DataType::Float64 => match idx == primary_key_index {
+                true => unimplemented!(),
+                false => unimplemented!(),
             },
             DataType::String => match idx == primary_key_index {
                 true => (col.value.as_ref().downcast_ref::<String>().unwrap()).into(),
