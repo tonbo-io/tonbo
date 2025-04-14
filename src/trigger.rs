@@ -6,10 +6,12 @@ use std::{
     },
 };
 
+use fusio_log::Encode;
+
 use crate::record::Record;
 
-pub trait Trigger<R: Record>: Send + Sync {
-    fn check_if_exceed(&self, item: &Option<R>) -> bool;
+pub trait FreezeTrigger<R: Record>: Send + Sync {
+    fn check_if_exceed(&self, item: &R) -> bool;
 
     fn reset(&self);
 }
@@ -31,9 +33,9 @@ impl<T> SizeOfMemTrigger<T> {
     }
 }
 
-impl<R: Record> Trigger<R> for SizeOfMemTrigger<R> {
-    fn check_if_exceed(&self, item: &Option<R>) -> bool {
-        let size = item.as_ref().map_or(0, R::size);
+impl<R: Record> FreezeTrigger<R> for SizeOfMemTrigger<R> {
+    fn check_if_exceed(&self, item: &R) -> bool {
+        let size = item.size() + item.key().size();
         self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
     }
 
@@ -59,8 +61,8 @@ impl<T> LengthTrigger<T> {
     }
 }
 
-impl<R: Record> Trigger<R> for LengthTrigger<R> {
-    fn check_if_exceed(&self, _: &Option<R>) -> bool {
+impl<R: Record> FreezeTrigger<R> for LengthTrigger<R> {
+    fn check_if_exceed(&self, _: &R) -> bool {
         self.count.fetch_add(1, Ordering::SeqCst) + 1 >= self.threshold
     }
 
@@ -75,12 +77,13 @@ pub enum TriggerType {
     #[allow(unused)]
     Length(usize),
 }
+
 pub(crate) struct TriggerFactory<R> {
     _p: PhantomData<R>,
 }
 
 impl<R: Record> TriggerFactory<R> {
-    pub fn create(trigger_type: TriggerType) -> Arc<dyn Trigger<R>> {
+    pub fn create(trigger_type: TriggerType) -> Arc<dyn FreezeTrigger<R>> {
         match trigger_type {
             TriggerType::SizeOfMem(threshold) => Arc::new(SizeOfMemTrigger::new(threshold)),
             TriggerType::Length(threshold) => Arc::new(LengthTrigger::new(threshold)),
@@ -95,17 +98,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_size_of_mem_trigger() {
-        let threshold = 10;
+        let threshold = 16;
         let trigger = SizeOfMemTrigger::new(threshold);
 
-        let record = Some(Test {
+        let record = Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None,
-        });
+        };
 
-        let record_size = record.clone().unwrap().size();
+        let record_size = record.size();
         assert_eq!(record_size, 8);
+        let record_size = record.key().size();
+        assert_eq!(record_size, 6);
 
         assert!(
             !trigger.check_if_exceed(&record),
@@ -130,11 +135,11 @@ mod tests {
         let threshold = 2;
         let trigger = LengthTrigger::new(threshold);
 
-        let record = Some(Test {
+        let record = Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None,
-        });
+        };
 
         assert!(
             !trigger.check_if_exceed(&record),
@@ -155,29 +160,29 @@ mod tests {
     }
     #[tokio::test]
     async fn test_trigger_factory() {
-        let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(9));
+        let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(16));
         let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
 
-        assert!(!size_of_mem_trigger.check_if_exceed(&Some(Test {
+        assert!(!size_of_mem_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None
-        })));
-        assert!(size_of_mem_trigger.check_if_exceed(&Some(Test {
+        }));
+        assert!(size_of_mem_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None
-        })));
+        }));
 
-        assert!(!length_trigger.check_if_exceed(&Some(Test {
+        assert!(!length_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 1,
             vbool: Some(true)
-        })));
-        assert!(length_trigger.check_if_exceed(&Some(Test {
+        }));
+        assert!(length_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 1,
             vbool: Some(true)
-        })));
+        }));
     }
 }

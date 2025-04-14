@@ -15,7 +15,7 @@ use crate::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
-    trigger::Trigger,
+    trigger::FreezeTrigger,
     wal::{
         log::{Log, LogType},
         WalFile,
@@ -34,24 +34,24 @@ pub(crate) type MutableScan<'scan, R> = Range<
     Option<R>,
 >;
 
-pub(crate) struct Mutable<R>
+pub(crate) struct MutableMemTable<R>
 where
     R: Record,
 {
-    pub(crate) data: SkipMap<Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
+    data: SkipMap<Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<R>>>,
-    pub(crate) trigger: Arc<dyn Trigger<R>>,
-    pub(super) schema: Arc<R::Schema>,
+    trigger: Arc<dyn FreezeTrigger<R>>,
+    schema: Arc<R::Schema>,
 }
 
-impl<R> Mutable<R>
+impl<R> MutableMemTable<R>
 where
     R: Record,
 {
-    pub async fn new(
+    pub(crate) async fn new(
         option: &DbOption,
-        trigger: Arc<dyn Trigger<R>>,
-        fs: &Arc<dyn DynFs>,
+        trigger: Arc<dyn FreezeTrigger<R>>,
+        fs: Arc<dyn DynFs>,
         schema: Arc<R::Schema>,
     ) -> Result<Self, fusio::Error> {
         let mut wal = None;
@@ -60,7 +60,7 @@ where
 
             wal = Some(Mutex::new(
                 WalFile::<R>::new(
-                    fs.clone(),
+                    fs,
                     option.wal_path(file_id),
                     option.wal_buffer_size,
                     file_id,
@@ -85,7 +85,7 @@ where
     }
 }
 
-impl<R> Mutable<R>
+impl<R> MutableMemTable<R>
 where
     R: Record + Send,
 {
@@ -119,18 +119,20 @@ where
 
         let record_entry = Log::new(timestamped_key, value, log_ty);
         if let (Some(_log_ty), Some(wal)) = (log_ty, &self.wal) {
-            let mut wal_guard = wal.lock().await;
-
-            wal_guard
+            wal.lock()
+                .await
                 .write(&record_entry)
                 .await
                 .map_err(|e| DbError::WalWrite(Box::new(e)))?;
         }
 
-        let is_exceeded = self.trigger.check_if_exceed(&record_entry.value);
-        self.data.insert(record_entry.key, record_entry.value);
+        let entry = self.data.insert(record_entry.key, record_entry.value);
 
-        Ok(is_exceeded)
+        Ok(entry
+            .value()
+            .as_ref()
+            .map(|v| self.trigger.check_if_exceed(v))
+            .unwrap_or(false))
     }
 
     pub(crate) fn get(
@@ -211,7 +213,7 @@ where
     }
 }
 
-impl<R> Mutable<R>
+impl<R> MutableMemTable<R>
 where
     R: Record,
 {
@@ -227,7 +229,7 @@ mod tests {
 
     use fusio::{disk::TokioFs, path::Path, DynFs};
 
-    use super::Mutable;
+    use super::MutableMemTable;
     use crate::{
         inmem::immutable::tests::TestSchema,
         record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
@@ -252,9 +254,10 @@ mod tests {
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
-        let mem_table = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
-            .await
-            .unwrap();
+        let mem_table =
+            MutableMemTable::<Test>::new(&option, trigger, fs.clone(), Arc::new(TestSchema {}))
+                .await
+                .unwrap();
 
         mem_table
             .insert(
@@ -306,9 +309,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
-            .await
-            .unwrap();
+        let mutable =
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+                .await
+                .unwrap();
 
         mutable
             .insert(LogType::Full, "1".into(), 0_u32.into())
@@ -404,7 +408,7 @@ mod tests {
 
         let schema = Arc::new(schema);
 
-        let mutable = Mutable::<DynRecord>::new(&option, trigger, &fs, schema)
+        let mutable = MutableMemTable::<DynRecord>::new(&option, trigger, fs.clone(), schema)
             .await
             .unwrap();
 

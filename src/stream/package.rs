@@ -94,7 +94,7 @@ mod tests {
                 tests::{TestImmutableArrays, TestSchema},
                 ArrowArrays,
             },
-            mutable::Mutable,
+            mutable::MutableMemTable,
         },
         record::Schema,
         stream::{merge::MergeStream, package::PackageStream},
@@ -117,7 +117,7 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
+        let m1 = MutableMemTable::<Test>::new(&option, trigger, fs, Arc::new(TestSchema {}))
             .await
             .unwrap();
         m1.insert(

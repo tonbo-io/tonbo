@@ -9,7 +9,7 @@ use crate::{
     compaction::CompactionError,
     context::Context,
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
-    inmem::{immutable::Immutable, mutable::Mutable},
+    inmem::{immutable::Immutable, mutable::MutableMemTable},
     ondisk::sstable::SsTable,
     record::{Record, Schema as RecordSchema},
     scope::Scope,
@@ -59,10 +59,10 @@ where
 
             let mutable = mem::replace(
                 &mut guard.mutable,
-                Mutable::new(
+                MutableMemTable::new(
                     &self.option,
                     trigger_clone,
-                    self.ctx.manager.base_fs(),
+                    self.ctx.manager.base_fs().clone(),
                     self.record_schema.clone(),
                 )
                 .await?,
@@ -424,7 +424,7 @@ pub(crate) mod tests {
         fs::{generate_file_id, manager::StoreManager},
         inmem::{
             immutable::{tests::TestSchema, Immutable},
-            mutable::Mutable,
+            mutable::MutableMemTable,
         },
         record::{DataType, DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
         scope::Scope,
@@ -447,12 +447,12 @@ pub(crate) mod tests {
     {
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable: Mutable<R> = Mutable::new(option, trigger, fs, schema.clone()).await?;
+        let mutable = MutableMemTable::new(option, trigger, fs.clone(), schema.clone()).await?;
 
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
         }
-        Ok(Immutable::new(mutable.data, schema.arrow_schema().clone()))
+        Ok(mutable.into_immutable().await?.1)
     }
 
     #[tokio::test(flavor = "multi_thread")]
