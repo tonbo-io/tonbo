@@ -153,7 +153,7 @@ use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
-use trigger::Trigger;
+use trigger::FreezeTrigger;
 use wal::log::Log;
 
 pub use crate::option::*;
@@ -501,7 +501,7 @@ where
     pub immutables: Vec<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
-    trigger: Arc<dyn Trigger<R>>,
+    trigger: Arc<dyn FreezeTrigger<R>>,
     record_schema: Arc<R::Schema>,
     option: Arc<DbOption>,
 }

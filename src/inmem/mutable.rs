@@ -15,7 +15,7 @@ use crate::{
         timestamped::{Timestamped, TimestampedRef},
         Timestamp, EPOCH,
     },
-    trigger::Trigger,
+    trigger::FreezeTrigger,
     wal::{
         log::{Log, LogType},
         WalFile,
@@ -40,7 +40,7 @@ where
 {
     data: SkipMap<Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<R>>>,
-    trigger: Arc<dyn Trigger<R>>,
+    trigger: Arc<dyn FreezeTrigger<R>>,
     schema: Arc<R::Schema>,
 }
 
@@ -50,7 +50,7 @@ where
 {
     pub(crate) async fn new(
         option: &DbOption,
-        trigger: Arc<dyn Trigger<R>>,
+        trigger: Arc<dyn FreezeTrigger<R>>,
         fs: Arc<dyn DynFs>,
         schema: Arc<R::Schema>,
     ) -> Result<Self, fusio::Error> {
