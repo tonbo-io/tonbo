@@ -22,10 +22,10 @@ pub(crate) struct LeveledCompactor<R>
 where
     R: Record,
 {
-    pub(crate) option: Arc<DbOption>,
-    pub(crate) schema: Arc<RwLock<DbStorage<R>>>,
-    pub(crate) ctx: Arc<Context<R>>,
-    pub(crate) record_schema: Arc<R::Schema>,
+    option: Arc<DbOption>,
+    schema: Arc<RwLock<DbStorage<R>>>,
+    ctx: Arc<Context<R>>,
+    record_schema: Arc<R::Schema>,
 }
 
 impl<R> LeveledCompactor<R>
@@ -133,7 +133,7 @@ where
         Ok(())
     }
 
-    pub(crate) async fn minor_compaction(
+    async fn minor_compaction(
         option: &DbOption,
         recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(
@@ -195,7 +195,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn major_compaction(
+    async fn major_compaction(
         version: &Version<R>,
         option: &DbOption,
         mut min: &<R::Schema as RecordSchema>::Key,
