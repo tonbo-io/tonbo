@@ -12,18 +12,8 @@
 //! `tonbo` constructs an instance using the [`DB::new`] method to serve a
 //! specific `Tonbo Record` type.
 //!
-//! `Tonbo Record` is automatically implemented by the macro [`tonbo_record`].
-//! Support type
-//! - String
-//! - Boolean
-//! - Int8
-//! - Int16
-//! - Int32
-//! - Int64
-//! - UInt8
-//! - UInt16
-//! - UInt32
-//! - UInt64
+//! `Tonbo Record` is automatically implemented by the macro [`tonbo_record`],
+//! it support types like `String`, `bool`, `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`.
 //!
 //! ACID `optimistic` transactions for concurrent data reading and writing are
 //! supported with the [`DB::transaction`] method.
@@ -147,7 +137,7 @@ pub use fusio::{SeqRead, Write};
 pub use fusio_log::{Decode, Encode};
 use futures_core::Stream;
 use futures_util::StreamExt;
-use inmem::{immutable::Immutable, mutable::Mutable};
+use inmem::{immutable::Immutable, mutable::MutableMemTable};
 use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
 pub use once_cell;
@@ -164,7 +154,7 @@ use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
-use trigger::Trigger;
+use trigger::FreezeTrigger;
 use wal::log::Log;
 
 pub use crate::option::*;
@@ -514,11 +504,11 @@ pub(crate) struct DbStorage<R>
 where
     R: Record,
 {
-    pub mutable: Mutable<R>,
+    pub mutable: MutableMemTable<R>,
     pub immutables: Vec<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
-    trigger: Arc<dyn Trigger<R>>,
+    trigger: Arc<dyn FreezeTrigger<R>>,
     record_schema: Arc<R::Schema>,
     option: Arc<DbOption>,
 }
@@ -555,10 +545,10 @@ where
 
         let trigger = TriggerFactory::create(option.trigger_type);
         let mut schema = DbStorage {
-            mutable: Mutable::new(
+            mutable: MutableMemTable::new(
                 &option,
                 trigger.clone(),
-                manager.base_fs(),
+                manager.base_fs().clone(),
                 record_schema.clone(),
             )
             .await?,
@@ -1021,7 +1011,7 @@ pub(crate) mod tests {
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
-        inmem::{immutable::tests::TestSchema, mutable::Mutable},
+        inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
@@ -1031,7 +1021,7 @@ pub(crate) mod tests {
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
-        CompactionOption, DbError, DbOption, Immutable, Projection, Record, DB,
+        CompactionOption, DbError, DbOption, Projection, Record, DB,
     };
 
     #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1253,17 +1243,18 @@ pub(crate) mod tests {
         let trigger = schema.trigger.clone();
         let mutable = mem::replace(
             &mut schema.mutable,
-            Mutable::new(&option, trigger, base_fs, Arc::new(TestSchema {}))
+            MutableMemTable::new(&option, trigger, base_fs.clone(), Arc::new(TestSchema {}))
                 .await
                 .unwrap(),
         );
 
-        Immutable::<<TestSchema as RecordSchema>::Columns>::new(
-            mutable.data,
-            TestSchema {}.arrow_schema().clone(),
-        )
-        .as_record_batch()
-        .clone()
+        mutable
+            .into_immutable()
+            .await
+            .unwrap()
+            .1
+            .as_record_batch()
+            .clone()
     }
 
     pub(crate) async fn build_schema(
@@ -1272,7 +1263,13 @@ pub(crate) mod tests {
     ) -> Result<(crate::DbStorage<Test>, Receiver<CompactTask>), fusio::Error> {
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable = Mutable::new(&option, trigger.clone(), fs, Arc::new(TestSchema {})).await?;
+        let mutable = MutableMemTable::new(
+            &option,
+            trigger.clone(),
+            fs.clone(),
+            Arc::new(TestSchema {}),
+        )
+        .await?;
 
         mutable
             .insert(
@@ -1314,8 +1311,9 @@ pub(crate) mod tests {
         let immutables = {
             let trigger = TriggerFactory::create(option.trigger_type);
 
-            let mutable: Mutable<Test> =
-                Mutable::new(&option, trigger.clone(), fs, Arc::new(TestSchema)).await?;
+            let mutable: MutableMemTable<Test> =
+                MutableMemTable::new(&option, trigger.clone(), fs.clone(), Arc::new(TestSchema))
+                    .await?;
 
             mutable
                 .insert(
@@ -1356,7 +1354,7 @@ pub(crate) mod tests {
 
             vec![(
                 Some(generate_file_id()),
-                Immutable::new(mutable.data, TestSchema {}.arrow_schema().clone()),
+                mutable.into_immutable().await.unwrap().1,
             )]
         };
 
@@ -1644,7 +1642,7 @@ pub(crate) mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::DbStorage<Test> = crate::DbStorage {
-            mutable: Mutable::new(&option, trigger.clone(), &fs, Arc::new(TestSchema))
+            mutable: MutableMemTable::new(&option, trigger.clone(), fs, Arc::new(TestSchema))
                 .await
                 .unwrap(),
             immutables: Default::default(),
@@ -1715,10 +1713,10 @@ pub(crate) mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::DbStorage<DynRecord> = crate::DbStorage {
-            mutable: Mutable::new(
+            mutable: MutableMemTable::new(
                 &option,
                 trigger.clone(),
-                manager.base_fs(),
+                manager.base_fs().clone(),
                 dyn_schema.clone(),
             )
             .await

@@ -194,7 +194,7 @@ pub(crate) mod tests {
         fs::{generate_file_id, manager::StoreManager, FileId, FileType},
         inmem::{
             immutable::{tests::TestSchema, Immutable},
-            mutable::Mutable,
+            mutable::MutableMemTable,
         },
         record::{Record, Schema},
         scope::Scope,
@@ -217,7 +217,8 @@ pub(crate) mod tests {
     {
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable: Mutable<R> = Mutable::new(option, trigger, fs, schema.clone()).await?;
+        let mutable: MutableMemTable<R> =
+            MutableMemTable::new(option, trigger, fs.clone(), schema.clone()).await?;
 
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;
