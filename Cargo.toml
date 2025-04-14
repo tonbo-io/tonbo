@@ -8,7 +8,7 @@ license = "Apache-2.0"
 name = "tonbo"
 readme = "README.md"
 resolver = "2"
-version = "0.3.1"
+version = "0.3.2"
 
 [package.metadata]
 msrv = "1.79.0"
@@ -39,10 +39,11 @@ tokio = [
     "fusio/tokio",
     "parquet/default",
     "tokio/fs",
+    "tokio/rt-multi-thread"
 ]
-tokio-http = ["fusio/tokio-http"]
+tokio-http = ["fusio/tokio-http", "fusio-log/tokio-http"]
 wasm = ["aws", "bytes", "opfs", "wasm-http"]
-wasm-http = ["fusio/wasm-http"]
+wasm-http = ["fusio/wasm-http", "fusio-log/web-http"]
 
 [[example]]
 name = "declare"
@@ -83,12 +84,12 @@ crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "45", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { version = "0.3.7", package = "fusio", features = ["dyn", "fs"] }
-fusio-dispatch = { version = "0.3.7", package = "fusio-dispatch" }
-fusio-log = { version = "0.3.7", package = "fusio-log", default-features = false, features = [
+fusio = { version = "0.3.8", package = "fusio", features = ["dyn", "fs"] }
+fusio-dispatch = { version = "0.3.8", package = "fusio-dispatch" }
+fusio-log = { version = "0.3.8", package = "fusio-log", default-features = false, features = [
     "bytes",
 ] }
-fusio-parquet = { version = "0.3.7", package = "fusio-parquet" }
+fusio-parquet = { version = "0.3.8", package = "fusio-parquet" }
 futures-core = "0.3"
 futures-util = "0.3"
 lockable = "0.1.1"
