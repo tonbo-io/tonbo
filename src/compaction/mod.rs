@@ -20,7 +20,7 @@ use crate::{
     DbOption,
 };
 
-pub enum Compactor<R>
+pub(crate) enum Compactor<R>
 where
     R: Record,
 {
