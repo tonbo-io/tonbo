@@ -13,7 +13,7 @@ use crate::{
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
     inmem::{
         immutable::{ArrowArrays, Builder, Immutable},
-        mutable::Mutable,
+        mutable::MutableMemTable,
     },
     ondisk::sstable::SsTable,
     record::{KeyRef, Record, Schema as RecordSchema},
@@ -67,14 +67,14 @@ where
         guard.trigger.reset();
 
         if !guard.mutable.is_empty() {
-            let trigger_clone = guard.trigger.clone();
+            let trigger = guard.trigger.clone();
 
             let mutable = mem::replace(
                 &mut guard.mutable,
-                Mutable::new(
+                MutableMemTable::new(
                     &self.option,
-                    trigger_clone,
-                    self.ctx.manager.base_fs(),
+                    trigger,
+                    self.ctx.manager.base_fs().clone(),
                     self.record_schema.clone(),
                 )
                 .await?,
@@ -570,7 +570,7 @@ pub(crate) mod tests {
         fs::{generate_file_id, manager::StoreManager, FileId, FileType},
         inmem::{
             immutable::{tests::TestSchema, Immutable},
-            mutable::Mutable,
+            mutable::MutableMemTable,
         },
         record::{DataType, DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
         scope::Scope,
@@ -593,7 +593,8 @@ pub(crate) mod tests {
     {
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable: Mutable<R> = Mutable::new(option, trigger, fs, schema.clone()).await?;
+        let mutable: MutableMemTable<R> =
+            MutableMemTable::new(option, trigger, fs.clone(), schema.clone()).await?;
 
         for (log_ty, record, ts) in records {
             let _ = mutable.insert(log_ty, record, ts).await?;

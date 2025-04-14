@@ -6,10 +6,12 @@ use std::{
     },
 };
 
+use fusio_log::Encode;
+
 use crate::record::Record;
 
 pub trait Trigger<R: Record>: Send + Sync {
-    fn check_if_exceed(&self, item: &Option<R>) -> bool;
+    fn check_if_exceed(&self, item: &R) -> bool;
 
     fn reset(&self);
 }
@@ -32,8 +34,8 @@ impl<T> SizeOfMemTrigger<T> {
 }
 
 impl<R: Record> Trigger<R> for SizeOfMemTrigger<R> {
-    fn check_if_exceed(&self, item: &Option<R>) -> bool {
-        let size = item.as_ref().map_or(0, R::size);
+    fn check_if_exceed(&self, item: &R) -> bool {
+        let size = item.size() + item.key().size();
         self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
     }
 
@@ -60,7 +62,7 @@ impl<T> LengthTrigger<T> {
 }
 
 impl<R: Record> Trigger<R> for LengthTrigger<R> {
-    fn check_if_exceed(&self, _: &Option<R>) -> bool {
+    fn check_if_exceed(&self, _: &R) -> bool {
         self.count.fetch_add(1, Ordering::SeqCst) + 1 >= self.threshold
     }
 
@@ -98,13 +100,13 @@ mod tests {
         let threshold = 10;
         let trigger = SizeOfMemTrigger::new(threshold);
 
-        let record = Some(Test {
+        let record = Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None,
-        });
+        };
 
-        let record_size = record.clone().unwrap().size();
+        let record_size = record.size();
         assert_eq!(record_size, 8);
 
         assert!(
@@ -130,11 +132,11 @@ mod tests {
         let threshold = 2;
         let trigger = LengthTrigger::new(threshold);
 
-        let record = Some(Test {
+        let record = Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None,
-        });
+        };
 
         assert!(
             !trigger.check_if_exceed(&record),
@@ -158,26 +160,26 @@ mod tests {
         let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(9));
         let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
 
-        assert!(!size_of_mem_trigger.check_if_exceed(&Some(Test {
+        assert!(!size_of_mem_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None
-        })));
-        assert!(size_of_mem_trigger.check_if_exceed(&Some(Test {
+        }));
+        assert!(size_of_mem_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 0,
             vbool: None
-        })));
+        }));
 
-        assert!(!length_trigger.check_if_exceed(&Some(Test {
+        assert!(!length_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 1,
             vbool: Some(true)
-        })));
-        assert!(length_trigger.check_if_exceed(&Some(Test {
+        }));
+        assert!(length_trigger.check_if_exceed(&Test {
             vstring: "test".to_string(),
             vu32: 1,
             vbool: Some(true)
-        })));
+        }));
     }
 }

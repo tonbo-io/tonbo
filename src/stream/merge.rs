@@ -163,7 +163,7 @@ mod tests {
 
     use super::MergeStream;
     use crate::{
-        inmem::mutable::Mutable, record::test::StringSchema, stream::Entry,
+        inmem::mutable::MutableMemTable, record::test::StringSchema, stream::Entry,
         trigger::TriggerFactory, wal::log::LogType, DbOption,
     };
 
@@ -180,9 +180,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
-            .await
-            .unwrap();
+        let m1 =
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+                .await
+                .unwrap();
 
         m1.remove(LogType::Full, "b".into(), 3.into())
             .await
@@ -196,9 +197,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m2 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
-            .await
-            .unwrap();
+        let m2 =
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+                .await
+                .unwrap();
         m2.insert(LogType::Full, "a".into(), 1.into())
             .await
             .unwrap();
@@ -211,9 +213,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m3 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
-            .await
-            .unwrap();
+        let m3 =
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+                .await
+                .unwrap();
         m3.insert(LogType::Full, "e".into(), 4.into())
             .await
             .unwrap();
@@ -283,9 +286,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
-            .await
-            .unwrap();
+        let m1 =
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+                .await
+                .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();
@@ -374,9 +378,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
-            .await
-            .unwrap();
+        let m1 =
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+                .await
+                .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();
