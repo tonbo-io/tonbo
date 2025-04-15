@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use fusio::{SeqRead, Write};
-use fusio_log::{Decode, Encode, Options, Path};
+use fusio_log::{Decode, Encode, FsOptions, Options, Path};
 use futures_util::TryStreamExt;
 
 use crate::{fs::FileId, scope::Scope, timestamp::Timestamp};
@@ -18,11 +18,12 @@ impl<K> VersionEdit<K>
 where
     K: Decode + Send,
 {
-    pub(crate) async fn recover(path: Path) -> Vec<VersionEdit<K>> {
+    pub(crate) async fn recover(path: Path, fs_option: FsOptions) -> Vec<VersionEdit<K>> {
         let mut edits = vec![];
 
         let mut edits_stream = Options::new(path)
             .disable_buf()
+            .fs(fs_option)
             .recover::<VersionEdit<K>>()
             .await
             .unwrap();

@@ -5,7 +5,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -25,7 +24,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
       - name: Build with maturin and run
         shell: bash
         working-directory: "bindings/python"
@@ -34,4 +33,4 @@ jobs:
           source venv/bin/activate
           pip install maturin
           maturin develop -E test
-          pytest --ignore=tests/bench -v .  
+          pytest --ignore=tests/bench -v .
