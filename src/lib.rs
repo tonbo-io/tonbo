@@ -1541,9 +1541,9 @@ pub(crate) mod tests {
         assert!(!version.level_slice[0].is_empty());
     }
 
-    #[ignore = "s3"]
+    #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_recover_from_s3() {
+    async fn test_s3_recover() {
         let temp_dir = TempDir::new().unwrap();
 
         if option_env!("AWS_ACCESS_KEY_ID").is_none()
@@ -1556,16 +1556,19 @@ pub(crate) mod tests {
         let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
             .unwrap()
             .to_string();
+        let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
+        let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
+        let token = Some(std::option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
 
         let s3_option = FsOptions::S3 {
-            bucket: "fusio-test".to_string(),
+            bucket,
             credential: Some(fusio::remotes::aws::AwsCredential {
                 key_id,
                 secret_key,
-                token: None,
+                token,
             }),
             endpoint: None,
-            region: Some("ap-southeast-1".to_string()),
+            region,
             sign_payload: None,
             checksum: None,
         };

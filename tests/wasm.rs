@@ -279,31 +279,45 @@ mod tests {
         remove("opfs_dir").await;
     }
 
-    #[ignore]
+    #[ignore = "s3"]
+    #[cfg(all(feature = "aws", feature = "wasm-http"))]
     #[wasm_bindgen_test]
     async fn test_s3_read_write() {
         use fusio::remotes::aws::AwsCredential;
         use fusio_dispatch::FsOptions;
 
-        if option_env!("AWS_ACCESS_KEY_ID").is_none() {
+        if option_env!("AWS_ACCESS_KEY_ID").is_none()
+            || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
+        {
+            eprintln!("can not get `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`");
             return;
         }
         let key_id = option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
         let secret_key = option_env!("AWS_SECRET_ACCESS_KEY").unwrap().to_string();
 
+        let bucket = option_env!("BUCKET_NAME")
+            .expect("expected s3 bucket not to be empty")
+            .to_string();
+        let region = Some(
+            option_env!("AWS_REGION")
+                .expect("expected s3 region not to be empty")
+                .to_string(),
+        );
+        let token = Some(option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
+
         let schema = test_dyn_item_schema();
 
         let fs_option = FsOptions::S3 {
-            bucket: "wasm-data".to_string(),
+            bucket,
             credential: Some(AwsCredential {
                 key_id,
                 secret_key,
-                token: None,
+                token,
             }),
             endpoint: None,
             sign_payload: None,
             checksum: None,
-            region: Some("ap-southeast-2".to_string()),
+            region,
         };
 
         let option = DbOption::new(Path::from_opfs_path("s3_rw").unwrap(), &schema)
@@ -382,6 +396,7 @@ mod tests {
                 assert!(bytes.unwrap().is_none());
                 i += 1
             }
+            let _ = db.flush_wal().await;
         }
         drop(db);
 
