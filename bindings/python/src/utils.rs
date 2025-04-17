@@ -118,6 +118,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                         .unwrap();
                 }
             }
+            TonboDataType::List(_) => unimplemented!(),
         }
     }
     dict

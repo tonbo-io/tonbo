@@ -925,7 +925,7 @@ mod tests {
 
             assert_eq!(record_ref.columns.len(), 3);
             let col = record_ref.columns.first().unwrap();
-            assert_eq!(col.datatype(), DataType::Int8);
+            assert_eq!(col.datatype(), &DataType::Int8);
             let name = col.value.as_ref().downcast_ref::<i8>();
             assert!(name.is_some());
             assert_eq!(*name.unwrap(), 1);
@@ -954,21 +954,21 @@ mod tests {
                 dbg!(columns.clone());
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int8);
+                assert_eq!(primary_key_col.datatype(), &DataType::Int8);
                 assert_eq!(
                     *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
                     1
                 );
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype(), DataType::Int16);
+                assert_eq!(col.datatype(), &DataType::Int16);
                 assert_eq!(
                     *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
                     Some(180)
                 );
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::Int32);
+                assert_eq!(col.datatype(), &DataType::Int32);
                 let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), Some(56_i32));
