@@ -476,14 +476,10 @@ pub(crate) mod tests {
         assert_eq!(version_set.load_ts(), 20_u32.into());
     }
 
-    async fn version_log_snap_shot(base_option: FsOptions) {
-        let temp_dir = TempDir::new().unwrap();
+    async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
         let manager = Arc::new(StoreManager::new(base_option, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let mut option = DbOption::new(path, &StringSchema);
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -612,9 +608,15 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_version_log_snap_shot() {
-        version_log_snap_shot(FsOptions::Local).await;
+        let temp_dir = TempDir::new().unwrap();
+        version_log_snap_shot(
+            FsOptions::Local,
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        )
+        .await;
     }
 
+    #[ignore = "s3"]
     #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_version_log_snap_shot() {
@@ -646,7 +648,13 @@ pub(crate) mod tests {
             checksum: None,
             region: Some(region),
         };
-        version_log_snap_shot(fs_option).await;
+
+        let temp_dir = TempDir::new().unwrap();
+        version_log_snap_shot(
+            fs_option,
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

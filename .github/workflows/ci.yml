@@ -46,7 +46,7 @@ jobs:
           command: build
 
       - name: configure aws credentials
-        if: ${{ (github.event_name == 'push' && github.ref_name == 'chore/ci') || startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ (github.event_name == 'push' && github.ref_name == 'main') || startsWith(github.ref, 'refs/tags/') }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.ROLE_TO_ASSUME }}

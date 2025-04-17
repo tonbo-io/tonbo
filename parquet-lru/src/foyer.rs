@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use futures_util::FutureExt;
 use parquet::{
-    arrow::async_reader::AsyncFileReader,
+    arrow::{arrow_reader::ArrowReaderOptions, async_reader::AsyncFileReader},
     errors::{ParquetError, Result},
     file::metadata::ParquetMetaData,
 };
@@ -25,7 +25,7 @@ where
     for<'a> K: Send + Sync + Hash + Eq + Serialize + Deserialize<'a> + 'static,
 {
     meta: foyer::Cache<K, Arc<ParquetMetaData>>,
-    data: foyer::HybridCache<(K, Range<usize>), Bytes>,
+    data: foyer::HybridCache<(K, Range<u64>), Bytes>,
 }
 
 impl<K> LruCache<K> for FoyerCache<K>
@@ -69,7 +69,7 @@ where
     for<'a> K: Send + Sync + Hash + Eq + Serialize + Deserialize<'a> + Clone + 'static,
     R: AsyncFileReader,
 {
-    fn get_bytes(&mut self, range: Range<usize>) -> BoxFuture<'_, Result<Bytes>> {
+    fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, Result<Bytes>> {
         async move {
             if let Some(data) = self
                 .cache
@@ -92,12 +92,15 @@ where
         .boxed()
     }
 
-    fn get_metadata(&mut self) -> BoxFuture<'_, Result<Arc<ParquetMetaData>>> {
+    fn get_metadata<'a>(
+        &'a mut self,
+        options: Option<&'a ArrowReaderOptions>,
+    ) -> BoxFuture<Result<Arc<ParquetMetaData>>> {
         async move {
             if let Some(meta) = self.cache.inner.meta.get(&self.key) {
                 Ok(meta.value().clone())
             } else {
-                let meta = self.reader.get_metadata().await?;
+                let meta = self.reader.get_metadata(options).await?;
                 self.cache.inner.meta.insert(self.key.clone(), meta.clone());
                 Ok(meta)
             }
@@ -105,7 +108,7 @@ where
         .boxed()
     }
 
-    fn get_byte_ranges(&mut self, ranges: Vec<Range<usize>>) -> BoxFuture<'_, Result<Vec<Bytes>>> {
+    fn get_byte_ranges(&mut self, ranges: Vec<Range<u64>>) -> BoxFuture<'_, Result<Vec<Bytes>>> {
         async move {
             let mut missed = Vec::with_capacity(ranges.len());
             let mut results = Vec::with_capacity(ranges.len());
