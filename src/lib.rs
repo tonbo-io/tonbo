@@ -1016,7 +1016,7 @@ pub(crate) mod tests {
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
             DataType, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
-            Schema as RecordSchema, Value,
+            Schema as RecordSchema, Value, F32, F64,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
@@ -1887,6 +1887,14 @@ pub(crate) mod tests {
                     *cast_arc_value!(record_ref.columns.get(7).unwrap().value, Option<Vec<u8>>),
                     Some(i.to_le_bytes().to_vec()),
                 );
+                assert_eq!(
+                    *cast_arc_value!(record_ref.columns.get(8).unwrap().value, Option<F32>),
+                    Some(F32::from(i as f32 * 1.11)),
+                );
+                assert_eq!(
+                    *cast_arc_value!(record_ref.columns.get(9).unwrap().value, Option<F64>),
+                    Some(F64::from(i as f64 * 1.01)),
+                );
             }
             tx.commit().await.unwrap();
         }
@@ -1897,7 +1905,7 @@ pub(crate) mod tests {
             let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(&["id", "height", "bytes"])
+                .projection(&["id", "height", "bytes", "grade", "price"])
                 .take()
                 .await
                 .unwrap();
@@ -1965,6 +1973,18 @@ pub(crate) mod tests {
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
                 assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
+
+                let col = columns.get(8).unwrap();
+                assert_eq!(col.datatype(), DataType::Float32);
+                let v = col.value.as_ref().downcast_ref::<Option<F32>>();
+                assert!(v.is_some());
+                assert_eq!(v.unwrap(), &Some(F32::from(i as f32 * 1.11)));
+
+                let col = columns.get(9).unwrap();
+                assert_eq!(col.datatype(), DataType::Float64);
+                let v = col.value.as_ref().downcast_ref::<Option<F64>>();
+                assert!(v.is_some());
+                assert_eq!(v.unwrap(), &Some(F64::from(i as f64 * 1.01)));
                 i += 1
             }
         }

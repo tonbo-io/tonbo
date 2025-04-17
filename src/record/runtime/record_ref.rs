@@ -3,8 +3,8 @@ use std::{any::Any, marker::PhantomData, mem, sync::Arc};
 use arrow::{
     array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
     datatypes::{
-        Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type,
-        UInt64Type, UInt8Type,
+        Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
+        UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
 use fusio::Write;
@@ -13,7 +13,9 @@ use fusio_log::Encode;
 use super::{DataType, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
-    record::{option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema},
+    record::{
+        option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema, F32, F64,
+    },
 };
 
 #[derive(Clone)]
@@ -165,6 +167,28 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     projection_mask,
                     primary_index == idx - 2,
                 ),
+                DataType::Float32 => {
+                    let v = col.as_primitive::<Float32Type>();
+
+                    if primary_index == idx - 2 {
+                        Arc::new(F32::from(v.value(offset))) as Arc<dyn Any + Send + Sync>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(F32::from(v.value(offset)));
+                        Arc::new(value) as Arc<dyn Any + Send + Sync>
+                    }
+                }
+                DataType::Float64 => {
+                    let v = col.as_primitive::<Float64Type>();
+
+                    if primary_index == idx - 2 {
+                        Arc::new(F64::from(v.value(offset))) as Arc<dyn Any + Send + Sync>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(F64::from(v.value(offset)));
+                        Arc::new(value) as Arc<dyn Any + Send + Sync>
+                    }
+                }
                 DataType::String => {
                     let v = col.as_string::<i32>();
 
@@ -227,6 +251,8 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     DataType::Int16 => col.value = Arc::<Option<i16>>::new(None),
                     DataType::Int32 => col.value = Arc::<Option<i32>>::new(None),
                     DataType::Int64 => col.value = Arc::<Option<i64>>::new(None),
+                    DataType::Float32 => col.value = Arc::<Option<f32>>::new(None),
+                    DataType::Float64 => col.value = Arc::<Option<f64>>::new(None),
                     DataType::String => col.value = Arc::<Option<String>>::new(None),
                     DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
                     DataType::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
