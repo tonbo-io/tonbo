@@ -279,7 +279,6 @@ mod tests {
         remove("opfs_dir").await;
     }
 
-    #[ignore = "s3"]
     #[cfg(all(feature = "aws", feature = "wasm-http"))]
     #[wasm_bindgen_test]
     async fn test_s3_read_write() {
@@ -303,7 +302,7 @@ mod tests {
                 .expect("expected s3 region not to be empty")
                 .to_string(),
         );
-        let token = Some(option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
+        let token = option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
 
         let schema = test_dyn_item_schema();
 
@@ -396,8 +395,8 @@ mod tests {
                 assert!(bytes.unwrap().is_none());
                 i += 1
             }
-            let _ = db.flush_wal().await;
         }
+        let _ = db.flush_wal().await;
         drop(db);
 
         remove("s3_rw").await;

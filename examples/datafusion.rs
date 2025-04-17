@@ -7,10 +7,11 @@ use std::{
     task::{Context, Poll},
 };
 
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch, util::pretty};
+use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use async_stream::stream;
 use async_trait::async_trait;
 use datafusion::{
+    arrow::util::pretty,
     catalog::Session,
     common::internal_err,
     datasource::{TableProvider, TableType},
