@@ -1541,6 +1541,7 @@ pub(crate) mod tests {
         assert!(!version.level_slice[0].is_empty());
     }
 
+    #[ignore = "s3"]
     #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_recover() {

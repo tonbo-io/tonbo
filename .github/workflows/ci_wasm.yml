@@ -8,6 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_REGISTRIES_MY_REGISTRY_INDEX: https://github.com/rust-lang/crates.io-index
+  BUCKET_NAME: tonbo-test
 
 jobs:
   check:
@@ -34,16 +35,16 @@ jobs:
         with:
           command: check
 
-      # - name: configure aws credentials
-      #   if: ${{ (github.event_name == 'push' && github.ref_name == 'chore/ci') || startsWith(github.ref, 'refs/tags/') }}
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     role-to-assume: ${{ env.ROLE_TO_ASSUME }}
-      #     role-session-name: samplerolesession
-      #     aws-region: ${{ env.AWS_REGION }}
-      #   env:
-      #     AWS_REGION: ap-southeast-1
-      #     ROLE_TO_ASSUME: arn:aws:iam::232814779190:role/github
+      - name: configure aws credentials
+        if: ${{ (github.event_name == 'push' && github.ref_name == 'main') || startsWith(github.ref, 'refs/tags/') }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          role-session-name: samplerolesession
+          aws-region: ${{ env.AWS_REGION }}
+        env:
+          AWS_REGION: ap-southeast-1
+          ROLE_TO_ASSUME: arn:aws:iam::232814779190:role/github
       - name: Setup for wasm32
         run: |
           rustup target add wasm32-unknown-unknown
