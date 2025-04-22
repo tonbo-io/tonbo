@@ -27,10 +27,10 @@ impl AsyncFileReader for BoxedFileReader {
         self.inner.get_bytes(range)
     }
 
-    fn get_metadata<'a>(
-        &'a mut self,
-        options: Option<&'a ArrowReaderOptions>,
-    ) -> BoxFuture<Result<Arc<ParquetMetaData>>> {
+    fn get_metadata<'s>(
+        &'s mut self,
+        options: Option<&'s ArrowReaderOptions>,
+    ) -> BoxFuture<'s, Result<Arc<ParquetMetaData>>> {
         self.inner.get_metadata(options)
     }
 
