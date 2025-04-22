@@ -92,10 +92,10 @@ where
         .boxed()
     }
 
-    fn get_metadata<'a>(
-        &'a mut self,
-        options: Option<&'a ArrowReaderOptions>,
-    ) -> BoxFuture<Result<Arc<ParquetMetaData>>> {
+    fn get_metadata<'s>(
+        &'s mut self,
+        options: Option<&'s ArrowReaderOptions>,
+    ) -> BoxFuture<'s, Result<Arc<ParquetMetaData>>> {
         async move {
             if let Some(meta) = self.cache.inner.meta.get(&self.key) {
                 Ok(meta.value().clone())
