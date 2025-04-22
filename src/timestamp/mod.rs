@@ -7,7 +7,7 @@ use arrow::{
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-pub(crate) use self::timestamped::*;
+pub use self::timestamped::*;
 
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]

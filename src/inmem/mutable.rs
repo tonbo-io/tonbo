@@ -11,10 +11,7 @@ use crate::{
     fs::{generate_file_id, FileId},
     inmem::immutable::Immutable,
     record::{KeyRef, Record, Schema},
-    timestamp::{
-        timestamped::{Timestamped, TimestampedRef},
-        Timestamp, EPOCH,
-    },
+    timestamp::{Timestamp, Ts, TsRef, EPOCH},
     trigger::FreezeTrigger,
     wal::{
         log::{Log, LogType},
@@ -25,12 +22,12 @@ use crate::{
 
 pub(crate) type MutableScan<'scan, R> = Range<
     'scan,
-    TimestampedRef<<<R as Record>::Schema as Schema>::Key>,
+    TsRef<<<R as Record>::Schema as Schema>::Key>,
     (
-        Bound<&'scan TimestampedRef<<<R as Record>::Schema as Schema>::Key>>,
-        Bound<&'scan TimestampedRef<<<R as Record>::Schema as Schema>::Key>>,
+        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
+        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
     ),
-    Timestamped<<<R as Record>::Schema as Schema>::Key>,
+    Ts<<<R as Record>::Schema as Schema>::Key>,
     Option<R>,
 >;
 
@@ -38,7 +35,7 @@ pub(crate) struct MutableMemTable<R>
 where
     R: Record,
 {
-    data: SkipMap<Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
+    data: SkipMap<Ts<<R::Schema as Schema>::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<R>>>,
     trigger: Arc<dyn FreezeTrigger<R>>,
     schema: Arc<R::Schema>,
@@ -115,7 +112,7 @@ where
         ts: Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
-        let timestamped_key = Timestamped::new(key, ts);
+        let timestamped_key = Ts::new(key, ts);
 
         let record_entry = Log::new(timestamped_key, value, log_ty);
         if let (Some(_log_ty), Some(wal)) = (log_ty, &self.wal) {
@@ -139,11 +136,11 @@ where
         &self,
         key: &<R::Schema as Schema>::Key,
         ts: Timestamp,
-    ) -> Option<Entry<'_, Timestamped<<R::Schema as Schema>::Key>, Option<R>>> {
+    ) -> Option<Entry<'_, Ts<<R::Schema as Schema>::Key>, Option<R>>> {
         self.data
-            .range::<TimestampedRef<<R::Schema as Schema>::Key>, _>((
-                Bound::Included(TimestampedRef::new(key, ts)),
-                Bound::Included(TimestampedRef::new(key, EPOCH)),
+            .range::<TsRef<<R::Schema as Schema>::Key>, _>((
+                Bound::Included(TsRef::new(key, ts)),
+                Bound::Included(TsRef::new(key, EPOCH)),
             ))
             .next()
     }
@@ -157,13 +154,13 @@ where
         ts: Timestamp,
     ) -> MutableScan<'scan, R> {
         let lower = match range.0 {
-            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, ts)),
-            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, EPOCH)),
+            Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
+            Bound::Excluded(key) => Bound::Excluded(TsRef::new(key, EPOCH)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let upper = match range.1 {
-            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, EPOCH)),
-            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, ts)),
+            Bound::Included(key) => Bound::Included(TsRef::new(key, EPOCH)),
+            Bound::Excluded(key) => Bound::Excluded(TsRef::new(key, ts)),
             Bound::Unbounded => Bound::Unbounded,
         };
 
@@ -176,9 +173,9 @@ where
 
     pub(crate) fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: Timestamp) -> bool {
         self.data
-            .range::<TimestampedRef<<R::Schema as Schema>::Key>, _>((
-                Bound::Excluded(TimestampedRef::new(key, u32::MAX.into())),
-                Bound::Excluded(TimestampedRef::new(key, ts)),
+            .range::<TsRef<<R::Schema as Schema>::Key>, _>((
+                Bound::Excluded(TsRef::new(key, u32::MAX.into())),
+                Bound::Excluded(TsRef::new(key, ts)),
             ))
             .next()
             .is_some()
@@ -234,7 +231,7 @@ mod tests {
         inmem::immutable::tests::TestSchema,
         record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
         tests::{Test, TestRef},
-        timestamp::Timestamped,
+        timestamp::Ts,
         trigger::TriggerFactory,
         wal::log::LogType,
         DbOption,
@@ -339,23 +336,23 @@ mod tests {
 
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("1".into(), 0_u32.into())
+            &Ts::new("1".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 1_u32.into())
+            &Ts::new("2".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 0_u32.into())
+            &Ts::new("2".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("3".into(), 1_u32.into())
+            &Ts::new("3".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("4".into(), 0_u32.into())
+            &Ts::new("4".into(), 0_u32.into())
         );
 
         let lower = "1".to_string();
@@ -367,23 +364,23 @@ mod tests {
 
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("1".into(), 0_u32.into())
+            &Ts::new("1".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 1_u32.into())
+            &Ts::new("2".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 0_u32.into())
+            &Ts::new("2".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("3".into(), 1_u32.into())
+            &Ts::new("3".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("4".into(), 0_u32.into())
+            &Ts::new("4".into(), 0_u32.into())
         );
     }
 
@@ -437,7 +434,7 @@ mod tests {
             let entry = scan.next().unwrap();
             assert_eq!(
                 entry.key(),
-                &Timestamped::new(
+                &Ts::new(
                     Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
                     0_u32.into()
                 )

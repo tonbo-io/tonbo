@@ -28,7 +28,7 @@ mod tests {
         inmem::immutable::{ArrowArrays, Builder},
         magic,
         record::{Record, RecordRef, Schema},
-        timestamp::timestamped::Timestamped,
+        timestamp::Ts,
     };
 
     use crate::{User, UserImmutableArrays, UserRef, UserSchema};
@@ -158,7 +158,7 @@ mod tests {
             );
             assert_eq!(
                 record_ref.key(),
-                Timestamped {
+                Ts {
                     ts: 9.into(),
                     value: "cat",
                 }
@@ -204,7 +204,7 @@ mod tests {
             );
             assert_eq!(
                 record_ref.key(),
-                Timestamped {
+                Ts {
                     ts: 9.into(),
                     value: "cat",
                 }
@@ -258,21 +258,21 @@ mod tests {
         };
 
         builder.push(
-            Timestamped {
+            Ts {
                 ts: 0.into(),
                 value: "cat",
             },
             Some(cat.as_record_ref()),
         );
         builder.push(
-            Timestamped {
+            Ts {
                 ts: 1.into(),
                 value: "dog",
             },
             Some(dog.as_record_ref()),
         );
         builder.push(
-            Timestamped {
+            Ts {
                 ts: 2.into(),
                 value: "human",
             },
@@ -327,21 +327,21 @@ mod tests {
         };
 
         builder.push(
-            Timestamped {
+            Ts {
                 ts: 0.into(),
                 value: "cat",
             },
             Some(cat.as_record_ref()),
         );
         builder.push(
-            Timestamped {
+            Ts {
                 ts: 1.into(),
                 value: "dog",
             },
             Some(dog.as_record_ref()),
         );
         builder.push(
-            Timestamped {
+            Ts {
                 ts: 2.into(),
                 value: "human",
             },
