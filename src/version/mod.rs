@@ -24,7 +24,7 @@ use crate::{
     record::{Record, Schema},
     scope::Scope,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
-    timestamp::{Timestamp, TimestampedRef},
+    timestamp::{Timestamp, TsRef},
     version::{cleaner::CleanTag, edit::VersionEdit},
     DbOption, ParquetLru,
 };
@@ -120,7 +120,7 @@ where
     pub(crate) async fn query(
         &self,
         manager: &StoreManager,
-        key: &TimestampedRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<<R::Schema as Schema>::Key>,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
@@ -182,7 +182,7 @@ where
     async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
-        key: &TimestampedRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<<R::Schema as Schema>::Key>,
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,

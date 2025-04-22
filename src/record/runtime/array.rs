@@ -18,7 +18,7 @@ use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic::USER_COLUMN_OFFSET,
     record::{Key, Record, Schema, F32, F64},
-    timestamp::Timestamped,
+    timestamp::Ts,
 };
 
 #[allow(unused)]
@@ -283,7 +283,7 @@ pub struct DynRecordBuilder {
 impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
     fn push(
         &mut self,
-        key: Timestamped<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
+        key: Ts<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
         row: Option<DynRecordRef>,
     ) {
         self._null.append(row.is_none());
@@ -770,7 +770,7 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
 impl DynRecordBuilder {
     fn push_primary_key(
         &mut self,
-        key: Timestamped<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
+        key: Ts<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
         primary_key_index: usize,
     ) {
         let builder = self.builders.get_mut(primary_key_index).unwrap();
@@ -875,7 +875,7 @@ mod tests {
         );
 
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
-        let key = crate::timestamp::Timestamped {
+        let key = crate::timestamp::Ts {
             ts: 0.into(),
             value: record.key(),
         };
