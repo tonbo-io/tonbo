@@ -18,7 +18,7 @@ use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
     record::{Record, Schema},
     stream::record_batch::RecordBatchEntry,
-    timestamp::{Timestamp, TimestampedRef},
+    timestamp::{Timestamp, TsRef},
 };
 
 pub(crate) struct SsTable<R>
@@ -70,7 +70,7 @@ where
 
     pub(crate) async fn get(
         self,
-        key: &TimestampedRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<<R::Schema as Schema>::Key>,
         projection_mask: ProjectionMask,
     ) -> ParquetResult<Option<RecordBatchEntry<R>>> {
         self.scan(
@@ -140,7 +140,7 @@ pub(crate) mod tests {
         inmem::immutable::tests::TestSchema,
         record::{Record, Schema},
         tests::{get_test_record_batch, Test},
-        timestamp::Timestamped,
+        timestamp::Ts,
         DbOption,
     };
 
@@ -210,7 +210,7 @@ pub(crate) mod tests {
             .unwrap();
         write_record_batch(file, &record_batch).await.unwrap();
 
-        let key = Timestamped::new("hello".to_owned(), 1.into());
+        let key = Ts::new("hello".to_owned(), 1.into());
 
         {
             let test_ref_1 = open_sstable::<Test>(base_fs, &table_path)

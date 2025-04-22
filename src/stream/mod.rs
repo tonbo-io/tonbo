@@ -23,7 +23,7 @@ use crate::{
     ondisk::scan::SsTableScan,
     record::{Key, Record, RecordRef, Schema},
     stream::{level::LevelStream, mem_projection::MemProjectionStream},
-    timestamp::Timestamped,
+    timestamp::Ts,
     transaction::TransactionScan,
 };
 
@@ -33,13 +33,11 @@ where
 {
     Transaction(
         (
-            Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'entry>>,
+            Ts<<<R::Schema as Schema>::Key as Key>::Ref<'entry>>,
             &'entry Option<R>,
         ),
     ),
-    Mutable(
-        crossbeam_skiplist::map::Entry<'entry, Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
-    ),
+    Mutable(crossbeam_skiplist::map::Entry<'entry, Ts<<R::Schema as Schema>::Key>, Option<R>>),
     Projection((Box<Entry<'entry, R>>, Arc<ProjectionMask>)),
     RecordBatch(RecordBatchEntry<R>),
 }
@@ -48,14 +46,14 @@ impl<R> Entry<'_, R>
 where
     R: Record,
 {
-    pub(crate) fn key(&self) -> Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'_>> {
+    pub(crate) fn key(&self) -> Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>> {
         match self {
             Entry::Transaction((key, _)) => {
                 // Safety: shorter lifetime must be safe
                 unsafe {
                     transmute::<
-                        Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
-                        Timestamped<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
+                        Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
+                        Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
                     >(key.clone())
                 }
             }

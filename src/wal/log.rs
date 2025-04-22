@@ -3,7 +3,7 @@ use fusio_log::{Decode, Encode};
 
 use crate::{
     record::{Record, Schema},
-    timestamp::Timestamped,
+    timestamp::Ts,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -31,7 +31,7 @@ pub(crate) struct Log<R>
 where
     R: Record,
 {
-    pub(crate) key: Timestamped<<R::Schema as Schema>::Key>,
+    pub(crate) key: Ts<<R::Schema as Schema>::Key>,
     pub(crate) value: Option<R>,
     pub(crate) log_type: Option<LogType>,
 }
@@ -41,7 +41,7 @@ where
     R: Record,
 {
     pub(crate) fn new(
-        ts: Timestamped<<R::Schema as Schema>::Key>,
+        ts: Ts<<R::Schema as Schema>::Key>,
         value: Option<R>,
         log_type: Option<LogType>,
     ) -> Self {
@@ -94,7 +94,7 @@ where
         R: SeqRead,
     {
         let log_type = LogType::from(u8::decode(reader).await?);
-        let key = Timestamped::<<Re::Schema as Schema>::Key>::decode(reader)
+        let key = Ts::<<Re::Schema as Schema>::Key>::decode(reader)
             .await
             .unwrap();
         let record = Option::<Re>::decode(reader).await.unwrap();
@@ -111,14 +111,14 @@ mod tests {
     use tokio::io::AsyncSeekExt;
 
     use crate::{
-        timestamp::Timestamped,
+        timestamp::Ts,
         wal::log::{Log, LogType},
     };
 
     #[tokio::test]
     async fn encode_and_decode() {
         let entry: Log<String> = Log::new(
-            Timestamped::new("hello".into(), 1.into()),
+            Ts::new("hello".into(), 1.into()),
             Some("hello".into()),
             Some(LogType::Middle),
         );

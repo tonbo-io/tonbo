@@ -149,7 +149,7 @@ use parquet::{
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
 use thiserror::Error;
-use timestamp::{Timestamp, TimestampedRef};
+use timestamp::{Timestamp, TsRef};
 use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
@@ -687,7 +687,7 @@ where
         Ok(version
             .query(
                 ctx.storage_manager(),
-                TimestampedRef::new(key, ts),
+                TsRef::new(key, ts),
                 projection,
                 ctx.cache().clone(),
             )

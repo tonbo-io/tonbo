@@ -158,7 +158,7 @@ mod tests {
     use super::{log::LogType, WalFile};
     use crate::{
         fs::{generate_file_id, FileType},
-        timestamp::Timestamped,
+        timestamp::Ts,
         wal::log::Log,
     };
 
@@ -174,7 +174,7 @@ mod tests {
 
         {
             wal.write(&Log::new(
-                Timestamped::new("hello".into(), 0.into()),
+                Ts::new("hello".into(), 0.into()),
                 Some("hello".into()),
                 Some(LogType::Full),
             ))
@@ -193,7 +193,7 @@ mod tests {
             }
 
             wal.write(&Log::new(
-                Timestamped::new("world".into(), 1.into()),
+                Ts::new("world".into(), 1.into()),
                 Some("world".into()),
                 Some(LogType::Full),
             ))

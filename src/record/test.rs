@@ -14,7 +14,7 @@ use super::{option::OptionRecordRef, Key, Record, RecordRef, Schema};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic,
-    timestamp::Timestamped,
+    timestamp::Ts,
 };
 
 const PRIMARY_FIELD_NAME: &str = "vstring";
@@ -155,7 +155,7 @@ pub struct StringColumnsBuilder {
 }
 
 impl Builder<StringColumns> for StringColumnsBuilder {
-    fn push(&mut self, key: Timestamped<&str>, row: Option<&str>) {
+    fn push(&mut self, key: Ts<&str>, row: Option<&str>) {
         self._null.append(row.is_none());
         self._ts.append_value(key.ts.into());
         if let Some(row) = row {
