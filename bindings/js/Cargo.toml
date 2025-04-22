@@ -26,7 +26,7 @@ wasm-bindgen-futures = { version = "0.4.45" }
 wasm-bindgen-test = "0.3.9"
 wasm-streams = "0.4.2"
 web-sys = { version = "0.3", features = ["console"] }
-fusio = { git = "https://github.com/tonbo-io/fusio", recv = "d0cb41a700e2dd3c1c77dac30cc3f3b6e0a02b34", version = "0.3.7", default-features = false, features = [
+fusio = { git = "https://github.com/tonbo-io/fusio", rev = "d0cb41a700e2dd3c1c77dac30cc3f3b6e0a02b34", version = "0.3.7", default-features = false, features = [
     "dyn",
     "bytes",
     "opfs",
