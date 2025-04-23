@@ -11,7 +11,7 @@ resolver = "2"
 version = "0.3.2"
 
 [package.metadata]
-msrv = "1.85.0"
+msrv = "1.79.0"
 
 [features]
 aws = ["fusio-dispatch/aws", "fusio-log/aws", "fusio/aws"]
