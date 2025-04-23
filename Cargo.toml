@@ -11,7 +11,7 @@ resolver = "2"
 version = "0.3.2"
 
 [package.metadata]
-msrv = "1.79.0"
+msrv = "1.85.0"
 
 [features]
 aws = ["fusio-dispatch/aws", "fusio-log/aws", "fusio/aws"]
@@ -84,15 +84,15 @@ crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "47", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { git = "https://github.com/tonbo-io/fusio", rev = "d0cb41a700e2dd3c1c77dac30cc3f3b6e0a02b34", version = "0.3.8", package = "fusio", features = [
+fusio = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio", features = [
     "dyn",
     "fs",
 ] }
-fusio-dispatch = { git = "https://github.com/tonbo-io/fusio", rev = "d0cb41a700e2dd3c1c77dac30cc3f3b6e0a02b34", version = "0.3.8", package = "fusio-dispatch" }
-fusio-log = { git = "https://github.com/tonbo-io/fusio", rev = "d0cb41a700e2dd3c1c77dac30cc3f3b6e0a02b34", version = "0.3.8", package = "fusio-log", default-features = false, features = [
+fusio-dispatch = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-dispatch" }
+fusio-log = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-log", default-features = false, features = [
     "bytes",
 ] }
-fusio-parquet = { git = "https://github.com/tonbo-io/fusio", rev = "d0cb41a700e2dd3c1c77dac30cc3f3b6e0a02b34", version = "0.3.8", package = "fusio-parquet" }
+fusio-parquet = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-parquet" }
 futures-core = "0.3"
 futures-util = "0.3"
 lockable = "0.1.1"
