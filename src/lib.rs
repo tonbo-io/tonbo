@@ -225,16 +225,6 @@ where
         )?);
         {
             manager
-                .local_fs()
-                .create_dir_all(&option.wal_dir_path())
-                .await
-                .map_err(DbError::Fusio)?;
-            manager
-                .local_fs()
-                .create_dir_all(&option.version_log_dir_path())
-                .await
-                .map_err(DbError::Fusio)?;
-            manager
                 .base_fs()
                 .create_dir_all(&option.wal_dir_path())
                 .await
@@ -1545,8 +1535,6 @@ pub(crate) mod tests {
     #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_recover() {
-        let temp_dir = TempDir::new().unwrap();
-
         if option_env!("AWS_ACCESS_KEY_ID").is_none()
             || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
         {
@@ -1574,7 +1562,7 @@ pub(crate) mod tests {
             checksum: None,
         };
         let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            Path::from_url_path(format!("recover/{}", generate_file_id())).unwrap(),
             &TestSchema {},
         )
         .base_fs(s3_option.clone());

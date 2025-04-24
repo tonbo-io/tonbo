@@ -1,3 +1,4 @@
+pub mod logger;
 pub mod manager;
 
 use std::{
@@ -67,4 +68,8 @@ pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<File
             FileId::from_str(file_id)
         })
         .transpose()
+}
+
+pub(crate) fn filename(file_id: FileId, file_type: FileType) -> String {
+    format!("{}.{}", file_id, file_type)
 }
