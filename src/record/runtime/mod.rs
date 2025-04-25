@@ -29,6 +29,8 @@ pub enum DataType {
     String,
     Boolean,
     Bytes,
+    Float32,
+    Float64,
     List(ValueDescRef),
 }
 
@@ -43,6 +45,8 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::Int16 => DataType::Int16,
             ArrowDataType::Int32 => DataType::Int32,
             ArrowDataType::Int64 => DataType::Int64,
+            ArrowDataType::Float32 => DataType::Float32,
+            ArrowDataType::Float64 => DataType::Float64,
             ArrowDataType::Utf8 => DataType::String,
             ArrowDataType::Boolean => DataType::Boolean,
             ArrowDataType::Binary => DataType::Bytes,
@@ -63,6 +67,8 @@ impl From<&DataType> for ArrowDataType {
             DataType::Int16 => ArrowDataType::Int16,
             DataType::Int32 => ArrowDataType::Int32,
             DataType::Int64 => ArrowDataType::Int64,
+            DataType::Float32 => ArrowDataType::Float32,
+            DataType::Float64 => ArrowDataType::Float64,
             DataType::String => ArrowDataType::Utf8,
             DataType::Boolean => ArrowDataType::Boolean,
             DataType::Bytes => ArrowDataType::Binary,
@@ -89,6 +95,8 @@ impl From<u8> for DataType {
             8 => DataType::String,
             9 => DataType::Boolean,
             10 => DataType::Bytes,
+            11 => DataType::Float32,
+            12 => DataType::Float64,
             _ => panic!("can not construct `DataType` from {}", value),
         }
     }
@@ -113,8 +121,10 @@ impl Encode for DataType {
             DataType::String => 8_u8.encode(writer).await?,
             DataType::Boolean => 9_u8.encode(writer).await?,
             DataType::Bytes => 10_u8.encode(writer).await?,
+            DataType::Float32 => 11_u8.encode(writer).await?,
+            DataType::Float64 => 12_u8.encode(writer).await?,
             DataType::List(desc) => {
-                11_u8.encode(writer).await?;
+                13_u8.encode(writer).await?;
                 desc.is_nullable.encode(writer).await?;
                 match desc.datatype {
                     DataType::UInt8 => 0_u8.encode(writer).await?,
@@ -128,6 +138,8 @@ impl Encode for DataType {
                     DataType::String => 8_u8.encode(writer).await?,
                     DataType::Boolean => 9_u8.encode(writer).await?,
                     DataType::Bytes => 10_u8.encode(writer).await?,
+                    DataType::Float32 => 11_u8.encode(writer).await?,
+                    DataType::Float64 => 12_u8.encode(writer).await?,
                     DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
                 }
             }
@@ -145,6 +157,8 @@ impl Encode for DataType {
             | DataType::Int16
             | DataType::Int32
             | DataType::Int64
+            | DataType::Float32
+            | DataType::Float64
             | DataType::String
             | DataType::Boolean
             | DataType::Bytes => 1,
@@ -173,7 +187,9 @@ impl Decode for DataType {
             8 => DataType::String,
             9 => DataType::Boolean,
             10 => DataType::Bytes,
-            11 => {
+            11 => DataType::Float32,
+            12 => DataType::Float64,
+            13 => {
                 let is_nullable = bool::decode(reader).await?;
                 let inner_datatype = u8::decode(reader).await?;
                 DataType::List(Arc::new(ValueDesc::new(

@@ -142,12 +142,19 @@ where
             Some(log_id) => {
                 let recover_edits = VersionEdit::<<R::Schema as Schema>::Key>::recover(
                     option.version_log_path(log_id),
+                    option.base_fs.clone(),
                 )
                 .await;
                 edits = recover_edits;
                 log_id
             }
-            None => generate_file_id(),
+            None => {
+                let log_id = generate_file_id();
+                let base_fs = manager.base_fs();
+                let mut log = Self::open_version_log(&option, base_fs.clone(), log_id).await?;
+                log.close().await?;
+                log_id
+            }
         };
 
         let timestamp = Arc::new(AtomicU32::default());
@@ -469,14 +476,10 @@ pub(crate) mod tests {
         assert_eq!(version_set.load_ts(), 20_u32.into());
     }
 
-    async fn version_log_snap_shot(base_option: FsOptions) {
-        let temp_dir = TempDir::new().unwrap();
+    async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
         let manager = Arc::new(StoreManager::new(base_option, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let mut option = DbOption::new(path, &StringSchema);
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -546,7 +549,11 @@ pub(crate) mod tests {
 
         let guard = version_set.inner.write().await;
 
-        let edits = VersionEdit::<String>::recover(option.version_log_path(guard.log_id)).await;
+        let edits = VersionEdit::<String>::recover(
+            option.version_log_path(guard.log_id),
+            option.base_fs.clone(),
+        )
+        .await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(
@@ -577,7 +584,8 @@ pub(crate) mod tests {
         }
         logs.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
 
-        let edits = VersionEdit::<String>::recover(logs.pop().unwrap().path).await;
+        let edits =
+            VersionEdit::<String>::recover(logs.pop().unwrap().path, option.base_fs.clone()).await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(
@@ -600,10 +608,16 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_version_log_snap_shot() {
-        version_log_snap_shot(FsOptions::Local).await;
+        let temp_dir = TempDir::new().unwrap();
+        version_log_snap_shot(
+            FsOptions::Local,
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        )
+        .await;
     }
 
     #[ignore = "s3"]
+    #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_version_log_snap_shot() {
         use fusio::remotes::aws::AwsCredential;
@@ -618,20 +632,29 @@ pub(crate) mod tests {
         let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
             .unwrap()
             .to_string();
+        let token = std::option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
+        let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
+        let region = std::env::var("AWS_REGION").expect("expected s3 region not to be empty");
 
         let fs_option = FsOptions::S3 {
-            bucket: "fusio-test".to_string(),
+            bucket,
             credential: Some(AwsCredential {
                 key_id,
                 secret_key,
-                token: None,
+                token,
             }),
             endpoint: None,
             sign_payload: None,
             checksum: None,
-            region: Some("ap-southeast-1".to_string()),
+            region: Some(region),
         };
-        version_log_snap_shot(fs_option).await;
+
+        let temp_dir = TempDir::new().unwrap();
+        version_log_snap_shot(
+            fs_option,
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

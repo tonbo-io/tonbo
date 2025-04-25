@@ -13,6 +13,8 @@ pub(crate) enum DataType {
     String,
     Boolean,
     Bytes,
+    Float32,
+    Float64,
 }
 
 impl DataType {
@@ -39,6 +41,10 @@ impl DataType {
             DataType::Boolean
         } else if path.is_ident("Bytes") {
             DataType::Bytes
+        } else if path.is_ident("F32") {
+            DataType::Float32
+        } else if path.is_ident("F64") {
+            DataType::Float64
         } else {
             todo!()
         }
@@ -79,6 +85,12 @@ impl DataType {
             DataType::Bytes => {
                 quote!(bytes::Bytes)
             }
+            DataType::Float32 => {
+                quote!(::tonbo::record::F32)
+            }
+            DataType::Float64 => {
+                quote!(::tonbo::record::F64)
+            }
         }
     }
 
@@ -116,6 +128,12 @@ impl DataType {
             }
             DataType::Bytes => {
                 quote!(::tonbo::arrow::datatypes::DataType::Binary)
+            }
+            DataType::Float32 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Float32)
+            }
+            DataType::Float64 => {
+                quote!(::tonbo::arrow::datatypes::DataType::Float64)
             }
         }
     }
@@ -159,6 +177,12 @@ impl DataType {
                     >
                 )
             }
+            DataType::Float32 => {
+                quote!(::tonbo::arrow::array::Float32Array)
+            }
+            DataType::Float64 => {
+                quote!(::tonbo::arrow::array::Float64Array)
+            }
         }
     }
 
@@ -196,6 +220,12 @@ impl DataType {
             }
             DataType::Bytes => {
                 quote!(as_bytes::<::tonbo::arrow::datatypes::GenericBinaryType<i32>>())
+            }
+            DataType::Float32 => {
+                quote!(as_primitive::<::tonbo::arrow::datatypes::Float32Type>())
+            }
+            DataType::Float64 => {
+                quote!(as_primitive::<::tonbo::arrow::datatypes::Float64Type>())
             }
         }
     }
@@ -256,6 +286,16 @@ impl DataType {
                 quote!(::tonbo::arrow::array::GenericByteBuilder::<
                     ::tonbo::arrow::datatypes::GenericBinaryType<i32>,
                 >::with_capacity(capacity, 0))
+            }
+            DataType::Float32 => {
+                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                    ::tonbo::arrow::datatypes::Float32Type,
+                >::with_capacity(capacity))
+            }
+            DataType::Float64 => {
+                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
+                    ::tonbo::arrow::datatypes::Float64Type,
+                >::with_capacity(capacity))
             }
         }
     }
@@ -331,6 +371,20 @@ impl DataType {
                     >
                 )
             }
+            DataType::Float32 => {
+                quote!(
+                    ::tonbo::arrow::array::PrimitiveBuilder<
+                        ::tonbo::arrow::datatypes::Float32Type,
+                    >
+                )
+            }
+            DataType::Float64 => {
+                quote!(
+                    ::tonbo::arrow::array::PrimitiveBuilder<
+                        ::tonbo::arrow::datatypes::Float64Type,
+                    >
+                )
+            }
         }
     }
     pub(crate) fn to_size_method(&self, field_name: &Ident) -> proc_macro2::TokenStream {
@@ -367,6 +421,12 @@ impl DataType {
             }
             DataType::Bytes => {
                 quote!(self.#field_name.values_slice().len())
+            }
+            DataType::Float32 => {
+                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
+            }
+            DataType::Float64 => {
+                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
             }
         }
     }
@@ -416,6 +476,12 @@ impl DataType {
                 } else {
                     quote!(self.#field_name.len())
                 }
+            }
+            DataType::Float32 => {
+                quote! {std::mem::size_of::<::tonbo::record::F32>()}
+            }
+            DataType::Float64 => {
+                quote! {std::mem::size_of::<::tonbo::record::F64>()}
             }
         }
     }

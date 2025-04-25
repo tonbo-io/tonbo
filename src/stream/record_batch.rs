@@ -10,7 +10,7 @@ use parquet::arrow::ProjectionMask;
 
 use crate::{
     record::{option::OptionRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
-    timestamp::Timestamped,
+    timestamp::Ts,
 };
 
 pub struct RecordBatchEntry<R>
@@ -35,9 +35,7 @@ where
         }
     }
 
-    pub(crate) fn internal_key(
-        &self,
-    ) -> Timestamped<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {
+    pub(crate) fn internal_key(&self) -> Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {
         self.record_ref.key()
     }
 

@@ -215,3 +215,25 @@ If you want to persist metadata files to S3, you can configure `DbOption::base_f
 > **Note**: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest WAL is uploaded, you can use `DB::flush_wal`. If you want to ensure the latest metadata is uploaded, you can use `DB::flush` to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust `DbOption::version_log_snapshot_threshold` to a smaller value. The default value is 200.
 
 See more details in [Configuration](./conf.md#manifest-configuration).
+
+> **Note**: If you want to use S3 in WASM, please configure CORS rules for the bucket before using. Here is an example of CORS configuration:
+>```json
+> [
+>     {
+>         "AllowedHeaders": [
+>             "*"
+>         ],
+>         "AllowedMethods": [
+>             "GET",
+>             "PUT",
+>             "DELETE",
+>             "HEAD"
+>         ],
+>         "AllowedOrigins": [
+>             "*"
+>         ],
+>         "ExposeHeaders": []
+>     }
+> ]
+> ```
+> For more details, please refer to [AWS documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ManageCorsUsing.html).

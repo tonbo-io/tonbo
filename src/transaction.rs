@@ -20,7 +20,7 @@ use crate::{
     record::{Key, KeyRef, RecordRef, Schema as RecordSchema},
     snapshot::Snapshot,
     stream::{self, mem_projection::MemProjectionStream},
-    timestamp::{Timestamp, Timestamped},
+    timestamp::{Timestamp, Ts},
     wal::log::LogType,
     DbError, DbStorage, LockMap, Projection, Record, Scan,
 };
@@ -35,14 +35,14 @@ where
     R: Record,
 {
     type Item = (
-        Timestamped<<<R::Schema as RecordSchema>::Key as Key>::Ref<'scan>>,
+        Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'scan>>,
         &'scan Option<R>,
     );
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner
             .next()
-            .map(|(key, value)| (Timestamped::new(key.as_key_ref(), self.ts), value))
+            .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value))
     }
 }
 /// optimistic ACID transaction, open with

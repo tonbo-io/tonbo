@@ -3,7 +3,9 @@ use std::{ops::Range, sync::Arc};
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use parquet::{
-    arrow::async_reader::AsyncFileReader, errors::Result, file::metadata::ParquetMetaData,
+    arrow::{arrow_reader::ArrowReaderOptions, async_reader::AsyncFileReader},
+    errors::Result,
+    file::metadata::ParquetMetaData,
 };
 
 use crate::LruCache;
@@ -21,15 +23,18 @@ impl BoxedFileReader {
 }
 
 impl AsyncFileReader for BoxedFileReader {
-    fn get_bytes(&mut self, range: Range<usize>) -> BoxFuture<'_, Result<Bytes>> {
+    fn get_bytes(&mut self, range: Range<u64>) -> BoxFuture<'_, Result<Bytes>> {
         self.inner.get_bytes(range)
     }
 
-    fn get_metadata(&mut self) -> BoxFuture<'_, Result<Arc<ParquetMetaData>>> {
-        self.inner.get_metadata()
+    fn get_metadata<'s>(
+        &'s mut self,
+        options: Option<&'s ArrowReaderOptions>,
+    ) -> BoxFuture<'s, Result<Arc<ParquetMetaData>>> {
+        self.inner.get_metadata(options)
     }
 
-    fn get_byte_ranges(&mut self, ranges: Vec<Range<usize>>) -> BoxFuture<'_, Result<Vec<Bytes>>> {
+    fn get_byte_ranges(&mut self, ranges: Vec<Range<u64>>) -> BoxFuture<'_, Result<Vec<Bytes>>> {
         self.inner.get_byte_ranges(ranges)
     }
 }

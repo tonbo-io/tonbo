@@ -3,8 +3,9 @@ use std::{any::Any, fmt::Debug, sync::Arc};
 
 use arrow::{
     array::{
-        Array, BooleanArray, GenericBinaryArray, Int16Array, Int32Array, Int64Array, Int8Array,
-        ListArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        Array, BooleanArray, Float32Array, Float64Array, GenericBinaryArray, Int16Array,
+        Int32Array, Int64Array, Int8Array, ListArray, StringArray, UInt16Array, UInt32Array,
+        UInt64Array, UInt8Array,
     },
     buffer::OffsetBuffer,
     datatypes::{DataType as ArrowDataType, Field, FieldRef},
@@ -15,7 +16,7 @@ use fusio_log::{Decode, DecodeError, Encode};
 use super::DataType;
 use crate::{
     cast_arc_value,
-    record::{Key, KeyRef},
+    record::{Key, KeyRef, F32, F64},
 };
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,8 @@ impl ValueDesc {
             DataType::Int16 => ArrowDataType::Int16,
             DataType::Int32 => ArrowDataType::Int32,
             DataType::Int64 => ArrowDataType::Int64,
+            DataType::Float32 => ArrowDataType::Float32,
+            DataType::Float64 => ArrowDataType::Float64,
             DataType::String => ArrowDataType::Utf8,
             DataType::Boolean => ArrowDataType::Boolean,
             DataType::Bytes => ArrowDataType::Binary,
@@ -99,6 +102,8 @@ impl ValueDesc {
                     DataType::Int16 => ArrowDataType::Int16,
                     DataType::Int32 => ArrowDataType::Int32,
                     DataType::Int64 => ArrowDataType::Int64,
+                    DataType::Float32 => ArrowDataType::Float32,
+                    DataType::Float64 => ArrowDataType::Float64,
                     DataType::String => ArrowDataType::Utf8,
                     DataType::Boolean => ArrowDataType::Boolean,
                     DataType::Bytes => ArrowDataType::Binary,
@@ -157,6 +162,12 @@ impl Value {
             }
             DataType::Int64 => {
                 Self::new(datatype, name, Arc::<Option<i64>>::new(None), is_nullable)
+            }
+            DataType::Float32 => {
+                Self::new(datatype, name, Arc::<Option<f32>>::new(None), is_nullable)
+            }
+            DataType::Float64 => {
+                Self::new(datatype, name, Arc::<Option<f64>>::new(None), is_nullable)
             }
             DataType::String => Self::new(
                 datatype,
@@ -222,6 +233,18 @@ impl Value {
                     Arc::<Option<Vec<i64>>>::new(None),
                     is_nullable,
                 ),
+                DataType::Float32 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<f32>>>::new(None),
+                    is_nullable,
+                ),
+                DataType::Float64 => Self::new(
+                    datatype,
+                    name,
+                    Arc::<Option<Vec<f64>>>::new(None),
+                    is_nullable,
+                ),
                 DataType::String => Self::new(
                     datatype,
                     name,
@@ -272,6 +295,8 @@ pub(crate) fn wrapped_value(
         DataType::Int16 => Arc::new(Some(*cast_arc_value!(value, i16))),
         DataType::Int32 => Arc::new(Some(*cast_arc_value!(value, i32))),
         DataType::Int64 => Arc::new(Some(*cast_arc_value!(value, i64))),
+        DataType::Float32 => Arc::new(Some(*cast_arc_value!(value, F32))),
+        DataType::Float64 => Arc::new(Some(*cast_arc_value!(value, F64))),
         DataType::String => Arc::new(Some(cast_arc_value!(value, String).to_owned())),
         DataType::Boolean => Arc::new(Some(*cast_arc_value!(value, bool))),
         DataType::Bytes => Arc::new(Some(cast_arc_value!(value, Vec<u8>).to_owned())),
@@ -284,6 +309,8 @@ pub(crate) fn wrapped_value(
             DataType::Int16 => Arc::new(Some(cast_arc_value!(value, Vec<i16>).to_owned())),
             DataType::Int32 => Arc::new(Some(cast_arc_value!(value, Vec<i32>).to_owned())),
             DataType::Int64 => Arc::new(Some(cast_arc_value!(value, Vec<i64>).to_owned())),
+            DataType::Float32 => Arc::new(Some(cast_arc_value!(value, Vec<F32>).to_owned())),
+            DataType::Float64 => Arc::new(Some(cast_arc_value!(value, Vec<F64>).to_owned())),
             DataType::String => Arc::new(Some(cast_arc_value!(value, Vec<String>).to_owned())),
             DataType::Boolean => Arc::new(Some(cast_arc_value!(value, Vec<bool>).to_owned())),
             DataType::Bytes => Arc::new(Some(cast_arc_value!(value, Vec<Vec<u8>>).to_owned())),
@@ -330,7 +357,8 @@ macro_rules! implement_col {
 
         impl PartialEq for Value {
             fn eq(&self, other: &Self) -> bool {
-                self.datatype() == other.datatype()
+                self.name() == other.name()
+                && self.datatype() == other.datatype()
                 && self.is_nullable() == other.is_nullable()
                 && match self.datatype() {
                         $(
@@ -393,6 +421,7 @@ macro_rules! implement_col {
         impl Debug for Value {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let mut debug_struct = f.debug_struct("Value");
+                debug_struct.field("name", &self.name());
                 match self.datatype() {
                     $(
                         DataType::$DataType => {
@@ -453,6 +482,20 @@ macro_rules! implement_key_col {
                                 .expect(stringify!("unexpected datatype, expected " $Type))
                         )),
                     )*
+                    DataType::Float32 => Arc::new(Float32Array::new_scalar(
+                        self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<F32>()
+                                .expect("unexpected datatype, expected String").into(),
+                    )),
+                    DataType::Float64 => Arc::new(Float64Array::new_scalar(
+                        self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<F64>()
+                                .expect("unexpected datatype, expected String").into(),
+                    )),
                     DataType::String => Arc::new(StringArray::new_scalar(
                         self
                             .value
@@ -481,6 +524,12 @@ macro_rules! implement_key_col {
                                     Arc::new($Array::from_iter_values(cast_arc_value!(self.value, Vec<$Type>).clone()))
                                 }
                             )*
+                            DataType::Float32 => {
+                                Arc::new(Float32Array::from_iter_values(cast_arc_value!(self.value, Vec<f32>).clone()))
+                            },
+                            DataType::Float64 => {
+                                Arc::new(Float64Array::from_iter_values(cast_arc_value!(self.value, Vec<f64>).clone()))
+                            },
                             DataType::Boolean => {
                                 Arc::new(BooleanArray::from(cast_arc_value!(self.value, Vec<bool>).clone()))
                             },
@@ -689,6 +738,8 @@ macro_rules! for_datatype {
                 { i16, Int16 },
                 { i32, Int32 },
                 { i64, Int64 },
+                { F32, Float32 },
+                { F64, Float64 },
                 { String, String },
                 { bool, Boolean },
                 { Vec<u8>, Bytes }

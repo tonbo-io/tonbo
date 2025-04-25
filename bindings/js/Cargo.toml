@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 futures = { version = "0.3" }
 js-sys = { version = "0.3.72" }
-tonbo = { version = "0.3.1", path = "../../", default-features = false, features = [
+tonbo = { version = "0.3.2", path = "../../", default-features = false, features = [
     "bytes",
     "wasm",
 ] }
@@ -26,7 +26,7 @@ wasm-bindgen-futures = { version = "0.4.45" }
 wasm-bindgen-test = "0.3.9"
 wasm-streams = "0.4.2"
 web-sys = { version = "0.3", features = ["console"] }
-fusio = { version = "0.3.8", default-features = false, features = [
+fusio = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.7", default-features = false, features = [
     "dyn",
     "bytes",
     "opfs",

@@ -12,18 +12,8 @@
 //! `tonbo` constructs an instance using the [`DB::new`] method to serve a
 //! specific `Tonbo Record` type.
 //!
-//! `Tonbo Record` is automatically implemented by the macro [`tonbo_record`].
-//! Support type
-//! - String
-//! - Boolean
-//! - Int8
-//! - Int16
-//! - Int32
-//! - Int64
-//! - UInt8
-//! - UInt16
-//! - UInt32
-//! - UInt64
+//! `Tonbo Record` is automatically implemented by the macro [`tonbo_record`],
+//! it support types like `String`, `bool`, `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`.
 //!
 //! ACID `optimistic` transactions for concurrent data reading and writing are
 //! supported with the [`DB::transaction`] method.
@@ -139,6 +129,7 @@ use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::p
 pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
+use compaction::leveled::LeveledCompactor;
 use context::Context;
 use flume::{bounded, Sender};
 use fs::FileId;
@@ -146,7 +137,7 @@ pub use fusio::{SeqRead, Write};
 pub use fusio_log::{Decode, Encode};
 use futures_core::Stream;
 use futures_util::StreamExt;
-use inmem::{immutable::Immutable, mutable::Mutable};
+use inmem::{immutable::Immutable, mutable::MutableMemTable};
 use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
 pub use once_cell;
@@ -158,12 +149,12 @@ use parquet::{
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
 use thiserror::Error;
-use timestamp::{Timestamp, TimestampedRef};
+use timestamp::{Timestamp, TsRef};
 use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
-use trigger::Trigger;
+use trigger::FreezeTrigger;
 use wal::log::Log;
 
 pub use crate::option::*;
@@ -275,8 +266,14 @@ where
             version_set,
             record_schema.arrow_schema().clone(),
         ));
-        let mut compactor =
-            Compactor::<R>::new(schema.clone(), record_schema, option.clone(), ctx.clone());
+        let mut compactor = match option.compaction_option {
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+                schema.clone(),
+                record_schema,
+                option.clone(),
+                ctx.clone(),
+            )),
+        };
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -507,11 +504,11 @@ pub(crate) struct DbStorage<R>
 where
     R: Record,
 {
-    pub mutable: Mutable<R>,
+    pub mutable: MutableMemTable<R>,
     pub immutables: Vec<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
-    trigger: Arc<dyn Trigger<R>>,
+    trigger: Arc<dyn FreezeTrigger<R>>,
     record_schema: Arc<R::Schema>,
     option: Arc<DbOption>,
 }
@@ -548,10 +545,10 @@ where
 
         let trigger = TriggerFactory::create(option.trigger_type);
         let mut schema = DbStorage {
-            mutable: Mutable::new(
+            mutable: MutableMemTable::new(
                 &option,
                 trigger.clone(),
-                manager.base_fs(),
+                manager.base_fs().clone(),
                 record_schema.clone(),
             )
             .await?,
@@ -690,7 +687,7 @@ where
         Ok(version
             .query(
                 ctx.storage_manager(),
-                TimestampedRef::new(key, ts),
+                TsRef::new(key, ts),
                 projection,
                 ctx.cache().clone(),
             )
@@ -1010,21 +1007,21 @@ pub(crate) mod tests {
 
     use crate::{
         cast_arc_value,
-        compaction::{CompactTask, CompactionError, Compactor},
+        compaction::{leveled::LeveledCompactor, CompactTask, CompactionError, Compactor},
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
-        inmem::{immutable::tests::TestSchema, mutable::Mutable},
+        inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
             DataType, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
-            Schema as RecordSchema, Value,
+            Schema as RecordSchema, Value, F32, F64,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
-        DbError, DbOption, Immutable, Projection, Record, DB,
+        CompactionOption, DbError, DbOption, Projection, Record, DB,
     };
 
     #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1246,17 +1243,18 @@ pub(crate) mod tests {
         let trigger = schema.trigger.clone();
         let mutable = mem::replace(
             &mut schema.mutable,
-            Mutable::new(&option, trigger, base_fs, Arc::new(TestSchema {}))
+            MutableMemTable::new(&option, trigger, base_fs.clone(), Arc::new(TestSchema {}))
                 .await
                 .unwrap(),
         );
 
-        Immutable::<<TestSchema as RecordSchema>::Columns>::new(
-            mutable.data,
-            TestSchema {}.arrow_schema().clone(),
-        )
-        .as_record_batch()
-        .clone()
+        mutable
+            .into_immutable()
+            .await
+            .unwrap()
+            .1
+            .as_record_batch()
+            .clone()
     }
 
     pub(crate) async fn build_schema(
@@ -1265,7 +1263,13 @@ pub(crate) mod tests {
     ) -> Result<(crate::DbStorage<Test>, Receiver<CompactTask>), fusio::Error> {
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable = Mutable::new(&option, trigger.clone(), fs, Arc::new(TestSchema {})).await?;
+        let mutable = MutableMemTable::new(
+            &option,
+            trigger.clone(),
+            fs.clone(),
+            Arc::new(TestSchema {}),
+        )
+        .await?;
 
         mutable
             .insert(
@@ -1307,8 +1311,9 @@ pub(crate) mod tests {
         let immutables = {
             let trigger = TriggerFactory::create(option.trigger_type);
 
-            let mutable: Mutable<Test> =
-                Mutable::new(&option, trigger.clone(), fs, Arc::new(TestSchema)).await?;
+            let mutable: MutableMemTable<Test> =
+                MutableMemTable::new(&option, trigger.clone(), fs.clone(), Arc::new(TestSchema))
+                    .await?;
 
             mutable
                 .insert(
@@ -1349,7 +1354,7 @@ pub(crate) mod tests {
 
             vec![(
                 Some(generate_file_id()),
-                Immutable::new(mutable.data, TestSchema {}.arrow_schema().clone()),
+                mutable.into_immutable().await.unwrap().1,
             )]
         };
 
@@ -1401,8 +1406,14 @@ pub(crate) mod tests {
             version_set,
             TestSchema.arrow_schema().clone(),
         ));
-        let mut compactor =
-            Compactor::<R>::new(schema.clone(), record_schema, option.clone(), ctx.clone());
+        let mut compactor = match option.compaction_option {
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+                schema.clone(),
+                record_schema,
+                option.clone(),
+                ctx.clone(),
+            )),
+        };
 
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -1531,8 +1542,9 @@ pub(crate) mod tests {
     }
 
     #[ignore = "s3"]
+    #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_recover_from_s3() {
+    async fn test_s3_recover() {
         let temp_dir = TempDir::new().unwrap();
 
         if option_env!("AWS_ACCESS_KEY_ID").is_none()
@@ -1545,16 +1557,19 @@ pub(crate) mod tests {
         let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
             .unwrap()
             .to_string();
+        let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
+        let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
+        let token = Some(std::option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
 
         let s3_option = FsOptions::S3 {
-            bucket: "fusio-test".to_string(),
+            bucket,
             credential: Some(fusio::remotes::aws::AwsCredential {
                 key_id,
                 secret_key,
-                token: None,
+                token,
             }),
             endpoint: None,
-            region: Some("ap-southeast-1".to_string()),
+            region,
             sign_payload: None,
             checksum: None,
         };
@@ -1631,7 +1646,7 @@ pub(crate) mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::DbStorage<Test> = crate::DbStorage {
-            mutable: Mutable::new(&option, trigger.clone(), &fs, Arc::new(TestSchema))
+            mutable: MutableMemTable::new(&option, trigger.clone(), fs, Arc::new(TestSchema))
                 .await
                 .unwrap(),
             immutables: Default::default(),
@@ -1702,10 +1717,10 @@ pub(crate) mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
         let schema: crate::DbStorage<DynRecord> = crate::DbStorage {
-            mutable: Mutable::new(
+            mutable: MutableMemTable::new(
                 &option,
                 trigger.clone(),
-                manager.base_fs(),
+                manager.base_fs().clone(),
                 dyn_schema.clone(),
             )
             .await
@@ -1876,6 +1891,14 @@ pub(crate) mod tests {
                     *cast_arc_value!(record_ref.columns.get(7).unwrap().value, Option<Vec<u8>>),
                     Some(i.to_le_bytes().to_vec()),
                 );
+                assert_eq!(
+                    *cast_arc_value!(record_ref.columns.get(8).unwrap().value, Option<F32>),
+                    Some(F32::from(i as f32 * 1.11)),
+                );
+                assert_eq!(
+                    *cast_arc_value!(record_ref.columns.get(9).unwrap().value, Option<F64>),
+                    Some(F64::from(i as f64 * 1.01)),
+                );
             }
             tx.commit().await.unwrap();
         }
@@ -1886,7 +1909,7 @@ pub(crate) mod tests {
             let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(49_i64), false);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
-                .projection(&["id", "height", "bytes"])
+                .projection(&["id", "height", "bytes", "grade", "price"])
                 .take()
                 .await
                 .unwrap();
@@ -1954,6 +1977,18 @@ pub(crate) mod tests {
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
                 assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
+
+                let col = columns.get(8).unwrap();
+                assert_eq!(col.datatype(), &DataType::Float32);
+                let v = col.value.as_ref().downcast_ref::<Option<F32>>();
+                assert!(v.is_some());
+                assert_eq!(v.unwrap(), &Some(F32::from(i as f32 * 1.11)));
+
+                let col = columns.get(9).unwrap();
+                assert_eq!(col.datatype(), &DataType::Float64);
+                let v = col.value.as_ref().downcast_ref::<Option<F64>>();
+                assert!(v.is_some());
+                assert_eq!(v.unwrap(), &Some(F64::from(i as f64 * 1.01)));
                 i += 1
             }
         }

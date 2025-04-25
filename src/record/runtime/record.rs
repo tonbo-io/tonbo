@@ -6,7 +6,7 @@ use fusio_log::{Decode, Encode};
 use super::{schema::DynSchema, wrapped_value, DataType, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
-    record::{Record, RecordDecodeError},
+    record::{Record, RecordDecodeError, F32, F64},
 };
 
 #[derive(Debug)]
@@ -48,6 +48,8 @@ impl Decode for DynRecord {
                     DataType::Int16 => Arc::new(cast_arc_value!(col.value, Option<i16>).unwrap()),
                     DataType::Int32 => Arc::new(cast_arc_value!(col.value, Option<i32>).unwrap()),
                     DataType::Int64 => Arc::new(cast_arc_value!(col.value, Option<i64>).unwrap()),
+                    DataType::Float32 => Arc::new(cast_arc_value!(col.value, Option<F32>).unwrap()),
+                    DataType::Float64 => Arc::new(cast_arc_value!(col.value, Option<F64>).unwrap()),
                     DataType::String => {
                         Arc::new(cast_arc_value!(col.value, Option<String>).clone().unwrap())
                     }
@@ -91,6 +93,16 @@ impl Decode for DynRecord {
                         ),
                         DataType::Int64 => Arc::new(
                             cast_arc_value!(col.value, Option<Vec<i64>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::Float32 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<F32>>)
+                                .clone()
+                                .unwrap(),
+                        ),
+                        DataType::Float64 => Arc::new(
+                            cast_arc_value!(col.value, Option<Vec<F64>>)
                                 .clone()
                                 .unwrap(),
                         ),
@@ -200,6 +212,7 @@ macro_rules! dyn_record {
 
 #[cfg(test)]
 pub(crate) mod test {
+    use core::f32;
     use std::{io::Cursor, sync::Arc};
 
     use fusio_log::{Decode, Encode};
@@ -207,7 +220,7 @@ pub(crate) mod test {
     use super::{DynRecord, DynSchema};
     use crate::{
         dyn_schema,
-        record::{DataType, Record, Value, ValueDesc},
+        record::{DataType, Record, Value, ValueDesc, F32, F64},
     };
 
     #[allow(unused)]
@@ -221,6 +234,8 @@ pub(crate) mod test {
             ("email", String, true),
             ("enabled", Boolean, false),
             ("bytes", Bytes, true),
+            ("grade", Float32, false),
+            ("price", Float64, true),
             0
         )
     }
@@ -238,6 +253,8 @@ pub(crate) mod test {
                 ("email", String, true, Some(format!("{}@tonbo.io", i))),
                 ("enabled", Boolean, false, i % 2 == 0),
                 ("bytes", Bytes, true, Some(i.to_le_bytes().to_vec())),
+                ("grade", Float32, false, F32::from(i as f32 * 1.11)),
+                ("price", Float64, true, Some(F64::from(i as f64 * 1.01))),
                 0
             );
             if i >= 45 {
@@ -298,7 +315,7 @@ pub(crate) mod test {
                 record_ref.columns.get(2).unwrap(),
                 &Value::new(
                     DataType::List(Arc::new(desc.clone())),
-                    "strs".to_string(),
+                    "strs_option".to_string(),
                     Arc::new(Some(vec![
                         "abc".to_string(),
                         "xyz".to_string(),
@@ -359,6 +376,79 @@ pub(crate) mod test {
                         vec![0_u8, 1, 2, 3],
                         vec![10, 11, 12, 13],
                         vec![20, 21, 22, 23],
+                    ])),
+                    true,
+                )
+            )
+        }
+
+        {
+            let record = DynRecord::new(
+                vec![
+                    Value::new(DataType::UInt32, "id".into(), Arc::new(1_u32), false),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new(
+                            "".into(),
+                            DataType::Float32,
+                            false,
+                        ))),
+                        "f32s".to_string(),
+                        Arc::new(vec![
+                            F32::from(1.0_f32),
+                            F32::from(f32::NAN),
+                            F32::from(f32::INFINITY),
+                            F32::from(-0.1_f32),
+                        ]),
+                        false,
+                    ),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new(
+                            "".into(),
+                            DataType::Float64,
+                            true,
+                        ))),
+                        "f64s".to_string(),
+                        Arc::new(Some(vec![
+                            F64::from(1.0_f64),
+                            F64::from(f64::NAN),
+                            F64::from(f64::INFINITY),
+                            F64::from(-0.1_f64),
+                        ])),
+                        true,
+                    ),
+                ],
+                0,
+            );
+
+            let record_ref = record.as_record_ref();
+            assert_eq!(
+                record_ref.columns.get(1).unwrap(),
+                &Value::new(
+                    DataType::List(Arc::new(ValueDesc::new(
+                        "".into(),
+                        DataType::Float32,
+                        false,
+                    ))),
+                    "f32s".to_string(),
+                    Arc::new(Some(vec![
+                        F32::from(1.0),
+                        F32::from(f32::NAN),
+                        F32::from(f32::INFINITY),
+                        F32::from(-0.1),
+                    ])),
+                    false,
+                )
+            );
+            assert_eq!(
+                record_ref.columns.get(2).unwrap(),
+                &Value::new(
+                    DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Float64, true))),
+                    "f64s".to_string(),
+                    Arc::new(Some(vec![
+                        F64::from(1.0_f64),
+                        F64::from(f64::NAN),
+                        F64::from(f64::INFINITY),
+                        F64::from(-0.1_f64),
                     ])),
                     true,
                 )
@@ -437,6 +527,54 @@ pub(crate) mod test {
                         DataType::List(Arc::new(ValueDesc::new("".into(), DataType::Int64, true))),
                         "none".to_string(),
                         Arc::new(None::<Vec<i64>>),
+                        true,
+                    ),
+                ],
+                0,
+            );
+
+            let mut source = vec![];
+            let mut cursor = Cursor::new(&mut source);
+            let record_ref = record.as_record_ref();
+            record_ref.encode(&mut cursor).await.unwrap();
+
+            cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            let decoded = DynRecord::decode(&mut cursor).await.unwrap();
+            assert_eq!(decoded.values, record.values);
+        }
+
+        {
+            let record = DynRecord::new(
+                vec![
+                    Value::new(DataType::UInt32, "id".into(), Arc::new(1_u32), false),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new(
+                            "".into(),
+                            DataType::Float64,
+                            false,
+                        ))),
+                        "f64s".to_string(),
+                        Arc::new(vec![
+                            F64::from(1.0_f64),
+                            F64::from(f64::NAN),
+                            F64::from(f64::INFINITY),
+                            F64::from(-0.1_f64),
+                        ]),
+                        false,
+                    ),
+                    Value::new(
+                        DataType::List(Arc::new(ValueDesc::new(
+                            "".into(),
+                            DataType::Float32,
+                            false,
+                        ))),
+                        "f32s".to_string(),
+                        Arc::new(Some(vec![
+                            F32::from(1.0_f32),
+                            F32::from(f32::NAN),
+                            F32::from(f32::INFINITY),
+                            F32::from(-0.1_f32),
+                        ])),
                         true,
                     ),
                 ],

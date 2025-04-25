@@ -63,7 +63,7 @@ mod tests {
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
-        inmem::{immutable::tests::TestSchema, mutable::Mutable},
+        inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
         record::Schema,
         stream::mem_projection::MemProjectionStream,
         tests::Test,
@@ -85,9 +85,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
-            .await
-            .unwrap();
+        let mutable =
+            MutableMemTable::<Test>::new(&option, trigger, fs.clone(), Arc::new(TestSchema {}))
+                .await
+                .unwrap();
 
         mutable
             .insert(

@@ -11,11 +11,8 @@ use crate::{
     fs::{generate_file_id, FileId},
     inmem::immutable::Immutable,
     record::{KeyRef, Record, Schema},
-    timestamp::{
-        timestamped::{Timestamped, TimestampedRef},
-        Timestamp, EPOCH,
-    },
-    trigger::Trigger,
+    timestamp::{Timestamp, Ts, TsRef, EPOCH},
+    trigger::FreezeTrigger,
     wal::{
         log::{Log, LogType},
         WalFile,
@@ -25,33 +22,33 @@ use crate::{
 
 pub(crate) type MutableScan<'scan, R> = Range<
     'scan,
-    TimestampedRef<<<R as Record>::Schema as Schema>::Key>,
+    TsRef<<<R as Record>::Schema as Schema>::Key>,
     (
-        Bound<&'scan TimestampedRef<<<R as Record>::Schema as Schema>::Key>>,
-        Bound<&'scan TimestampedRef<<<R as Record>::Schema as Schema>::Key>>,
+        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
+        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
     ),
-    Timestamped<<<R as Record>::Schema as Schema>::Key>,
+    Ts<<<R as Record>::Schema as Schema>::Key>,
     Option<R>,
 >;
 
-pub(crate) struct Mutable<R>
+pub(crate) struct MutableMemTable<R>
 where
     R: Record,
 {
-    pub(crate) data: SkipMap<Timestamped<<R::Schema as Schema>::Key>, Option<R>>,
+    data: SkipMap<Ts<<R::Schema as Schema>::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<R>>>,
-    pub(crate) trigger: Arc<dyn Trigger<R>>,
-    pub(super) schema: Arc<R::Schema>,
+    trigger: Arc<dyn FreezeTrigger<R>>,
+    schema: Arc<R::Schema>,
 }
 
-impl<R> Mutable<R>
+impl<R> MutableMemTable<R>
 where
     R: Record,
 {
-    pub async fn new(
+    pub(crate) async fn new(
         option: &DbOption,
-        trigger: Arc<dyn Trigger<R>>,
-        fs: &Arc<dyn DynFs>,
+        trigger: Arc<dyn FreezeTrigger<R>>,
+        fs: Arc<dyn DynFs>,
         schema: Arc<R::Schema>,
     ) -> Result<Self, fusio::Error> {
         let mut wal = None;
@@ -60,7 +57,7 @@ where
 
             wal = Some(Mutex::new(
                 WalFile::<R>::new(
-                    fs.clone(),
+                    fs,
                     option.wal_path(file_id),
                     option.wal_buffer_size,
                     file_id,
@@ -85,7 +82,7 @@ where
     }
 }
 
-impl<R> Mutable<R>
+impl<R> MutableMemTable<R>
 where
     R: Record + Send,
 {
@@ -115,33 +112,35 @@ where
         ts: Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
-        let timestamped_key = Timestamped::new(key, ts);
+        let timestamped_key = Ts::new(key, ts);
 
         let record_entry = Log::new(timestamped_key, value, log_ty);
         if let (Some(_log_ty), Some(wal)) = (log_ty, &self.wal) {
-            let mut wal_guard = wal.lock().await;
-
-            wal_guard
+            wal.lock()
+                .await
                 .write(&record_entry)
                 .await
                 .map_err(|e| DbError::WalWrite(Box::new(e)))?;
         }
 
-        let is_exceeded = self.trigger.check_if_exceed(&record_entry.value);
-        self.data.insert(record_entry.key, record_entry.value);
+        let entry = self.data.insert(record_entry.key, record_entry.value);
 
-        Ok(is_exceeded)
+        Ok(entry
+            .value()
+            .as_ref()
+            .map(|v| self.trigger.check_if_exceed(v))
+            .unwrap_or(false))
     }
 
     pub(crate) fn get(
         &self,
         key: &<R::Schema as Schema>::Key,
         ts: Timestamp,
-    ) -> Option<Entry<'_, Timestamped<<R::Schema as Schema>::Key>, Option<R>>> {
+    ) -> Option<Entry<'_, Ts<<R::Schema as Schema>::Key>, Option<R>>> {
         self.data
-            .range::<TimestampedRef<<R::Schema as Schema>::Key>, _>((
-                Bound::Included(TimestampedRef::new(key, ts)),
-                Bound::Included(TimestampedRef::new(key, EPOCH)),
+            .range::<TsRef<<R::Schema as Schema>::Key>, _>((
+                Bound::Included(TsRef::new(key, ts)),
+                Bound::Included(TsRef::new(key, EPOCH)),
             ))
             .next()
     }
@@ -155,13 +154,13 @@ where
         ts: Timestamp,
     ) -> MutableScan<'scan, R> {
         let lower = match range.0 {
-            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, ts)),
-            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, EPOCH)),
+            Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
+            Bound::Excluded(key) => Bound::Excluded(TsRef::new(key, EPOCH)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let upper = match range.1 {
-            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, EPOCH)),
-            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, ts)),
+            Bound::Included(key) => Bound::Included(TsRef::new(key, EPOCH)),
+            Bound::Excluded(key) => Bound::Excluded(TsRef::new(key, ts)),
             Bound::Unbounded => Bound::Unbounded,
         };
 
@@ -174,9 +173,9 @@ where
 
     pub(crate) fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: Timestamp) -> bool {
         self.data
-            .range::<TimestampedRef<<R::Schema as Schema>::Key>, _>((
-                Bound::Excluded(TimestampedRef::new(key, u32::MAX.into())),
-                Bound::Excluded(TimestampedRef::new(key, ts)),
+            .range::<TsRef<<R::Schema as Schema>::Key>, _>((
+                Bound::Excluded(TsRef::new(key, u32::MAX.into())),
+                Bound::Excluded(TsRef::new(key, ts)),
             ))
             .next()
             .is_some()
@@ -211,7 +210,7 @@ where
     }
 }
 
-impl<R> Mutable<R>
+impl<R> MutableMemTable<R>
 where
     R: Record,
 {
@@ -227,12 +226,12 @@ mod tests {
 
     use fusio::{disk::TokioFs, path::Path, DynFs};
 
-    use super::Mutable;
+    use super::MutableMemTable;
     use crate::{
         inmem::immutable::tests::TestSchema,
         record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
         tests::{Test, TestRef},
-        timestamp::Timestamped,
+        timestamp::Ts,
         trigger::TriggerFactory,
         wal::log::LogType,
         DbOption,
@@ -252,9 +251,10 @@ mod tests {
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
-        let mem_table = Mutable::<Test>::new(&option, trigger, &fs, Arc::new(TestSchema {}))
-            .await
-            .unwrap();
+        let mem_table =
+            MutableMemTable::<Test>::new(&option, trigger, fs.clone(), Arc::new(TestSchema {}))
+                .await
+                .unwrap();
 
         mem_table
             .insert(
@@ -306,9 +306,10 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable = Mutable::<String>::new(&option, trigger, &fs, Arc::new(StringSchema))
-            .await
-            .unwrap();
+        let mutable =
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+                .await
+                .unwrap();
 
         mutable
             .insert(LogType::Full, "1".into(), 0_u32.into())
@@ -335,23 +336,23 @@ mod tests {
 
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("1".into(), 0_u32.into())
+            &Ts::new("1".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 1_u32.into())
+            &Ts::new("2".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 0_u32.into())
+            &Ts::new("2".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("3".into(), 1_u32.into())
+            &Ts::new("3".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("4".into(), 0_u32.into())
+            &Ts::new("4".into(), 0_u32.into())
         );
 
         let lower = "1".to_string();
@@ -363,23 +364,23 @@ mod tests {
 
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("1".into(), 0_u32.into())
+            &Ts::new("1".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 1_u32.into())
+            &Ts::new("2".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("2".into(), 0_u32.into())
+            &Ts::new("2".into(), 0_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("3".into(), 1_u32.into())
+            &Ts::new("3".into(), 1_u32.into())
         );
         assert_eq!(
             scan.next().unwrap().key(),
-            &Timestamped::new("4".into(), 0_u32.into())
+            &Ts::new("4".into(), 0_u32.into())
         );
     }
 
@@ -404,7 +405,7 @@ mod tests {
 
         let schema = Arc::new(schema);
 
-        let mutable = Mutable::<DynRecord>::new(&option, trigger, &fs, schema)
+        let mutable = MutableMemTable::<DynRecord>::new(&option, trigger, fs.clone(), schema)
             .await
             .unwrap();
 
@@ -433,7 +434,7 @@ mod tests {
             let entry = scan.next().unwrap();
             assert_eq!(
                 entry.key(),
-                &Timestamped::new(
+                &Ts::new(
                     Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
                     0_u32.into()
                 )

@@ -85,6 +85,12 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(name, value).unwrap();
                 }
             }
+            TonboDataType::Float32 => {
+                unimplemented!()
+            }
+            TonboDataType::Float64 => {
+                unimplemented!()
+            }
             TonboDataType::String => {
                 if idx == primary_key_index {
                     dict.set_item(name, col.value.as_ref().downcast_ref::<String>())

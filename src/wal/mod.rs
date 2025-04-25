@@ -158,7 +158,7 @@ mod tests {
     use super::{log::LogType, WalFile};
     use crate::{
         fs::{generate_file_id, FileType},
-        timestamp::Timestamped,
+        timestamp::Ts,
         wal::log::Log,
     };
 
@@ -174,7 +174,7 @@ mod tests {
 
         {
             wal.write(&Log::new(
-                Timestamped::new("hello".into(), 0.into()),
+                Ts::new("hello".into(), 0.into()),
                 Some("hello".into()),
                 Some(LogType::Full),
             ))
@@ -193,7 +193,7 @@ mod tests {
             }
 
             wal.write(&Log::new(
-                Timestamped::new("world".into(), 1.into()),
+                Ts::new("world".into(), 1.into()),
                 Some("world".into()),
                 Some(LogType::Full),
             ))
@@ -227,7 +227,7 @@ mod tests {
         write_and_recover(FsOptions::Local).await
     }
 
-    #[ignore = "s3"]
+    #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_write_and_recover() {
         use fusio::remotes::aws::AwsCredential;
@@ -242,18 +242,21 @@ mod tests {
         let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
             .unwrap()
             .to_string();
+        let token = Some(std::option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
+        let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
+        let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
 
         let fs_option = fusio_log::FsOptions::S3 {
-            bucket: "fusio-test".to_string(),
+            bucket,
             credential: Some(AwsCredential {
                 key_id,
                 secret_key,
-                token: None,
+                token,
             }),
             endpoint: None,
             sign_payload: None,
             checksum: None,
-            region: Some("ap-southeast-1".to_string()),
+            region,
         };
 
         write_and_recover(fs_option).await

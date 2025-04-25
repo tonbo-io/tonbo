@@ -12,7 +12,7 @@ use parquet::arrow::ProjectionMask;
 use crate::{
     record::{option::OptionRecordRef, Key, Record, RecordRef, Schema},
     stream::record_batch::RecordBatchEntry,
-    timestamp::{Timestamp, Timestamped, TimestampedRef, EPOCH},
+    timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };
 
 pub trait ArrowArrays: Sized + Sync {
@@ -37,7 +37,7 @@ where
 {
     fn push(
         &mut self,
-        key: Timestamped<<<<S::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
+        key: Ts<<<<S::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
         row: Option<<S::Record as Record>::Ref<'_>>,
     );
 
@@ -51,7 +51,7 @@ where
     A: ArrowArrays,
 {
     data: A,
-    index: BTreeMap<Timestamped<<<A::Record as Record>::Schema as Schema>::Key>, u32>,
+    index: BTreeMap<Ts<<<A::Record as Record>::Schema as Schema>::Key>, u32>,
 }
 
 impl<A> Immutable<A>
@@ -60,10 +60,7 @@ where
     A::Record: Send,
 {
     pub(crate) fn new(
-        mutable: SkipMap<
-            Timestamped<<<A::Record as Record>::Schema as Schema>::Key>,
-            Option<A::Record>,
-        >,
+        mutable: SkipMap<Ts<<<A::Record as Record>::Schema as Schema>::Key>, Option<A::Record>>,
         schema: Arc<ArrowSchema>,
     ) -> Self {
         let mut index = BTreeMap::new();
@@ -71,7 +68,7 @@ where
 
         for (offset, (key, value)) in mutable.into_iter().enumerate() {
             builder.push(
-                Timestamped::new(key.value.as_key_ref(), key.ts),
+                Ts::new(key.value.as_key_ref(), key.ts),
                 value.as_ref().map(Record::as_record_ref),
             );
             index.insert(key, offset as u32);
@@ -113,21 +110,19 @@ where
         projection_mask: ProjectionMask,
     ) -> ImmutableScan<'scan, A::Record> {
         let lower = match range.0 {
-            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, ts)),
-            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, EPOCH)),
+            Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
+            Bound::Excluded(key) => Bound::Excluded(TsRef::new(key, EPOCH)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let upper = match range.1 {
-            Bound::Included(key) => Bound::Included(TimestampedRef::new(key, EPOCH)),
-            Bound::Excluded(key) => Bound::Excluded(TimestampedRef::new(key, ts)),
+            Bound::Included(key) => Bound::Included(TsRef::new(key, EPOCH)),
+            Bound::Excluded(key) => Bound::Excluded(TsRef::new(key, ts)),
             Bound::Unbounded => Bound::Unbounded,
         };
 
         let range = self
             .index
-            .range::<TimestampedRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((
-                lower, upper,
-            ));
+            .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((lower, upper));
 
         ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
     }
@@ -152,9 +147,9 @@ where
         ts: Timestamp,
     ) -> bool {
         self.index
-            .range::<TimestampedRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((
-                Bound::Excluded(TimestampedRef::new(key, u32::MAX.into())),
-                Bound::Excluded(TimestampedRef::new(key, ts)),
+            .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((
+                Bound::Excluded(TsRef::new(key, u32::MAX.into())),
+                Bound::Excluded(TsRef::new(key, ts)),
             ))
             .next()
             .is_some()
@@ -165,7 +160,7 @@ pub(crate) struct ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    range: Range<'iter, Timestamped<<R::Schema as Schema>::Key>, u32>,
+    range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
     record_batch: &'iter RecordBatch,
     projection_mask: ProjectionMask,
 }
@@ -175,7 +170,7 @@ where
     R: Record,
 {
     fn new(
-        range: Range<'iter, Timestamped<<R::Schema as Schema>::Key>, u32>,
+        range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
         record_batch: &'iter RecordBatch,
         projection_mask: ProjectionMask,
     ) -> Self {
@@ -234,7 +229,7 @@ pub(crate) mod tests {
         magic,
         record::{Record, Schema},
         tests::{Test, TestRef},
-        timestamp::timestamped::Timestamped,
+        timestamp::Ts,
     };
 
     #[derive(Debug)]
@@ -349,7 +344,7 @@ pub(crate) mod tests {
     }
 
     impl Builder<TestImmutableArrays> for TestBuilder {
-        fn push(&mut self, key: Timestamped<&str>, row: Option<TestRef>) {
+        fn push(&mut self, key: Ts<&str>, row: Option<TestRef>) {
             self.vstring.append_value(key.value);
             match row {
                 Some(row) => {
