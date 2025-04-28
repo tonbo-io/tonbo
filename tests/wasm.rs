@@ -7,7 +7,7 @@ mod tests {
     use futures::StreamExt;
     use tonbo::{
         executor::opfs::OpfsExecutor,
-        record::{DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{DataType, DynRecord, DynSchema, Record, RecordRef, Schema, Value, ValueDesc},
         DbOption, Projection, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;
@@ -258,7 +258,6 @@ mod tests {
             let tx = db.transaction().await;
             let mut scan = tx
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(&["id", "age", "name"])
                 .take()
                 .await
                 .unwrap();
@@ -267,6 +266,44 @@ mod tests {
                 let columns1 = entry.value().unwrap().columns;
                 let (_, record) = sort_items.pop_first().unwrap();
                 let columns2 = record.as_record_ref().columns;
+
+                assert_eq!(columns1.len(), columns2.len());
+                for i in 0..columns1.len() {
+                    assert_eq!(columns1.get(i), columns2.get(i));
+                }
+            }
+        }
+        {
+            use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
+            // test projection
+
+            let mut sort_items = BTreeMap::new();
+            for item in test_dyn_items() {
+                sort_items.insert(item.key(), item);
+            }
+
+            let tx = db.transaction().await;
+            let mut scan = tx
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(&["id", "age", "name"])
+                .take()
+                .await
+                .unwrap();
+
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns1 = entry.value().unwrap().columns;
+                let (_, record) = sort_items.pop_first().unwrap();
+
+                let schema = test_dyn_item_schema();
+                let mask = ProjectionMask::roots(
+                    &ArrowSchemaConverter::new()
+                        .convert(schema.arrow_schema())
+                        .unwrap(),
+                    [2, 3, 4],
+                );
+                let mut record_ref = record.as_record_ref();
+                record_ref.projection(&mask);
+                let columns2 = record_ref.columns;
 
                 assert_eq!(columns1.len(), columns2.len());
                 for i in 0..columns1.len() {
