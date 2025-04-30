@@ -6,6 +6,7 @@ use arrow::array::{
 };
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
+use parquet::data_type::AsBytes;
 
 use crate::record::{Key, KeyRef};
 
@@ -21,6 +22,18 @@ macro_rules! implement_key {
 
             fn to_arrow_datum(&self) -> Arc<dyn Datum> {
                 Arc::new($array_name::new_scalar(*self))
+            }
+
+            fn as_i32(&self) -> i32 {
+                *self as i32
+            }
+
+            fn as_i64(&self) -> i64 {
+                *self as i64
+            }
+
+            fn to_bytes(&self) -> &[u8] {
+                (*self).as_bytes()
             }
         }
 
@@ -144,6 +157,18 @@ macro_rules! implement_float_key {
 
             fn to_arrow_datum(&self) -> Arc<dyn Datum> {
                 Arc::new($array_name::new_scalar(self.0))
+            }
+
+            fn as_i32(&self) -> i32 {
+                panic!("float can not be casted to i32")
+            }
+
+            fn as_i64(&self) -> i64 {
+                panic!("float can not be casted to i64")
+            }
+
+            fn to_bytes(&self) -> &[u8] {
+                panic!("float can not be casted to i64")
             }
         }
 
