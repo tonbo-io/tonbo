@@ -10,6 +10,14 @@ pub struct User {
     grade: F32,
 }
 
+#[derive(Record, Debug, PartialEq)]
+pub struct Point {
+    #[record(primary_key)]
+    id: u64,
+    x: i32,
+    y: i32,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{io::Cursor, sync::Arc};
@@ -31,7 +39,7 @@ mod tests {
         timestamp::Ts,
     };
 
-    use crate::{User, UserImmutableArrays, UserRef, UserSchema};
+    use crate::{Point, User, UserImmutableArrays, UserRef, UserSchema};
 
     #[tokio::test]
     async fn test_record_info() {
@@ -371,5 +379,24 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_encode_and_decode_without_ref() {
+        let original = Point {
+            id: 1243,
+            x: 124,
+            y: -124,
+        };
+        let original_ref = original.as_record_ref();
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+
+        assert_eq!(original_ref.size(), 18);
+        original_ref.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        let decoded = Point::decode(&mut cursor).await.unwrap();
+        assert_eq!(original, decoded);
     }
 }
