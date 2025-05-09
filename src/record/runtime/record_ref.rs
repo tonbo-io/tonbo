@@ -1,7 +1,10 @@
 use std::{any::Any, marker::PhantomData, mem, sync::Arc};
 
 use arrow::{
-    array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
+    array::{
+        Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, GenericBinaryArray,
+        PrimitiveArray, StringArray,
+    },
     datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
         UInt16Type, UInt32Type, UInt64Type, UInt8Type,
@@ -92,10 +95,10 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
 
         let mut columns = vec![];
 
-        for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
+        for (idx, field) in full_schema.fields().iter().enumerate().skip(2) {
             let datatype = DataType::from(field.data_type());
             let schema = record_batch.schema();
-            let flattened_fields = schema.flattened_fields();
+            let flattened_fields = schema.fields();
             let batch_field = flattened_fields
                 .iter()
                 .enumerate()
@@ -110,7 +113,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             }
             let col = record_batch.column(batch_field.unwrap().0);
             let is_nullable = field.is_nullable();
-            let value = match datatype {
+            let value = match &datatype {
                 DataType::UInt8 => Self::primitive_value::<UInt8Type>(
                     col,
                     offset,
@@ -221,7 +224,178 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                         Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
+                DataType::List(desc) => {
+                    let array = col.as_list::<i32>().value(offset);
+                    match &desc.datatype {
+                        DataType::UInt8 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<UInt8Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<u8>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::UInt16 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<UInt16Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<u16>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::UInt32 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<UInt32Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<u32>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::UInt64 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<UInt64Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<u64>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Int8 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<Int8Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<i8>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Int16 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<Int16Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<i16>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Int32 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<Int32Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<i32>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Int64 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<Int64Type>>()
+                                .unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<i64>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Float32 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<Float32Type>>()
+                                .unwrap();
+                            let v = data
+                                .iter()
+                                .map(|v| F32::from(v.unwrap()))
+                                .collect::<Vec<F32>>();
+
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Float64 => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<PrimitiveArray<Float64Type>>()
+                                .unwrap();
+                            let v = data
+                                .iter()
+                                .map(|v| F64::from(v.unwrap()))
+                                .collect::<Vec<F64>>();
+
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::String => {
+                            let data = array.as_any().downcast_ref::<StringArray>().unwrap();
+                            let v = data
+                                .iter()
+                                .map(|v| v.unwrap().to_string())
+                                .collect::<Vec<String>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Boolean => {
+                            let data = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+                            let v = data.iter().map(|v| v.unwrap()).collect::<Vec<bool>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::Bytes => {
+                            let data = array
+                                .as_any()
+                                .downcast_ref::<GenericBinaryArray<i32>>()
+                                .unwrap();
+                            let v = data
+                                .iter()
+                                .map(|v| v.unwrap().to_vec())
+                                .collect::<Vec<Vec<u8>>>();
+                            if primary_index == idx - 2 {
+                                Arc::new(v) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                Arc::new((!array.is_null(offset)).then_some(v))
+                            }
+                        }
+                        DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                    }
+                }
             };
+
             columns.push(Value::new(
                 datatype,
                 field.name().to_owned(),
@@ -256,6 +430,24 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     DataType::String => col.value = Arc::<Option<String>>::new(None),
                     DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
                     DataType::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
+                    DataType::List(field) => {
+                        col.value = match &field.datatype {
+                            DataType::UInt8 => Arc::<Option<Vec<u8>>>::new(None),
+                            DataType::UInt16 => Arc::<Option<Vec<u16>>>::new(None),
+                            DataType::UInt32 => Arc::<Option<Vec<u32>>>::new(None),
+                            DataType::UInt64 => Arc::<Option<Vec<u64>>>::new(None),
+                            DataType::Int8 => Arc::<Option<Vec<i8>>>::new(None),
+                            DataType::Int16 => Arc::<Option<Vec<i16>>>::new(None),
+                            DataType::Int32 => Arc::<Option<Vec<i32>>>::new(None),
+                            DataType::Int64 => Arc::<Option<Vec<i64>>>::new(None),
+                            DataType::Float32 => Arc::<Option<f32>>::new(None),
+                            DataType::Float64 => Arc::<Option<f64>>::new(None),
+                            DataType::String => Arc::<Option<Vec<String>>>::new(None),
+                            DataType::Boolean => Arc::<Option<Vec<bool>>>::new(None),
+                            DataType::Bytes => Arc::<Option<Vec<Vec<u8>>>>::new(None),
+                            DataType::List(_) => unimplemented!("Vec<Vec<T>> is not supporte yet"),
+                        };
+                    }
                 };
             }
         }

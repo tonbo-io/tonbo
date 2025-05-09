@@ -1924,7 +1924,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.datatype(), &DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(
                     *primary_key_col
@@ -1936,7 +1936,7 @@ pub(crate) mod tests {
                 );
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::Int16);
+                assert_eq!(col.datatype(), &DataType::Int16);
                 assert_eq!(col.desc.name, "height".to_string());
                 let height = *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
                 if i < 45 {
@@ -1951,41 +1951,41 @@ pub(crate) mod tests {
                 }
 
                 let col = columns.get(3).unwrap();
-                assert_eq!(col.datatype(), DataType::Int32);
+                assert_eq!(col.datatype(), &DataType::Int32);
                 assert_eq!(col.desc.name, "weight".to_string());
                 let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), None);
 
                 let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype(), DataType::String);
+                assert_eq!(col.datatype(), &DataType::String);
                 assert_eq!(col.desc.name, "name".to_string());
                 let name = col.value.as_ref().downcast_ref::<Option<String>>();
                 assert!(name.is_some());
                 assert_eq!(name.unwrap(), &None);
 
                 let col = columns.get(6).unwrap();
-                assert_eq!(col.datatype(), DataType::Boolean);
+                assert_eq!(col.datatype(), &DataType::Boolean);
                 assert_eq!(col.desc.name, "enabled".to_string());
                 let enabled = col.value.as_ref().downcast_ref::<Option<bool>>();
                 assert!(enabled.is_some());
                 assert_eq!(*enabled.unwrap(), None);
 
                 let col = columns.get(7).unwrap();
-                assert_eq!(col.datatype(), DataType::Bytes);
+                assert_eq!(col.datatype(), &DataType::Bytes);
                 assert_eq!(col.desc.name, "bytes".to_string());
                 let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
                 assert!(bytes.is_some());
                 assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
 
                 let col = columns.get(8).unwrap();
-                assert_eq!(col.datatype(), DataType::Float32);
+                assert_eq!(col.datatype(), &DataType::Float32);
                 let v = col.value.as_ref().downcast_ref::<Option<F32>>();
                 assert!(v.is_some());
                 assert_eq!(v.unwrap(), &Some(F32::from(i as f32 * 1.11)));
 
                 let col = columns.get(9).unwrap();
-                assert_eq!(col.datatype(), DataType::Float64);
+                assert_eq!(col.datatype(), &DataType::Float64);
                 let v = col.value.as_ref().downcast_ref::<Option<F64>>();
                 assert!(v.is_some());
                 assert_eq!(v.unwrap(), &Some(F64::from(i as f64 * 1.01)));
@@ -2112,7 +2112,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.datatype(), &DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
 
@@ -2132,7 +2132,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.datatype(), &DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
 
@@ -2152,7 +2152,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
+                assert_eq!(primary_key_col.datatype(), &DataType::Int64);
                 assert_eq!(primary_key_col.desc.name, "id".to_string());
                 assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
 

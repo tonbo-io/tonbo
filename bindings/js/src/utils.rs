@@ -11,7 +11,7 @@ fn to_col_value<T: 'static + Send + Sync>(value: T, primary: bool) -> Arc<dyn An
     }
 }
 
-fn none_value(datatype: DataType) -> Arc<dyn Any + Send + Sync> {
+fn none_value(datatype: &DataType) -> Arc<dyn Any + Send + Sync> {
     match datatype {
         DataType::UInt8 => Arc::new(Option::<u8>::None),
         DataType::UInt16 => Arc::new(Option::<u16>::None),
@@ -26,6 +26,7 @@ fn none_value(datatype: DataType) -> Arc<dyn Any + Send + Sync> {
         DataType::String => Arc::new(Option::<String>::None),
         DataType::Boolean => Arc::new(Option::<bool>::None),
         DataType::Bytes => Arc::new(Option::<Vec<u8>>::None),
+        DataType::List(_) => unimplemented!(),
     }
 }
 
@@ -35,9 +36,9 @@ pub(crate) fn parse_key(desc: &ValueDesc, key: JsValue, primary: bool) -> Result
             true => return Err(format!("{} can not be null", &desc.name).into()),
             false => {
                 return Ok(Value::new(
-                    desc.datatype,
+                    desc.datatype.clone(),
                     desc.name.clone(),
-                    none_value(desc.datatype),
+                    none_value(&desc.datatype),
                     desc.is_nullable,
                 ))
             }
@@ -59,10 +60,11 @@ pub(crate) fn parse_key(desc: &ValueDesc, key: JsValue, primary: bool) -> Result
         DataType::Bytes => {
             to_col_value::<Vec<u8>>(key.dyn_into::<Uint8Array>().unwrap().to_vec(), primary)
         }
+        DataType::List(_) => unimplemented!(),
     };
 
     Ok(Value::new(
-        desc.datatype,
+        desc.datatype.clone(),
         desc.name.clone(),
         value,
         desc.is_nullable,
@@ -160,6 +162,7 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
                     .map(|v| Uint8Array::from(v.as_slice()).into())
                     .unwrap_or(JsValue::NULL),
             },
+            DataType::List(_) => unimplemented!(),
         };
 
         Reflect::set(&obj, &col.desc.name.as_str().into(), &value).unwrap();
@@ -181,7 +184,7 @@ mod tests {
         {
             let desc = ValueDesc::new("id".to_string(), DataType::UInt64, false);
             let key_col = parse_key(&desc, JsValue::from(19), true).unwrap();
-            assert_eq!(key_col.datatype(), DataType::UInt64);
+            assert_eq!(key_col.datatype(), &DataType::UInt64);
             assert_eq!(key_col.value.as_ref().downcast_ref::<u64>(), Some(&19_u64));
         }
         {
@@ -192,7 +195,7 @@ mod tests {
         {
             let desc = ValueDesc::new("name".to_string(), DataType::String, false);
             let key_col = parse_key(&desc, JsValue::from("Hello tonbo"), false).unwrap();
-            assert_eq!(key_col.datatype(), DataType::String);
+            assert_eq!(key_col.datatype(), &DataType::String);
             assert_eq!(
                 key_col.value.as_ref().downcast_ref::<Option<String>>(),
                 Some(&Some("Hello tonbo".to_string()))
@@ -201,7 +204,7 @@ mod tests {
         {
             let desc = ValueDesc::new("data".to_string(), DataType::Bytes, false);
             let key_col = parse_key(&desc, JsValue::from(b"Hello tonbo".to_vec()), false).unwrap();
-            assert_eq!(key_col.datatype(), DataType::Bytes);
+            assert_eq!(key_col.datatype(), &DataType::Bytes);
             assert_eq!(
                 key_col.value.as_ref().downcast_ref::<Option<Vec<u8>>>(),
                 Some(&Some(b"Hello tonbo".to_vec()))
