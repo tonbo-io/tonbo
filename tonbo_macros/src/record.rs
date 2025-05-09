@@ -167,6 +167,7 @@ fn trait_record_codegen(
     let mut size_fields: Vec<TokenStream> = Vec::new();
 
     let mut to_ref_init_fields: Vec<TokenStream> = Vec::new();
+    let mut has_ref = false;
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -176,6 +177,7 @@ fn trait_record_codegen(
         let is_string = matches!(data_type, DataType::String);
         let is_bytes = matches!(data_type, DataType::Bytes);
         let size_field = data_type.to_size_field(field_name, is_nullable);
+        has_ref = has_ref || is_string || is_bytes;
 
         size_fields.push(quote! {
             + #size_field
@@ -206,6 +208,15 @@ fn trait_record_codegen(
     }
 
     let struct_ref_name = struct_name.to_ref_ident();
+    let struct_ref_type = if has_ref {
+        quote! {
+            #struct_ref_name<'r>
+        }
+    } else {
+        quote! {
+            #struct_ref_name
+        }
+    };
     let struct_schema_name = struct_name.to_schema_ident();
 
     let PrimaryKey {
@@ -217,7 +228,7 @@ fn trait_record_codegen(
         impl ::tonbo::record::Record for #struct_name {
             type Schema = #struct_schema_name;
 
-            type Ref<'r> = #struct_ref_name<'r>
+            type Ref<'r> = #struct_ref_type
             where
                 Self: 'r;
 
@@ -298,6 +309,7 @@ fn struct_ref_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> T
     let struct_ref_name = struct_name.to_ref_ident();
     let mut ref_fields: Vec<TokenStream> = Vec::new();
 
+    let mut has_ref = false;
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
 
@@ -306,6 +318,8 @@ fn struct_ref_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> T
         let is_string = matches!(data_type, DataType::String);
         let is_bytes = matches!(data_type, DataType::Bytes);
         let field_ty = data_type.to_field_ty();
+
+        has_ref = has_ref || is_string || is_bytes;
 
         if field.primary_key.unwrap_or_default() {
             if is_string {
@@ -324,11 +338,19 @@ fn struct_ref_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> T
         }
     }
 
-    quote! {
-
-        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-        pub struct #struct_ref_name<'r> {
-            #(#ref_fields)*
+    if has_ref {
+        quote! {
+            #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+            pub struct #struct_ref_name<'r> {
+                #(#ref_fields)*
+            }
+        }
+    } else {
+        quote! {
+            #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+            pub struct #struct_ref_name {
+                #(#ref_fields)*
+            }
         }
     }
 }
@@ -407,6 +429,7 @@ fn trait_decode_ref_codegen(
 
     let mut from_record_batch_fields: Vec<TokenStream> = Vec::new();
     let mut field_names: Vec<TokenStream> = Vec::new();
+    let mut has_ref = false;
 
     for (i, field) in fields.iter().enumerate() {
         let field_name = field.ident.as_ref().unwrap();
@@ -414,6 +437,10 @@ fn trait_decode_ref_codegen(
         let field_index = i + 2;
 
         let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
+
+        if matches!(data_type, DataType::String | DataType::Bytes) {
+            has_ref = true;
+        }
 
         let as_method = data_type.to_as_method();
 
@@ -472,11 +499,21 @@ fn trait_decode_ref_codegen(
 
     let struct_ref_name = struct_name.to_ref_ident();
 
+    let struct_ref_type = if has_ref {
+        quote! {
+            #struct_ref_name<'r>
+        }
+    } else {
+        quote! {
+            #struct_ref_name
+        }
+    };
+
     quote! {
-        impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_name<'r> {
+        impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_type {
             type Record = #struct_name;
 
-            fn key(self) -> <<<<#struct_ref_name<'r> as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'r> {
+            fn key(self) -> <<<<#struct_ref_type as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'r> {
                 self.#primary_key_name
             }
 
@@ -515,10 +552,16 @@ fn trait_decode_ref_codegen(
 fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) -> TokenStream {
     let mut encode_method_fields: Vec<TokenStream> = Vec::new();
     let mut encode_size_fields: Vec<TokenStream> = Vec::new();
+    let mut has_ref = false;
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
 
+        let (data_type, _is_nullable) = field.to_data_type().expect("unreachable code");
+
+        if matches!(data_type, DataType::String | DataType::Bytes) {
+            has_ref = true;
+        }
         encode_method_fields.push(quote! {
                     ::tonbo::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
                         field_name: stringify!(#field_name).to_string(),
@@ -532,21 +575,42 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
     let struct_ref_name = struct_name.to_ref_ident();
 
-    quote! {
-        impl<'r> ::tonbo::Encode for #struct_ref_name<'r> {
-            type Error = ::tonbo::record::RecordEncodeError;
+    if has_ref {
+        quote! {
+            impl<'r> ::tonbo::Encode for #struct_ref_name<'r> {
+                type Error = ::tonbo::record::RecordEncodeError;
 
-            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
-            where
-                W: ::tonbo::Write,
-            {
-                #(#encode_method_fields)*
+                async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+                where
+                    W: ::tonbo::Write,
+                {
+                    #(#encode_method_fields)*
 
-                Ok(())
+                    Ok(())
+                }
+
+                fn size(&self) -> usize {
+                    0 #(#encode_size_fields)*
+                }
             }
+        }
+    } else {
+        quote! {
+            impl ::tonbo::Encode for #struct_ref_name {
+                type Error = ::tonbo::record::RecordEncodeError;
 
-            fn size(&self) -> usize {
-                0 #(#encode_size_fields)*
+                async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+                where
+                    W: ::tonbo::Write,
+                {
+                    #(#encode_method_fields)*
+
+                    Ok(())
+                }
+
+                fn size(&self) -> usize {
+                    0 #(#encode_size_fields)*
+                }
             }
         }
     }
