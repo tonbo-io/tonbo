@@ -996,7 +996,11 @@ pub(crate) mod tests {
     };
     use async_lock::RwLock;
     use flume::{bounded, Receiver};
-    use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
+    use fusio::{
+        disk::{LocalFs, TokioFs},
+        path::Path,
+        DynFs, SeqRead, Write,
+    };
     use fusio_dispatch::FsOptions;
     use fusio_log::{Decode, Encode};
     use futures::StreamExt;
@@ -1248,6 +1252,45 @@ pub(crate) mod tests {
                 .unwrap(),
         );
 
+        mutable
+            .into_immutable()
+            .await
+            .unwrap()
+            .1
+            .as_record_batch()
+            .clone()
+    }
+
+    pub(crate) async fn get_test_record_batch_with_size(
+        option: DbOption,
+        size: usize,
+    ) -> RecordBatch {
+        let base_fs = Arc::new(LocalFs {});
+
+        let trigger = TriggerFactory::create(TriggerType::Length(10000));
+        let mutable = MutableMemTable::new(
+            &option,
+            trigger.clone(),
+            base_fs.clone(),
+            Arc::new(TestSchema {}),
+        )
+        .await
+        .unwrap();
+        for i in 0..size {
+            if mutable
+                .insert(
+                    LogType::Full,
+                    Test {
+                        vstring: format!("{:08}", i),
+                        vu32: i as u32,
+                        vbool: Some(true),
+                    },
+                    1.into(),
+                )
+                .await
+                .unwrap()
+            {}
+        }
         mutable
             .into_immutable()
             .await

@@ -9,9 +9,13 @@ use arrow::{
 };
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, DecodeError, Encode};
+use parquet::data_type::AsBytes;
 
 use super::DataType;
-use crate::record::{Key, KeyRef, F32, F64};
+use crate::{
+    cast_arc_value,
+    record::{Key, KeyRef, F32, F64},
+};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {
@@ -257,6 +261,50 @@ macro_rules! implement_key_col {
                     )),
                 }
             }
+
+            fn as_i32(&self) -> i32 {
+                match self.datatype() {
+                    DataType::UInt8 => *cast_arc_value!(self.value, u8) as i32,
+                    DataType::UInt16 => *cast_arc_value!(self.value, u16) as i32,
+                    DataType::UInt32 => *cast_arc_value!(self.value, u32) as i32,
+                    DataType::UInt64 => *cast_arc_value!(self.value, u64) as i32,
+                    DataType::Int8 => *cast_arc_value!(self.value, i8) as i32,
+                    DataType::Int16 => *cast_arc_value!(self.value, i16) as i32,
+                    DataType::Int32 => *cast_arc_value!(self.value, i32),
+                    DataType::Int64 => *cast_arc_value!(self.value, i64) as i32,
+                    _ => panic!("Can not convert to i32"),
+                }
+
+            }
+            fn as_i64(&self) -> i64 {
+                match self.datatype() {
+                    DataType::UInt8 => *cast_arc_value!(self.value, u8) as i64,
+                    DataType::UInt16 => *cast_arc_value!(self.value, u16) as i64,
+                    DataType::UInt32 => *cast_arc_value!(self.value, u32) as i64,
+                    DataType::UInt64 => *cast_arc_value!(self.value, u64) as i64,
+                    DataType::Int8 => *cast_arc_value!(self.value, i8) as i64,
+                    DataType::Int16 => *cast_arc_value!(self.value, i16) as i64,
+                    DataType::Int32 => *cast_arc_value!(self.value, i64),
+                    DataType::Int64 => *cast_arc_value!(self.value, i64) as i64,
+                    _ => panic!("Can not convert to i32"),
+                }
+
+            }
+            fn to_bytes(&self) -> &[u8] {
+                match self.datatype() {
+                    DataType::UInt8 => cast_arc_value!(self.value, u8).as_bytes(),
+                    DataType::UInt16 => cast_arc_value!(self.value, u16).as_bytes(),
+                    DataType::UInt32 => cast_arc_value!(self.value, u32).as_bytes(),
+                    DataType::UInt64 => cast_arc_value!(self.value, u64).as_bytes(),
+                    DataType::Int8 => cast_arc_value!(self.value, i8).as_bytes(),
+                    DataType::Int16 => cast_arc_value!(self.value, i16).as_bytes(),
+                    DataType::Int32 => cast_arc_value!(self.value, i64).as_bytes(),
+                    DataType::Int64 => cast_arc_value!(self.value, i64).as_bytes(),
+                    _ => panic!("Can not convert to i32"),
+                }
+
+            }
+
         }
     }
 }
