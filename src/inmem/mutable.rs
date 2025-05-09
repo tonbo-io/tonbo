@@ -56,13 +56,7 @@ where
             let file_id = generate_file_id();
 
             wal = Some(Mutex::new(
-                WalFile::<R>::new(
-                    fs,
-                    option.wal_path(file_id),
-                    option.wal_buffer_size,
-                    file_id,
-                )
-                .await,
+                WalFile::<R>::new(fs, option.wal_dir_path(), file_id, option.wal_buffer_size).await,
             ));
         };
 

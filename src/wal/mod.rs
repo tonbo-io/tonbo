@@ -1,26 +1,26 @@
 pub(crate) mod log;
 
-use std::{pin::pin, sync::Arc};
+use std::sync::Arc;
 
 use async_stream::stream;
-use fusio::{disk::LocalFs, DynFs};
-use fusio_log::{error::LogError, Decode, FsOptions, Logger, Options, Path};
+use fusio::DynFs;
+use fusio_log::{error::LogError, Decode, FsOptions, Path};
 use futures_core::Stream;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use thiserror::Error;
 
-use crate::{fs::FileId, record::Record, wal::log::Log};
+use crate::{
+    fs::{filename, logger::Logger, FileId, FileType},
+    record::Record,
+    wal::log::Log,
+};
 
 pub(crate) struct WalFile<R>
 where
     R: Record,
 {
-    file: Option<Logger<Log<R>>>,
+    file: Logger<Log<R>>,
     file_id: FileId,
-    path: Path,
-    wal_buffer_size: usize,
-    fs: Arc<dyn DynFs>,
-    local_fs: Arc<dyn DynFs>,
 }
 
 impl<R> WalFile<R>
@@ -29,26 +29,20 @@ where
 {
     pub(crate) async fn new(
         fs: Arc<dyn DynFs>,
-        path: Path,
-        wal_buffer_size: usize,
+        wal_dir: Path,
         file_id: FileId,
+        wal_buffer_size: usize,
     ) -> Self {
-        let local_fs = Arc::new(LocalFs {});
-        let file = Options::new(path.clone())
-            .buf_size(wal_buffer_size)
-            .truncate(true)
-            .build_with_fs::<Log<R>>(local_fs.clone())
-            .await
-            .unwrap();
-
-        Self {
-            file: Some(file),
-            file_id,
-            path,
-            wal_buffer_size,
+        let file = Logger::open(
+            wal_dir,
             fs,
-            local_fs,
-        }
+            filename(file_id, FileType::Wal).as_str(),
+            wal_buffer_size,
+        )
+        .await
+        .unwrap();
+
+        Self { file, file_id }
     }
 
     pub(crate) fn file_id(&self) -> FileId {
@@ -60,52 +54,16 @@ impl<R> WalFile<R>
 where
     R: Record,
 {
-    pub(crate) async fn write<'r>(&mut self, data: &Log<R>) -> Result<(), LogError> {
-        if self.file.is_none() {
-            self.file = Some(
-                Options::new(self.path.clone())
-                    .buf_size(self.wal_buffer_size)
-                    .build_with_fs::<Log<R>>(self.local_fs.clone())
-                    .await?,
-            );
-        }
-
-        self.file.as_mut().unwrap().write(data).await
+    pub(crate) async fn write(&mut self, data: &Log<R>) -> Result<(), LogError> {
+        self.file.write(data).await
     }
 
     pub(crate) async fn flush(&mut self) -> Result<(), LogError> {
-        match self.file.take() {
-            Some(mut file) => {
-                file.close().await?;
-                if self.fs.file_system() != self.local_fs.file_system() {
-                    let mut log = Options::new(self.path.clone())
-                        .buf_size(self.wal_buffer_size)
-                        .truncate(true)
-                        .build_with_fs::<Log<R>>(self.fs.clone())
-                        .await
-                        .unwrap();
-
-                    let mut log_stream =
-                        pin!(Self::recover(FsOptions::Local, self.path.clone()).await);
-                    while let Some(record) = log_stream.next().await {
-                        let record_batch = record.unwrap();
-                        log.write_batch(record_batch.iter()).await?;
-                    }
-
-                    log.close().await?;
-                }
-                Ok(())
-            }
-            None => Ok(()),
-        }
+        self.file.flush().await
     }
 
-    pub(crate) async fn remove(mut self) -> Result<(), LogError> {
-        if let Some(mut file) = self.file.take() {
-            file.close().await?;
-        }
-        self.fs.remove(&self.path).await?;
-        Ok(())
+    pub(crate) async fn remove(self) -> Result<(), LogError> {
+        self.file.remove().await
     }
 }
 
@@ -118,9 +76,7 @@ where
         path: Path,
     ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<<R as Decode>::Error>>> {
         stream! {
-            let mut stream = Options::new(path)
-                .fs(fs_option)
-                .recover::<Log<R>>()
+            let mut stream = Logger::<Log<R>>::recover(fs_option, path)
                 .await
                 .unwrap();
                 while let Ok(batch) = stream.try_next().await {
@@ -167,10 +123,9 @@ mod tests {
 
         let wal_id = generate_file_id();
         let fs = fs_option.clone().parse().unwrap();
-        let wal_path = Path::from_filesystem_path(temp_dir.path())
-            .unwrap()
-            .child(format!("{}.{}", wal_id, FileType::Wal));
-        let mut wal = WalFile::<String>::new(fs.clone(), wal_path.clone(), 0, wal_id).await;
+        let wal_dir = Path::from_filesystem_path(temp_dir.path()).unwrap();
+        let wal_path = wal_dir.child(format!("{}.{}", wal_id, FileType::Wal));
+        let mut wal = WalFile::<String>::new(fs.clone(), wal_dir, wal_id, 0).await;
 
         {
             wal.write(&Log::new(
