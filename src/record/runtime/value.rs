@@ -152,14 +152,23 @@ macro_rules! implement_col {
 
         impl PartialEq for Value {
             fn eq(&self, other: &Self) -> bool {
-                self.datatype() == other.datatype()
+                self.name() == other.name()
+                && self.datatype() == other.datatype()
                 && self.is_nullable() == other.is_nullable()
                 && match self.datatype() {
                         $(
-                            DataType::$DataType => self
-                                .value
-                                .downcast_ref::<$Type>()
-                                .eq(&other.value.downcast_ref::<$Type>()),
+                            DataType::$DataType => {
+                                if let Some(v) = self
+                                    .value
+                                    .downcast_ref::<$Type>() {
+                                        v.eq(other.value.downcast_ref::<$Type>().unwrap())
+                                    } else {
+                                        self.value
+                                            .downcast_ref::<Option<$Type>>()
+                                            .unwrap()
+                                            .eq(other.value.downcast_ref::<Option<$Type>>().unwrap())
+                                    }
+                            }
                         )*
                     }
             }
@@ -178,6 +187,7 @@ macro_rules! implement_col {
         impl Debug for Value {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let mut debug_struct = f.debug_struct("Value");
+                debug_struct.field("name", &self.name());
                 match self.datatype() {
                     $(
                         DataType::$DataType => {
@@ -452,3 +462,59 @@ implement_key_col!(
 for_datatype! { implement_col }
 for_datatype! { implement_decode_col }
 for_datatype! { implement_encode_col }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::Value;
+    use crate::record::DataType;
+
+    #[test]
+    fn test_value_eq() {
+        {
+            let value1 = Value::new(
+                DataType::UInt64,
+                "uint64".to_string(),
+                Arc::new(123_u64),
+                false,
+            );
+            let value2 = Value::new(
+                DataType::UInt64,
+                "uint64".to_string(),
+                Arc::new(123_u64),
+                false,
+            );
+            let value3 = Value::new(
+                DataType::UInt64,
+                "uint64".to_string(),
+                Arc::new(124_u64),
+                false,
+            );
+            assert_eq!(value1, value2);
+            assert_ne!(value1, value3);
+        }
+        {
+            let value1 = Value::new(
+                DataType::UInt64,
+                "uint64".to_string(),
+                Arc::new(Some(123_u64)),
+                true,
+            );
+            let value2 = Value::new(
+                DataType::UInt64,
+                "uint64".to_string(),
+                Arc::new(Some(123_u64)),
+                true,
+            );
+            let value3 = Value::new(
+                DataType::UInt64,
+                "uint64".to_string(),
+                Arc::new(Some(124_u64)),
+                true,
+            );
+            assert_eq!(value1, value2);
+            assert_ne!(value1, value3);
+        }
+    }
+}

@@ -809,11 +809,11 @@ impl DynRecordBuilder {
             }
             DataType::Float32 => {
                 Self::as_builder_mut::<PrimitiveBuilder<Float32Type>>(builder.as_mut())
-                    .append_value(*cast_arc_value!(col.value, f32))
+                    .append_value(cast_arc_value!(col.value, F32).into())
             }
             DataType::Float64 => {
                 Self::as_builder_mut::<PrimitiveBuilder<Float64Type>>(builder.as_mut())
-                    .append_value(*cast_arc_value!(col.value, f64))
+                    .append_value(cast_arc_value!(col.value, F64).into())
             }
             DataType::String => Self::as_builder_mut::<StringBuilder>(builder.as_mut())
                 .append_value(cast_arc_value!(col.value, String)),
@@ -849,6 +849,67 @@ mod tests {
         inmem::immutable::{ArrowArrays, Builder},
         record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema, F32, F64},
     };
+
+    #[tokio::test]
+    async fn test_build_primary_key() {
+        {
+            let schema = dyn_schema!(("id", UInt64, false), 0);
+            let record = dyn_record!(("id", UInt64, false, 1_u64), 0);
+            let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+            let key = crate::timestamp::Ts {
+                ts: 0.into(),
+                value: record.key(),
+            };
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            builder.push(key.clone(), None);
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            let arrays = builder.finish(None);
+            let res = arrays.get(0, &ProjectionMask::all());
+            let cols = res.unwrap().unwrap().columns;
+            assert_eq!(cols.len(), 1);
+            for (actual, expected) in cols.iter().zip(record.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
+        }
+        {
+            let schema = dyn_schema!(("id", String, false), 0);
+            let record = dyn_record!(("id", String, false, "abc".to_string()), 0);
+            let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+            let key = crate::timestamp::Ts {
+                ts: 0.into(),
+                value: record.key(),
+            };
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            builder.push(key.clone(), None);
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            let arrays = builder.finish(None);
+            let res = arrays.get(0, &ProjectionMask::all());
+            let cols = res.unwrap().unwrap().columns;
+            assert_eq!(cols.len(), 1);
+            for (actual, expected) in cols.iter().zip(record.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
+        }
+        {
+            let schema = dyn_schema!(("id", Float32, false), 0);
+            let record = dyn_record!(("id", Float32, false, F32::from(3.2324)), 0);
+            let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+            let key = crate::timestamp::Ts {
+                ts: 0.into(),
+                value: record.key(),
+            };
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            builder.push(key.clone(), None);
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            let arrays = builder.finish(None);
+            let res = arrays.get(0, &ProjectionMask::all());
+            let cols = res.unwrap().unwrap().columns;
+            assert_eq!(cols.len(), 1);
+            for (actual, expected) in cols.iter().zip(record.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_build_array() {
