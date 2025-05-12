@@ -14,6 +14,18 @@ impl Key for String {
     fn to_arrow_datum(&self) -> Arc<dyn Datum> {
         Arc::new(StringArray::new_scalar(self))
     }
+
+    fn as_i32(&self) -> i32 {
+        panic!("String can not be casted to i32")
+    }
+
+    fn as_i64(&self) -> i64 {
+        panic!("String can not be casted to i64")
+    }
+
+    fn to_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
 }
 
 impl<'r> KeyRef<'r> for &'r str {

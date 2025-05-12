@@ -17,6 +17,12 @@ pub trait Key:
     fn as_key_ref(&self) -> Self::Ref<'_>;
 
     fn to_arrow_datum(&self) -> Arc<dyn Datum>;
+
+    fn as_i32(&self) -> i32;
+
+    fn as_i64(&self) -> i64;
+
+    fn to_bytes(&self) -> &[u8];
 }
 
 pub trait KeyRef<'r>: Clone + Encode + Send + Sync + Ord + std::fmt::Debug {
