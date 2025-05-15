@@ -75,6 +75,7 @@ path = "benches/criterion/writes.rs"
 required-features = ["sled"]
 
 [dependencies]
+aisle = { git = "https://github.com/tonbo-io/aisle" }
 arrow = "55"
 async-lock = "3"
 async-stream = "0.3"
@@ -84,15 +85,15 @@ crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "47", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio", features = [
+fusio = { git = "https://github.com/tonbo-io/fusio", rev = "0217218b29713978929a272d9f14feb08cddf325", version = "0.3.8", package = "fusio", features = [
     "dyn",
     "fs",
 ] }
-fusio-dispatch = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-dispatch" }
-fusio-log = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-log", default-features = false, features = [
+fusio-dispatch = { git = "https://github.com/tonbo-io/fusio", rev = "0217218b29713978929a272d9f14feb08cddf325", version = "0.3.8", package = "fusio-dispatch" }
+fusio-log = { git = "https://github.com/tonbo-io/fusio", rev = "0217218b29713978929a272d9f14feb08cddf325", version = "0.3.8", package = "fusio-log", default-features = false, features = [
     "bytes",
 ] }
-fusio-parquet = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-parquet" }
+fusio-parquet = { git = "https://github.com/tonbo-io/fusio", rev = "0217218b29713978929a272d9f14feb08cddf325", version = "0.3.8", package = "fusio-parquet" }
 futures-core = "0.3"
 futures-util = "0.3"
 lockable = "0.1.1"

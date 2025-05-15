@@ -1,14 +1,11 @@
 use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
+use aisle::ParquetRecordBatchStreamBuilder;
 use fusio::{dynamic::DynFile, DynRead};
 use fusio_parquet::reader::AsyncReader;
 use futures_util::StreamExt;
 use parquet::{
-    arrow::{
-        arrow_reader::{ArrowReaderBuilder, ArrowReaderOptions},
-        async_reader::{AsyncFileReader, AsyncReader as ParquetAsyncReader},
-        ParquetRecordBatchStreamBuilder, ProjectionMask,
-    },
+    arrow::{arrow_reader::ArrowReaderOptions, async_reader::AsyncFileReader, ProjectionMask},
     errors::Result as ParquetResult,
 };
 use parquet_lru::{BoxedFileReader, DynLruCache};
@@ -55,8 +52,7 @@ where
         self,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> ParquetResult<ArrowReaderBuilder<ParquetAsyncReader<Box<dyn AsyncFileReader + 'static>>>>
-    {
+    ) -> ParquetResult<ParquetRecordBatchStreamBuilder<Box<dyn AsyncFileReader + 'static>>> {
         let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(
             Box::new(self.reader) as Box<dyn AsyncFileReader + 'static>,
             ArrowReaderOptions::default().with_page_index(true),
