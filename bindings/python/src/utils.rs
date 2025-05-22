@@ -4,7 +4,10 @@ use pyo3::{
     types::{PyBytes, PyDict, PyDictMethods},
     Bound, Py, PyAny, Python,
 };
-use tonbo::record::{DataType as TonboDataType, Value};
+use tonbo::{
+    cast_arc_value,
+    record::{DataType as TonboDataType, Value, F64},
+};
 
 use crate::{column::Column, datatype::DataType, range};
 
@@ -85,11 +88,14 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                     dict.set_item(name, value).unwrap();
                 }
             }
-            TonboDataType::Float32 => {
-                unimplemented!()
-            }
             TonboDataType::Float64 => {
-                unimplemented!()
+                if idx == primary_key_index {
+                    let value: f64 = cast_arc_value!(col.value, F64).into();
+                    dict.set_item(name, value).unwrap();
+                } else {
+                    let value = cast_arc_value!(col.value, Option<F64>).map(|v| f64::from(v));
+                    dict.set_item(name, value).unwrap();
+                }
             }
             TonboDataType::String => {
                 if idx == primary_key_index {
@@ -124,11 +130,17 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                         .unwrap();
                 }
             }
+            TonboDataType::Float32 => {
+                unreachable!()
+            }
         }
     }
     dict
 }
 
+/// convert key to tonbo key
+///
+/// Note: `f64` will be convert `F64`
 pub(crate) fn to_key(
     py: Python,
     datatype: &DataType,
@@ -152,9 +164,15 @@ pub(crate) fn to_key(
         DataType::Bytes => {
             Arc::new(key.extract::<Vec<u8>>(py).unwrap()) as Arc<dyn Any + Send + Sync>
         }
+        DataType::Float => {
+            Arc::new(F64::from(key.extract::<f64>(py).unwrap())) as Arc<dyn Any + Send + Sync>
+        }
     }
 }
 
+/// convert col to tonbo col
+///
+/// Note: `f64` will be convert `F64`
 pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> Value {
     Value::new(
         TonboDataType::from(&col.datatype),
