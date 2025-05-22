@@ -5,7 +5,7 @@ use std::{
 };
 
 use pyo3::{pyclass, PyObject, Python, ToPyObject};
-use tonbo::record::DataType as TonboDataType;
+use tonbo::record::{DataType as TonboDataType, F64};
 
 #[pyclass]
 #[derive(PartialEq, Clone)]
@@ -21,6 +21,7 @@ pub enum DataType {
     String,
     Boolean,
     Bytes,
+    Float,
 }
 
 impl Debug for DataType {
@@ -37,6 +38,7 @@ impl Debug for DataType {
             DataType::String => f.write_str("str"),
             DataType::Boolean => f.write_str("bool"),
             DataType::Bytes => f.write_str("bytes"),
+            DataType::Float => f.write_str("float"),
         }
     }
 }
@@ -56,6 +58,7 @@ impl DataType {
             DataType::String => String::default().to_object(py),
             DataType::Boolean => bool::default().to_object(py),
             DataType::Bytes => Vec::<u8>::default().to_object(py),
+            DataType::Float => F64::default().to_object(py),
         }
     }
     pub(crate) fn none_value(&self) -> Arc<dyn Any + Send + Sync> {
@@ -71,6 +74,7 @@ impl DataType {
             DataType::String => Arc::new(Option::<String>::None),
             DataType::Boolean => Arc::new(Option::<bool>::None),
             DataType::Bytes => Arc::new(Option::<Vec<u8>>::None),
+            DataType::Float => Arc::new(Option::<F64>::None),
         }
     }
 }
@@ -89,6 +93,7 @@ impl From<DataType> for TonboDataType {
             DataType::String => TonboDataType::String,
             DataType::Boolean => TonboDataType::Boolean,
             DataType::Bytes => TonboDataType::Bytes,
+            DataType::Float => TonboDataType::Float64,
         }
     }
 }
@@ -107,6 +112,7 @@ impl From<&DataType> for TonboDataType {
             DataType::String => TonboDataType::String,
             DataType::Boolean => TonboDataType::Boolean,
             DataType::Bytes => TonboDataType::Bytes,
+            DataType::Float => TonboDataType::Float64,
         }
     }
 }

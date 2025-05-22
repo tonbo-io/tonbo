@@ -9,13 +9,14 @@ class User:
     name = Column(DataType.String, name="name", nullable=False)
     email = Column(DataType.String, name="email", nullable=True)
     data = Column(DataType.Bytes, name="data", nullable=True)
+    grade = Column(DataType.Float, name="grade", nullable=True)
 
 
 async def main():
     temp_dir = tempfile.TemporaryDirectory()
 
     db = TonboDB(DbOption(temp_dir.name), User())
-    await db.insert(User(id=18, age=175, name="Alice"))
+    await db.insert(User(id=18, age=175, name="Alice", grade = 1.23))
 
     record = await db.get(18)
     assert record == {
@@ -24,6 +25,7 @@ async def main():
         "name": "Alice",
         "email": None,
         "data": None,
+        "grade": 1.23,
     }
 
     txn = await db.transaction()
@@ -34,6 +36,7 @@ async def main():
         "name": "Alice",
         "email": None,
         "data": None,
+        "grade": 1.23,
     }
 
     txn.insert(
@@ -43,6 +46,7 @@ async def main():
             name="Bob",
             data=b"Hello Tonbo!",
             email="contact@tonbo.io",
+            grade = 2.23,
         )
     )
     result = await txn.get(19)
@@ -52,6 +56,7 @@ async def main():
         "name": "Bob",
         "email": "contact@tonbo.io",
         "data": b"Hello Tonbo!",
+        "grade": 2.23,
     }
 
     await txn.commit()
@@ -60,7 +65,7 @@ async def main():
         Bound.Excluded(18),
         None,
         limit=100,
-        projection=["id", "email", "data"],
+        projection=["id", "email", "data", "grade"],
     )
     async for record in scan:
         assert record["age"] is None
