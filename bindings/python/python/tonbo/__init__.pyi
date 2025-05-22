@@ -31,6 +31,7 @@ class DataType(Enum):
     String = auto()
     Boolean = auto()
     Bytes = auto()
+    Float = auto()
 
 @final
 class Column:

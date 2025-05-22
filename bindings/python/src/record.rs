@@ -6,6 +6,7 @@ use pyo3::{
     types::{PyDict, PyMapping, PyString},
     Bound,
 };
+use tonbo::record::F64;
 
 use crate::{column::Column, datatype::DataType};
 
@@ -106,6 +107,13 @@ impl Record {
                         match col.nullable {
                             true => col.value = Arc::new(Some(value)),
                             false => col.value = Arc::new(value),
+                        }
+                    }
+                    DataType::Float => {
+                        let value = v.extract::<f64>()?;
+                        match col.nullable {
+                            true => col.value = Arc::new(Some(F64::from(value))),
+                            false => col.value = Arc::new(F64::from(value)),
                         }
                     }
                 };
