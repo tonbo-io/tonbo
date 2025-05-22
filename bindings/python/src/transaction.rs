@@ -2,10 +2,10 @@ use std::{mem::transmute, sync::Arc};
 
 use pyo3::{
     pyclass, pymethods,
-    types::{PyAnyMethods, PyMapping, PyMappingMethods, PySequenceMethods, PyTuple},
-    Bound, IntoPy, Py, PyAny, PyResult, Python,
+    types::{PyAnyMethods, PyListMethods, PyMapping, PyMappingMethods, PyTuple},
+    Bound, IntoPyObjectExt, Py, PyAny, PyResult, Python,
 };
-use pyo3_asyncio::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::future_into_py;
 use tonbo::{
     record::{DynRecord, Value},
     transaction, Projection,
@@ -107,7 +107,9 @@ impl Transaction {
 
             Python::with_gil(|py| {
                 Ok(match entry {
-                    Some(entry) => to_dict(py, primary_key_index, entry.get().columns).into_py(py),
+                    Some(entry) => {
+                        to_dict(py, primary_key_index, entry.get().columns).into_py_any(py)?
+                    }
                     None => py.None(),
                 })
             })
@@ -126,7 +128,7 @@ impl Transaction {
         let mapping_proxy = dict.downcast_bound::<PyMapping>(py)?;
 
         for x in mapping_proxy.items().iter() {
-            let list = x.to_tuple()?;
+            let list = x.to_tuple();
             for x in list {
                 let tuple = x.downcast::<PyTuple>()?;
                 let col = tuple.get_item(1)?;
@@ -208,7 +210,7 @@ impl Transaction {
 
             let stream = ScanStream::new(stream);
 
-            Ok(Python::with_gil(|py| stream.into_py(py)))
+            Python::with_gil(|py| stream.into_py_any(py))
         })
     }
 

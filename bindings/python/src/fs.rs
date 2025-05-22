@@ -73,25 +73,25 @@ impl From<FsOptions> for tonbo::option::FsOptions {
 #[pyfunction]
 pub fn parse(path: String, py: Python) -> PyResult<Bound<PyString>> {
     let path = Path::parse(path).map_err(|e| PathParseError::new_err(e.to_string()))?;
-    Ok(PyString::new_bound(py, path.as_ref()))
+    Ok(PyString::new(py, path.as_ref()))
 }
 
 #[pyfunction]
 pub fn from_filesystem_path(path: String, py: Python) -> PyResult<Bound<PyString>> {
     let path =
         Path::from_filesystem_path(path).map_err(|e| PathParseError::new_err(e.to_string()))?;
-    Ok(PyString::new_bound(py, path.as_ref()))
+    Ok(PyString::new(py, path.as_ref()))
 }
 
 #[pyfunction]
 pub fn from_absolute_path(path: String, py: Python) -> PyResult<Bound<PyString>> {
     let path =
         Path::from_absolute_path(path).map_err(|e| PathParseError::new_err(e.to_string()))?;
-    Ok(PyString::new_bound(py, path.as_ref()))
+    Ok(PyString::new(py, path.as_ref()))
 }
 
 #[pyfunction]
 pub fn from_url_path(path: String, py: Python) -> PyResult<Bound<PyString>> {
     let path = Path::from_url_path(path).map_err(|e| PathParseError::new_err(e.to_string()))?;
-    Ok(PyString::new_bound(py, path.as_ref()))
+    Ok(PyString::new(py, path.as_ref()))
 }

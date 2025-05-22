@@ -2,10 +2,10 @@ use std::{pin::Pin, sync::Arc};
 
 use futures::{Stream, TryStreamExt};
 use pyo3::{
-    exceptions::PyStopAsyncIteration, prelude::*, pyclass, pymethods, IntoPy, PyRef, PyRefMut,
-    PyResult, Python,
+    exceptions::PyStopAsyncIteration, prelude::*, pyclass, pymethods, IntoPyObjectExt, PyRef,
+    PyRefMut, PyResult, Python,
 };
-use pyo3_asyncio::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::Mutex;
 use tonbo::{parquet::errors::ParquetError, record::DynRecord, stream};
 
@@ -40,10 +40,12 @@ impl ScanStream {
             let mut locked_stream = stream.lock().await;
             let entry = locked_stream.try_next().await.unwrap();
             match entry {
-                Some(entry) => Ok(Python::with_gil(|py| match entry.value() {
-                    Some(record) => to_dict(py, record.primary_index, record.columns).into_py(py),
-                    None => py.None(),
-                })),
+                Some(entry) => Python::with_gil(|py| match entry.value() {
+                    Some(record) => {
+                        to_dict(py, record.primary_index, record.columns).into_py_any(py)
+                    }
+                    None => Ok(py.None()),
+                }),
                 None => Err(PyStopAsyncIteration::new_err("stream exhausted")),
             }
         })?;

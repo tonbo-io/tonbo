@@ -4,9 +4,9 @@ use pyo3::{
     prelude::*,
     pyclass, pymethods,
     types::{PyDict, PyMapping},
-    Py, PyAny, PyResult, Python,
+    IntoPyObjectExt, Py, PyAny, PyResult, Python,
 };
-use pyo3_asyncio::tokio::{future_into_py, get_runtime};
+use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tonbo::{
     executor::tokio::TokioExecutor,
     record::{DynRecord, DynSchema, Value, ValueDesc},
@@ -41,7 +41,7 @@ impl TonboDB {
         let mut cols = vec![];
         let mut primary_key_index = None;
 
-        for i in 0..values.len()? {
+        for i in 0..values.len() {
             let value = values.get_item(i)?;
             if let Ok(bound_col) = value.downcast::<Column>() {
                 let col = bound_col.extract::<Column>()?;
@@ -75,7 +75,7 @@ impl TonboDB {
         let dict = record.getattr(py, "__dict__")?;
         let values = dict.downcast_bound::<PyMapping>(py)?.values()?;
 
-        for i in 0..values.len()? {
+        for i in 0..values.len() {
             let value = values.get_item(i)?;
             if let Ok(bound_col) = value.downcast::<Column>() {
                 let col = Value::from(bound_col.extract::<Column>()?);
@@ -90,7 +90,7 @@ impl TonboDB {
             db.insert(DynRecord::new(cols, primary_key_index))
                 .await
                 .map_err(CommitError::from)?;
-            Ok(Python::with_gil(|py| PyDict::new_bound(py).into_py(py)))
+            Python::with_gil(|py| PyDict::new(py).into_py_any(py))
         })
     }
 
@@ -102,7 +102,7 @@ impl TonboDB {
             db.insert_batch(record_batch.into_iter())
                 .await
                 .map_err(CommitError::from)?;
-            Ok(Python::with_gil(|py| PyDict::new_bound(py).into_py(py)))
+            Python::with_gil(|py| PyDict::new(py).into_py_any(py))
         })
     }
 
@@ -119,10 +119,10 @@ impl TonboDB {
                 .get(&col, |e| Some(e.get().columns))
                 .await
                 .map_err(CommitError::from)?;
-            Ok(Python::with_gil(|py| match record {
-                Some(record) => to_dict(py, primary_key_index, record).into_py(py),
-                None => py.None(),
-            }))
+            Python::with_gil(|py| match record {
+                Some(record) => to_dict(py, primary_key_index, record).into_py_any(py),
+                None => Ok(py.None()),
+            })
         })
     }
 
@@ -135,7 +135,7 @@ impl TonboDB {
         let db = self.db.clone();
         future_into_py(py, async move {
             let ret = db.remove(col).await.map_err(CommitError::from)?;
-            Ok(Python::with_gil(|py| ret.into_py(py)))
+            Python::with_gil(|py| ret.into_py_any(py))
         })
     }
 
