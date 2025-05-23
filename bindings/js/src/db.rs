@@ -238,6 +238,7 @@ mod tests {
         let schema = Object::new();
         let id = Object::new();
         let name = Object::new();
+        let price = Object::new();
         js_sys::Reflect::set(
             &id,
             &JsValue::from_str("primary"),
@@ -265,8 +266,22 @@ mod tests {
         )
         .unwrap();
 
+        js_sys::Reflect::set(
+            &price,
+            &JsValue::from_str("type"),
+            &JsValue::from_str("Float64"),
+        )
+        .unwrap();
+        js_sys::Reflect::set(
+            &price,
+            &JsValue::from_str("nullable"),
+            &JsValue::from_bool(true),
+        )
+        .unwrap();
+
         js_sys::Reflect::set(&schema, &JsValue::from_str("id"), &JsValue::from(id)).unwrap();
         js_sys::Reflect::set(&schema, &JsValue::from_str("name"), &JsValue::from(name)).unwrap();
+        js_sys::Reflect::set(&schema, &JsValue::from_str("price"), &JsValue::from(price)).unwrap();
 
         schema
     }
@@ -282,6 +297,7 @@ mod tests {
                 &JsValue::from_str(i.to_string().as_str()),
             )
             .unwrap();
+            js_sys::Reflect::set(&item, &JsValue::from_str("price"), &JsValue::from(i as f64)).unwrap();
 
             items.push(item);
         }

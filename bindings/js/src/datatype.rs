@@ -15,6 +15,8 @@ pub enum DataType {
     String = 8,
     Boolean = 9,
     Bytes = 10,
+    Float32 = 11,
+    Float64 = 12,
 }
 
 impl From<DataType> for tonbo::record::DataType {
@@ -30,6 +32,8 @@ impl From<DataType> for tonbo::record::DataType {
             DataType::Int64 => tonbo::record::DataType::Int64,
             DataType::String => tonbo::record::DataType::String,
             DataType::Boolean => tonbo::record::DataType::Boolean,
+            DataType::Float32 => tonbo::record::DataType::Float32,
+            DataType::Float64 => tonbo::record::DataType::Float64,
             _ => todo!(),
         }
     }
@@ -47,6 +51,8 @@ pub(crate) fn to_datatype(datatype: &str) -> tonbo::record::DataType {
         "Int64" => tonbo::record::DataType::Int64,
         "String" => tonbo::record::DataType::String,
         "Boolean" => tonbo::record::DataType::Boolean,
+        "Float32" => tonbo::record::DataType::Float32,
+        "Float64" => tonbo::record::DataType::Float64,
         _ => todo!(),
     }
 }
