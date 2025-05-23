@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "build": "wasm-pack build",
+    "build": "wasm-pack build --target web",
     "serve": "cp -r ../../pkg ./ && webpack serve"
   },
   "devDependencies": {
