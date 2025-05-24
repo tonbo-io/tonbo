@@ -13,12 +13,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 futures = { version = "0.3" }
-pyo3 = { version = "0.21.2", features = [
+pyo3 = { version = "0.25", features = [
     "abi3",
     "abi3-py310",
     "extension-module",
 ] }
-pyo3-asyncio = { package = "pyo3-asyncio-0-21", version = "0.21", features = [
+pyo3-async-runtimes = { version = "0.25", features = [
+    "attributes",
     "tokio-runtime",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread"] }

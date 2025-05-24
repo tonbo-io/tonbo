@@ -69,7 +69,7 @@ fn _tonbo(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<range::Bound>()?;
     m.add_class::<RecordBatch>()?;
 
-    let fs_module = PyModule::new_bound(py, "fs")?;
+    let fs_module = PyModule::new(py, "fs")?;
     fs_module.add_class::<FsOptions>()?;
     fs_module.add_class::<AwsCredential>()?;
     fs_module.add_function(wrap_pyfunction!(parse, &fs_module)?)?;
@@ -78,33 +78,27 @@ fn _tonbo(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     fs_module.add_function(wrap_pyfunction!(from_url_path, &fs_module)?)?;
 
     m.add_submodule(&fs_module)?;
-    py.import_bound("sys")?
+    py.import("sys")?
         .getattr("modules")?
         .set_item("tonbo.fs", fs_module)?;
 
-    let error_module = PyModule::new_bound(py, "error")?;
+    let error_module = PyModule::new(py, "error")?;
     error_module.add_class::<DbError>()?;
     error_module.add_class::<CommitError>()?;
 
-    error_module.add("DecodeError", py.get_type_bound::<DecodeError>())?;
-    error_module.add("RecoverError", py.get_type_bound::<RecoverError>())?;
+    error_module.add("DecodeError", py.get_type::<DecodeError>())?;
+    error_module.add("RecoverError", py.get_type::<RecoverError>())?;
     error_module.add(
         "ExceedsMaxLevelError",
-        py.get_type_bound::<ExceedsMaxLevelError>(),
+        py.get_type::<ExceedsMaxLevelError>(),
     )?;
-    error_module.add(
-        "WriteConflictError",
-        py.get_type_bound::<WriteConflictError>(),
-    )?;
-    error_module.add("InnerError", py.get_type_bound::<InnerError>())?;
-    error_module.add(
-        "RepeatedCommitError",
-        py.get_type_bound::<RepeatedCommitError>(),
-    )?;
-    error_module.add("PathParseError", py.get_type_bound::<PathParseError>())?;
+    error_module.add("WriteConflictError", py.get_type::<WriteConflictError>())?;
+    error_module.add("InnerError", py.get_type::<InnerError>())?;
+    error_module.add("RepeatedCommitError", py.get_type::<RepeatedCommitError>())?;
+    error_module.add("PathParseError", py.get_type::<PathParseError>())?;
 
     m.add_submodule(&error_module)?;
-    py.import_bound("sys")?
+    py.import("sys")?
         .getattr("modules")?
         .set_item("tonbo.error", error_module)?;
 
