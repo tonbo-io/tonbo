@@ -12,7 +12,7 @@ use tonbo::{
 use crate::{column::Column, datatype::DataType, range};
 
 pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) -> Bound<PyDict> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     for (idx, col) in record.iter().enumerate() {
         let name = col.desc.name.clone();
         match &col.datatype() {
@@ -118,7 +118,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
             TonboDataType::Bytes => {
                 if idx == primary_key_index {
                     let value = col.value.as_ref().downcast_ref::<Vec<u8>>().unwrap();
-                    let v = PyBytes::new_bound(py, value);
+                    let v = PyBytes::new(py, value);
                     dict.set_item(name, v).unwrap();
                 } else {
                     let value = col
@@ -126,7 +126,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                         .as_ref()
                         .downcast_ref::<Option<Vec<u8>>>()
                         .unwrap();
-                    dict.set_item(name, value.as_ref().map(|v| PyBytes::new_bound(py, v)))
+                    dict.set_item(name, value.as_ref().map(|v| PyBytes::new(py, v)))
                         .unwrap();
                 }
             }

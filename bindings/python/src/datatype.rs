@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use pyo3::{pyclass, PyObject, Python, ToPyObject};
+use pyo3::pyclass;
 use tonbo::record::{DataType as TonboDataType, F64};
 
 #[pyclass]
@@ -44,23 +44,6 @@ impl Debug for DataType {
 }
 
 impl DataType {
-    #[allow(unused)]
-    pub(crate) fn default_value(&self, py: Python<'_>) -> PyObject {
-        match self {
-            DataType::UInt8 => u8::default().to_object(py),
-            DataType::UInt16 => u16::default().to_object(py),
-            DataType::UInt32 => u32::default().to_object(py),
-            DataType::UInt64 => u64::default().to_object(py),
-            DataType::Int8 => i8::default().to_object(py),
-            DataType::Int16 => i16::default().to_object(py),
-            DataType::Int32 => i32::default().to_object(py),
-            DataType::Int64 => i64::default().to_object(py),
-            DataType::String => String::default().to_object(py),
-            DataType::Boolean => bool::default().to_object(py),
-            DataType::Bytes => Vec::<u8>::default().to_object(py),
-            DataType::Float => F64::default().to_object(py),
-        }
-    }
     pub(crate) fn none_value(&self) -> Arc<dyn Any + Send + Sync> {
         match self {
             DataType::UInt8 => Arc::new(Option::<u8>::None),
