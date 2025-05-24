@@ -1,7 +1,7 @@
 use std::{any::Any, sync::Arc};
 
 use js_sys::{Object, Reflect, Uint8Array};
-use tonbo::record::{DataType, DynRecord, Value, ValueDesc};
+use tonbo::{cast_arc_value, record::{DataType, DynRecord, Value, ValueDesc, F32, F64}};
 use wasm_bindgen::{JsCast, JsValue};
 
 fn to_col_value<T: 'static + Send + Sync>(value: T, primary: bool) -> Arc<dyn Any + Send + Sync> {
@@ -21,14 +21,17 @@ fn none_value(datatype: DataType) -> Arc<dyn Any + Send + Sync> {
         DataType::Int16 => Arc::new(Option::<i16>::None),
         DataType::Int32 => Arc::new(Option::<i32>::None),
         DataType::Int64 => Arc::new(Option::<i64>::None),
-        DataType::Float32 => unimplemented!(),
-        DataType::Float64 => unimplemented!(),
+        DataType::Float32 => Arc::new(Option::<F32>::None),
+        DataType::Float64 =>  Arc::new(Option::<F64>::None),
         DataType::String => Arc::new(Option::<String>::None),
         DataType::Boolean => Arc::new(Option::<bool>::None),
         DataType::Bytes => Arc::new(Option::<Vec<u8>>::None),
     }
 }
 
+/// parse js key to tonbo key
+///
+/// Note: float number will be convert to `F32`/`F64`
 pub(crate) fn parse_key(desc: &ValueDesc, key: JsValue, primary: bool) -> Result<Value, JsValue> {
     if key.is_undefined() || key.is_null() {
         match primary || !desc.is_nullable {
@@ -51,8 +54,8 @@ pub(crate) fn parse_key(desc: &ValueDesc, key: JsValue, primary: bool) -> Result
         DataType::Int8 => to_col_value::<i8>(key.as_f64().unwrap().round() as i8, primary),
         DataType::Int16 => to_col_value::<i16>(key.as_f64().unwrap().round() as i16, primary),
         DataType::Int32 => to_col_value::<i32>(key.as_f64().unwrap().round() as i32, primary),
-        DataType::Float32 => unimplemented!(),
-        DataType::Float64 => unimplemented!(),
+        DataType::Float32 => to_col_value(F32::from(key.as_f64().unwrap() as f32), primary),
+        DataType::Float64 => to_col_value(F64::from(key.as_f64().unwrap()), primary),
         DataType::Int64 => to_col_value::<i64>(key.as_f64().unwrap().round() as i64, primary),
         DataType::String => to_col_value::<String>(key.as_string().unwrap(), primary),
         DataType::Boolean => to_col_value::<bool>(key.as_bool().unwrap(), primary),
@@ -83,7 +86,10 @@ pub(crate) fn parse_record(
     Ok(DynRecord::new(cols, primary_key_index))
 }
 
+/// convert tonbo `DynRecord` values to `JsValue`
+///
 pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue {
+    
     let obj = Object::new();
     for (idx, col) in cols.iter().enumerate() {
         let value = match col.datatype() {
@@ -120,12 +126,12 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
                 false => (*col.value.as_ref().downcast_ref::<Option<i64>>().unwrap()).into(),
             },
             DataType::Float32 => match idx == primary_key_index {
-                true => unimplemented!(),
-                false => unimplemented!(),
+                true => f32::from(cast_arc_value!(col.value, F32)).into(),
+                false => cast_arc_value!(col.value, Option<F32>).map(|v| f32::from(v)).into()
             },
             DataType::Float64 => match idx == primary_key_index {
-                true => unimplemented!(),
-                false => unimplemented!(),
+                true =>f64::from(cast_arc_value!(col.value, F64)).into(),
+                false => cast_arc_value!(col.value, Option<F64>).map(|v| f64::from(v)).into()
             },
             DataType::String => match idx == primary_key_index {
                 true => (col.value.as_ref().downcast_ref::<String>().unwrap()).into(),
@@ -170,7 +176,7 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
 #[cfg(test)]
 mod tests {
 
-    use tonbo::record::{DataType, ValueDesc};
+    use tonbo::{cast_arc_value, record::{DataType, ValueDesc, F64}};
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -206,6 +212,12 @@ mod tests {
                 key_col.value.as_ref().downcast_ref::<Option<Vec<u8>>>(),
                 Some(&Some(b"Hello tonbo".to_vec()))
             );
+        }
+        {
+            let desc = ValueDesc::new("price".to_string(), DataType::Float64, false);
+            let key_col = parse_key(&desc, JsValue::from(19), true).unwrap();
+            assert_eq!(key_col.datatype(), DataType::Float64);
+            assert_eq!(*cast_arc_value!(key_col.value, F64), F64::from(19f64));
         }
     }
 }

@@ -8,4 +8,8 @@ export const userSchema = {
     type: "String",
     nullable: true,
   },
+  price: {
+    type: "Float64",
+    nullable: true,
+  },
 };
