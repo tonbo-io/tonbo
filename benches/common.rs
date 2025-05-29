@@ -26,6 +26,9 @@ pub(crate) const NUM_SCAN: usize = 200_000;
 const STRING_SIZE: usize = 50;
 
 #[allow(dead_code)]
+pub(crate) const NUMBER_RECORD: usize = 40000000;
+
+#[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
 type ItemKey = i32;
@@ -39,7 +42,6 @@ pub enum BenchResult<'a> {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
 pub enum ProjectionResult<'a> {
     // the entry is directly used to represent the field being projected.
     Ref(stream::Entry<'a, Customer>),
@@ -102,6 +104,7 @@ pub(crate) fn gen_record(rng: &mut fastrand::Rng) -> Customer {
     }
 }
 
+#[allow(unused)]
 pub(crate) fn read_tbl(file_path: impl AsRef<Path>) -> Box<dyn Iterator<Item = Customer>> {
     let file = File::open(file_path).expect("Cannot open file");
     let reader = BufReader::new(file);
@@ -125,6 +128,15 @@ pub(crate) fn read_tbl(file_path: impl AsRef<Path>) -> Box<dyn Iterator<Item = C
         }
         None
     }))
+}
+
+pub(crate) fn gen_records(num_records: usize) -> Box<dyn Iterator<Item = Customer>> {
+    let mut data = Vec::with_capacity(num_records);
+    let mut rng = make_rng();
+    for i in 0..num_records {
+        data.push(gen_record(&mut rng));
+    }
+    Box::new(data.into_iter())
 }
 
 pub trait BenchDatabase {

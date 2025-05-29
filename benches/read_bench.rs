@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::make_rng;
+use common::{gen_records, make_rng, NUMBER_RECORD};
 use futures_util::{future::join_all, StreamExt};
 use tokio::{fs, io::AsyncWriteExt};
 
@@ -140,7 +140,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
 
 #[tokio::main]
 async fn main() {
-    let data_dir = PathBuf::from("/home/kkould/benchmark");
+    let data_dir = PathBuf::from("./db_path");
 
     #[cfg(feature = "load_tbl")]
     {
@@ -156,7 +156,7 @@ async fn main() {
             println!("{}: start loading", T::db_type_name());
             let database = T::build(path).await;
 
-            for customer in read_tbl(tbl_path) {
+            for customer in gen_records(NUMBER_RECORD) {
                 let mut tx = database.write_transaction().await;
                 let mut inserter = tx.get_inserter();
                 inserter.insert(customer).unwrap();
