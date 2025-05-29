@@ -39,6 +39,7 @@ pub enum BenchResult<'a> {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub enum ProjectionResult<'a> {
     // the entry is directly used to represent the field being projected.
     Ref(stream::Entry<'a, Customer>),
@@ -239,7 +240,7 @@ impl BenchDatabase for TonboS3BenchDataBase {
         };
 
         let path = fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap();
-        let option = DbOption::from(path.clone())
+        let option = DbOption::new(path.clone(), &CustomerSchema)
             .level_path(
                 0,
                 fusio::path::Path::from_url_path("/l0").unwrap(),
@@ -273,7 +274,7 @@ impl BenchDatabase for TonboS3BenchDataBase {
             .disable_wal();
 
         TonboS3BenchDataBase::new(
-            tonbo::DB::new(option, TokioExecutor::current(), &CustomerSchema)
+            tonbo::DB::new(option, TokioExecutor::current(), CustomerSchema)
                 .await
                 .unwrap(),
         )
@@ -320,11 +321,13 @@ impl BenchDatabase for TonboBenchDataBase {
     async fn build(path: impl AsRef<Path>) -> Self {
         create_dir_all(path.as_ref()).await.unwrap();
 
-        let option =
-            DbOption::from(fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap())
-                .disable_wal();
+        let option = DbOption::new(
+            fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap(),
+            &CustomerSchema,
+        )
+        .disable_wal();
 
-        let db = tonbo::DB::new(option, TokioExecutor::current(), &CustomerSchema)
+        let db = tonbo::DB::new(option, TokioExecutor::current(), CustomerSchema)
             .await
             .unwrap();
         TonboBenchDataBase::new(db)
@@ -377,7 +380,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = ProjectionResult> + 'a {
         stream! {
-            let mut stream = self.txn.scan(range).projection(vec![1]).take().await.unwrap();
+            let mut stream = self.txn.scan(range).projection(&["c_name"]).take().await.unwrap();
 
             while let Some(entry) = stream.next().await.map(|result| result.unwrap()) {
                 yield ProjectionResult::Ref(entry);
