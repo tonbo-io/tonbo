@@ -132,3 +132,21 @@ jobs:
   #       run: |
   #         gh pr comment ${{ github.event.pull_request.number }} --body-file "read_benchmark.md"
   #         gh pr comment ${{ github.event.pull_request.number }} --body-file "write_benchmark.md"
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate code coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        # if: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true
