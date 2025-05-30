@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use common::{gen_records, make_rng, NUMBER_RECORD};
 use futures_util::{future::join_all, StreamExt};
 use tokio::{fs, io::AsyncWriteExt};
 
@@ -16,8 +17,20 @@ use crate::common::{
     NUM_SCAN, READ_TIMES,
 };
 
+fn ranges() -> Vec<(Bound<i32>, Bound<i32>)> {
+    let mut rand = make_rng();
+    let mut ranges = Vec::with_capacity(READ_TIMES);
+    for _ in 0..READ_TIMES {
+        let left = rand.i32(..);
+        let right = rand.i32(left..);
+        ranges.push((Bound::Included(left), Bound::Included(right)));
+    }
+    ranges
+}
+
 async fn benchmark<T: BenchDatabase + Send + Sync>(
     path: impl AsRef<Path> + Clone,
+    ranges: &[(Bound<i32>, Bound<i32>)],
 ) -> Vec<(String, Duration)> {
     let mut results = Vec::new();
     let db = Arc::new(T::build(path).await);
@@ -36,8 +49,8 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         for _ in 0..ITERATIONS {
             let start = Instant::now();
             let reader = txn.get_reader();
-            for _ in 0..READ_TIMES {
-                let mut iter = Box::pin(reader.range_from((Bound::Unbounded, Bound::Unbounded)));
+            for range in ranges.iter() {
+                let mut iter = Box::pin(reader.range_from((range.0.as_ref(), range.1.as_ref())));
                 for _ in 0..NUM_SCAN {
                     if let Some(_record) = iter.next().await {
                     } else {
@@ -59,9 +72,9 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
         for _ in 0..ITERATIONS {
             let start = Instant::now();
             let reader = txn.get_reader();
-            for _ in 0..READ_TIMES {
+            for range in ranges.iter() {
                 let mut iter =
-                    Box::pin(reader.projection_range_from((Bound::Unbounded, Bound::Unbounded)));
+                    Box::pin(reader.projection_range_from((range.0.as_ref(), range.1.as_ref())));
                 for _ in 0..NUM_SCAN {
                     if let Some(_projection_field) = iter.next().await {
                     } else {
@@ -85,15 +98,17 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
     for num_threads in [4, 8, 16, 32] {
         let start = Instant::now();
 
-        let futures = (0..num_threads).map(|_| {
+        let futures = (0..num_threads).map(|n| {
             let db2 = db.clone();
 
             async move {
                 let txn = db2.read_transaction().await;
                 let reader = txn.get_reader();
-                for _ in 0..(READ_TIMES / num_threads) {
+                let cnt = READ_TIMES / num_threads;
+                for i in 0..cnt {
+                    let range = &ranges[i + n * cnt];
                     let mut iter = Box::pin(
-                        reader.projection_range_from((Bound::Unbounded, Bound::Unbounded)),
+                        reader.projection_range_from((range.0.as_ref(), range.1.as_ref())),
                     );
                     for _ in 0..NUM_SCAN {
                         if let Some(_projection_field) = iter.next().await {
@@ -125,7 +140,7 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
 
 #[tokio::main]
 async fn main() {
-    let data_dir = PathBuf::from("/home/kkould/benchmark");
+    let data_dir = PathBuf::from("./db_path");
 
     #[cfg(feature = "load_tbl")]
     {
@@ -141,7 +156,7 @@ async fn main() {
             println!("{}: start loading", T::db_type_name());
             let database = T::build(path).await;
 
-            for customer in read_tbl(tbl_path) {
+            for customer in gen_records(NUMBER_RECORD) {
                 let mut tx = database.write_transaction().await;
                 let mut inserter = tx.get_inserter();
                 inserter.insert(customer).unwrap();
@@ -156,10 +171,13 @@ async fn main() {
         load::<TonboS3BenchDataBase>(&tbl_path, data_dir.join("tonbo_s3")).await;
     }
 
-    let tonbo_latency_results = { benchmark::<TonboBenchDataBase>(data_dir.join("tonbo")).await };
-    let rocksdb_results = { benchmark::<RocksdbBenchDatabase>(data_dir.join("rocksdb")).await };
+    let ranges = ranges();
+    let tonbo_latency_results =
+        { benchmark::<TonboBenchDataBase>(data_dir.join("tonbo"), &ranges).await };
+    let rocksdb_results =
+        { benchmark::<RocksdbBenchDatabase>(data_dir.join("rocksdb"), &ranges).await };
     let tonbo_s3_latency_results =
-        { benchmark::<TonboS3BenchDataBase>(data_dir.join("tonbo_s3")).await };
+        { benchmark::<TonboS3BenchDataBase>(data_dir.join("tonbo_s3"), &ranges).await };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
 

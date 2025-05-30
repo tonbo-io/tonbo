@@ -26,6 +26,9 @@ pub(crate) const NUM_SCAN: usize = 200_000;
 const STRING_SIZE: usize = 50;
 
 #[allow(dead_code)]
+pub(crate) const NUMBER_RECORD: usize = 40000000;
+
+#[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
 type ItemKey = i32;
@@ -101,6 +104,7 @@ pub(crate) fn gen_record(rng: &mut fastrand::Rng) -> Customer {
     }
 }
 
+#[allow(unused)]
 pub(crate) fn read_tbl(file_path: impl AsRef<Path>) -> Box<dyn Iterator<Item = Customer>> {
     let file = File::open(file_path).expect("Cannot open file");
     let reader = BufReader::new(file);
@@ -124,6 +128,15 @@ pub(crate) fn read_tbl(file_path: impl AsRef<Path>) -> Box<dyn Iterator<Item = C
         }
         None
     }))
+}
+
+pub(crate) fn gen_records(num_records: usize) -> Box<dyn Iterator<Item = Customer>> {
+    let mut data = Vec::with_capacity(num_records);
+    let mut rng = make_rng();
+    for i in 0..num_records {
+        data.push(gen_record(&mut rng));
+    }
+    Box::new(data.into_iter())
 }
 
 pub trait BenchDatabase {
@@ -239,7 +252,7 @@ impl BenchDatabase for TonboS3BenchDataBase {
         };
 
         let path = fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap();
-        let option = DbOption::from(path.clone())
+        let option = DbOption::new(path.clone(), &CustomerSchema)
             .level_path(
                 0,
                 fusio::path::Path::from_url_path("/l0").unwrap(),
@@ -273,7 +286,7 @@ impl BenchDatabase for TonboS3BenchDataBase {
             .disable_wal();
 
         TonboS3BenchDataBase::new(
-            tonbo::DB::new(option, TokioExecutor::current(), &CustomerSchema)
+            tonbo::DB::new(option, TokioExecutor::current(), CustomerSchema)
                 .await
                 .unwrap(),
         )
@@ -320,11 +333,13 @@ impl BenchDatabase for TonboBenchDataBase {
     async fn build(path: impl AsRef<Path>) -> Self {
         create_dir_all(path.as_ref()).await.unwrap();
 
-        let option =
-            DbOption::from(fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap())
-                .disable_wal();
+        let option = DbOption::new(
+            fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap(),
+            &CustomerSchema,
+        )
+        .disable_wal();
 
-        let db = tonbo::DB::new(option, TokioExecutor::current(), &CustomerSchema)
+        let db = tonbo::DB::new(option, TokioExecutor::current(), CustomerSchema)
             .await
             .unwrap();
         TonboBenchDataBase::new(db)
@@ -377,7 +392,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
     ) -> impl Stream<Item = ProjectionResult> + 'a {
         stream! {
-            let mut stream = self.txn.scan(range).projection(vec![1]).take().await.unwrap();
+            let mut stream = self.txn.scan(range).projection(&["c_name"]).take().await.unwrap();
 
             while let Some(entry) = stream.next().await.map(|result| result.unwrap()) {
                 yield ProjectionResult::Ref(entry);
