@@ -12,6 +12,7 @@
   <a href="https://github.com/tonbo-io/tonbo" target="_blank">
     <a href="https://github.com/tonbo-io/tonbo/actions/workflows/ci.yml"><img src="https://github.com/tonbo-io/tonbo/actions/workflows/ci.yml/badge.svg" alt="CI"></img></a>
     <a href="https://crates.io/crates/tonbo/"><img src="https://img.shields.io/crates/v/tonbo.svg"></a>
+    <a href="https://codecov.io/gh/tonbo-io/tonbo" > <img src="https://codecov.io/gh/tonbo-io/tonbo/graph/badge.svg?token=4AJ8ACDUM3"/></a>
     <a href="https://github.com/tonbo-io/tonbo/blob/main/LICENSE"><img src="https://img.shields.io/crates/l/tonbo"></a>
   </a>
 </p>
