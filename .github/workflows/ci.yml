@@ -144,7 +144,6 @@ jobs:
       - name: Generate code coverage
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
-        # if: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
