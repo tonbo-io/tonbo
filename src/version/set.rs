@@ -259,7 +259,7 @@ where
         guard.current = Arc::new(new_version);
 
         drop(guard);
-        if edit_len >= option.version_log_snapshot_threshold {
+        if edit_len >= option.version_log_snapshot_threshold || is_recover {
             self.rewrite().await?;
             self.clean().await?;
         }
@@ -346,7 +346,6 @@ where
         gen: FileId,
     ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
         Options::new(option.version_log_path(gen))
-            .truncate(true)
             .build_with_fs(fs)
             .await
             .map_err(VersionError::Logger)
@@ -474,6 +473,175 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         assert_eq!(version_set.load_ts(), 20_u32.into());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_apply_edits() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+        let (sender, _) = bounded(1);
+        let mut option = DbOption::new(path, &StringSchema);
+        option.version_log_snapshot_threshold = 1000;
+
+        let option = Arc::new(option);
+        manager
+            .local_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager.clone())
+                .await
+                .unwrap();
+        let gen_0 = generate_file_id();
+        let gen_1 = generate_file_id();
+        let gen_2 = generate_file_id();
+
+        version_set
+            .apply_edits(
+                vec![VersionEdit::Add {
+                    level: 0,
+                    scope: Scope {
+                        min: "0".to_string(),
+                        max: "1".to_string(),
+                        gen: gen_0,
+                        wal_ids: None,
+                    },
+                }],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        version_set
+            .apply_edits(
+                vec![VersionEdit::Add {
+                    level: 0,
+                    scope: Scope {
+                        min: "2".to_string(),
+                        max: "3".to_string(),
+                        gen: gen_1,
+                        wal_ids: None,
+                    },
+                }],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        version_set
+            .apply_edits(
+                vec![VersionEdit::Add {
+                    level: 0,
+                    scope: Scope {
+                        min: "4".to_string(),
+                        max: "5".to_string(),
+                        gen: gen_2,
+                        wal_ids: None,
+                    },
+                }],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        {
+            let guard = version_set.inner.write().await;
+            let edits = VersionEdit::<String>::recover(
+                option.version_log_path(guard.log_id),
+                option.base_fs.clone(),
+            )
+            .await;
+
+            assert_eq!(edits.len(), 8);
+            assert_eq!(
+                edits[2..],
+                [
+                    VersionEdit::Add {
+                        level: 0,
+                        scope: Scope {
+                            min: "0".to_string(),
+                            max: "1".to_string(),
+                            gen: gen_0,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::NewLogLength { len: 1 },
+                    VersionEdit::Add {
+                        level: 0,
+                        scope: Scope {
+                            min: "2".to_string(),
+                            max: "3".to_string(),
+                            gen: gen_1,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::NewLogLength { len: 2 },
+                    VersionEdit::Add {
+                        level: 0,
+                        scope: Scope {
+                            min: "4".to_string(),
+                            max: "5".to_string(),
+                            gen: gen_2,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::NewLogLength { len: 3 },
+                ]
+            );
+        }
+
+        // test recover case
+        {
+            // ignore error originatey by cleaner
+            let _ = version_set
+                .apply_edits(
+                    vec![
+                        VersionEdit::Remove {
+                            level: 0,
+                            gen: gen_0,
+                        },
+                        VersionEdit::Remove {
+                            level: 0,
+                            gen: gen_2,
+                        },
+                    ],
+                    None,
+                    true,
+                )
+                .await;
+            let guard = version_set.inner.write().await;
+            let edits = guard.current.to_edits();
+
+            assert_eq!(edits.len(), 3);
+            assert_eq!(
+                edits,
+                vec![
+                    VersionEdit::Add {
+                        level: 0,
+                        scope: Scope {
+                            min: "2".to_string(),
+                            max: "3".to_string(),
+                            gen: gen_1,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::LatestTimeStamp { ts: 0.into() },
+                    VersionEdit::NewLogLength { len: 0 }
+                ]
+            );
+        }
+
+        drop(version_set);
     }
 
     async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
