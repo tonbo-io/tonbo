@@ -144,7 +144,7 @@ wasm-bindgen-test = "0.3.9"
 web-sys = { version = "0.3", features = ["console"] }
 
 [target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [profile.release]
 codegen-units = 1
