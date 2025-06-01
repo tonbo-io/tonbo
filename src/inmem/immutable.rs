@@ -108,6 +108,7 @@ where
         ),
         ts: Timestamp,
         projection_mask: ProjectionMask,
+        reverse: bool,
     ) -> ImmutableScan<'scan, A::Record> {
         let lower = match range.0 {
             Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
@@ -124,7 +125,7 @@ where
             .index
             .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((lower, upper));
 
-        ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
+        ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask, reverse)
     }
 
     pub(crate) fn get(
@@ -137,6 +138,7 @@ where
             (Bound::Included(key), Bound::Included(key)),
             ts,
             projection_mask,
+            false,
         )
         .next()
     }
@@ -160,9 +162,12 @@ pub(crate) struct ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
+    range: Option<Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>>,
     record_batch: &'iter RecordBatch,
     projection_mask: ProjectionMask,
+    reverse: bool,
+    items: Option<Vec<(Ts<<R::Schema as Schema>::Key>, u32)>>,
+    current_index: Option<usize>,
 }
 
 impl<'iter, R> ImmutableScan<'iter, R>
@@ -173,11 +178,15 @@ where
         range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
         record_batch: &'iter RecordBatch,
         projection_mask: ProjectionMask,
+        reverse: bool,
     ) -> Self {
         Self {
-            range,
+            range: Some(range),
             record_batch,
             projection_mask,
+            reverse,
+            items: None,
+            current_index: None,
         }
     }
 }
@@ -189,24 +198,65 @@ where
     type Item = RecordBatchEntry<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|(_, &offset)| {
-            let schema = self.record_batch.schema();
-            let record_ref = R::Ref::from_record_batch(
-                self.record_batch,
-                offset as usize,
-                &self.projection_mask,
-                &schema,
-            );
-            // TODO: remove cloning record batch
-            RecordBatchEntry::new(self.record_batch.clone(), {
-                // Safety: record_ref self-references the record batch
-                unsafe {
-                    transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
-                        record_ref,
-                    )
+        if self.reverse {
+            // Initialize items collection on first call
+            if self.items.is_none() {
+                if let Some(range) = self.range.take() {
+                    let items: Vec<_> = range.map(|(key, &offset)| (key.clone(), offset)).collect();
+                    self.current_index = if items.is_empty() { None } else { Some(items.len() - 1) };
+                    self.items = Some(items);
                 }
+            }
+            
+            if let (Some(items), Some(index)) = (&self.items, self.current_index) {
+                let (_, offset) = &items[index];
+                let offset = *offset;
+                if index == 0 {
+                    self.current_index = None;
+                } else {
+                    self.current_index = Some(index - 1);
+                }
+                
+                let schema = self.record_batch.schema();
+                let record_ref = R::Ref::from_record_batch(
+                    self.record_batch,
+                    offset as usize,
+                    &self.projection_mask,
+                    &schema,
+                );
+                // TODO: remove cloning record batch
+                Some(RecordBatchEntry::new(self.record_batch.clone(), {
+                    // Safety: record_ref self-references the record batch
+                    unsafe {
+                        transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
+                            record_ref,
+                        )
+                    }
+                }))
+            } else {
+                None
+            }
+        } else {
+            // Forward iteration (existing logic)
+            self.range.as_mut()?.next().map(|(_, &offset)| {
+                let schema = self.record_batch.schema();
+                let record_ref = R::Ref::from_record_batch(
+                    self.record_batch,
+                    offset as usize,
+                    &self.projection_mask,
+                    &schema,
+                );
+                // TODO: remove cloning record batch
+                RecordBatchEntry::new(self.record_batch.clone(), {
+                    // Safety: record_ref self-references the record batch
+                    unsafe {
+                        transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
+                            record_ref,
+                        )
+                    }
+                })
             })
-        })
+        }
     }
 }
 

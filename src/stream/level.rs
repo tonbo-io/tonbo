@@ -59,6 +59,7 @@ where
     fs: Arc<dyn DynFs>,
     path: Option<Path>,
     parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+    reverse: bool,
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -81,13 +82,20 @@ where
         projection_mask: ProjectionMask,
         fs: Arc<dyn DynFs>,
         parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+        reverse: bool,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
             .iter()
             .map(Scope::gen)
             .collect();
-        let first_gen = gens.pop_front()?;
+        
+        // For reverse iteration, process files in reverse order
+        let first_gen = if reverse {
+            gens.pop_back()?
+        } else {
+            gens.pop_front()?
+        };
         let status = FutureStatus::Init(first_gen);
 
         Some(LevelStream {
@@ -103,6 +111,7 @@ where
             fs,
             path: None,
             parquet_lru,
+            reverse,
         })
     }
 }
@@ -140,30 +149,39 @@ where
                     continue;
                 }
                 FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
-                    Poll::Ready(None) => match self.gens.pop_front() {
-                        None => Poll::Ready(None),
-                        Some(gen) => {
-                            self.path = Some(self.option.table_path(gen, self.level));
+                    Poll::Ready(None) => {
+                        // Get next file based on reverse flag
+                        let next_gen = if self.reverse {
+                            self.gens.pop_back()
+                        } else {
+                            self.gens.pop_front()
+                        };
+                        
+                        match next_gen {
+                            None => Poll::Ready(None),
+                            Some(gen) => {
+                                self.path = Some(self.option.table_path(gen, self.level));
 
-                            let reader = self.fs.open_options(
-                                self.path.as_ref().unwrap(),
-                                FileType::Parquet.open_options(true),
-                            );
-                            #[allow(clippy::missing_transmute_annotations)]
-                            let reader = unsafe {
-                                std::mem::transmute::<
-                                    _,
-                                    Pin<
-                                        Box<
-                                            dyn MaybeSendFuture<
-                                                    Output = Result<Box<dyn DynFile>, Error>,
-                                                > + 'static,
+                                let reader = self.fs.open_options(
+                                    self.path.as_ref().unwrap(),
+                                    FileType::Parquet.open_options(true),
+                                );
+                                #[allow(clippy::missing_transmute_annotations)]
+                                let reader = unsafe {
+                                    std::mem::transmute::<
+                                        _,
+                                        Pin<
+                                            Box<
+                                                dyn MaybeSendFuture<
+                                                        Output = Result<Box<dyn DynFile>, Error>,
+                                                    > + 'static,
+                                            >,
                                         >,
-                                    >,
-                                >(reader)
-                            };
-                            self.status = FutureStatus::OpenFile(gen, reader);
-                            continue;
+                                    >(reader)
+                                };
+                                self.status = FutureStatus::OpenFile(gen, reader);
+                                continue;
+                            }
                         }
                     },
                     Poll::Ready(Some(result)) => {
@@ -196,6 +214,7 @@ where
                             self.ts,
                             self.limit,
                             self.projection_mask.clone(),
+                            self.reverse
                         )));
                         continue;
                     }
@@ -272,6 +291,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                false,
             )
             .unwrap();
 
@@ -311,6 +331,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                false,
             )
             .unwrap();
 
@@ -350,6 +371,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                false,
             )
             .unwrap();
 

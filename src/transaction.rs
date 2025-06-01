@@ -28,6 +28,9 @@ use crate::{
 pub(crate) struct TransactionScan<'scan, R: Record> {
     inner: Range<'scan, <R::Schema as RecordSchema>::Key, Option<R>>,
     ts: Timestamp,
+    reverse: bool,
+    items: Option<Vec<(&'scan <R::Schema as RecordSchema>::Key, &'scan Option<R>)>>,
+    current_index: Option<usize>,
 }
 
 impl<'scan, R> Iterator for TransactionScan<'scan, R>
@@ -40,9 +43,31 @@ where
     );
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner
-            .next()
-            .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value))
+        if self.reverse {
+            // Initialize items collection on first call
+            if self.items.is_none() {
+                let items: Vec<_> = self.inner.clone().collect();
+                self.current_index = if items.is_empty() { None } else { Some(items.len() - 1) };
+                self.items = Some(items);
+            }
+            
+            if let (Some(items), Some(index)) = (&self.items, self.current_index) {
+                let (key, value) = items[index];
+                if index == 0 {
+                    self.current_index = None;
+                } else {
+                    self.current_index = Some(index - 1);
+                }
+                Some((Ts::new(key.as_key_ref(), self.ts), value))
+            } else {
+                None
+            }
+        } else {
+            // Forward iteration (existing logic)
+            self.inner
+                .next()
+                .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value))
+        }
     }
 }
 /// optimistic ACID transaction, open with
@@ -147,16 +172,37 @@ where
         ),
     ) -> Scan<'scan, 'range, R> {
         let ts = self.snapshot.ts();
-        let inner = self.local.range(range);
+        
+        // Capture range by value to avoid lifetime issues in the closure
+        let lower = match range.0 {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        
+        let upper = match range.1 {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        
         self.snapshot._scan(
             range,
-            Box::new(move |projection_mask: Option<ProjectionMask>| {
-                let mut transaction_scan = TransactionScan { inner, ts }.into();
+            Box::new(move |projection_mask: Option<ProjectionMask>, reverse: bool| {
+                let inner = self.local.range((lower, upper));
+                let mut transaction_scan = TransactionScan { 
+                    inner, 
+                    ts, 
+                    reverse, // This will now use the actual reverse flag passed from Scan::reverse()
+                    items: None,
+                    current_index: None,
+                }.into();
                 if let Some(mask) = projection_mask {
                     transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();
                 }
                 Some(transaction_scan)
             }),
+            false // Default to forward iteration
         )
     }
 
@@ -636,6 +682,99 @@ mod tests {
         assert_eq!(entry_14.key().value, "funk");
         let entry_15 = stream.next().await.unwrap().unwrap();
         assert_eq!(entry_15.key().value, "king");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn transaction_scan_reverse() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+        let option = Arc::new(DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        ));
+
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
+            .await
+            .unwrap();
+        let db = build_db(
+            option,
+            compaction_rx,
+            TokioExecutor::current(),
+            schema,
+            Arc::new(TestSchema),
+            version,
+            manager,
+        )
+        .await
+        .unwrap();
+
+        {
+            // to increase timestamps to 1 because the data ts built in advance is 1
+            db.ctx.increase_ts();
+        }
+        let mut txn = db.transaction().await;
+        txn.insert(Test {
+            vstring: "king".to_string(),
+            vu32: 8,
+            vbool: Some(true),
+        });
+
+        // First, collect all results from forward scan
+        let mut forward_stream = txn
+            .scan((Bound::Unbounded, Bound::Unbounded))
+            .projection(&["vu32"])
+            .take()
+            .await
+            .unwrap();
+        
+        let mut forward_results: Vec<String> = Vec::new();
+        while let Some(entry) = forward_stream.next().await {
+            let entry = entry.unwrap();
+            forward_results.push(entry.key().value.to_string());
+        }
+        
+        // Manually reverse the forward results
+        let mut expected_reverse: Vec<String> = forward_results.clone();
+        expected_reverse.reverse();
+        
+        // Now get results from reverse scan
+        let mut reverse_stream = txn
+            .scan((Bound::Unbounded, Bound::Unbounded))
+            .reverse() // Using reverse() method to enable reverse iteration
+            .projection(&["vu32"])
+            .take()
+            .await
+            .unwrap();
+        
+        let mut reverse_results: Vec<String> = Vec::new();
+        while let Some(entry) = reverse_stream.next().await {
+            let entry = entry.unwrap();
+            reverse_results.push(entry.key().value.to_string());
+        }
+        
+        // The reverse scan should exactly match the manually reversed forward scan
+        assert_eq!(expected_reverse, reverse_results, 
+            "Reverse scan results should match manually reversed forward scan results\n\
+             Forward: {:?}\n\
+             Expected reverse: {:?}\n\
+             Actual reverse: {:?}", 
+            forward_results, expected_reverse, reverse_results);
+        
+        // Also verify we have the expected number of results
+        assert!(!forward_results.is_empty(), "Should have some results to test");
+        assert_eq!(forward_results.len(), reverse_results.len(), "Forward and reverse should have same number of results");
     }
 
     #[tokio::test(flavor = "multi_thread")]
