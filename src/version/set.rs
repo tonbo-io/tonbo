@@ -10,12 +10,14 @@ use std::{
 use async_lock::RwLock;
 use flume::Sender;
 use fusio::{fs::FileMeta, DynFs};
-use fusio_log::{Logger, Options};
 use futures_util::StreamExt;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
-    fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
+    fs::{
+        filename, generate_file_id, logger::Logger, manager::StoreManager, parse_file_id, FileId,
+        FileType,
+    },
     record::{Record, Schema},
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
@@ -152,6 +154,7 @@ where
                 let log_id = generate_file_id();
                 let base_fs = manager.base_fs();
                 let mut log = Self::open_version_log(&option, base_fs.clone(), log_id).await?;
+                log.flush().await?;
                 log.close().await?;
                 log_id
             }
@@ -201,7 +204,7 @@ where
         let edit_len = new_version.log_length + version_edits.len() as u32;
 
         let mut log =
-            Self::open_version_log(&self.option, self.manager.local_fs().clone(), *log_id).await?;
+            Self::open_version_log(&self.option, self.manager.base_fs().clone(), *log_id).await?;
 
         if !is_recover {
             version_edits.push(VersionEdit::NewLogLength { len: edit_len });
@@ -262,6 +265,7 @@ where
         if edit_len >= option.version_log_snapshot_threshold {
             self.rewrite().await?;
             self.clean().await?;
+            log.remove().await?;
         }
         Ok(())
     }
@@ -269,20 +273,19 @@ where
     pub(crate) async fn rewrite(&self) -> Result<(), VersionError<R>> {
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
-        let fs = self.manager.local_fs();
         let log_id = &mut guard.log_id;
-        let old_log_id = mem::replace(log_id, generate_file_id());
+        let _old_log_id = mem::replace(log_id, generate_file_id());
 
         new_version.log_length = 0;
         let edits = new_version.to_edits();
-        let mut log = Self::open_version_log(&self.option, fs.clone(), *log_id).await?;
+
+        let mut log =
+            Self::open_version_log(&self.option, self.manager.base_fs().clone(), *log_id).await?;
         log.write_batch(edits.iter())
             .await
             .map_err(VersionError::Logger)?;
+        log.flush().await?;
         log.close().await?;
-
-        fs.remove(&self.option.version_log_path(old_log_id)).await?;
-        self.sync(*log_id, old_log_id, edits.iter()).await?;
 
         guard.current = Arc::new(new_version);
 
@@ -319,37 +322,19 @@ where
         Ok(())
     }
 
-    async fn sync<'r>(
-        &self,
-        log_id: FileId,
-        old_log_id: FileId,
-        edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
-    ) -> Result<(), VersionError<R>> {
-        if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
-            // push local manifest to base file system
-            let base_fs = self.manager.base_fs();
-            let mut log = Self::open_version_log(&self.option, base_fs.clone(), log_id).await?;
-
-            log.write_batch(edits).await?;
-            log.close().await?;
-            base_fs
-                .remove(&self.option.version_log_path(old_log_id))
-                .await?;
-        }
-
-        Ok(())
-    }
-
     async fn open_version_log(
         option: &DbOption,
         fs: Arc<dyn DynFs>,
         gen: FileId,
     ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
-        Options::new(option.version_log_path(gen))
-            .truncate(true)
-            .build_with_fs(fs)
-            .await
-            .map_err(VersionError::Logger)
+        let log = Logger::<VersionEdit<<R::Schema as Schema>::Key>>::open(
+            option.version_log_dir_path(),
+            fs,
+            filename(gen, FileType::Log).as_str(),
+            0,
+        )
+        .await?;
+        Ok(log)
     }
 
     pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
@@ -438,6 +423,143 @@ pub(crate) mod tests {
         })
     }
 
+    async fn version_log_rewrite(path: Path, base_fs: FsOptions) {
+        let option = Arc::new(DbOption::new(path, &StringSchema).base_fs(base_fs.clone()));
+        let (sender, _) = bounded(1);
+
+        let mut version =
+            Version::<String>::new(option.clone(), sender.clone(), Arc::new(0.into()));
+        let (gen1, gen2, gen3) = (generate_file_id(), generate_file_id(), generate_file_id());
+        version.level_slice[0] = vec![
+            Scope {
+                min: "0000".to_string(),
+                max: "0100".to_string(),
+                gen: gen1,
+                wal_ids: None,
+            },
+            Scope {
+                min: "0010".to_string(),
+                max: "0300".to_string(),
+                gen: gen2,
+                wal_ids: None,
+            },
+        ];
+        version.level_slice[1] = vec![Scope {
+            min: "0001".to_string(),
+            max: "1200".to_string(),
+            gen: gen3,
+            wal_ids: None,
+        }];
+
+        let manager = Arc::new(StoreManager::new(base_fs, vec![]).unwrap());
+
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager.clone())
+                .await
+                .unwrap();
+        let old_log_id = {
+            let mut guard = version_set.inner.write().await;
+            guard.current = Arc::new(version);
+            guard.log_id
+        };
+
+        version_set.rewrite().await.unwrap();
+        let log_id = {
+            let guard = version_set.inner.write().await;
+            guard.log_id
+        };
+
+        assert_ne!(old_log_id, log_id);
+
+        let version_log_dir = option.version_log_dir_path();
+        let file_stream = manager.base_fs().list(&version_log_dir).await.unwrap();
+        assert_eq!(file_stream.count().await, 2);
+
+        let edits =
+            VersionEdit::<String>::recover(option.version_log_path(log_id), option.base_fs.clone())
+                .await;
+        let expected = vec![
+            VersionEdit::Add {
+                level: 0,
+                scope: Scope {
+                    min: "0000".to_string(),
+                    max: "0100".to_string(),
+                    gen: gen1,
+                    wal_ids: None,
+                },
+            },
+            VersionEdit::Add {
+                level: 0,
+                scope: Scope {
+                    min: "0010".to_string(),
+                    max: "0300".to_string(),
+                    gen: gen2,
+                    wal_ids: None,
+                },
+            },
+            VersionEdit::Add {
+                level: 1,
+                scope: Scope {
+                    min: "0001".to_string(),
+                    max: "1200".to_string(),
+                    gen: gen3,
+                    wal_ids: None,
+                },
+            },
+            VersionEdit::LatestTimeStamp { ts: 0.into() },
+            VersionEdit::NewLogLength { len: 0 },
+        ];
+        assert_eq!(expected, edits);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_version_log_rewrite() {
+        let tmp_dir = TempDir::new().unwrap();
+        version_log_rewrite(Path::new(tmp_dir.path()).unwrap(), FsOptions::Local).await;
+    }
+
+    #[cfg(all(feature = "aws", feature = "tokio-http"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_s3_version_log_rewrite() {
+        use fusio::remotes::aws::AwsCredential;
+
+        if option_env!("AWS_ACCESS_KEY_ID").is_none()
+            || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
+        {
+            eprintln!("can not get `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`");
+            return;
+        }
+        let key_id = std::option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
+        let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
+            .unwrap()
+            .to_string();
+        let token = std::option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
+        let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
+        let region = std::env::var("AWS_REGION").expect("expected s3 region not to be empty");
+
+        let fs_option = FsOptions::S3 {
+            bucket,
+            credential: Some(AwsCredential {
+                key_id,
+                secret_key,
+                token,
+            }),
+            endpoint: None,
+            sign_payload: None,
+            checksum: None,
+            region: Some(region),
+        };
+
+        let path = Path::from_url_path(format!("rewrite/{}", generate_file_id())).unwrap();
+        version_log_rewrite(path, fs_option).await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn timestamp_persistence() {
         let temp_dir = TempDir::new().unwrap();
@@ -477,17 +599,12 @@ pub(crate) mod tests {
     }
 
     async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
-        let manager = Arc::new(StoreManager::new(base_option, vec![]).unwrap());
+        let manager = Arc::new(StoreManager::new(base_option.clone(), vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::new(path, &StringSchema);
+        let mut option = DbOption::new(path, &StringSchema).base_fs(base_option);
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
-        manager
-            .local_fs()
-            .create_dir_all(&option.version_log_dir_path())
-            .await
-            .unwrap();
         manager
             .base_fs()
             .create_dir_all(&option.version_log_dir_path())
@@ -616,7 +733,6 @@ pub(crate) mod tests {
         .await;
     }
 
-    #[ignore = "s3"]
     #[cfg(all(feature = "aws", feature = "tokio-http"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_s3_version_log_snap_shot() {
@@ -649,12 +765,8 @@ pub(crate) mod tests {
             region: Some(region),
         };
 
-        let temp_dir = TempDir::new().unwrap();
-        version_log_snap_shot(
-            fs_option,
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-        )
-        .await;
+        let path = Path::from_url_path(format!("snap/{}", generate_file_id())).unwrap();
+        version_log_snap_shot(fs_option, path).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
