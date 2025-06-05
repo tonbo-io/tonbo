@@ -39,8 +39,9 @@ Tonbo is designed to integrate seamlessly with other Arrow analytical tools, suc
 ```rust
 use std::ops::Bound;
 
+use tokio::fs;
 use futures_util::stream::StreamExt;
-use tonbo::{executor::tokio::TokioExecutor, Record, Projection, DB};
+use tonbo::{executor::tokio::TokioExecutor, Record, Projection, DB, DbOption, Path};
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
@@ -55,7 +56,14 @@ pub struct User {
 #[tokio::main]
 async fn main() {
     // pluggable async runtime and I/O
-    let db = DB::new("./db_path/users".into(), TokioExecutor::current())
+    let _ = fs::create_dir_all("./db_path/users").await;
+
+    let options = DbOption::new(
+        Path::from_filesystem_path("./db_path/users").unwrap(),
+        &UserSchema,
+    );
+
+    let db = DB::new(options, TokioExecutor::current(), UserSchema)
         .await
         .unwrap();
 
@@ -92,7 +100,6 @@ async fn main() {
             // range scan of users
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
-                .await
                 // tonbo supports pushing down projection
                 .projection(&["email"])
                 .take()
