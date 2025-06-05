@@ -3,15 +3,16 @@ use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 use arrow::{
     array::{
         BooleanArray, Float32Array, Float64Array, GenericBinaryArray, Int16Array, Int32Array,
-        Int64Array, Int8Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        Int64Array, Int8Array, StringArray, TimestampMillisecondArray, UInt16Array, UInt32Array,
+        UInt64Array, UInt8Array,
     },
-    datatypes::{DataType as ArrowDataType, Field},
+    datatypes::{DataType as ArrowDataType, Field, TimeUnit},
 };
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, DecodeError, Encode};
 
 use super::DataType;
-use crate::record::{Key, KeyRef, F32, F64};
+use crate::record::{Key, KeyRef, Timestamp, F32, F64};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {
@@ -44,6 +45,7 @@ impl ValueDesc {
             DataType::String => ArrowDataType::Utf8,
             DataType::Boolean => ArrowDataType::Boolean,
             DataType::Bytes => ArrowDataType::Binary,
+            DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
         };
         Field::new(&self.name, arrow_type, self.is_nullable)
     }
@@ -68,6 +70,7 @@ impl Value {
         }
     }
 
+    /// return the none value of tonbo type
     pub(crate) fn with_none_value(datatype: DataType, name: String, is_nullable: bool) -> Self {
         match datatype {
             DataType::UInt8 => Self::new(datatype, name, Arc::<Option<u8>>::new(None), is_nullable),
@@ -91,10 +94,10 @@ impl Value {
                 Self::new(datatype, name, Arc::<Option<i64>>::new(None), is_nullable)
             }
             DataType::Float32 => {
-                Self::new(datatype, name, Arc::<Option<f32>>::new(None), is_nullable)
+                Self::new(datatype, name, Arc::<Option<F32>>::new(None), is_nullable)
             }
             DataType::Float64 => {
-                Self::new(datatype, name, Arc::<Option<f64>>::new(None), is_nullable)
+                Self::new(datatype, name, Arc::<Option<F64>>::new(None), is_nullable)
             }
             DataType::String => Self::new(
                 datatype,
@@ -109,6 +112,12 @@ impl Value {
                 datatype,
                 name,
                 Arc::<Option<Vec<u8>>>::new(None),
+                is_nullable,
+            ),
+            DataType::Timestamp => Self::new(
+                datatype,
+                name,
+                Arc::<Option<Timestamp>>::new(None),
                 is_nullable,
             ),
         }
@@ -230,19 +239,26 @@ macro_rules! implement_key_col {
                                 .expect(stringify!("unexpected datatype, expected " $Type))
                         )),
                     )*
+                    DataType::Timestamp => Arc::new(TimestampMillisecondArray::new_scalar(
+                        self
+                            .value
+                            .as_ref()
+                            .downcast_ref::<Timestamp>()
+                                .expect("unexpected datatype, expected Timestamp").0,
+                    )),
                     DataType::Float32 => Arc::new(Float32Array::new_scalar(
                         self
                             .value
                             .as_ref()
                             .downcast_ref::<F32>()
-                                .expect("unexpected datatype, expected String").into(),
+                                .expect("unexpected datatype, expected float32").into(),
                     )),
                     DataType::Float64 => Arc::new(Float64Array::new_scalar(
                         self
                             .value
                             .as_ref()
                             .downcast_ref::<F64>()
-                                .expect("unexpected datatype, expected String").into(),
+                                .expect("unexpected datatype, expected float64").into(),
                     )),
                     DataType::String => Arc::new(StringArray::new_scalar(
                         self
@@ -390,6 +406,7 @@ impl Value {
             DataType::Bytes => 10,
             DataType::Float32 => 11,
             DataType::Float64 => 12,
+            DataType::Timestamp => 13,
         }
     }
 
@@ -408,6 +425,7 @@ impl Value {
             10 => DataType::Bytes,
             11 => DataType::Float32,
             12 => DataType::Float64,
+            13 => DataType::Timestamp,
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -429,6 +447,11 @@ impl From<&ValueDesc> for Field {
             DataType::String => Field::new(&col.name, ArrowDataType::Utf8, col.is_nullable),
             DataType::Boolean => Field::new(&col.name, ArrowDataType::Boolean, col.is_nullable),
             DataType::Bytes => Field::new(&col.name, ArrowDataType::Binary, col.is_nullable),
+            DataType::Timestamp => Field::new(
+                &col.name,
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                col.is_nullable,
+            ),
         }
     }
 }
@@ -449,7 +472,8 @@ macro_rules! for_datatype {
                 { F64, Float64 },
                 { String, String },
                 { bool, Boolean },
-                { Vec<u8>, Bytes }
+                { Vec<u8>, Bytes },
+                { Timestamp, Timestamp }
         }
     };
 }
@@ -457,7 +481,6 @@ macro_rules! for_datatype {
 implement_key_col!(
     { u8, UInt8, UInt8Array }, { u16, UInt16, UInt16Array }, { u32, UInt32, UInt32Array }, { u64, UInt64, UInt64Array },
     { i8, Int8, Int8Array }, { i16, Int16, Int16Array }, { i32, Int32, Int32Array }, { i64, Int64, Int64Array }
-    // { F32, Float32, Float32Array }, { F64, Float64, Float64Array }
 );
 for_datatype! { implement_col }
 for_datatype! { implement_decode_col }
@@ -468,7 +491,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::Value;
-    use crate::record::DataType;
+    use crate::record::{DataType, Timestamp};
 
     #[test]
     fn test_value_eq() {
@@ -511,6 +534,28 @@ mod tests {
                 DataType::UInt64,
                 "uint64".to_string(),
                 Arc::new(Some(124_u64)),
+                true,
+            );
+            assert_eq!(value1, value2);
+            assert_ne!(value1, value3);
+        }
+        {
+            let value1 = Value::new(
+                DataType::Timestamp,
+                "ts".to_string(),
+                Arc::new(Some(Timestamp(1717507203412))),
+                true,
+            );
+            let value2 = Value::new(
+                DataType::Timestamp,
+                "ts".to_string(),
+                Arc::new(Some(Timestamp(1717507203412))),
+                true,
+            );
+            let value3 = Value::new(
+                DataType::Timestamp,
+                "ts".to_string(),
+                Arc::new(Some(Timestamp(2717507203412))),
                 true,
             );
             assert_eq!(value1, value2);

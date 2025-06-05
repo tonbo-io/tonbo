@@ -26,6 +26,7 @@ pub enum DataType {
     Bytes,
     Float32,
     Float64,
+    Timestamp,
 }
 
 impl From<&ArrowDataType> for DataType {
@@ -44,6 +45,15 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::Utf8 => DataType::String,
             ArrowDataType::Boolean => DataType::Boolean,
             ArrowDataType::Binary => DataType::Bytes,
+            ArrowDataType::Timestamp(unit, tz) => {
+                debug_assert!(
+                    unit == &arrow::datatypes::TimeUnit::Millisecond,
+                    "expected TimeUnit::Millisecond, get {:?}",
+                    unit
+                );
+                debug_assert!(tz.is_none(), "expected timezone is none, get {:?}", tz);
+                DataType::Timestamp
+            }
             _ => todo!(),
         }
     }

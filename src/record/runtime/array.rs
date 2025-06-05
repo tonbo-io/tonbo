@@ -4,7 +4,8 @@ use arrow::{
     array::{
         Array, ArrayBuilder, ArrayRef, ArrowPrimitiveType, BooleanArray, BooleanBufferBuilder,
         BooleanBuilder, GenericBinaryArray, GenericBinaryBuilder, PrimitiveArray, PrimitiveBuilder,
-        StringArray, StringBuilder, UInt32Builder,
+        StringArray, StringBuilder, TimestampMillisecondArray, TimestampMillisecondBuilder,
+        UInt32Builder,
     },
     datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
@@ -17,7 +18,7 @@ use crate::{
     cast_arc_value,
     inmem::immutable::{ArrowArrays, Builder},
     magic::USER_COLUMN_OFFSET,
-    record::{Key, Record, Schema, F32, F64},
+    record::{Key, Record, Schema, Timestamp, F32, F64},
     timestamp::Ts,
 };
 
@@ -99,6 +100,11 @@ impl ArrowArrays for DynRecordImmutableArrays {
                 DataType::Bytes => {
                     builders.push(Box::new(GenericBinaryBuilder::<i32>::with_capacity(
                         capacity, 0,
+                    )));
+                }
+                DataType::Timestamp => {
+                    builders.push(Box::new(TimestampMillisecondBuilder::with_capacity(
+                        capacity,
                     )));
                 }
             }
@@ -247,6 +253,14 @@ impl ArrowArrays for DynRecordImmutableArrays {
                             Arc::new(v)
                         } else {
                             Arc::new(Some(v))
+                        }
+                    }
+                    DataType::Timestamp => {
+                        let v = cast_arc_value!(col.value, TimestampMillisecondArray).value(offset);
+                        if primary_key_index == idx {
+                            Arc::new(Timestamp(v))
+                        } else {
+                            Arc::new(Some(Timestamp(v)))
                         }
                     }
                 };
@@ -433,6 +447,16 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                                 None => bd.append_value(vec![]),
                             }
                         }
+                        DataType::Timestamp => {
+                            let bd = Self::as_builder_mut::<TimestampMillisecondBuilder>(
+                                builder.as_mut(),
+                            );
+                            match cast_arc_value!(col.value, Option<Timestamp>) {
+                                Some(value) => bd.append_value(value.0),
+                                None if col.is_nullable() => bd.append_null(),
+                                None => bd.append_value(Default::default()),
+                            }
+                        }
                     }
                 }
             }
@@ -499,6 +523,10 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                             Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                                 .append_value(Vec::<u8>::default());
                         }
+                        DataType::Timestamp => {
+                            Self::as_builder_mut::<TimestampMillisecondBuilder>(builder.as_mut())
+                                .append_value(i64::default());
+                        }
                     }
                 }
             }
@@ -560,6 +588,10 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     ),
                     DataType::Bytes => mem::size_of_val(
                         Self::as_builder::<GenericBinaryBuilder<i32>>(builder.as_ref())
+                            .values_slice(),
+                    ),
+                    DataType::Timestamp => mem::size_of_val(
+                        Self::as_builder::<TimestampMillisecondBuilder>(builder.as_ref())
                             .values_slice(),
                     ),
                 }
@@ -746,6 +778,19 @@ impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
                     ));
                     array_refs.push(value);
                 }
+                DataType::Timestamp => {
+                    let value = Arc::new(
+                        Self::as_builder_mut::<TimestampMillisecondBuilder>(builder.as_mut())
+                            .finish(),
+                    );
+                    columns.push(Value::new(
+                        DataType::Timestamp,
+                        field.name().to_owned(),
+                        value.clone(),
+                        is_nullable,
+                    ));
+                    array_refs.push(value);
+                }
             };
         }
 
@@ -821,6 +866,10 @@ impl DynRecordBuilder {
                 .append_value(*cast_arc_value!(col.value, bool)),
             DataType::Bytes => Self::as_builder_mut::<GenericBinaryBuilder<i32>>(builder.as_mut())
                 .append_value(cast_arc_value!(col.value, Vec<u8>)),
+            DataType::Timestamp => {
+                Self::as_builder_mut::<TimestampMillisecondBuilder>(builder.as_mut())
+                    .append_value(cast_arc_value!(col.value, Timestamp).0)
+            }
         };
     }
 
@@ -958,6 +1007,7 @@ mod tests {
         }
         {
             let record_batch = arrays.as_record_batch();
+            dbg!(&record_batch);
             let mask = ProjectionMask::all();
             let record_ref =
                 DynRecordRef::from_record_batch(record_batch, 0, &mask, schema.arrow_schema());
