@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{i16, i8, sync::Arc};
 
 use pyo3::{
     prelude::*,
     pyclass, pymethods,
-    types::{PyDict, PyMapping, PyString},
+    types::{PyDict, PyMapping, PyString, PyTuple},
     Bound,
 };
 use tonbo::record::F64;
@@ -24,8 +24,23 @@ impl Record {
 
     #[pyo3(signature = ( **kwargs))]
     fn __call__(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+        let record = self.wraps.call0(py)?;
+
         let dict = self.wraps.getattr(py, "__dict__")?;
         let mapping_proxy = dict.downcast_bound::<PyMapping>(py).unwrap();
+
+        let record_dict = PyDict::new(py);
+
+        for entry in mapping_proxy.items().iter() {
+            for item in entry.iter() {
+                let tuple = item.downcast_exact::<PyTuple>()?;
+                let key = tuple.get_item(0)?;
+                let value = tuple.get_item(1)?;
+                record_dict.set_item(key.downcast::<PyString>()?, value)?;
+            }
+        }
+        record.setattr(py, "__dict__", record_dict)?;
+
         if let Some(kwargs) = kwargs {
             for (key, v) in kwargs.iter() {
                 let attr = key.downcast::<PyString>().unwrap();
@@ -117,12 +132,10 @@ impl Record {
                         }
                     }
                 };
-                self.wraps.setattr(py, attr, col).unwrap();
+                record.setattr(py, attr, col)?;
             }
         }
 
-        let ret = self.wraps.clone_ref(py).into_any();
-
-        Ok(ret)
+        Ok(record)
     }
 }
