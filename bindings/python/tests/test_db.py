@@ -21,6 +21,15 @@ async def test_db_write():
     for i in range(0, 100):
         await db.insert(User(age=i, height=i * 10, weight=i * 20))
 
+@pytest.mark.asyncio
+async def test_db_write_none_value():
+    db = build_db()
+    await db.insert(User(age=1, height=100, weight=20))
+    await db.insert(User(age=2, weight=30))
+    user1 = await db.get(1)
+    user2 = await db.get(2)
+    assert user1 == {"age": 1, "height": 100, "weight": 20}
+    assert user2 == {"age": 2, "height": None, "weight": 30}
 
 @pytest.mark.asyncio
 async def test_db_read():
