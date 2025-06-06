@@ -92,7 +92,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         .as_ref()
         .expect("cannot find primary key ident");
     let primary_key_value = match primary_key_data_type.0 {
-        DataType::Float32 | DataType::Float64 => quote!(key.value.into()),
+        DataType::Float32 | DataType::Float64 | DataType::Timestamp => quote!(key.value.into()),
         _ => quote!(key.value),
     };
     let primary_key_definitions = PrimaryKey {
@@ -765,7 +765,10 @@ fn struct_builder_codegen(
 
         let is_string = matches!(data_type, DataType::String);
         let is_bytes = matches!(data_type, DataType::Bytes);
-        let is_float = matches!(data_type, DataType::Float32 | DataType::Float64);
+        let is_wrapped = matches!(
+            data_type,
+            DataType::Float32 | DataType::Float64 | DataType::Timestamp
+        );
         let builder = data_type.to_builder();
         let size_method = data_type.to_size_method(field_name);
 
@@ -785,7 +788,7 @@ fn struct_builder_codegen(
             + #size_method
         });
 
-        let append_val = if is_float {
+        let append_val = if is_wrapped {
             quote!(#field_name.into())
         } else {
             quote!(#field_name)
