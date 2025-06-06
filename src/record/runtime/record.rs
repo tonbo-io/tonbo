@@ -6,7 +6,7 @@ use fusio_log::{Decode, Encode};
 use super::{schema::DynSchema, DataType, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
-    record::{Record, RecordDecodeError, F32, F64},
+    record::{Record, RecordDecodeError, Timestamp, F32, F64},
 };
 
 #[derive(Debug)]
@@ -59,6 +59,9 @@ impl Decode for DynRecord {
                     DataType::Bytes => {
                         Arc::new(cast_arc_value!(col.value, Option<Vec<u8>>).clone().unwrap())
                     }
+                    DataType::Timestamp => {
+                        Arc::new(cast_arc_value!(col.value, Option<Timestamp>).unwrap())
+                    }
                 };
             }
             values.push(col);
@@ -101,6 +104,7 @@ impl Record for DynRecord {
                     DataType::Bytes => {
                         Arc::new(Some(cast_arc_value!(col.value, Vec<u8>).to_owned()))
                     }
+                    DataType::Timestamp => Arc::new(Some(*cast_arc_value!(col.value, Timestamp))),
                 };
             }
 
@@ -163,12 +167,18 @@ macro_rules! dyn_record {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::sync::Arc;
+    use std::{
+        io::{Cursor, SeekFrom},
+        sync::Arc,
+    };
 
-    use super::{DynRecord, DynSchema};
+    use fusio_log::{Decode, Encode};
+    use tokio::io::AsyncSeekExt;
+
+    use super::{DynRecord, DynSchema, Record};
     use crate::{
         dyn_schema,
-        record::{F32, F64},
+        record::{DataType, DynRecordRef, Timestamp, Value, F32, F64},
     };
 
     #[allow(unused)]
@@ -184,6 +194,7 @@ pub(crate) mod test {
             ("bytes", Bytes, true),
             ("grade", Float32, false),
             ("price", Float64, true),
+            ("timestamp", Timestamp, true),
             0
         )
     }
@@ -203,6 +214,7 @@ pub(crate) mod test {
                 ("bytes", Bytes, true, Some(i.to_le_bytes().to_vec())),
                 ("grade", Float32, false, F32::from(i as f32 * 1.11)),
                 ("price", Float64, true, Some(F64::from(i as f64 * 1.01))),
+                ("timestamp", Timestamp, true, Some(Timestamp(i as i64))),
                 0
             );
             if i >= 45 {
@@ -212,5 +224,116 @@ pub(crate) mod test {
             items.push(record);
         }
         items
+    }
+
+    fn test_dyn_record() -> DynRecord {
+        dyn_record!(
+            ("id", Int64, false, 10i64),
+            ("age", Int8, true, Some(10i8)),
+            ("height", Int16, true, Some(183i16)),
+            ("weight", Int32, false, 56i32),
+            ("name", String, false, "tonbo".to_string()),
+            ("email", String, true, Some("contact@tonbo.io".to_string())),
+            ("enabled", Boolean, false, true),
+            ("bytes", Bytes, true, Some(b"hello tonbo".to_vec())),
+            ("grade", Float32, false, F32::from(1.1234)),
+            ("price", Float64, true, Some(F64::from(1.01))),
+            ("timestamp", Timestamp, true, Some(Timestamp(1717507203412))),
+            0
+        )
+    }
+
+    #[test]
+    fn test_as_record_ref() {
+        let record = test_dyn_record();
+        let record_ref = record.as_record_ref();
+        let expected = DynRecordRef::new(
+            vec![
+                Value::new(DataType::Int64, "id".to_string(), Arc::new(10i64), false),
+                Value::new(
+                    DataType::Int8,
+                    "age".to_string(),
+                    Arc::new(Some(10i8)),
+                    true,
+                ),
+                Value::new(
+                    DataType::Int16,
+                    "height".to_string(),
+                    Arc::new(Some(183i16)),
+                    true,
+                ),
+                Value::new(
+                    DataType::Int32,
+                    "weight".to_string(),
+                    Arc::new(Some(56i32)),
+                    false,
+                ),
+                Value::new(
+                    DataType::String,
+                    "name".to_string(),
+                    Arc::new(Some("tonbo".to_string())),
+                    false,
+                ),
+                Value::new(
+                    DataType::String,
+                    "email".to_string(),
+                    Arc::new(Some("contact@tonbo.io".to_string())),
+                    true,
+                ),
+                Value::new(
+                    DataType::Boolean,
+                    "enabled".to_string(),
+                    Arc::new(Some(true)),
+                    false,
+                ),
+                Value::new(
+                    DataType::Bytes,
+                    "bytes".to_string(),
+                    Arc::new(Some(b"hello tonbo".to_vec())),
+                    true,
+                ),
+                Value::new(
+                    DataType::Float32,
+                    "grade".to_string(),
+                    Arc::new(Some(F32::from(1.1234))),
+                    false,
+                ),
+                Value::new(
+                    DataType::Float64,
+                    "price".to_string(),
+                    Arc::new(Some(F64::from(1.01))),
+                    true,
+                ),
+                Value::new(
+                    DataType::Timestamp,
+                    "timestamp".to_string(),
+                    Arc::new(Some(Timestamp(1717507203412))),
+                    true,
+                ),
+            ],
+            0,
+        );
+
+        for (actual, expected) in record_ref.columns.iter().zip(expected.columns) {
+            assert_eq!(*actual, expected)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_decode_dyn_record() {
+        let record = test_dyn_record();
+
+        let mut bytes = Vec::new();
+        let mut buf = Cursor::new(&mut bytes);
+        let record_ref = record.as_record_ref();
+        record_ref.encode(&mut buf).await.unwrap();
+
+        buf.seek(SeekFrom::Start(0)).await.unwrap();
+        let actual = DynRecord::decode(&mut buf).await.unwrap();
+
+        assert_eq!(
+            record.as_record_ref().columns,
+            actual.as_record_ref().columns
+        );
     }
 }

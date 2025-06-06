@@ -4,7 +4,7 @@ use arrow::{
     array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
     datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
-        UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+        TimestampMillisecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
 use fusio::Write;
@@ -14,7 +14,8 @@ use super::{DataType, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
-        option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema, F32, F64,
+        option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema, Timestamp, F32,
+        F64,
     },
 };
 
@@ -92,10 +93,11 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
 
         let mut columns = vec![];
 
+        let schema = record_batch.schema();
+        let flattened_fields = schema.flattened_fields();
+
         for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
             let datatype = DataType::from(field.data_type());
-            let schema = record_batch.schema();
-            let flattened_fields = schema.flattened_fields();
             let batch_field = flattened_fields
                 .iter()
                 .enumerate()
@@ -221,6 +223,16 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                         Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
+                DataType::Timestamp => {
+                    let v = col.as_primitive::<TimestampMillisecondType>();
+                    if primary_index == idx - 2 {
+                        Arc::new(Timestamp(v.value(offset))) as Arc<dyn Any + Send + Sync>
+                    } else {
+                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                            .then_some(Timestamp(v.value(offset)));
+                        Arc::new(value) as Arc<dyn Any + Send + Sync>
+                    }
+                }
             };
             columns.push(Value::new(
                 datatype,
@@ -256,6 +268,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     DataType::String => col.value = Arc::<Option<String>>::new(None),
                     DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
                     DataType::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
+                    DataType::Timestamp => col.value = Arc::<Option<Timestamp>>::new(None),
                 };
             }
         }
@@ -287,11 +300,12 @@ impl<'r> DynRecordRef<'r> {
 
 #[cfg(test)]
 mod tests {
+
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
         cast_arc_value, dyn_record, dyn_schema,
-        record::{Record, RecordRef, Schema, F32, F64},
+        record::{Record, RecordRef, Schema, Timestamp, F32, F64},
     };
 
     #[test]
@@ -421,6 +435,67 @@ mod tests {
             assert_eq!(*cast_arc_value!(columns[4].value, Option<String>), None,);
             assert_eq!(*cast_arc_value!(columns[5].value, Option<String>), None,);
             assert_eq!(*cast_arc_value!(columns[6].value, Option<Vec<u8>>), None);
+        }
+    }
+
+    #[test]
+    fn test_timestamp_projection() {
+        let schema = dyn_schema!(
+            ("_null", Boolean, false),
+            ("_ts", UInt32, false),
+            ("id", Timestamp, false),
+            ("ts1", Timestamp, false),
+            ("ts2", Timestamp, true),
+            ("ts3", Timestamp, true),
+            2
+        );
+        let record = dyn_record!(
+            ("_null", Boolean, false, true),
+            ("_ts", UInt32, false, 7u32),
+            ("id", Timestamp, false, Timestamp(1717507203412)),
+            ("ts1", Timestamp, false, Timestamp(1717507203432)),
+            ("ts2", Timestamp, true, Some(Timestamp(1717507203442))),
+            ("ts3", Timestamp, true, None::<Timestamp>),
+            2
+        );
+        {
+            // test project all
+            let mut record_ref = record.as_record_ref();
+            record_ref.projection(&ProjectionMask::all());
+            let columns = record_ref.columns;
+            assert_eq!(
+                cast_arc_value!(columns[2].value, Timestamp),
+                &Timestamp(1717507203412)
+            );
+            assert_eq!(
+                cast_arc_value!(columns[3].value, Option<Timestamp>),
+                &Some(Timestamp(1717507203432))
+            );
+            assert_eq!(
+                cast_arc_value!(columns[4].value, Option<Timestamp>),
+                &Some(Timestamp(1717507203442))
+            );
+
+            assert_eq!(*cast_arc_value!(columns[5].value, Option<Timestamp>), None);
+        }
+        {
+            // test project no columns
+            let mut record_ref = record.as_record_ref();
+            let mask = ProjectionMask::roots(
+                &ArrowSchemaConverter::new()
+                    .convert(schema.arrow_schema())
+                    .unwrap(),
+                vec![1],
+            );
+            record_ref.projection(&mask);
+            let columns = record_ref.columns;
+            assert_eq!(
+                *cast_arc_value!(columns[2].value, Timestamp),
+                Timestamp(1717507203412)
+            );
+            assert_eq!(*cast_arc_value!(columns[3].value, Option<Timestamp>), None);
+            assert_eq!(*cast_arc_value!(columns[4].value, Option<Timestamp>), None);
+            assert_eq!(*cast_arc_value!(columns[5].value, Option<Timestamp>), None);
         }
     }
 }
