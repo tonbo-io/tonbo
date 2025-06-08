@@ -29,8 +29,6 @@ pub(crate) struct TransactionScan<'scan, R: Record> {
     inner: Range<'scan, <R::Schema as RecordSchema>::Key, Option<R>>,
     ts: Timestamp,
     reverse: bool,
-    items: Option<Vec<(&'scan <R::Schema as RecordSchema>::Key, &'scan Option<R>)>>,
-    current_index: Option<usize>,
 }
 
 impl<'scan, R> Iterator for TransactionScan<'scan, R>
@@ -44,24 +42,9 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.reverse {
-            // Initialize items collection on first call
-            if self.items.is_none() {
-                let items: Vec<_> = self.inner.clone().collect();
-                self.current_index = if items.is_empty() { None } else { Some(items.len() - 1) };
-                self.items = Some(items);
-            }
-            
-            if let (Some(items), Some(index)) = (&self.items, self.current_index) {
-                let (key, value) = items[index];
-                if index == 0 {
-                    self.current_index = None;
-                } else {
-                    self.current_index = Some(index - 1);
-                }
-                Some((Ts::new(key.as_key_ref(), self.ts), value))
-            } else {
-                None
-            }
+            self.inner
+                .next_back()
+                .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value))
         } else {
             // Forward iteration (existing logic)
             self.inner
@@ -194,8 +177,6 @@ where
                     inner, 
                     ts, 
                     reverse, // This will now use the actual reverse flag passed from Scan::reverse()
-                    items: None,
-                    current_index: None,
                 }.into();
                 if let Some(mask) = projection_mask {
                     transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();

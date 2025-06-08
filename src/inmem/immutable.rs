@@ -166,8 +166,6 @@ where
     record_batch: &'iter RecordBatch,
     projection_mask: ProjectionMask,
     reverse: bool,
-    items: Option<Vec<(Ts<<R::Schema as Schema>::Key>, u32)>>,
-    current_index: Option<usize>,
 }
 
 impl<'iter, R> ImmutableScan<'iter, R>
@@ -185,8 +183,6 @@ where
             record_batch,
             projection_mask,
             reverse,
-            items: None,
-            current_index: None,
         }
     }
 }
@@ -200,23 +196,7 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if self.reverse {
             // Initialize items collection on first call
-            if self.items.is_none() {
-                if let Some(range) = self.range.take() {
-                    let items: Vec<_> = range.map(|(key, &offset)| (key.clone(), offset)).collect();
-                    self.current_index = if items.is_empty() { None } else { Some(items.len() - 1) };
-                    self.items = Some(items);
-                }
-            }
-            
-            if let (Some(items), Some(index)) = (&self.items, self.current_index) {
-                let (_, offset) = &items[index];
-                let offset = *offset;
-                if index == 0 {
-                    self.current_index = None;
-                } else {
-                    self.current_index = Some(index - 1);
-                }
-                
+            self.range.as_mut()?.next_back().map(|(_, &offset)| {
                 let schema = self.record_batch.schema();
                 let record_ref = R::Ref::from_record_batch(
                     self.record_batch,
@@ -225,17 +205,15 @@ where
                     &schema,
                 );
                 // TODO: remove cloning record batch
-                Some(RecordBatchEntry::new(self.record_batch.clone(), {
+                RecordBatchEntry::new(self.record_batch.clone(), {
                     // Safety: record_ref self-references the record batch
                     unsafe {
                         transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
                             record_ref,
                         )
                     }
-                }))
-            } else {
-                None
-            }
+                })
+            })
         } else {
             // Forward iteration (existing logic)
             self.range.as_mut()?.next().map(|(_, &offset)| {

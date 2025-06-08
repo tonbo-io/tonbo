@@ -32,8 +32,6 @@ pub(crate) struct MutableScan<'scan, R: Record> {
         Option<R>,
     >>,
     reverse: bool,
-    items: Option<Vec<crossbeam_skiplist::map::Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>>>,
-    current_index: Option<usize>,
 }
 
 impl<'scan, R> Iterator for MutableScan<'scan, R>
@@ -44,26 +42,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.reverse {
-            // Initialize items collection on first call
-            if self.items.is_none() {
-                if let Some(inner) = self.inner.take() {
-                    let items: Vec<_> = inner.collect();
-                    self.current_index = if items.is_empty() { None } else { Some(items.len() - 1) };
-                    self.items = Some(items);
-                }
-            }
-            
-            if let (Some(items), Some(index)) = (&self.items, self.current_index) {
-                let item = items[index].clone();
-                if index == 0 {
-                    self.current_index = None;
-                } else {
-                    self.current_index = Some(index - 1);
-                }
-                Some(item)
-            } else {
-                None
-            }
+            self.inner.as_mut()?.next_back()
         } else {
             // Forward iteration (existing logic)
             self.inner.as_mut()?.next()
@@ -208,8 +187,6 @@ where
         MutableScan {
             inner: Some(self.data.range((lower, upper))),
             reverse,
-            items: None,
-            current_index: None,
         }
     }
 
