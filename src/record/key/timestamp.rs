@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use arrow::array::TimestampMillisecondArray;
-use chrono::{DateTime, NaiveDateTime};
 use fusio_log::{Decode, Encode};
 
 use super::{Key, KeyRef};
@@ -58,34 +57,6 @@ impl Encode for Timestamp {
 impl From<i64> for Timestamp {
     fn from(value: i64) -> Self {
         Self(value)
-    }
-}
-
-impl From<Timestamp> for i64 {
-    fn from(value: Timestamp) -> Self {
-        value.0
-    }
-}
-
-impl From<&Timestamp> for i64 {
-    fn from(value: &Timestamp) -> Self {
-        value.0
-    }
-}
-
-impl Timestamp {
-    /// build [`Timestamp`] from [`NaiveDateTime`]
-    pub fn from_naive_date_time(naive: NaiveDateTime) -> Option<Self> {
-        let utc = naive.and_utc();
-        let millis = utc.timestamp().checked_mul(1_000)?;
-        millis
-            .checked_add(utc.timestamp_subsec_millis() as i64)
-            .map(Timestamp)
-    }
-
-    /// convert [`Timestamp`] to [`NaiveDateTime`]
-    pub fn to_naive_date_time(&self) -> Option<NaiveDateTime> {
-        Some(DateTime::from_timestamp_millis(self.0)?.naive_utc())
     }
 }
 

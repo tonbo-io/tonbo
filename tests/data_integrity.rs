@@ -1,5 +1,3 @@
-mod macros;
-
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{hash::Hasher, ops::Bound};

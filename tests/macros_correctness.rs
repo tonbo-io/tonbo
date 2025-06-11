@@ -1,3 +1,23 @@
+use tonbo::record::F32;
+use tonbo_macros::Record;
+
+#[derive(Record, Debug, PartialEq)]
+pub struct User {
+    email: Option<String>,
+    age: u8,
+    #[record(primary_key)]
+    name: String,
+    grade: F32,
+}
+
+#[derive(Record, Debug, PartialEq)]
+pub struct Point {
+    #[record(primary_key)]
+    id: u64,
+    x: i32,
+    y: i32,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{io::Cursor, sync::Arc};
@@ -15,27 +35,12 @@ mod tests {
     use tonbo::{
         inmem::immutable::{ArrowArrays, Builder},
         magic,
-        record::{Record, RecordRef, Schema, F32},
+        record::{Record, RecordRef, Schema},
         timestamp::Ts,
     };
-    use tonbo_macros::Record;
 
-    #[derive(Record, Debug, PartialEq)]
-    pub struct User {
-        email: Option<String>,
-        age: u8,
-        #[record(primary_key)]
-        name: String,
-        grade: F32,
-    }
+    use crate::{Point, User, UserImmutableArrays, UserRef, UserSchema};
 
-    #[derive(Record, Debug, PartialEq)]
-    pub struct Point {
-        #[record(primary_key)]
-        id: u64,
-        x: i32,
-        y: i32,
-    }
     #[tokio::test]
     async fn test_record_info() {
         let user = User {
@@ -377,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_and_decode_without_ref_field() {
+    async fn test_encode_and_decode_without_ref() {
         let original = Point {
             id: 1243,
             x: 124,
