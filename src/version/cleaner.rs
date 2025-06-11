@@ -69,6 +69,16 @@ impl Cleaner {
                                 .map(|path| self.manager.get_fs(path))
                                 .unwrap_or(self.manager.base_fs());
                             fs.remove(&self.option.table_path(gen, level)).await?;
+
+                            let cached_to_local = self.option.level_fs_cached(level);
+                            if cached_to_local {
+                                let fs = self
+                                    .option
+                                    .level_fs_path(level)
+                                    .map(|path| self.manager.get_cache(path))
+                                    .unwrap_or(self.manager.base_fs());
+                                fs.remove(&self.option.table_path(gen, level)).await?;
+                            }
                         }
                     }
                 }

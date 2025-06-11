@@ -253,7 +253,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema), false).await;
 
         {
             let mut level_stream_1 = LevelStream::new(

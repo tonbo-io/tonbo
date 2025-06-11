@@ -256,7 +256,7 @@ async fn main() {
     ];
     let schema = DynSchema::new(descs, 0);
     let options = DbOption::new(Path::from_filesystem_path("s3_path").unwrap(), &schema)
-        .level_path(2, "l2", fs_option);
+        .level_path(2, "l2", fs_option, true);
 
 
     let db = DB::<DynRecord, TokioExecutor>::new(options, TokioExecutor::current(), schema)

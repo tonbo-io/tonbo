@@ -26,7 +26,7 @@ pub struct DbOption {
     /// build the `DB` storage directory based on the passed path
     path: String,
     base_fs: FsOptions,
-    level_paths: Vec<Option<(String, FsOptions)>>,
+    level_paths: Vec<Option<(String, FsOptions, bool)>>,
 }
 
 #[wasm_bindgen]
@@ -57,8 +57,9 @@ impl DbOption {
         level: usize,
         path: String,
         fs_options: FsOptions,
+        cached: bool,
     ) -> Result<Self, JsValue> {
-        self.level_paths[level] = Some((path.to_string(), fs_options));
+        self.level_paths[level] = Some((path.to_string(), fs_options, cached));
         Ok(self)
     }
 }
@@ -77,10 +78,10 @@ impl DbOption {
             .base_fs(self.base_fs.into_fs_options());
 
         for (level, path) in self.level_paths.into_iter().enumerate() {
-            if let Some((path, fs_options)) = path {
+            if let Some((path, fs_options, cached)) = path {
                 let path = fs_options.path(path).unwrap();
                 opt = opt
-                    .level_path(level, path, fs_options.into_fs_options())
+                    .level_path(level, path, fs_options.into_fs_options(), cached)
                     .unwrap();
             }
         }

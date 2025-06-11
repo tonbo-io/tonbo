@@ -30,7 +30,7 @@ pub struct DbOption {
     pub(crate) clean_channel_buffer: usize,
     pub(crate) base_path: Path,
     pub(crate) base_fs: FsOptions,
-    pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
+    pub(crate) level_paths: Vec<Option<(Path, FsOptions, bool)>>,
     pub(crate) immutable_chunk_num: usize,
     pub(crate) immutable_chunk_max_num: usize,
     pub(crate) level_sst_magnification: usize,
@@ -180,11 +180,12 @@ impl DbOption {
         level: usize,
         path: Path,
         fs_options: FsOptions,
+        cached: bool,
     ) -> Result<Self, ExceedsMaxLevel> {
         if level >= MAX_LEVEL {
             return Err(ExceedsMaxLevel);
         }
-        self.level_paths[level] = Some((path, fs_options));
+        self.level_paths[level] = Some((path, fs_options, cached));
         Ok(self)
     }
 
@@ -213,7 +214,7 @@ impl DbOption {
     pub(crate) fn table_path(&self, gen: FileId, level: usize) -> Path {
         self.level_paths[level]
             .as_ref()
-            .map(|(path, _)| path)
+            .map(|(path, _, _)| path)
             .unwrap_or(&self.base_path)
             .child(format!("{}.{}", gen, FileType::Parquet))
     }
@@ -237,7 +238,14 @@ impl DbOption {
     }
 
     pub(crate) fn level_fs_path(&self, level: usize) -> Option<&Path> {
-        self.level_paths[level].as_ref().map(|(path, _)| path)
+        self.level_paths[level].as_ref().map(|(path, _, _)| path)
+    }
+
+    pub(crate) fn level_fs_cached(&self, level: usize) -> bool {
+        self.level_paths[level]
+            .as_ref()
+            .map(|(_, _, cached)| *cached)
+            .unwrap_or(false)
     }
 
     pub(crate) fn is_threshold_exceeded_major<R: Record>(

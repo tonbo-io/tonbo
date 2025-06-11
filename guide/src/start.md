@@ -219,8 +219,8 @@ let s3_option = FsOptions::S3 {
 let options = DbOption::new(
     Path::from_filesystem_path("./db_path/users").unwrap(),
     &UserSchema,
-).level_path(2, "l2", s3_option.clone())
-).level_path(3, "l3", s3_option);
+).level_path(2, "l2", s3_option.clone(), false)
+).level_path(3, "l3", s3_option, true);
 ```
 
 In this example, data for level 2 and level 3 will be stored in S3, while all other levels remain on the local disk. If there is data in level 2 and level 3, you can verify and access it in S3:

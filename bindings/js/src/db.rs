@@ -349,11 +349,11 @@ mod tests {
 
         let option = DbOption::new("write_s3".to_string())
             .expect("cannot open DB")
-            .level_path(0, "js/l0".to_string(), fs_option.clone())
+            .level_path(0, "js/l0".to_string(), fs_option.clone(), true)
             .unwrap()
-            .level_path(1, "js/l1".to_string(), fs_option.clone())
+            .level_path(1, "js/l1".to_string(), fs_option.clone(), false)
             .unwrap()
-            .level_path(2, "js/l2".to_string(), fs_option.clone())
+            .level_path(2, "js/l2".to_string(), fs_option.clone(), true)
             .unwrap();
 
         let schema = schema();

@@ -381,7 +381,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema), false).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -561,7 +561,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema), false).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -658,7 +658,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema), false).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -836,7 +836,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema), false).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();

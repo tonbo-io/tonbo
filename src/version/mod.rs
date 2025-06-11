@@ -128,7 +128,12 @@ where
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
-        let level_0_fs = manager.get_fs(level_0_path);
+        let level_0_cached = self.option.level_fs_cached(0);
+        let level_0_fs = if level_0_cached {
+            manager.get_cache(level_0_path)
+        } else {
+            manager.get_fs(level_0_path)
+        };
         for scope in self.level_slice[0].iter().rev() {
             if !scope.contains(key.value()) {
                 continue;
@@ -153,7 +158,12 @@ where
                 .option
                 .level_fs_path(leve)
                 .unwrap_or(&self.option.base_path);
-            let level_fs = manager.get_fs(level_path);
+            let level_cached = self.option.level_fs_cached(leve);
+            let level_fs = if level_cached {
+                manager.get_cache(level_path)
+            } else {
+                manager.get_fs(level_path)
+            };
             if sort_runs.is_empty() {
                 continue;
             }
