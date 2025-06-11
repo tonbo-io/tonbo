@@ -80,7 +80,6 @@ async-lock = "3"
 async-stream = "0.3"
 async-trait = { version = "0.1", optional = true }
 bytes = { version = "1.7", optional = true }
-chrono = { version = "0.4", default-features = false, features = ["wasmbind"] }
 crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "47", optional = true }
