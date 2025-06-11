@@ -1,13 +1,87 @@
-use std::sync::Arc;
+use std::{
+    fmt::Debug,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
-use arrow::array::TimestampMillisecondArray;
+use arrow::array::{
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+use chrono::{DateTime, NaiveDateTime};
 use fusio_log::{Decode, Encode};
 
 use super::{Key, KeyRef};
 
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TimeUnit {
+    Second,
+    Millisecond,
+    Microsecond,
+    Nanosecond,
+}
+
+impl TimeUnit {
+    fn factor(&self) -> i64 {
+        match self {
+            TimeUnit::Second => 1_000_000_000,
+            TimeUnit::Millisecond => 1_000_000,
+            TimeUnit::Microsecond => 1_000,
+            TimeUnit::Nanosecond => 1,
+        }
+    }
+}
+
+impl From<arrow::datatypes::TimeUnit> for TimeUnit {
+    fn from(value: arrow::datatypes::TimeUnit) -> Self {
+        match value {
+            arrow::datatypes::TimeUnit::Second => TimeUnit::Second,
+            arrow::datatypes::TimeUnit::Millisecond => TimeUnit::Millisecond,
+            arrow::datatypes::TimeUnit::Microsecond => TimeUnit::Microsecond,
+            arrow::datatypes::TimeUnit::Nanosecond => TimeUnit::Nanosecond,
+        }
+    }
+}
+
+impl From<&arrow::datatypes::TimeUnit> for TimeUnit {
+    fn from(value: &arrow::datatypes::TimeUnit) -> Self {
+        match value {
+            arrow::datatypes::TimeUnit::Second => TimeUnit::Second,
+            arrow::datatypes::TimeUnit::Millisecond => TimeUnit::Millisecond,
+            arrow::datatypes::TimeUnit::Microsecond => TimeUnit::Microsecond,
+            arrow::datatypes::TimeUnit::Nanosecond => TimeUnit::Nanosecond,
+        }
+    }
+}
+
+impl From<TimeUnit> for arrow::datatypes::TimeUnit {
+    fn from(value: TimeUnit) -> Self {
+        match value {
+            TimeUnit::Second => arrow::datatypes::TimeUnit::Second,
+            TimeUnit::Millisecond => arrow::datatypes::TimeUnit::Millisecond,
+            TimeUnit::Microsecond => arrow::datatypes::TimeUnit::Microsecond,
+            TimeUnit::Nanosecond => arrow::datatypes::TimeUnit::Nanosecond,
+        }
+    }
+}
+
+impl Debug for TimeUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeUnit::Second => write!(f, "Second"),
+            TimeUnit::Millisecond => write!(f, "Millisecond"),
+            TimeUnit::Microsecond => write!(f, "Microsecond"),
+            TimeUnit::Nanosecond => write!(f, "Nanosecond"),
+        }
+    }
+}
+
 /// Timestamp without timezone
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Timestamp(pub(crate) i64);
+#[derive(Debug, Clone, Copy)]
+pub struct Timestamp {
+    pub(crate) ts: i64,
+    pub(crate) unit: TimeUnit,
+}
 
 impl Key for Timestamp {
     type Ref<'r> = Timestamp;
@@ -16,7 +90,12 @@ impl Key for Timestamp {
     }
 
     fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        Arc::new(TimestampMillisecondArray::new_scalar(self.0))
+        match self.unit {
+            TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(self.ts)),
+            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(self.ts)),
+            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(self.ts)),
+            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(self.ts)),
+        }
     }
 }
 
@@ -35,7 +114,15 @@ impl Decode for Timestamp {
     where
         R: fusio::SeqRead,
     {
-        Ok(Timestamp(i64::decode(reader).await?))
+        let ts = i64::decode(reader).await?;
+        let unit = match u8::decode(reader).await? {
+            0 => TimeUnit::Second,
+            1 => TimeUnit::Millisecond,
+            2 => TimeUnit::Microsecond,
+            3 => TimeUnit::Nanosecond,
+            _ => unreachable!(),
+        };
+        Ok(Timestamp { ts, unit })
     }
 }
 
@@ -46,17 +133,145 @@ impl Encode for Timestamp {
     where
         W: fusio::Write,
     {
-        self.0.encode(writer).await
+        self.ts.encode(writer).await?;
+        match self.unit {
+            TimeUnit::Second => 0u8.encode(writer).await?,
+            TimeUnit::Millisecond => 1u8.encode(writer).await?,
+            TimeUnit::Microsecond => 2u8.encode(writer).await?,
+            TimeUnit::Nanosecond => 3u8.encode(writer).await?,
+        };
+        Ok(())
     }
 
     fn size(&self) -> usize {
-        self.0.size()
+        self.ts.size() + 1
     }
 }
 
-impl From<i64> for Timestamp {
-    fn from(value: i64) -> Self {
-        Self(value)
+impl PartialEq for Timestamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.ts * self.unit.factor() == other.ts * other.unit.factor()
+    }
+}
+
+impl Eq for Timestamp {}
+
+impl PartialOrd for Timestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Timestamp {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.ts * self.unit.factor()).cmp(&(other.ts * other.unit.factor()))
+    }
+}
+
+impl Hash for Timestamp {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.ts * self.unit.factor()).hash(state);
+    }
+}
+
+impl Timestamp {
+    pub fn new(ts: i64, unit: TimeUnit) -> Self {
+        Self { ts, unit }
+    }
+
+    pub fn new_seconds(ts: i64) -> Self {
+        Self {
+            ts,
+            unit: TimeUnit::Second,
+        }
+    }
+
+    pub fn new_millis(ts: i64) -> Self {
+        Self {
+            ts,
+            unit: TimeUnit::Millisecond,
+        }
+    }
+    pub fn new_micros(ts: i64) -> Self {
+        Self {
+            ts,
+            unit: TimeUnit::Microsecond,
+        }
+    }
+
+    pub fn new_nanos(ts: i64) -> Self {
+        Self {
+            ts,
+            unit: TimeUnit::Nanosecond,
+        }
+    }
+
+    pub fn timestamp_millis(&self) -> i64 {
+        match self.unit {
+            TimeUnit::Second => self.ts.saturating_div(1_000),
+            TimeUnit::Millisecond => self.ts,
+            TimeUnit::Microsecond => self.ts.saturating_mul(1_000),
+            TimeUnit::Nanosecond => self.ts.saturating_mul(1_000_000),
+        }
+    }
+
+    pub fn timestamp_micros(&self) -> i64 {
+        match self.unit {
+            TimeUnit::Second => self.ts.saturating_div(1_000_000),
+            TimeUnit::Millisecond => self.ts.saturating_div(1_000),
+            TimeUnit::Microsecond => self.ts,
+            TimeUnit::Nanosecond => self.ts.saturating_mul(1_000),
+        }
+    }
+
+    pub fn timestamp_nanos(&self) -> i64 {
+        match self.unit {
+            TimeUnit::Second => self.ts.saturating_div(1_000_000_000),
+            TimeUnit::Millisecond => self.ts.saturating_div(1_000_000),
+            TimeUnit::Microsecond => self.ts.saturating_div(1_000),
+            TimeUnit::Nanosecond => self.ts,
+        }
+    }
+
+    /// build [`Timestamp`] from [`NaiveDateTime`]
+    pub fn from_naive_date_time(naive: NaiveDateTime, unit: TimeUnit) -> Option<Self> {
+        let utc = naive.and_utc();
+        match unit {
+            TimeUnit::Second => {
+                let seconds = utc.timestamp();
+                seconds
+                    .checked_add(utc.timestamp_subsec_nanos() as i64)
+                    .map(|ts| Timestamp { ts, unit })
+            }
+            TimeUnit::Millisecond => {
+                let millis = utc.timestamp().checked_mul(1_000)?;
+                millis
+                    .checked_add(utc.timestamp_subsec_millis() as i64)
+                    .map(|ts| Timestamp { ts, unit })
+            }
+            TimeUnit::Microsecond => {
+                let micros = utc.timestamp().checked_mul(1_000_000)?;
+                micros
+                    .checked_add(utc.timestamp_subsec_micros() as i64)
+                    .map(|ts| Timestamp { ts, unit })
+            }
+            TimeUnit::Nanosecond => {
+                let nanos = utc.timestamp().checked_mul(1_000_000_000)?;
+                nanos
+                    .checked_add(utc.timestamp_subsec_nanos() as i64)
+                    .map(|ts| Timestamp { ts, unit })
+            }
+        }
+    }
+
+    /// convert [`Timestamp`] to [`NaiveDateTime`]
+    pub fn to_naive_date_time(&self) -> Option<NaiveDateTime> {
+        match self.unit {
+            TimeUnit::Second => Some(DateTime::from_timestamp(self.ts, 0)?.naive_utc()),
+            TimeUnit::Millisecond => Some(DateTime::from_timestamp_millis(self.ts)?.naive_utc()),
+            TimeUnit::Microsecond => Some(DateTime::from_timestamp_micros(self.ts)?.naive_utc()),
+            TimeUnit::Nanosecond => Some(DateTime::from_timestamp_nanos(self.ts).naive_utc()),
+        }
     }
 }
 
@@ -71,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timestamp_encode_decode() {
-        let ts = Timestamp(1717507203412);
+        let ts = Timestamp::new_millis(1717507203412);
         let mut bytes = Vec::new();
         let mut buf = Cursor::new(&mut bytes);
         ts.encode(&mut buf).await.unwrap();

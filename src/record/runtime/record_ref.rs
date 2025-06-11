@@ -4,7 +4,8 @@ use arrow::{
     array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
     datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
-        TimestampMillisecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
 use fusio::Write;
@@ -14,8 +15,8 @@ use super::{DataType, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
-        option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema, Timestamp, F32,
-        F64,
+        option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema, TimeUnit,
+        Timestamp, F32, F64,
     },
 };
 
@@ -223,16 +224,52 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                         Arc::new(value) as Arc<dyn Any + Send + Sync>
                     }
                 }
-                DataType::Timestamp => {
-                    let v = col.as_primitive::<TimestampMillisecondType>();
-                    if primary_index == idx - 2 {
-                        Arc::new(Timestamp(v.value(offset))) as Arc<dyn Any + Send + Sync>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(Timestamp(v.value(offset)));
-                        Arc::new(value) as Arc<dyn Any + Send + Sync>
+                DataType::Timestamp(unit) => match unit {
+                    TimeUnit::Second => {
+                        let v = col.as_primitive::<TimestampSecondType>();
+                        if primary_index == idx - 2 {
+                            Arc::new(Timestamp::new_seconds(v.value(offset)))
+                                as Arc<dyn Any + Send + Sync>
+                        } else {
+                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                                .then_some(Timestamp::new_seconds(v.value(offset)));
+                            Arc::new(value) as Arc<dyn Any + Send + Sync>
+                        }
                     }
-                }
+                    TimeUnit::Millisecond => {
+                        let v = col.as_primitive::<TimestampMillisecondType>();
+                        if primary_index == idx - 2 {
+                            Arc::new(Timestamp::new_millis(v.value(offset)))
+                                as Arc<dyn Any + Send + Sync>
+                        } else {
+                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                                .then_some(Timestamp::new_millis(v.value(offset)));
+                            Arc::new(value) as Arc<dyn Any + Send + Sync>
+                        }
+                    }
+                    TimeUnit::Microsecond => {
+                        let v = col.as_primitive::<TimestampMicrosecondType>();
+                        if primary_index == idx - 2 {
+                            Arc::new(Timestamp::new_micros(v.value(offset)))
+                                as Arc<dyn Any + Send + Sync>
+                        } else {
+                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                                .then_some(Timestamp::new_micros(v.value(offset)));
+                            Arc::new(value) as Arc<dyn Any + Send + Sync>
+                        }
+                    }
+                    TimeUnit::Nanosecond => {
+                        let v = col.as_primitive::<TimestampNanosecondType>();
+                        if primary_index == idx - 2 {
+                            Arc::new(Timestamp::new_nanos(v.value(offset)))
+                                as Arc<dyn Any + Send + Sync>
+                        } else {
+                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                                .then_some(Timestamp::new_nanos(v.value(offset)));
+                            Arc::new(value) as Arc<dyn Any + Send + Sync>
+                        }
+                    }
+                },
             };
             columns.push(Value::new(
                 datatype,
@@ -268,7 +305,7 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                     DataType::String => col.value = Arc::<Option<String>>::new(None),
                     DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
                     DataType::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
-                    DataType::Timestamp => col.value = Arc::<Option<Timestamp>>::new(None),
+                    DataType::Timestamp(_) => col.value = Arc::<Option<Timestamp>>::new(None),
                 };
             }
         }
@@ -304,8 +341,8 @@ mod tests {
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
-        cast_arc_value, dyn_record, dyn_schema,
-        record::{Record, RecordRef, Schema, Timestamp, F32, F64},
+        cast_arc_value, dyn_record, dyn_schema, make_dyn_record, make_dyn_schema,
+        record::{DataType, Record, RecordRef, Schema, TimeUnit, Timestamp, F32, F64},
     };
 
     #[test]
@@ -440,22 +477,42 @@ mod tests {
 
     #[test]
     fn test_timestamp_projection() {
-        let schema = dyn_schema!(
-            ("_null", Boolean, false),
-            ("_ts", UInt32, false),
-            ("id", Timestamp, false),
-            ("ts1", Timestamp, false),
-            ("ts2", Timestamp, true),
-            ("ts3", Timestamp, true),
+        let schema = make_dyn_schema!(
+            ("_null", DataType::Boolean, false),
+            ("_ts", DataType::UInt32, false),
+            ("id", DataType::Timestamp(TimeUnit::Millisecond), false),
+            ("ts1", DataType::Timestamp(TimeUnit::Millisecond), false),
+            ("ts2", DataType::Timestamp(TimeUnit::Millisecond), true),
+            ("ts3", DataType::Timestamp(TimeUnit::Millisecond), true),
             2
         );
-        let record = dyn_record!(
-            ("_null", Boolean, false, true),
-            ("_ts", UInt32, false, 7u32),
-            ("id", Timestamp, false, Timestamp(1717507203412)),
-            ("ts1", Timestamp, false, Timestamp(1717507203432)),
-            ("ts2", Timestamp, true, Some(Timestamp(1717507203442))),
-            ("ts3", Timestamp, true, None::<Timestamp>),
+        let record = make_dyn_record!(
+            ("_null", DataType::Boolean, false, true),
+            ("_ts", DataType::UInt32, false, 7u32),
+            (
+                "id",
+                DataType::Timestamp(TimeUnit::Millisecond),
+                false,
+                Timestamp::new_millis(1717507203412)
+            ),
+            (
+                "ts1",
+                DataType::Timestamp(TimeUnit::Millisecond),
+                false,
+                Timestamp::new_millis(1717507203432)
+            ),
+            (
+                "ts2",
+                DataType::Timestamp(TimeUnit::Millisecond),
+                true,
+                Some(Timestamp::new_millis(1717507203442))
+            ),
+            (
+                "ts3",
+                DataType::Timestamp(TimeUnit::Millisecond),
+                true,
+                None::<Timestamp>
+            ),
             2
         );
         {
@@ -465,15 +522,15 @@ mod tests {
             let columns = record_ref.columns;
             assert_eq!(
                 cast_arc_value!(columns[2].value, Timestamp),
-                &Timestamp(1717507203412)
+                &Timestamp::new_millis(1717507203412)
             );
             assert_eq!(
                 cast_arc_value!(columns[3].value, Option<Timestamp>),
-                &Some(Timestamp(1717507203432))
+                &Some(Timestamp::new_millis(1717507203432))
             );
             assert_eq!(
                 cast_arc_value!(columns[4].value, Option<Timestamp>),
-                &Some(Timestamp(1717507203442))
+                &Some(Timestamp::new_millis(1717507203442))
             );
 
             assert_eq!(*cast_arc_value!(columns[5].value, Option<Timestamp>), None);
@@ -491,7 +548,7 @@ mod tests {
             let columns = record_ref.columns;
             assert_eq!(
                 *cast_arc_value!(columns[2].value, Timestamp),
-                Timestamp(1717507203412)
+                Timestamp::new_millis(1717507203412)
             );
             assert_eq!(*cast_arc_value!(columns[3].value, Option<Timestamp>), None);
             assert_eq!(*cast_arc_value!(columns[4].value, Option<Timestamp>), None);

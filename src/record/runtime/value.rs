@@ -3,16 +3,17 @@ use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 use arrow::{
     array::{
         BooleanArray, Float32Array, Float64Array, GenericBinaryArray, Int16Array, Int32Array,
-        Int64Array, Int8Array, StringArray, TimestampMillisecondArray, UInt16Array, UInt32Array,
-        UInt64Array, UInt8Array,
+        Int64Array, Int8Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
     },
-    datatypes::{DataType as ArrowDataType, Field, TimeUnit},
+    datatypes::{DataType as ArrowDataType, Field},
 };
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, DecodeError, Encode};
 
 use super::DataType;
-use crate::record::{Key, KeyRef, Timestamp, F32, F64};
+use crate::record::{Key, KeyRef, TimeUnit, Timestamp, F32, F64};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {
@@ -45,7 +46,7 @@ impl ValueDesc {
             DataType::String => ArrowDataType::Utf8,
             DataType::Boolean => ArrowDataType::Boolean,
             DataType::Bytes => ArrowDataType::Binary,
-            DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(unit) => ArrowDataType::Timestamp(unit.into(), None),
         };
         Field::new(&self.name, arrow_type, self.is_nullable)
     }
@@ -114,7 +115,7 @@ impl Value {
                 Arc::<Option<Vec<u8>>>::new(None),
                 is_nullable,
             ),
-            DataType::Timestamp => Self::new(
+            DataType::Timestamp(_) => Self::new(
                 datatype,
                 name,
                 Arc::<Option<Timestamp>>::new(None),
@@ -155,6 +156,10 @@ macro_rules! implement_col {
                             .downcast_ref::<$Type>()
                             .cmp(&other.value.downcast_ref::<$Type>()),
                     )*
+                    DataType::Timestamp(_) => self
+                        .value
+                        .downcast_ref::<Timestamp>()
+                        .cmp(&other.value.downcast_ref::<Timestamp>()),
                 }
             }
         }
@@ -171,16 +176,28 @@ macro_rules! implement_col {
                                     .value
                                     .downcast_ref::<$Type>() {
                                         v.eq(other.value.downcast_ref::<$Type>().unwrap())
-                                    } else {
-                                        self.value
-                                            .downcast_ref::<Option<$Type>>()
-                                            .unwrap()
-                                            .eq(other.value.downcast_ref::<Option<$Type>>().unwrap())
-                                    }
+                                } else {
+                                    self.value
+                                        .downcast_ref::<Option<$Type>>()
+                                        .unwrap()
+                                        .eq(other.value.downcast_ref::<Option<$Type>>().unwrap())
+                                }
                             }
                         )*
+                        DataType::Timestamp(_) => {
+                            if let Some(v) = self
+                                .value
+                                .downcast_ref::<Timestamp>() {
+                                    v.eq(other.value.downcast_ref::<Timestamp>().unwrap())
+                            } else {
+                                self.value
+                                    .downcast_ref::<Option<Timestamp>>()
+                                    .unwrap()
+                                    .eq(other.value.downcast_ref::<Option<Timestamp>>().unwrap())
+                            }
+                        }
                     }
-            }
+                }
         }
 
         impl Hash for Value {
@@ -189,6 +206,7 @@ macro_rules! implement_col {
                     $(
                         DataType::$DataType => self.value.downcast_ref::<$Type>().hash(state),
                     )*
+                    DataType::Timestamp(_) => self.value.downcast_ref::<Timestamp>().hash(state),
                 }
             }
         }
@@ -211,6 +229,17 @@ macro_rules! implement_col {
                             }
                         }
                     )*
+                    DataType::Timestamp(unit) => {
+                            debug_struct.field("datatype", &format!("Timestamp({:?})", unit));
+                            if let Some(value) = self.value.as_ref().downcast_ref::<Timestamp>() {
+                                debug_struct.field("value", value);
+                            } else {
+                                debug_struct.field(
+                                    "value",
+                                    self.value.as_ref().downcast_ref::<Option<Timestamp>>().unwrap(),
+                                );
+                            }
+                    },
                 }
                 debug_struct.field("nullable", &self.is_nullable()).finish()
             }
@@ -239,13 +268,38 @@ macro_rules! implement_key_col {
                                 .expect(stringify!("unexpected datatype, expected " $Type))
                         )),
                     )*
-                    DataType::Timestamp => Arc::new(TimestampMillisecondArray::new_scalar(
-                        self
-                            .value
-                            .as_ref()
-                            .downcast_ref::<Timestamp>()
-                                .expect("unexpected datatype, expected Timestamp").0,
-                    )),
+                    DataType::Timestamp(unit) => {
+                        match unit {
+                            TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(
+                                self.value
+                                    .as_ref()
+                                    .downcast_ref::<Timestamp>()
+                                    .expect("unexpected datatype, expected Timestamp")
+                                    .ts,
+                            )),
+                            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(
+                                self
+                                    .value
+                                    .as_ref()
+                                    .downcast_ref::<Timestamp>()
+                                        .expect("unexpected datatype, expected Timestamp").ts,
+                            )),
+                            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(
+                                self
+                                    .value
+                                    .as_ref()
+                                    .downcast_ref::<Timestamp>()
+                                        .expect("unexpected datatype, expected Timestamp").ts,
+                            )),
+                            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(
+                                self
+                                    .value
+                                    .as_ref()
+                                    .downcast_ref::<Timestamp>()
+                                        .expect("unexpected datatype, expected Timestamp").ts,
+                            )),
+                        }
+                    }
                     DataType::Float32 => Arc::new(Float32Array::new_scalar(
                         self
                             .value
@@ -322,6 +376,16 @@ macro_rules! implement_decode_col {
                                 false => Arc::new(<$Type>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
                             },
                         )*
+                        DataType::Timestamp(_) => match is_some {
+                            true => Arc::new(Option::<Timestamp>::decode(reader).await.map_err(
+                                |err| match err {
+                                    DecodeError::Io(error) => fusio::Error::Io(error),
+                                    DecodeError::Fusio(error) => error,
+                                    DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
+                                },
+                            )?) as Arc<dyn Any + Send + Sync>,
+                            false => Arc::new(<Timestamp>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
+                        },
                     };
                 let name = String::decode(reader).await?;
                 Ok(Value::new(
@@ -364,6 +428,21 @@ macro_rules! implement_encode_col {
                                 }
                             }
                         )*
+                        DataType::Timestamp(_) => {
+                            if let Some(value) = self.value.as_ref().downcast_ref::<Timestamp>() {
+                                true.encode(writer).await?;
+                                value.encode(writer).await?
+                            } else {
+                                false.encode(writer).await?;
+                                self.value
+                                    .as_ref()
+                                    .downcast_ref::<Option<Timestamp>>()
+                                    .unwrap()
+                                    .encode(writer)
+                                    .await
+                                    .map_err(|err| fusio::Error::Other(Box::new(err)))?;
+                            }
+                        }
                 };
                 self.desc.name.encode(writer).await?;
                 Ok(())
@@ -384,6 +463,17 @@ macro_rules! implement_encode_col {
                             }
                         }
                     )*
+                    DataType::Timestamp(_) => {
+                        if let Some(value) = self.value.as_ref().downcast_ref::<Timestamp>() {
+                            value.size()
+                        } else {
+                            self.value
+                                .as_ref()
+                                .downcast_ref::<Option<Timestamp>>()
+                                .unwrap()
+                                .size()
+                        }
+                    }
                 }
             }
         }
@@ -406,7 +496,10 @@ impl Value {
             DataType::Bytes => 10,
             DataType::Float32 => 11,
             DataType::Float64 => 12,
-            DataType::Timestamp => 13,
+            DataType::Timestamp(TimeUnit::Second) => 13,
+            DataType::Timestamp(TimeUnit::Millisecond) => 14,
+            DataType::Timestamp(TimeUnit::Microsecond) => 15,
+            DataType::Timestamp(TimeUnit::Nanosecond) => 16,
         }
     }
 
@@ -425,7 +518,10 @@ impl Value {
             10 => DataType::Bytes,
             11 => DataType::Float32,
             12 => DataType::Float64,
-            13 => DataType::Timestamp,
+            13 => DataType::Timestamp(TimeUnit::Second),
+            14 => DataType::Timestamp(TimeUnit::Millisecond),
+            15 => DataType::Timestamp(TimeUnit::Millisecond),
+            16 => DataType::Timestamp(TimeUnit::Nanosecond),
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -447,9 +543,9 @@ impl From<&ValueDesc> for Field {
             DataType::String => Field::new(&col.name, ArrowDataType::Utf8, col.is_nullable),
             DataType::Boolean => Field::new(&col.name, ArrowDataType::Boolean, col.is_nullable),
             DataType::Bytes => Field::new(&col.name, ArrowDataType::Binary, col.is_nullable),
-            DataType::Timestamp => Field::new(
+            DataType::Timestamp(unit) => Field::new(
                 &col.name,
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                ArrowDataType::Timestamp(unit.into(), None),
                 col.is_nullable,
             ),
         }
@@ -472,8 +568,8 @@ macro_rules! for_datatype {
                 { F64, Float64 },
                 { String, String },
                 { bool, Boolean },
-                { Vec<u8>, Bytes },
-                { Timestamp, Timestamp }
+                { Vec<u8>, Bytes }
+
         }
     };
 }
@@ -491,7 +587,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::Value;
-    use crate::record::{DataType, Timestamp};
+    use crate::record::{DataType, TimeUnit, Timestamp};
 
     #[test]
     fn test_value_eq() {
@@ -541,21 +637,21 @@ mod tests {
         }
         {
             let value1 = Value::new(
-                DataType::Timestamp,
+                DataType::Timestamp(TimeUnit::Millisecond),
                 "ts".to_string(),
-                Arc::new(Some(Timestamp(1717507203412))),
+                Arc::new(Some(Timestamp::new_millis(1717507203412))),
                 true,
             );
             let value2 = Value::new(
-                DataType::Timestamp,
+                DataType::Timestamp(TimeUnit::Millisecond),
                 "ts".to_string(),
-                Arc::new(Some(Timestamp(1717507203412))),
+                Arc::new(Some(Timestamp::new_millis(1717507203412))),
                 true,
             );
             let value3 = Value::new(
-                DataType::Timestamp,
+                DataType::Timestamp(TimeUnit::Millisecond),
                 "ts".to_string(),
-                Arc::new(Some(Timestamp(2717507203412))),
+                Arc::new(Some(Timestamp::new_millis(2717507203412))),
                 true,
             );
             assert_eq!(value1, value2);
