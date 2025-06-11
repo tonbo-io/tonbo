@@ -15,7 +15,6 @@ pub(crate) enum DataType {
     Bytes,
     Float32,
     Float64,
-    Timestamp,
 }
 
 impl DataType {
@@ -46,8 +45,6 @@ impl DataType {
             DataType::Float32
         } else if path.is_ident("F64") {
             DataType::Float64
-        } else if path.is_ident("Timestamp") {
-            DataType::Timestamp
         } else {
             todo!()
         }
@@ -94,9 +91,6 @@ impl DataType {
             DataType::Float64 => {
                 quote!(::tonbo::record::F64)
             }
-            DataType::Timestamp => {
-                quote!(::tonbo::record::Timestamp)
-            }
         }
     }
 
@@ -140,12 +134,6 @@ impl DataType {
             }
             DataType::Float64 => {
                 quote!(::tonbo::arrow::datatypes::DataType::Float64)
-            }
-            DataType::Timestamp => {
-                quote!(::tonbo::arrow::datatypes::DataType::Timestamp(
-                    ::tonbo::arrow::datatypes::TimeUnit::Millisecond,
-                    None
-                ))
             }
         }
     }
@@ -195,9 +183,6 @@ impl DataType {
             DataType::Float64 => {
                 quote!(::tonbo::arrow::array::Float64Array)
             }
-            DataType::Timestamp => {
-                quote!(::tonbo::arrow::array::TimestampMillisecondArray)
-            }
         }
     }
 
@@ -241,11 +226,6 @@ impl DataType {
             }
             DataType::Float64 => {
                 quote!(as_primitive::<::tonbo::arrow::datatypes::Float64Type>())
-            }
-            DataType::Timestamp => {
-                quote!(as_primitive::<
-                    ::tonbo::arrow::datatypes::TimestampMillisecondType,
-                >())
             }
         }
     }
@@ -316,9 +296,6 @@ impl DataType {
                 quote!(::tonbo::arrow::array::PrimitiveBuilder::<
                     ::tonbo::arrow::datatypes::Float64Type,
                 >::with_capacity(capacity))
-            }
-            DataType::Timestamp => {
-                quote!(::tonbo::arrow::array::TimestampMillisecondBuilder::with_capacity(capacity))
             }
         }
     }
@@ -408,9 +385,6 @@ impl DataType {
                     >
                 )
             }
-            DataType::Timestamp => {
-                quote!(::tonbo::arrow::array::TimestampMillisecondBuilder)
-            }
         }
     }
     pub(crate) fn to_size_method(&self, field_name: &Ident) -> proc_macro2::TokenStream {
@@ -452,9 +426,6 @@ impl DataType {
                 quote!(std::mem::size_of_val(self.#field_name.values_slice()))
             }
             DataType::Float64 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::Timestamp => {
                 quote!(std::mem::size_of_val(self.#field_name.values_slice()))
             }
         }
@@ -511,9 +482,6 @@ impl DataType {
             }
             DataType::Float64 => {
                 quote! {std::mem::size_of::<::tonbo::record::F64>()}
-            }
-            DataType::Timestamp => {
-                quote! {std::mem::size_of::<::tonbo::record::Timestamp>()}
             }
         }
     }
