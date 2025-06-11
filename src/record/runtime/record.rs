@@ -59,7 +59,7 @@ impl Decode for DynRecord {
                     DataType::Bytes => {
                         Arc::new(cast_arc_value!(col.value, Option<Vec<u8>>).clone().unwrap())
                     }
-                    DataType::Timestamp => {
+                    DataType::Timestamp(_) => {
                         Arc::new(cast_arc_value!(col.value, Option<Timestamp>).unwrap())
                     }
                 };
@@ -104,7 +104,9 @@ impl Record for DynRecord {
                     DataType::Bytes => {
                         Arc::new(Some(cast_arc_value!(col.value, Vec<u8>).to_owned()))
                     }
-                    DataType::Timestamp => Arc::new(Some(*cast_arc_value!(col.value, Timestamp))),
+                    DataType::Timestamp(_) => {
+                        Arc::new(Some(*cast_arc_value!(col.value, Timestamp)))
+                    }
                 };
             }
 
@@ -165,6 +167,27 @@ macro_rules! dyn_record {
     }
 }
 
+#[macro_export]
+macro_rules! make_dyn_record {
+    ($(($name: expr, $type: expr, $nullable: expr, $value: expr)),*, $primary: literal) => {
+        {
+            $crate::record::DynRecord::new(
+                vec![
+                    $(
+                        $crate::record::Value::new(
+                            $type,
+                            $name.into(),
+                            std::sync::Arc::new($value),
+                            $nullable,
+                        ),
+                    )*
+                ],
+                $primary,
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test {
     use std::{
@@ -177,24 +200,28 @@ pub(crate) mod test {
 
     use super::{DynRecord, DynSchema, Record};
     use crate::{
-        dyn_schema,
-        record::{DataType, DynRecordRef, Timestamp, Value, F32, F64},
+        make_dyn_schema,
+        record::{DataType, DynRecordRef, TimeUnit, Timestamp, Value, F32, F64},
     };
 
     #[allow(unused)]
     pub(crate) fn test_dyn_item_schema() -> DynSchema {
-        dyn_schema!(
-            ("id", Int64, false),
-            ("age", Int8, true),
-            ("height", Int16, true),
-            ("weight", Int32, false),
-            ("name", String, false),
-            ("email", String, true),
-            ("enabled", Boolean, false),
-            ("bytes", Bytes, true),
-            ("grade", Float32, false),
-            ("price", Float64, true),
-            ("timestamp", Timestamp, true),
+        make_dyn_schema!(
+            ("id", DataType::Int64, false),
+            ("age", DataType::Int8, true),
+            ("height", DataType::Int16, true),
+            ("weight", DataType::Int32, false),
+            ("name", DataType::String, false),
+            ("email", DataType::String, true),
+            ("enabled", DataType::Boolean, false),
+            ("bytes", DataType::Bytes, true),
+            ("grade", DataType::Float32, false),
+            ("price", DataType::Float64, true),
+            (
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond),
+                true
+            ),
             0
         )
     }
@@ -203,18 +230,43 @@ pub(crate) mod test {
     pub(crate) fn test_dyn_items() -> Vec<DynRecord> {
         let mut items = vec![];
         for i in 0..50 {
-            let mut record = dyn_record!(
-                ("id", Int64, false, i as i64),
-                ("age", Int8, true, Some(i as i8)),
-                ("height", Int16, true, Some(i as i16 * 20)),
-                ("weight", Int32, false, i * 200_i32),
-                ("name", String, false, i.to_string()),
-                ("email", String, true, Some(format!("{}@tonbo.io", i))),
-                ("enabled", Boolean, false, i % 2 == 0),
-                ("bytes", Bytes, true, Some(i.to_le_bytes().to_vec())),
-                ("grade", Float32, false, F32::from(i as f32 * 1.11)),
-                ("price", Float64, true, Some(F64::from(i as f64 * 1.01))),
-                ("timestamp", Timestamp, true, Some(Timestamp(i as i64))),
+            let mut record = make_dyn_record!(
+                ("id", DataType::Int64, false, i as i64),
+                ("age", DataType::Int8, true, Some(i as i8)),
+                ("height", DataType::Int16, true, Some(i as i16 * 20)),
+                ("weight", DataType::Int32, false, i * 200_i32),
+                ("name", DataType::String, false, i.to_string()),
+                (
+                    "email",
+                    DataType::String,
+                    true,
+                    Some(format!("{}@tonbo.io", i))
+                ),
+                ("enabled", DataType::Boolean, false, i % 2 == 0),
+                (
+                    "bytes",
+                    DataType::Bytes,
+                    true,
+                    Some(i.to_le_bytes().to_vec())
+                ),
+                (
+                    "grade",
+                    DataType::Float32,
+                    false,
+                    F32::from(i as f32 * 1.11)
+                ),
+                (
+                    "price",
+                    DataType::Float64,
+                    true,
+                    Some(F64::from(i as f64 * 1.01))
+                ),
+                (
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Millisecond),
+                    true,
+                    Some(Timestamp::new_millis(i as i64))
+                ),
                 0
             );
             if i >= 45 {
@@ -227,18 +279,33 @@ pub(crate) mod test {
     }
 
     fn test_dyn_record() -> DynRecord {
-        dyn_record!(
-            ("id", Int64, false, 10i64),
-            ("age", Int8, true, Some(10i8)),
-            ("height", Int16, true, Some(183i16)),
-            ("weight", Int32, false, 56i32),
-            ("name", String, false, "tonbo".to_string()),
-            ("email", String, true, Some("contact@tonbo.io".to_string())),
-            ("enabled", Boolean, false, true),
-            ("bytes", Bytes, true, Some(b"hello tonbo".to_vec())),
-            ("grade", Float32, false, F32::from(1.1234)),
-            ("price", Float64, true, Some(F64::from(1.01))),
-            ("timestamp", Timestamp, true, Some(Timestamp(1717507203412))),
+        make_dyn_record!(
+            ("id", DataType::Int64, false, 10i64),
+            ("age", DataType::Int8, true, Some(10i8)),
+            ("height", DataType::Int16, true, Some(183i16)),
+            ("weight", DataType::Int32, false, 56i32),
+            ("name", DataType::String, false, "tonbo".to_string()),
+            (
+                "email",
+                DataType::String,
+                true,
+                Some("contact@tonbo.io".to_string())
+            ),
+            ("enabled", DataType::Boolean, false, true),
+            (
+                "bytes",
+                DataType::Bytes,
+                true,
+                Some(b"hello tonbo".to_vec())
+            ),
+            ("grade", DataType::Float32, false, F32::from(1.1234)),
+            ("price", DataType::Float64, true, Some(F64::from(1.01))),
+            (
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond),
+                true,
+                Some(Timestamp::new_millis(1717507203412))
+            ),
             0
         )
     }
@@ -305,9 +372,9 @@ pub(crate) mod test {
                     true,
                 ),
                 Value::new(
-                    DataType::Timestamp,
+                    DataType::Timestamp(TimeUnit::Millisecond),
                     "timestamp".to_string(),
-                    Arc::new(Some(Timestamp(1717507203412))),
+                    Arc::new(Some(Timestamp::new_millis(1717507203412))),
                     true,
                 ),
             ],
