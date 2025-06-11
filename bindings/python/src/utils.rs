@@ -130,7 +130,7 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
                         .unwrap();
                 }
             }
-            TonboDataType::Timestamp => {
+            TonboDataType::Timestamp(_) => {
                 unimplemented!()
             }
             TonboDataType::Float32 => {

@@ -11,6 +11,8 @@ pub use record_ref::*;
 pub use schema::*;
 pub use value::*;
 
+use crate::record::TimeUnit;
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DataType {
     UInt8,
@@ -26,7 +28,7 @@ pub enum DataType {
     Bytes,
     Float32,
     Float64,
-    Timestamp,
+    Timestamp(TimeUnit),
 }
 
 impl From<&ArrowDataType> for DataType {
@@ -46,13 +48,8 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::Boolean => DataType::Boolean,
             ArrowDataType::Binary => DataType::Bytes,
             ArrowDataType::Timestamp(unit, tz) => {
-                debug_assert!(
-                    unit == &arrow::datatypes::TimeUnit::Millisecond,
-                    "expected TimeUnit::Millisecond, get {:?}",
-                    unit
-                );
                 debug_assert!(tz.is_none(), "expected timezone is none, get {:?}", tz);
-                DataType::Timestamp
+                DataType::Timestamp(unit.into())
             }
             _ => todo!(),
         }
