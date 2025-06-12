@@ -100,3 +100,19 @@ macro_rules! dyn_schema {
         }
     }
 }
+
+#[macro_export]
+macro_rules! make_dyn_schema {
+    ($(($name: expr, $type: expr, $nullable: expr )),*, $primary: literal) => {
+        {
+            $crate::record::DynSchema::new(
+                vec![
+                    $(
+                        $crate::record::ValueDesc::new($name.into(), $type, $nullable),
+                    )*
+                ],
+                $primary,
+            )
+        }
+    }
+}
