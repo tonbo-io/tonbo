@@ -81,8 +81,8 @@ where
         key: &'get <R::Schema as RecordSchema>::Key,
         projection: Projection<'get>,
     ) -> Result<Option<TransactionEntry<'get, R>>, DbError<R>> {
-        Ok(match self.local.get(key).and_then(|v| v.as_ref()) {
-            Some(v) => {
+        Ok(match self.local.get(key) {
+            Some(v) => v.as_ref().map(|v| {
                 let mut record_ref = v.as_record_ref();
                 if let Projection::Parts(projection) = projection {
                     let primary_key_index =
@@ -107,8 +107,8 @@ where
                     );
                     record_ref.projection(&mask);
                 }
-                Some(TransactionEntry::Local(record_ref))
-            }
+                TransactionEntry::Local(record_ref)
+            }),
             None => self
                 .snapshot
                 .get(key, projection)
@@ -451,6 +451,49 @@ mod tests {
                     .unwrap()
                     .is_none())
             }
+        }
+    }
+
+    // https://github.com/tonbo-io/tonbo/issues/352
+    #[tokio::test(flavor = "multi_thread")]
+    async fn transaction_remove() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let db = DB::<String, TokioExecutor>::new(
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &StringSchema,
+            ),
+            TokioExecutor::current(),
+            StringSchema,
+        )
+        .await
+        .unwrap();
+
+        // Insert a record and commit
+        {
+            let mut txn = db.transaction().await;
+            txn.insert("foo".to_string());
+            txn.commit().await.unwrap();
+        }
+        // In a new transaction, remove the record and check visibility
+        {
+            let mut txn = db.transaction().await;
+            let key = "foo".to_string();
+
+            // Verify the record exists before removal
+            assert!(txn.get(&key, Projection::All).await.unwrap().is_some());
+
+            // Remove the record
+            txn.remove(key.clone());
+
+            // The record should NOT be visible after removal in the same transaction
+            let result_after = txn.get(&key, Projection::All).await.unwrap();
+
+            assert!(
+                result_after.is_none(),
+                "Record should not be visible after removal in the same transaction"
+            );
         }
     }
 
