@@ -3,6 +3,13 @@ target
 Cargo.lock
 db_path
 guide/book
+
+# python
 __pycache__
+*.so
+
+# node
+node_modules
+dist
 
 .DS_Store
