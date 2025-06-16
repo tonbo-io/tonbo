@@ -30,6 +30,7 @@ fn none_value(datatype: DataType) -> Arc<dyn Any + Send + Sync> {
         DataType::Boolean => Arc::new(Option::<bool>::None),
         DataType::Bytes => Arc::new(Option::<Vec<u8>>::None),
         DataType::Timestamp(_) => unimplemented!(),
+        _ => unimplemented!(),
     }
 }
 
@@ -67,6 +68,7 @@ pub(crate) fn parse_key(desc: &ValueDesc, key: JsValue, primary: bool) -> Result
             to_col_value::<Vec<u8>>(key.dyn_into::<Uint8Array>().unwrap().to_vec(), primary)
         }
         DataType::Timestamp(_) => unimplemented!(),
+        _ => unimplemented!(),
     };
 
     Ok(Value::new(
@@ -175,6 +177,7 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
                     .unwrap_or(JsValue::NULL),
             },
             DataType::Timestamp(_) => unimplemented!(),
+            _ => unimplemented!(),
         };
 
         Reflect::set(&obj, &col.desc.name.as_str().into(), &value).unwrap();

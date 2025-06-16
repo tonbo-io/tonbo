@@ -136,6 +136,9 @@ pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) 
             TonboDataType::Float32 => {
                 unreachable!()
             }
+            _ => {
+                unimplemented!()
+            }
         }
     }
     dict
