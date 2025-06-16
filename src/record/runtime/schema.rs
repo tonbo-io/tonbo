@@ -5,10 +5,10 @@ use arrow::{
     error::ArrowError,
 };
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
+use thiserror::Error;
 
 use super::{array::DynRecordImmutableArrays, DynRecord, Value, ValueDesc};
 use crate::{magic, record::Schema};
-use thiserror::Error;
 
 #[derive(Debug)]
 pub struct DynSchema {
