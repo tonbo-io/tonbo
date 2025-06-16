@@ -6,7 +6,10 @@ use fusio_log::{Decode, Encode};
 use super::{schema::DynSchema, DataType, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
-    record::{Record, RecordDecodeError, Timestamp, F32, F64},
+    record::{
+        Date32, Date64, LargeBinary, LargeString, Record, RecordDecodeError, Time32, Time64,
+        Timestamp, F32, F64,
+    },
 };
 
 #[derive(Debug)]
@@ -25,105 +28,114 @@ impl DynRecord {
     }
 }
 
-impl Decode for DynRecord {
-    type Error = RecordDecodeError;
+macro_rules! implement_record {
+    (
+        { $( { $copy_ty:ty, $copy_pat:pat}), * $(,)? },
+        { $( { $clone_ty:ty, $clone_pat:pat}), * $(,)? },
+    ) => {
+        impl Decode for DynRecord {
+            type Error = RecordDecodeError;
 
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
-    where
-        R: SeqRead,
+            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            where
+                R: SeqRead,
+            {
+                let len = u32::decode(reader).await? as usize;
+                let primary_index = u32::decode(reader).await? as usize;
+                let mut values = Vec::with_capacity(len);
+                // keep invariant for record: nullable --> Some(v); non-nullable --> v
+                for i in 0..len {
+                    let mut col = Value::decode(reader).await?;
+                    if i != primary_index && !col.is_nullable() {
+                        col.value = match col.datatype() {
+                            $(
+                                $copy_pat => {
+                                    Arc::new(cast_arc_value!(col.value, Option<$copy_ty>).unwrap())
+                                }
+                            )*
+                            $(
+                                $clone_pat => {
+                                    Arc::new(cast_arc_value!(col.value, Option<$clone_ty>).clone().unwrap())
+                                }
+                            )*
+                        };
+                    }
+                    values.push(col);
+                }
+
+                Ok(DynRecord {
+                    values,
+                    primary_index,
+                })
+            }
+        }
+
+        impl Record for DynRecord {
+            type Schema = DynSchema;
+
+            type Ref<'r> = DynRecordRef<'r>;
+
+            fn as_record_ref(&self) -> Self::Ref<'_> {
+                let mut columns = vec![];
+                for (idx, col) in self.values.iter().enumerate() {
+                    let datatype = col.datatype();
+                    let is_nullable = col.is_nullable();
+                    let mut value = col.value.clone();
+                    if idx != self.primary_index && !is_nullable {
+                        value = match datatype {
+
+                            $(
+                                $copy_pat => {
+                                    Arc::new(Some(*cast_arc_value!(col.value, $copy_ty)))
+                                }
+                            )*
+                            $(
+                                $clone_pat => {
+                                    Arc::new(Some(cast_arc_value!(col.value, $clone_ty).to_owned()))
+                                }
+                            )*
+                        };
+                    }
+
+                    columns.push(Value::new(
+                        datatype,
+                        col.desc.name.to_owned(),
+                        value,
+                        is_nullable,
+                    ));
+                }
+                DynRecordRef::new(columns, self.primary_index)
+            }
+
+            fn size(&self) -> usize {
+                self.values.iter().fold(0, |acc, col| acc + col.size())
+            }
+        }
+    };
+}
+
+implement_record!(
     {
-        let len = u32::decode(reader).await? as usize;
-        let primary_index = u32::decode(reader).await? as usize;
-        let mut values = vec![];
-        // keep invariant for record: nullable --> Some(v); non-nullable --> v
-        for i in 0..len {
-            let mut col = Value::decode(reader).await?;
-            if i != primary_index && !col.is_nullable() {
-                col.value = match col.datatype() {
-                    DataType::UInt8 => Arc::new(cast_arc_value!(col.value, Option<u8>).unwrap()),
-                    DataType::UInt16 => Arc::new(cast_arc_value!(col.value, Option<u16>).unwrap()),
-                    DataType::UInt32 => Arc::new(cast_arc_value!(col.value, Option<u32>).unwrap()),
-                    DataType::UInt64 => Arc::new(cast_arc_value!(col.value, Option<u64>).unwrap()),
-                    DataType::Int8 => Arc::new(cast_arc_value!(col.value, Option<i8>).unwrap()),
-                    DataType::Int16 => Arc::new(cast_arc_value!(col.value, Option<i16>).unwrap()),
-                    DataType::Int32 => Arc::new(cast_arc_value!(col.value, Option<i32>).unwrap()),
-                    DataType::Int64 => Arc::new(cast_arc_value!(col.value, Option<i64>).unwrap()),
-                    DataType::Float32 => Arc::new(cast_arc_value!(col.value, Option<F32>).unwrap()),
-                    DataType::Float64 => Arc::new(cast_arc_value!(col.value, Option<F64>).unwrap()),
-                    DataType::String => {
-                        Arc::new(cast_arc_value!(col.value, Option<String>).clone().unwrap())
-                    }
-                    DataType::Boolean => {
-                        Arc::new(cast_arc_value!(col.value, Option<bool>).unwrap())
-                    }
-                    DataType::Bytes => {
-                        Arc::new(cast_arc_value!(col.value, Option<Vec<u8>>).clone().unwrap())
-                    }
-                    DataType::Timestamp(_) => {
-                        Arc::new(cast_arc_value!(col.value, Option<Timestamp>).unwrap())
-                    }
-                };
-            }
-            values.push(col);
-        }
-
-        Ok(DynRecord {
-            values,
-            primary_index,
-        })
-    }
-}
-
-impl Record for DynRecord {
-    type Schema = DynSchema;
-
-    type Ref<'r> = DynRecordRef<'r>;
-
-    fn as_record_ref(&self) -> Self::Ref<'_> {
-        let mut columns = vec![];
-        for (idx, col) in self.values.iter().enumerate() {
-            let datatype = col.datatype();
-            let is_nullable = col.is_nullable();
-            let mut value = col.value.clone();
-            if idx != self.primary_index && !is_nullable {
-                value = match datatype {
-                    DataType::UInt8 => Arc::new(Some(*cast_arc_value!(col.value, u8))),
-                    DataType::UInt16 => Arc::new(Some(*cast_arc_value!(col.value, u16))),
-                    DataType::UInt32 => Arc::new(Some(*cast_arc_value!(col.value, u32))),
-                    DataType::UInt64 => Arc::new(Some(*cast_arc_value!(col.value, u64))),
-                    DataType::Int8 => Arc::new(Some(*cast_arc_value!(col.value, i8))),
-                    DataType::Int16 => Arc::new(Some(*cast_arc_value!(col.value, i16))),
-                    DataType::Int32 => Arc::new(Some(*cast_arc_value!(col.value, i32))),
-                    DataType::Int64 => Arc::new(Some(*cast_arc_value!(col.value, i64))),
-                    DataType::Float32 => Arc::new(Some(*cast_arc_value!(col.value, F32))),
-                    DataType::Float64 => Arc::new(Some(*cast_arc_value!(col.value, F64))),
-                    DataType::String => {
-                        Arc::new(Some(cast_arc_value!(col.value, String).to_owned()))
-                    }
-                    DataType::Boolean => Arc::new(Some(*cast_arc_value!(col.value, bool))),
-                    DataType::Bytes => {
-                        Arc::new(Some(cast_arc_value!(col.value, Vec<u8>).to_owned()))
-                    }
-                    DataType::Timestamp(_) => {
-                        Arc::new(Some(*cast_arc_value!(col.value, Timestamp)))
-                    }
-                };
-            }
-
-            columns.push(Value::new(
-                datatype,
-                col.desc.name.to_owned(),
-                value,
-                is_nullable,
-            ));
-        }
-        DynRecordRef::new(columns, self.primary_index)
-    }
-
-    fn size(&self) -> usize {
-        self.values.iter().fold(0, |acc, col| acc + col.size())
-    }
-}
+        // types that can be copied
+        { u8, DataType::UInt8 },
+        { u16, DataType::UInt16 },
+        { u32, DataType::UInt32 },
+        { u64, DataType::UInt64 },
+        { i8, DataType::Int8 },
+        { i16, DataType::Int16 },
+        { i32, DataType::Int32 },
+        { i64, DataType::Int64 },
+        { F32, DataType::Float32 },
+        { F64, DataType::Float64 },
+        { bool, DataType::Boolean },
+        { Timestamp, DataType::Timestamp(_) },
+    },
+    {
+        // types that can be cloned
+        { Vec<u8>, DataType::Bytes },
+        { String, DataType::String },
+    },
+);
 
 /// Creates a [`DynRecord`] from slice of values and primary key index, suitable for rapid
 /// testing and development.
