@@ -260,6 +260,9 @@ where
                     inner: level_scan_l,
                 });
             }
+
+            let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
+            let level_l_fs = ctx.manager.get_fs(level_l_path);
             if !meet_scopes_ll.is_empty() {
                 // Next Level
                 let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_ll)?;
@@ -272,7 +275,7 @@ where
                     u32::MAX.into(),
                     None,
                     ProjectionMask::all(),
-                    level_fs.clone(),
+                    level_l_fs.clone(),
                     ctx.parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
@@ -282,8 +285,6 @@ where
                 });
             }
 
-            let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
-            let level_l_fs = ctx.manager.get_fs(level_l_path);
             Compactor::<R>::build_tables(
                 option,
                 version_edits,
