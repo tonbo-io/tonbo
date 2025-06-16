@@ -3,9 +3,11 @@ use std::{any::Any, marker::PhantomData, mem, sync::Arc};
 use arrow::{
     array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
     datatypes::{
-        Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
-        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-        TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+        Date32Type, Date64Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
+        Int8Type, Schema as ArrowSchema, Time32MillisecondType, Time32SecondType,
+        Time64MicrosecondType, Time64NanosecondType, TimestampMicrosecondType,
+        TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt16Type,
+        UInt32Type, UInt64Type, UInt8Type,
     },
 };
 use fusio::Write;
@@ -15,8 +17,8 @@ use super::{DataType, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
-        option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema, TimeUnit,
-        Timestamp, F32, F64,
+        option::OptionRecordRef, Date32, Date64, Key, LargeBinary, LargeString, Record,
+        RecordEncodeError, RecordRef, Schema, Time32, Time64, TimeUnit, Timestamp, F32, F64,
     },
 };
 
@@ -62,256 +64,6 @@ impl<'r> Encode for DynRecordRef<'r> {
     }
 }
 
-impl<'r> RecordRef<'r> for DynRecordRef<'r> {
-    type Record = DynRecord;
-
-    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
-        self.columns
-            .get(self.primary_index)
-            .cloned()
-            .expect("The primary key must exist")
-    }
-
-    fn from_record_batch(
-        record_batch: &'r arrow::array::RecordBatch,
-        offset: usize,
-        projection_mask: &'r parquet::arrow::ProjectionMask,
-        full_schema: &'r Arc<ArrowSchema>,
-    ) -> OptionRecordRef<'r, Self> {
-        let null = record_batch.column(0).as_boolean().value(offset);
-        let metadata = full_schema.metadata();
-
-        let primary_index = metadata
-            .get("primary_key_index")
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        let ts = record_batch
-            .column(1)
-            .as_primitive::<arrow::datatypes::UInt32Type>()
-            .value(offset)
-            .into();
-
-        let mut columns = vec![];
-
-        let schema = record_batch.schema();
-        let flattened_fields = schema.flattened_fields();
-
-        for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
-            let datatype = DataType::from(field.data_type());
-            let batch_field = flattened_fields
-                .iter()
-                .enumerate()
-                .find(|(_idx, f)| field.contains(f));
-            if batch_field.is_none() {
-                columns.push(Value::with_none_value(
-                    datatype,
-                    field.name().to_owned(),
-                    field.is_nullable(),
-                ));
-                continue;
-            }
-            let col = record_batch.column(batch_field.unwrap().0);
-            let is_nullable = field.is_nullable();
-            let value = match datatype {
-                DataType::UInt8 => Self::primitive_value::<UInt8Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::UInt16 => Self::primitive_value::<UInt16Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::UInt32 => Self::primitive_value::<UInt32Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::UInt64 => Self::primitive_value::<UInt64Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::Int8 => Self::primitive_value::<Int8Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::Int16 => Self::primitive_value::<Int16Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::Int32 => Self::primitive_value::<Int32Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::Int64 => Self::primitive_value::<Int64Type>(
-                    col,
-                    offset,
-                    idx,
-                    projection_mask,
-                    primary_index == idx - 2,
-                ),
-                DataType::Float32 => {
-                    let v = col.as_primitive::<Float32Type>();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(F32::from(v.value(offset))) as Arc<dyn Any + Send + Sync>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(F32::from(v.value(offset)));
-                        Arc::new(value) as Arc<dyn Any + Send + Sync>
-                    }
-                }
-                DataType::Float64 => {
-                    let v = col.as_primitive::<Float64Type>();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(F64::from(v.value(offset))) as Arc<dyn Any + Send + Sync>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(F64::from(v.value(offset)));
-                        Arc::new(value) as Arc<dyn Any + Send + Sync>
-                    }
-                }
-                DataType::String => {
-                    let v = col.as_string::<i32>();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any + Send + Sync>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(v.value(offset).to_owned());
-                        Arc::new(value) as Arc<dyn Any + Send + Sync>
-                    }
-                }
-                DataType::Boolean => {
-                    let v = col.as_boolean();
-
-                    if primary_index == idx - 2 {
-                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any + Send + Sync>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(v.value(offset).to_owned());
-                        Arc::new(value) as Arc<dyn Any + Send + Sync>
-                    }
-                }
-                DataType::Bytes => {
-                    let v = col.as_binary::<i32>();
-                    if primary_index == idx - 2 {
-                        Arc::new(v.value(offset).to_owned()) as Arc<dyn Any + Send + Sync>
-                    } else {
-                        let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                            .then_some(v.value(offset).to_owned());
-                        Arc::new(value) as Arc<dyn Any + Send + Sync>
-                    }
-                }
-                DataType::Timestamp(unit) => match unit {
-                    TimeUnit::Second => {
-                        let v = col.as_primitive::<TimestampSecondType>();
-                        if primary_index == idx - 2 {
-                            Arc::new(Timestamp::new_seconds(v.value(offset)))
-                                as Arc<dyn Any + Send + Sync>
-                        } else {
-                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                                .then_some(Timestamp::new_seconds(v.value(offset)));
-                            Arc::new(value) as Arc<dyn Any + Send + Sync>
-                        }
-                    }
-                    TimeUnit::Millisecond => {
-                        let v = col.as_primitive::<TimestampMillisecondType>();
-                        if primary_index == idx - 2 {
-                            Arc::new(Timestamp::new_millis(v.value(offset)))
-                                as Arc<dyn Any + Send + Sync>
-                        } else {
-                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                                .then_some(Timestamp::new_millis(v.value(offset)));
-                            Arc::new(value) as Arc<dyn Any + Send + Sync>
-                        }
-                    }
-                    TimeUnit::Microsecond => {
-                        let v = col.as_primitive::<TimestampMicrosecondType>();
-                        if primary_index == idx - 2 {
-                            Arc::new(Timestamp::new_micros(v.value(offset)))
-                                as Arc<dyn Any + Send + Sync>
-                        } else {
-                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                                .then_some(Timestamp::new_micros(v.value(offset)));
-                            Arc::new(value) as Arc<dyn Any + Send + Sync>
-                        }
-                    }
-                    TimeUnit::Nanosecond => {
-                        let v = col.as_primitive::<TimestampNanosecondType>();
-                        if primary_index == idx - 2 {
-                            Arc::new(Timestamp::new_nanos(v.value(offset)))
-                                as Arc<dyn Any + Send + Sync>
-                        } else {
-                            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                                .then_some(Timestamp::new_nanos(v.value(offset)));
-                            Arc::new(value) as Arc<dyn Any + Send + Sync>
-                        }
-                    }
-                },
-            };
-            columns.push(Value::new(
-                datatype,
-                field.name().to_owned(),
-                value,
-                is_nullable,
-            ));
-        }
-
-        let record = DynRecordRef {
-            columns,
-            primary_index,
-            _marker: PhantomData,
-        };
-        OptionRecordRef::new(ts, record, null)
-    }
-
-    fn projection(&mut self, projection_mask: &parquet::arrow::ProjectionMask) {
-        for (idx, col) in self.columns.iter_mut().enumerate() {
-            if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
-            {
-                match col.datatype() {
-                    DataType::UInt8 => col.value = Arc::<Option<u8>>::new(None),
-                    DataType::UInt16 => col.value = Arc::<Option<u16>>::new(None),
-                    DataType::UInt32 => col.value = Arc::<Option<u32>>::new(None),
-                    DataType::UInt64 => col.value = Arc::<Option<u64>>::new(None),
-                    DataType::Int8 => col.value = Arc::<Option<i8>>::new(None),
-                    DataType::Int16 => col.value = Arc::<Option<i16>>::new(None),
-                    DataType::Int32 => col.value = Arc::<Option<i32>>::new(None),
-                    DataType::Int64 => col.value = Arc::<Option<i64>>::new(None),
-                    DataType::Float32 => col.value = Arc::<Option<F32>>::new(None),
-                    DataType::Float64 => col.value = Arc::<Option<F64>>::new(None),
-                    DataType::String => col.value = Arc::<Option<String>>::new(None),
-                    DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
-                    DataType::Bytes => col.value = Arc::<Option<Vec<u8>>>::new(None),
-                    DataType::Timestamp(_) => col.value = Arc::<Option<Timestamp>>::new(None),
-                };
-            }
-        }
-    }
-}
-
 impl<'r> DynRecordRef<'r> {
     fn primitive_value<T>(
         col: &ArrayRef,
@@ -334,6 +86,159 @@ impl<'r> DynRecordRef<'r> {
         }
     }
 }
+
+macro_rules! implement_record_ref {
+    (
+        { $( { $primitive_ty:ty, $primitive_pat:pat, $arrow_ty:ty } ),* $(,)? },
+        { $( { $alt_ty2:ty, $alt_variant2:pat,$as_array2:ident, $arrow_ty3:ty, $new_fn:expr} ),* }
+    ) => {
+        impl<'r> RecordRef<'r> for DynRecordRef<'r> {
+            type Record = DynRecord;
+
+            fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
+                self.columns
+                    .get(self.primary_index)
+                    .cloned()
+                    .expect("The primary key must exist")
+            }
+
+            fn from_record_batch(
+                record_batch: &'r arrow::array::RecordBatch,
+                offset: usize,
+                projection_mask: &'r parquet::arrow::ProjectionMask,
+                full_schema: &'r Arc<ArrowSchema>,
+            ) -> OptionRecordRef<'r, Self> {
+                let null = record_batch.column(0).as_boolean().value(offset);
+                let metadata = full_schema.metadata();
+
+                let primary_index = metadata
+                    .get("primary_key_index")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let ts = record_batch
+                    .column(1)
+                    .as_primitive::<arrow::datatypes::UInt32Type>()
+                    .value(offset)
+                    .into();
+
+                let mut columns = vec![];
+
+                let schema = record_batch.schema();
+                let flattened_fields = schema.flattened_fields();
+
+                for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
+                    let datatype = DataType::from(field.data_type());
+                    let batch_field = flattened_fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_idx, f)| field.contains(f));
+                    if batch_field.is_none() {
+                        columns.push(Value::with_none_value(
+                            datatype,
+                            field.name().to_owned(),
+                            field.is_nullable(),
+                        ));
+                        continue;
+                    }
+                    let col = record_batch.column(batch_field.unwrap().0);
+                    let is_nullable = field.is_nullable();
+                    let value = match datatype {
+                        $(
+                            $primitive_pat => Self::primitive_value::<$arrow_ty>(
+                                col,
+                                offset,
+                                idx,
+                                projection_mask,
+                                primary_index == idx - 2,
+                            ),
+                        )*
+                        DataType::Boolean => {
+                            let v = col.as_boolean();
+
+                            if primary_index == idx - 2 {
+                                Arc::new(v.value(offset)) as Arc<dyn Any + Send + Sync>
+                            } else {
+                                let value = (!v.is_null(offset)
+                                    && projection_mask.leaf_included(idx))
+                                .then_some(v.value(offset));
+                                Arc::new(value) as Arc<dyn Any + Send + Sync>
+                            }
+                        }
+                        $(
+                            $alt_variant2 => {
+                                let array = col.$as_array2::<$arrow_ty3>();
+                                if primary_index == idx - 2 {
+                                    Arc::new($new_fn(array.value(offset))) as Arc<dyn Any + Send + Sync>
+                                } else {
+                                    let value = (!array.is_null(offset)
+                                        && projection_mask.leaf_included(idx))
+                                    .then_some($new_fn(array.value(offset)));
+                                    Arc::new(value) as Arc<dyn Any + Send + Sync>
+                                }
+                            },
+                        )*
+                    };
+                    columns.push(Value::new(
+                        datatype,
+                        field.name().to_owned(),
+                        value,
+                        is_nullable,
+                    ));
+                }
+
+                let record = DynRecordRef {
+                    columns,
+                    primary_index,
+                    _marker: PhantomData,
+                };
+                OptionRecordRef::new(ts, record, null)
+            }
+
+            fn projection(&mut self, projection_mask: &parquet::arrow::ProjectionMask) {
+                for (idx, col) in self.columns.iter_mut().enumerate() {
+                    if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
+                    {
+                        match col.datatype() {
+                            $(
+                                $primitive_pat => col.value = Arc::<Option<$primitive_ty>>::new(None),
+                            )*
+                            DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
+                            $(
+                                $alt_variant2 => col.value = Arc::<Option<$alt_ty2>>::new(None),
+                            )*
+                        };
+                    }
+                }
+            }
+        }
+    };
+}
+implement_record_ref!(
+    {
+        // primitive_ty type
+        { u8, DataType::UInt8, UInt8Type },
+        { u16, DataType::UInt16, UInt16Type },
+        { u32, DataType::UInt32, UInt32Type },
+        { u64, DataType::UInt64, UInt64Type },
+        { i8, DataType::Int8, Int8Type },
+        { i16, DataType::Int16, Int16Type },
+        { i32, DataType::Int32, Int32Type },
+        { i64, DataType::Int64, Int64Type },
+    },
+    //  bool is special case, it is handled separately
+    {
+        // { tonbo_type, DataType::xxx, as_array_method, inner_type_to_as_array_method, one_param_constructor }
+        { String, DataType::String, as_string, i32, String::from },
+        { Vec<u8>, DataType::Bytes, as_binary, i32, Vec::from },
+        { F32, DataType::Float32, as_primitive, Float32Type, F32::from },
+        { F64, DataType::Float64, as_primitive, Float64Type, F64::from },
+        { Timestamp, DataType::Timestamp(TimeUnit::Second), as_primitive, TimestampSecondType, Timestamp::new_seconds },
+        { Timestamp, DataType::Timestamp(TimeUnit::Millisecond), as_primitive, TimestampMillisecondType, Timestamp::new_millis },
+        { Timestamp, DataType::Timestamp(TimeUnit::Microsecond), as_primitive, TimestampMicrosecondType, Timestamp::new_micros },
+        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond), as_primitive, TimestampNanosecondType, Timestamp::new_nanos }
+    }
+);
 
 #[cfg(test)]
 mod tests {
