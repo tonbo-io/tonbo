@@ -178,6 +178,7 @@ macro_rules! implement_record_ref {
                                 }
                             },
                         )*
+                        DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     };
                     columns.push(Value::new(
                         datatype,
@@ -207,6 +208,7 @@ macro_rules! implement_record_ref {
                             $(
                                 $alt_variant2 => col.value = Arc::<Option<$alt_ty2>>::new(None),
                             )*
+                            DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                         };
                     }
                 }
@@ -230,13 +232,21 @@ implement_record_ref!(
     {
         // { tonbo_type, DataType::xxx, as_array_method, inner_type_to_as_array_method, one_param_constructor }
         { String, DataType::String, as_string, i32, String::from },
+        { LargeString, DataType::LargeString, as_string, i64, String::from },
         { Vec<u8>, DataType::Bytes, as_binary, i32, Vec::from },
+        { LargeBinary, DataType::LargeBinary, as_binary, i64, Vec::from },
         { F32, DataType::Float32, as_primitive, Float32Type, F32::from },
         { F64, DataType::Float64, as_primitive, Float64Type, F64::from },
+        { Date32, DataType::Date32, as_primitive, Date32Type, Date32::new },
+        { Date64, DataType::Date64, as_primitive, Date64Type, Date64::new },
         { Timestamp, DataType::Timestamp(TimeUnit::Second), as_primitive, TimestampSecondType, Timestamp::new_seconds },
         { Timestamp, DataType::Timestamp(TimeUnit::Millisecond), as_primitive, TimestampMillisecondType, Timestamp::new_millis },
         { Timestamp, DataType::Timestamp(TimeUnit::Microsecond), as_primitive, TimestampMicrosecondType, Timestamp::new_micros },
-        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond), as_primitive, TimestampNanosecondType, Timestamp::new_nanos }
+        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond), as_primitive, TimestampNanosecondType, Timestamp::new_nanos },
+        { Time32, DataType::Time32(TimeUnit::Second), as_primitive, Time32SecondType, Time32::new_seconds },
+        { Time32, DataType::Time32(TimeUnit::Millisecond), as_primitive,  Time32MillisecondType, Time32::new_millis },
+        { Time64, DataType::Time64(TimeUnit::Microsecond),as_primitive, Time64MicrosecondType, Time64::new_micros },
+        { Time64, DataType::Time64(TimeUnit::Nanosecond),as_primitive, Time64NanosecondType, Time64::new_nanos }
     }
 );
 

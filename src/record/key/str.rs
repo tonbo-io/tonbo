@@ -4,6 +4,8 @@ use arrow::array::{Datum, StringArray};
 
 use super::{Key, KeyRef};
 
+pub type LargeString = String;
+
 impl Key for String {
     type Ref<'r> = &'r str;
 
