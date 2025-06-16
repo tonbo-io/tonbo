@@ -350,7 +350,6 @@ impl Time64 {
 
 impl Date32 {
     /// converts [`Date32`] to [`chrono::NaiveDate`] with January 1, 1970 being day 1.
-    ///
     pub fn to_naive_date(&self) -> Option<NaiveDate> {
         Some(
             DateTime::from_timestamp(self.0 as i64 * SECONDS_IN_DAY, 0)?
@@ -360,7 +359,6 @@ impl Date32 {
     }
 
     /// converts [`Date32`] to [`chrono::NaiveDateTime`] with January 1, 1970 being day 1.
-    ///
     pub fn to_naive_datetime(&self) -> Option<NaiveDateTime> {
         Some(DateTime::from_timestamp(self.0 as i64 * SECONDS_IN_DAY, 0)?.naive_utc())
     }
@@ -387,16 +385,13 @@ mod tests {
 
     use super::*;
 
-    // #[test]
-    // fn test_time_to_naive_time() {
-    //     let datetime = Utc::now();
-    //     let expected = datetime.time();
-    //     let time32 = Time32::from_naive_time_millisecond(expected);
-    //     // assert_eq!(time32.to_naive_time(), Some(expected));
-    //     // dbg!(&expected, datetime.timestamp_millis());
-    //     let time64 = Time64::from_naive_time_nanosecond(expected);
-    //     assert_eq!(time64.to_naive_time(), Some(expected));
-    // }
+    #[test]
+    fn test_time_to_naive_time() {
+        let datetime = Utc::now();
+        let expected = datetime.time();
+        let time64 = Time64::from_naive_time_nanosecond(expected);
+        assert_eq!(time64.to_naive_time(), Some(expected));
+    }
 
     #[test]
     fn test_date_to_naive_date() {
