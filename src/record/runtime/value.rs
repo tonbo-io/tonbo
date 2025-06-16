@@ -15,7 +15,10 @@ use fusio::{SeqRead, Write};
 use fusio_log::{Decode, DecodeError, Encode};
 
 use super::DataType;
-use crate::record::{Key, KeyRef, TimeUnit, Timestamp, F32, F64};
+use crate::record::{
+    Date32, Date64, Key, KeyRef, LargeBinary, LargeString, Time32, Time64, TimeUnit, Timestamp,
+    F32, F64,
+};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {
@@ -49,6 +52,18 @@ impl ValueDesc {
             DataType::Boolean => ArrowDataType::Boolean,
             DataType::Bytes => ArrowDataType::Binary,
             DataType::Timestamp(unit) => ArrowDataType::Timestamp(unit.into(), None),
+            DataType::Time32(unit) => match unit {
+                TimeUnit::Second | TimeUnit::Millisecond => ArrowDataType::Time32(unit.into()),
+                TimeUnit::Microsecond | TimeUnit::Nanosecond => unreachable!(),
+            },
+            DataType::Time64(unit) => match unit {
+                TimeUnit::Second | TimeUnit::Millisecond => unreachable!(),
+                TimeUnit::Microsecond | TimeUnit::Nanosecond => ArrowDataType::Time64(unit.into()),
+            },
+            DataType::Date32 => ArrowDataType::Date32,
+            DataType::Date64 => ArrowDataType::Date64,
+            DataType::LargeBinary => ArrowDataType::LargeBinary,
+            DataType::LargeString => ArrowDataType::LargeUtf8,
         };
         Field::new(&self.name, arrow_type, self.is_nullable)
     }
@@ -119,6 +134,7 @@ macro_rules! implement_col {
                             .downcast_ref::<$Type>()
                             .cmp(&other.value.downcast_ref::<$Type>()),
                     )*
+                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 }
             }
         }
@@ -143,6 +159,7 @@ macro_rules! implement_col {
                                 }
                             }
                         )*
+                        DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     }
                 }
         }
@@ -153,6 +170,7 @@ macro_rules! implement_col {
                     $(
                         $DataType => self.value.downcast_ref::<$Type>().hash(state),
                     )*
+                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 }
             }
         }
@@ -175,6 +193,7 @@ macro_rules! implement_col {
                             }
                         }
                     )*
+                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 }
                 debug_struct.field("nullable", &self.is_nullable()).finish()
             }
@@ -188,6 +207,7 @@ macro_rules! implement_col {
                     $(
                         $DataType => Self::new(datatype, name, Arc::<Option<$Type>>::new(None), is_nullable),
                     )*
+                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 }
             }
         }
@@ -238,6 +258,7 @@ macro_rules! implement_key_col {
                                 .$value_fn()
                         )),
                     )*
+                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 }
             }
         }
@@ -279,6 +300,7 @@ macro_rules! implement_decode_col {
                                 false => Arc::new(<$Type>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
                             },
                         )*
+                        DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     };
                 let name = String::decode(reader).await?;
                 Ok(Value::new(
@@ -321,6 +343,7 @@ macro_rules! implement_encode_col {
                                 }
                             }
                         )*
+                        DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 };
                 self.desc.name.encode(writer).await?;
                 Ok(())
@@ -341,6 +364,7 @@ macro_rules! implement_encode_col {
                             }
                         }
                     )*
+                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 }
             }
         }
@@ -367,6 +391,15 @@ impl Value {
             DataType::Timestamp(TimeUnit::Millisecond) => 14,
             DataType::Timestamp(TimeUnit::Microsecond) => 15,
             DataType::Timestamp(TimeUnit::Nanosecond) => 16,
+            DataType::Time32(TimeUnit::Second) => 17,
+            DataType::Time32(TimeUnit::Millisecond) => 18,
+            DataType::Time64(TimeUnit::Microsecond) => 19,
+            DataType::Time64(TimeUnit::Nanosecond) => 20,
+            DataType::Date32 => 21,
+            DataType::Date64 => 22,
+            DataType::LargeBinary => 23,
+            DataType::LargeString => 24,
+            DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
         }
     }
 
@@ -389,6 +422,14 @@ impl Value {
             14 => DataType::Timestamp(TimeUnit::Millisecond),
             15 => DataType::Timestamp(TimeUnit::Millisecond),
             16 => DataType::Timestamp(TimeUnit::Nanosecond),
+            17 => DataType::Time32(TimeUnit::Second),
+            18 => DataType::Time32(TimeUnit::Millisecond),
+            19 => DataType::Time64(TimeUnit::Microsecond),
+            20 => DataType::Time64(TimeUnit::Nanosecond),
+            21 => DataType::Date32,
+            22 => DataType::Date64,
+            23 => DataType::LargeBinary,
+            24 => DataType::LargeString,
             _ => panic!("invalid datatype tag"),
         }
     }
@@ -415,6 +456,32 @@ impl From<&ValueDesc> for Field {
                 ArrowDataType::Timestamp(unit.into(), None),
                 col.is_nullable,
             ),
+            DataType::Time32(unit) => match unit {
+                TimeUnit::Second | TimeUnit::Millisecond => Field::new(
+                    &col.name,
+                    ArrowDataType::Time32(unit.into()),
+                    col.is_nullable,
+                ),
+                _ => unreachable!("microsecond and nanosecond are not supported for Time32"),
+            },
+            DataType::Time64(unit) => match unit {
+                TimeUnit::Second | TimeUnit::Millisecond => {
+                    unreachable!("second and millisecond are not supported for Time64")
+                }
+                TimeUnit::Microsecond | TimeUnit::Nanosecond => Field::new(
+                    &col.name,
+                    ArrowDataType::Time64(unit.into()),
+                    col.is_nullable,
+                ),
+            },
+            DataType::Date32 => Field::new(&col.name, ArrowDataType::Date32, col.is_nullable),
+            DataType::Date64 => Field::new(&col.name, ArrowDataType::Date64, col.is_nullable),
+            DataType::LargeBinary => {
+                Field::new(&col.name, ArrowDataType::LargeBinary, col.is_nullable)
+            }
+            DataType::LargeString => {
+                Field::new(&col.name, ArrowDataType::LargeUtf8, col.is_nullable)
+            }
         }
     }
 }
@@ -434,12 +501,20 @@ macro_rules! for_datatype {
                 { F32, DataType::Float32 },
                 { F64, DataType::Float64 },
                 { String, DataType::String },
+                { LargeString, DataType::LargeString },
                 { bool, DataType::Boolean },
                 { Vec<u8>, DataType::Bytes },
+                { LargeBinary, DataType::LargeBinary },
+                { Date32, DataType::Date32 },
+                { Date64, DataType::Date64 },
                 { Timestamp, DataType::Timestamp(TimeUnit::Second) },
                 { Timestamp, DataType::Timestamp(TimeUnit::Millisecond) },
                 { Timestamp, DataType::Timestamp(TimeUnit::Microsecond) },
-                { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond) }
+                { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond) },
+                { Time32, DataType::Time32(TimeUnit::Second) },
+                { Time32, DataType::Time32(TimeUnit::Millisecond) },
+                { Time64, DataType::Time64(TimeUnit::Microsecond) },
+                { Time64, DataType::Time64(TimeUnit::Nanosecond) }
 
         }
     };
@@ -454,7 +529,9 @@ implement_key_col!(
     {
         // other native type
         { Vec<u8>, DataType::Bytes, GenericBinaryArray<i32> },
-        { String, DataType::String, StringArray }
+        { LargeBinary, DataType::LargeBinary, LargeBinaryArray },
+        { String, DataType::String, StringArray },
+        { LargeString, DataType::LargeString, LargeStringArray },
     },
     {
         // wrapped type
@@ -463,7 +540,13 @@ implement_key_col!(
         { Timestamp, DataType::Timestamp(TimeUnit::Second), TimestampSecondArray, timestamp },
         { Timestamp, DataType::Timestamp(TimeUnit::Millisecond), TimestampMillisecondArray, timestamp_millis },
         { Timestamp, DataType::Timestamp(TimeUnit::Microsecond), TimestampMicrosecondArray, timestamp_micros },
-        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond), TimestampNanosecondArray, timestamp_nanos }
+        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond), TimestampNanosecondArray, timestamp_nanos },
+        { Time32, DataType::Time32(TimeUnit::Second), Time32SecondArray, value },
+        { Time32, DataType::Time32(TimeUnit::Millisecond), Time32MillisecondArray, value },
+        { Time64, DataType::Time64(TimeUnit::Microsecond), Time64MicrosecondArray, value },
+        { Time64, DataType::Time64(TimeUnit::Nanosecond), Time64NanosecondArray, value },
+        { Date32, DataType::Date32, Date32Array, value },
+        { Date64, DataType::Date64, Date64Array, value }
 
     }
 );

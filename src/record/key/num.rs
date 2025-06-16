@@ -154,6 +154,12 @@ macro_rules! implement_float_key {
                 self
             }
         }
+
+        impl FloatType<$ty> {
+            pub fn value(&self) -> $ty {
+                self.0
+            }
+        }
     };
 }
 

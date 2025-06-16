@@ -500,17 +500,25 @@ implement_arrow_array!(
         { i64, i64, DataType::Int64, Int64Type },
         { f32, F32, DataType::Float32, Float32Type },
         { f64, F64, DataType::Float64, Float64Type },
+        { i32, Date32, DataType::Date32, Date32Type },
+        { i64, Date64, DataType::Date64, Date64Type },
     },
     // f32, f64, and bool are special cases, they are handled separately
     {
         { String, DataType::String, StringBuilder, StringArray },
+        { LargeString, DataType::LargeString, LargeStringBuilder, LargeStringArray },
         { Vec<u8>, DataType::Bytes, GenericBinaryBuilder<i32>, GenericBinaryArray<i32> },
+        { LargeBinary, DataType::LargeBinary, GenericBinaryBuilder<i64>, GenericBinaryArray<i64> }
     },
     {
         { Timestamp, DataType::Timestamp(TimeUnit::Second), TimestampSecondBuilder, TimestampSecondArray },
         { Timestamp, DataType::Timestamp(TimeUnit::Millisecond), TimestampMillisecondBuilder,  TimestampMillisecondArray },
         { Timestamp, DataType::Timestamp(TimeUnit::Microsecond),TimestampMicrosecondBuilder, TimestampMicrosecondArray },
         { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond),TimestampNanosecondBuilder, TimestampNanosecondArray },
+        { Time32, DataType::Time32(TimeUnit::Second), Time32SecondBuilder, Time32SecondArray },
+        { Time32, DataType::Time32(TimeUnit::Millisecond), Time32MillisecondBuilder,  Time32MillisecondArray },
+        { Time64, DataType::Time64(TimeUnit::Microsecond),Time64MicrosecondBuilder, Time64MicrosecondArray },
+        { Time64, DataType::Time64(TimeUnit::Nanosecond),Time64NanosecondBuilder, Time64NanosecondArray }
     }
 );
 
@@ -524,7 +532,7 @@ implement_builder_array!(
         { i8, DataType::Int8, Int8Type },
         { i16, DataType::Int16, Int16Type },
         { i32, DataType::Int32, Int32Type },
-        { i64, DataType::Int64, Int64Type }
+        { i64, DataType::Int64, Int64Type },
         // { f32, DataType::Float32, PrimitiveBuilder<Float32Type> },
         // { f64, DataType::Float64, PrimitiveBuilder<Float64Type> },
     },
@@ -532,15 +540,23 @@ implement_builder_array!(
     {
 
         { String, DataType::String, StringBuilder, StringArray },
-        { Vec<u8>, DataType::Bytes, GenericBinaryBuilder<i32>, GenericBinaryArray<i32> }
+        { LargeString, DataType::LargeString, LargeStringBuilder, LargeStringArray },
+        { Vec<u8>, DataType::Bytes, GenericBinaryBuilder<i32>, GenericBinaryArray<i32> },
+        { LargeBinary, DataType::LargeBinary, GenericBinaryBuilder<i64>, GenericBinaryArray<i64> }
     },
     {
         { F32, DataType::Float32, Float32Builder, Float32Array, value },
         { F64, DataType::Float64, Float64Builder, Float64Array, value },
+        { Date32, DataType::Date32, Date32Builder, Date32Array, value },
+        { Date64, DataType::Date64, Date64Builder, Date64Array, value },
         { Timestamp, DataType::Timestamp(TimeUnit::Second), TimestampSecondBuilder, TimestampSecondArray, timestamp },
         { Timestamp, DataType::Timestamp(TimeUnit::Millisecond), TimestampMillisecondBuilder,  TimestampMillisecondArray, timestamp_millis },
         { Timestamp, DataType::Timestamp(TimeUnit::Microsecond),TimestampMicrosecondBuilder, TimestampMicrosecondArray, timestamp_micros },
-        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond),TimestampNanosecondBuilder, TimestampNanosecondArray, timestamp_nanos }
+        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond),TimestampNanosecondBuilder, TimestampNanosecondArray, timestamp_nanos },
+        { Time32, DataType::Time32(TimeUnit::Second), Time32SecondBuilder, Time32SecondArray, value },
+        { Time32, DataType::Time32(TimeUnit::Millisecond), Time32MillisecondBuilder,  Time32MillisecondArray, value },
+        { Time64, DataType::Time64(TimeUnit::Microsecond),Time64MicrosecondBuilder, Time64MicrosecondArray, value },
+        { Time64, DataType::Time64(TimeUnit::Nanosecond),Time64NanosecondBuilder, Time64NanosecondArray, value }
     }
 );
 

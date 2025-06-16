@@ -129,11 +129,17 @@ implement_record!(
         { F64, DataType::Float64 },
         { bool, DataType::Boolean },
         { Timestamp, DataType::Timestamp(_) },
+        { Time32, DataType::Time32(_) },
+        { Time64, DataType::Time64(_) },
+        { Date32, DataType::Date32 },
+        { Date64, DataType::Date64 }
     },
     {
         // types that can be cloned
         { Vec<u8>, DataType::Bytes },
+        { LargeBinary, DataType::LargeBinary },
         { String, DataType::String },
+        { LargeString, DataType::LargeString }
     },
 );
 
