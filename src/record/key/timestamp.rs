@@ -11,9 +11,8 @@ use arrow::array::{
 use chrono::{DateTime, NaiveDateTime};
 use fusio_log::{Decode, Encode};
 
-use crate::record::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY};
-
 use super::{Date32, Date64, Key, KeyRef, Time32, Time64};
+use crate::record::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY};
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeUnit {
@@ -366,7 +365,14 @@ mod tests {
         // test microseconds
         let microseconds = datetime.timestamp_micros();
         let ts = Timestamp::new_micros(microseconds);
-        assert_eq!(ts.to_naive_date_time(), Some(expected));
+        assert_eq!(
+            ts.to_naive_date_time(),
+            Some(
+                DateTime::from_timestamp_micros(microseconds)
+                    .unwrap()
+                    .naive_utc()
+            ),
+        );
 
         // test milliseconds
         let milliseconds = datetime.timestamp_millis();
