@@ -219,6 +219,11 @@ impl DbOption {
             .child(format!("{}.{}", gen, FileType::Parquet))
     }
 
+    pub(crate) fn cached_table_path(&self, gen: FileId) -> Path {
+        self.base_path
+            .child(format!("{}.{}", gen, FileType::Parquet))
+    }
+
     pub(crate) fn wal_dir_path(&self) -> Path {
         self.base_path.child("wal")
     }

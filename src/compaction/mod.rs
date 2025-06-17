@@ -194,19 +194,21 @@ where
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
         manifest_tx: &flume::Sender<VersionEdit<<R::Schema as RecordSchema>::Key>>,
-        modify_manifest: bool,
+        cached_to_local: bool,
     ) -> Result<(), CompactionError<R>> {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
         let gen = generate_file_id();
+        let path = if cached_to_local {
+            &option.cached_table_path(gen)
+        } else {
+            &option.table_path(gen, level)
+        };
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(
-                    &option.table_path(gen, level),
-                    FileType::Parquet.open_options(false),
-                )
-                .await?,
+                fs.open_options(path, FileType::Parquet.open_options(false))
+                    .await?,
             ),
             schema.arrow_schema().clone(),
             Some(option.write_parquet_properties.clone()),
@@ -214,7 +216,7 @@ where
         writer.write(columns.as_record_batch()).await?;
         writer.close().await?;
 
-        if modify_manifest {
+        if cached_to_local {
             manifest_tx
                 .send_async(VersionEdit::Add {
                     level: level as u8,
@@ -307,18 +309,21 @@ pub(crate) mod tests {
         schema: &Arc<R::Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
+        build_cache: bool,
     ) -> Result<(), DbError<R>>
     where
         R: Record + Send,
     {
         let immutable = build_immutable::<R>(option, records, schema, fs).await?;
+        let path = if build_cache {
+            &option.cached_table_path(gen)
+        } else {
+            &option.table_path(gen, level)
+        };
         let mut writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(
-                fs.open_options(
-                    &option.table_path(gen, level),
-                    FileType::Parquet.open_options(false),
-                )
-                .await?,
+                fs.open_options(path, FileType::Parquet.open_options(false))
+                    .await?,
             ),
             schema.arrow_schema().clone(),
             None,
@@ -333,10 +338,10 @@ pub(crate) mod tests {
         option: &Arc<DbOption>,
         manager: &StoreManager,
         schema: &Arc<TestSchema>,
-        test_cached: bool,
+        test_cache: bool,
     ) -> ((FileId, FileId, FileId, FileId, FileId), Version<Test>) {
         let level_0_cache = option.level_fs_cached(0);
-        let level_0_fs = if test_cached && level_0_cache {
+        let level_0_fs = if test_cache && level_0_cache {
             option
                 .level_fs_path(0)
                 .map(|path| manager.get_cache(path))
@@ -349,7 +354,7 @@ pub(crate) mod tests {
         };
 
         let level_1_cache = option.level_fs_cached(1);
-        let level_1_fs = if test_cached && level_1_cache {
+        let level_1_fs = if test_cache && level_1_cache {
             option
                 .level_fs_path(1)
                 .map(|path| manager.get_cache(path))
@@ -399,6 +404,7 @@ pub(crate) mod tests {
             schema,
             0,
             level_0_fs,
+            test_cache,
         )
         .await
         .unwrap();
@@ -437,6 +443,7 @@ pub(crate) mod tests {
             schema,
             0,
             level_0_fs,
+            test_cache,
         )
         .await
         .unwrap();
@@ -480,6 +487,7 @@ pub(crate) mod tests {
             schema,
             1,
             level_1_fs,
+            test_cache,
         )
         .await
         .unwrap();
@@ -518,6 +526,7 @@ pub(crate) mod tests {
             schema,
             1,
             level_1_fs,
+            test_cache,
         )
         .await
         .unwrap();
@@ -556,6 +565,7 @@ pub(crate) mod tests {
             schema,
             1,
             level_1_fs,
+            test_cache,
         )
         .await
         .unwrap();

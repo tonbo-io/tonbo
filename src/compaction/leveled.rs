@@ -199,7 +199,7 @@ where
                     AsyncWriter::new(
                         level_0_cache_fs
                             .open_options(
-                                &option.table_path(gen, 0),
+                                &option.cached_table_path(gen),
                                 FileType::Parquet.open_options(true),
                             )
                             .await?,
@@ -686,6 +686,103 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_cached_read_path() {
+        use fusio::remotes::aws::AwsCredential;
+
+        use crate::Projection;
+
+        if option_env!("AWS_ACCESS_KEY_ID").is_none()
+            || option_env!("AWS_SECRET_ACCESS_KEY").is_none()
+        {
+            eprintln!("can not get `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`");
+            return;
+        }
+        let key_id = std::option_env!("AWS_ACCESS_KEY_ID").unwrap().to_string();
+        let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
+            .unwrap()
+            .to_string();
+        let token = std::option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
+        let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
+        let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
+
+        let fs_option = fusio_log::FsOptions::S3 {
+            bucket,
+            credential: Some(AwsCredential {
+                key_id,
+                secret_key,
+                token,
+            }),
+            endpoint: None,
+            sign_payload: None,
+            checksum: None,
+            region,
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let temp_dir_l0 = TempDir::new().unwrap();
+        let temp_dir_l1 = TempDir::new().unwrap();
+        let temp_dir_l2 = TempDir::new().unwrap();
+
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        )
+        .level_path(
+            0,
+            Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
+            fs_option.clone(),
+            true,
+        )
+        .unwrap()
+        .level_path(
+            1,
+            Path::from_filesystem_path(temp_dir_l1.path()).unwrap(),
+            fs_option.clone(),
+            true,
+        )
+        .unwrap()
+        .level_path(
+            2,
+            Path::from_filesystem_path(temp_dir_l2.path()).unwrap(),
+            fs_option.clone(),
+            true,
+        ).unwrap();
+
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.level_sst_magnification = 10;
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        let mut items = Vec::new();
+        for i in 0..10000 {
+            items.push(Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            });
+        }
+
+        for (_, item) in items.clone().into_iter().enumerate() {
+            db.write(item, 0.into()).await.unwrap();
+        }
+
+        for (i, item) in items.clone().into_iter().enumerate() {
+            let tx = db.transaction().await;
+            let key = item.key().to_string();
+            let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
+
+            assert_eq!(option1.get().vu32, Some(i as u32));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn major_compaction_cached() {
         use fusio::remotes::aws::AwsCredential;
 
@@ -699,7 +796,7 @@ pub(crate) mod tests {
         let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
             .unwrap()
             .to_string();
-        let token = None;
+        let token = std::option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
         let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
         let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
 
@@ -979,6 +1076,7 @@ pub(crate) mod tests {
             &Arc::new(TestSchema),
             0,
             level_0_fs,
+            false,
         )
         .await
         .unwrap();
@@ -989,6 +1087,7 @@ pub(crate) mod tests {
             &Arc::new(TestSchema),
             1,
             level_1_fs,
+            false,
         )
         .await
         .unwrap();
