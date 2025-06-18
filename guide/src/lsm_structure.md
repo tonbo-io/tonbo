@@ -7,6 +7,17 @@ Exposes `txn`/`basic`/`MVCC` read-write interfaces to external
 * Supports `get/scan` operations.
 * Supports `insert/remove` operations.
 
+## Path
+Some part of the lsm tree component is persist to `Local Disk/S3`.
+- `WAL`:`base_path/wal`
+- `SsTable`: `SsTable` can be stored at either `Local Disk` of `S3`. This can be set by `.level_path`
+    - `.level_path(level, Path, fs_option, cached)` can set level's `Path/cached/fs_option` mentioned below.
+    - each level of `Sstable` can be stored at seperated path set by `.level_path` and `Local Disk/S3`, under `/{Path}` provided by `.level_path`.
+    - if a level is set as `S3`, then `cache` can be set for this level and cached at `Local Disk`, under `/{base_path}`
+- `Manifest`:`Manifest` is stored at `{base_path}/version`
+    - `Manifest` will be further stored at a Distributed Coordination Service.
+
+
 ## DbStorage
 
 * `DbOptions::base_path/base_fs`: Configures storage backend type/path, currently supports `local/S3`.
