@@ -8,7 +8,6 @@ pub use array::*;
 use arrow::datatypes::DataType as ArrowDataType;
 pub use record::*;
 pub use record_ref::*;
-pub use schema::*;
 pub use value::*;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]

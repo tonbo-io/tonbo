@@ -100,7 +100,6 @@ pub(crate) mod tests {
     use crate::{
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager, FileType},
-        inmem::immutable::tests::TestSchema,
         version::cleaner::{CleanTag, Cleaner},
         DbOption,
     };
@@ -111,7 +110,6 @@ pub(crate) mod tests {
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
         ));
 
         let gen_0 = generate_file_id();

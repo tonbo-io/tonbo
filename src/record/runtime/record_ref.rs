@@ -13,9 +13,7 @@ use fusio_log::Encode;
 use super::{DataType, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
-    record::{
-        option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, Schema, F32, F64,
-    },
+    record::{option::OptionRecordRef, Key, Record, RecordEncodeError, RecordRef, F32, F64},
 };
 
 #[derive(Clone)]
@@ -63,7 +61,7 @@ impl<'r> Encode for DynRecordRef<'r> {
 impl<'r> RecordRef<'r> for DynRecordRef<'r> {
     type Record = DynRecord;
 
-    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
+    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
         self.columns
             .get(self.primary_index)
             .cloned()
@@ -287,25 +285,27 @@ impl<'r> DynRecordRef<'r> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
-        cast_arc_value, dyn_record, dyn_schema,
-        record::{Record, RecordRef, Schema, F32, F64},
+        cast_arc_value, dyn_record,
+        record::{Record, RecordRef, F32, F64},
     };
 
     #[test]
     fn test_float_projection() {
-        let schema = dyn_schema!(
-            ("_null", Boolean, false),
-            ("ts", UInt32, false),
-            ("id", Float64, false),
-            ("foo", Float32, false),
-            ("foo_opt", Float32, true),
-            ("bar", Float64, false),
-            ("bar_opt", Float64, true),
-            2
-        );
+        let arrow_schema = Arc::new(Schema::new(vec![
+            Field::new("_null", DataType::Boolean, false),
+            Field::new("ts", DataType::UInt32, false),
+            Field::new("id", DataType::Float64, false),
+            Field::new("foo", DataType::Float32, false),
+            Field::new("foo_opt", DataType::Float32, true),
+            Field::new("bar", DataType::Float64, false),
+            Field::new("bar_opt", DataType::Float64, true),
+        ]));
         let record = dyn_record!(
             ("_null", Boolean, false, true),
             ("ts", UInt32, false, 7u32),
@@ -342,9 +342,7 @@ mod tests {
             // test project no columns
             let mut record_ref = record.as_record_ref();
             let mask = ProjectionMask::roots(
-                &ArrowSchemaConverter::new()
-                    .convert(schema.arrow_schema())
-                    .unwrap(),
+                &ArrowSchemaConverter::new().convert(&arrow_schema).unwrap(),
                 vec![1],
             );
             record_ref.projection(&mask);
@@ -361,16 +359,15 @@ mod tests {
 
     #[test]
     fn test_string_projection() {
-        let schema = dyn_schema!(
-            ("_null", Boolean, false),
-            ("ts", UInt32, false),
-            ("id", String, false),
-            ("name", String, false),
-            ("email", String, true),
-            ("adress", String, true),
-            ("data", Bytes, true),
-            2
-        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("_null", DataType::Boolean, false),
+            Field::new("ts", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("email", DataType::Utf8, true),
+            Field::new("adress", DataType::Utf8, true),
+            Field::new("data", DataType::Binary, true),
+        ]));
         let record = dyn_record!(
             ("_null", Boolean, false, true),
             ("ts", UInt32, false, 7u32),
@@ -407,9 +404,7 @@ mod tests {
             // test project no columns
             let mut record_ref = record.as_record_ref();
             let mask = ProjectionMask::roots(
-                &ArrowSchemaConverter::new()
-                    .convert(schema.arrow_schema())
-                    .unwrap(),
+                &ArrowSchemaConverter::new().convert(&schema).unwrap(),
                 vec![1],
             );
             record_ref.projection(&mask);

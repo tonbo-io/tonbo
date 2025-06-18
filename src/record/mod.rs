@@ -4,41 +4,110 @@ pub mod runtime;
 #[cfg(test)]
 pub(crate) mod test;
 
-use std::{error::Error, fmt::Debug, io, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt::Debug, io, sync::Arc};
 
-use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use arrow::{
+    array::RecordBatch,
+    datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema},
+    error::ArrowError,
+};
 use fusio_log::{Decode, Encode};
 pub use key::*;
 use option::OptionRecordRef;
-use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+use parquet::arrow::ProjectionMask;
 pub use runtime::*;
 use thiserror::Error;
 
-use crate::inmem::immutable::ArrowArrays;
+use crate::{inmem::immutable::ArrowArrays, magic};
 
-pub trait Schema: Debug + Send + Sync {
-    type Record: Record<Schema = Self>;
+pub struct Schema {
+    schema: Arc<ArrowSchema>,
+    primary_keys: Vec<usize>,
+}
 
-    type Columns: ArrowArrays<Record = Self::Record>;
+impl Schema {
+    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
+    pub fn new(fields: Vec<Field>, primary_keys: Vec<usize>) -> Self {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "primary_key_index".to_string(),
+            primary_keys
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<String>>()
+                .join(","),
+        );
 
-    type Key: Key;
+        let fields = [
+            Field::new("_null", ArrowDataType::Boolean, false),
+            Field::new(magic::TS, ArrowDataType::UInt32, false),
+        ]
+        .into_iter()
+        .chain(fields)
+        .collect::<Vec<Field>>();
+        let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
 
-    /// Returns the [`arrow::datatypes::Schema`] of the record.
-    ///
-    /// **Note**: The first column should be `_null`, and the second column should be `_ts`.
-    fn arrow_schema(&self) -> &Arc<ArrowSchema>;
+        Self {
+            schema,
+            primary_keys,
+        }
+    }
+
+    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
+    pub fn from_arrow_schema(
+        arrow_schema: ArrowSchema,
+        primary_keys: Vec<usize>,
+    ) -> Result<Self, ArrowError> {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "primary_key_index".to_string(),
+            primary_keys
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<String>>()
+                .join(","),
+        );
+
+        let schema = Arc::new(ArrowSchema::try_merge(vec![
+            ArrowSchema::new_with_metadata(
+                vec![
+                    Field::new("_null", ArrowDataType::Boolean, false),
+                    Field::new(magic::TS, ArrowDataType::UInt32, false),
+                ],
+                metadata,
+            ),
+            arrow_schema,
+        ])?);
+
+        Ok(Self {
+            schema,
+            primary_keys,
+        })
+    }
+
+    pub(crate) fn arrow_schema(&self) -> &Arc<ArrowSchema> {
+        &self.schema
+    }
 
     /// Returns the index of the primary key column.
-    fn primary_key_index(&self) -> usize;
+    pub fn primary_key_index(&self) -> &[usize] {
+        &self.primary_keys
+    }
 
-    /// Returns the ([`ColumnPath`], [`Vec<SortingColumn>`]) of the primary key column, representing
-    /// the location of the primary key column in the parquet schema and the sort order within a
-    /// RowGroup of a leaf column
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>);
+    /// Returns the name of the primary key column.
+    pub fn primary_key_names(&self) -> Vec<String> {
+        let fields = self.schema.fields();
+        self.primary_keys
+            .iter()
+            .map(|idx| fields[*idx].name().to_string())
+            .collect::<Vec<String>>()
+    }
 }
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
-    type Schema: Schema<Record = Self>;
+    type Key: Key;
+
+    type Columns: ArrowArrays<Record = Self>;
 
     type Ref<'r>: RecordRef<'r, Record = Self>
     where
@@ -46,7 +115,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
 
     /// Returns the primary key of the record. This should be the type defined in the
     /// [`Schema`].
-    fn key(&self) -> <<<Self as Record>::Schema as Schema>::Key as Key>::Ref<'_> {
+    fn key(&self) -> <Self::Key as Key>::Ref<'_> {
         self.as_record_ref().key()
     }
 
@@ -62,7 +131,7 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
 
     /// Returns the primary key of the record. This should be the type that defined in the
     /// [`Schema`].
-    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r>;
+    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;
 
     /// Do projection on the record. Only keep the columns specified in the projection mask.
     ///

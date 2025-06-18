@@ -21,7 +21,7 @@ use record_batch::RecordBatchEntry;
 use crate::{
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
-    record::{Key, Record, RecordRef, Schema},
+    record::{Key, Record, RecordRef},
     stream::{level::LevelStream, mem_projection::MemProjectionStream},
     timestamp::Ts,
     transaction::TransactionScan,
@@ -31,13 +31,8 @@ pub enum Entry<'entry, R>
 where
     R: Record,
 {
-    Transaction(
-        (
-            Ts<<<R::Schema as Schema>::Key as Key>::Ref<'entry>>,
-            &'entry Option<R>,
-        ),
-    ),
-    Mutable(crossbeam_skiplist::map::Entry<'entry, Ts<<R::Schema as Schema>::Key>, Option<R>>),
+    Transaction((Ts<<R::Key as Key>::Ref<'entry>>, &'entry Option<R>)),
+    Mutable(crossbeam_skiplist::map::Entry<'entry, Ts<R::Key>, Option<R>>),
     Projection((Box<Entry<'entry, R>>, Arc<ProjectionMask>)),
     RecordBatch(RecordBatchEntry<R>),
 }
@@ -46,15 +41,14 @@ impl<R> Entry<'_, R>
 where
     R: Record,
 {
-    pub(crate) fn key(&self) -> Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>> {
+    pub(crate) fn key(&self) -> Ts<<R::Key as Key>::Ref<'_>> {
         match self {
             Entry::Transaction((key, _)) => {
                 // Safety: shorter lifetime must be safe
                 unsafe {
-                    transmute::<
-                        Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
-                        Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
-                    >(key.clone())
+                    transmute::<Ts<<R::Key as Key>::Ref<'_>>, Ts<<R::Key as Key>::Ref<'_>>>(
+                        key.clone(),
+                    )
                 }
             }
             Entry::Mutable(entry) => entry.key().map(|key| {
@@ -82,7 +76,7 @@ where
 impl<R> fmt::Debug for Entry<'_, R>
 where
     R: Record + Debug,
-    <R::Schema as Schema>::Key: Debug,
+    R::Key: Debug,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
-use super::{schema::DynSchema, DataType, DynRecordRef, Value};
+use super::{DataType, DynRecordImmutableArrays, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
     record::{Record, RecordDecodeError, F32, F64},
@@ -72,9 +72,11 @@ impl Decode for DynRecord {
 }
 
 impl Record for DynRecord {
-    type Schema = DynSchema;
+    type Key = Value;
 
     type Ref<'r> = DynRecordRef<'r>;
+
+    type Columns = DynRecordImmutableArrays;
 
     fn as_record_ref(&self) -> Self::Ref<'_> {
         let mut columns = vec![];
@@ -165,26 +167,27 @@ macro_rules! dyn_record {
 pub(crate) mod test {
     use std::sync::Arc;
 
-    use super::{DynRecord, DynSchema};
-    use crate::{
-        dyn_schema,
-        record::{F32, F64},
-    };
+    use arrow::datatypes::{DataType, Field};
+
+    use super::DynRecord;
+    use crate::record::{Schema, F32, F64};
 
     #[allow(unused)]
-    pub(crate) fn test_dyn_item_schema() -> DynSchema {
-        dyn_schema!(
-            ("id", Int64, false),
-            ("age", Int8, true),
-            ("height", Int16, true),
-            ("weight", Int32, false),
-            ("name", String, false),
-            ("email", String, true),
-            ("enabled", Boolean, false),
-            ("bytes", Bytes, true),
-            ("grade", Float32, false),
-            ("price", Float64, true),
-            0
+    pub(crate) fn test_dyn_item_schema() -> Schema {
+        Schema::new(
+            vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("age", DataType::Int8, true),
+                Field::new("height", DataType::Int16, true),
+                Field::new("weight", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("email", DataType::Utf8, true),
+                Field::new("enabled", DataType::Boolean, false),
+                Field::new("bytes", DataType::Binary, true),
+                Field::new("grade", DataType::Float32, false),
+                Field::new("price", DataType::Float64, true),
+            ],
+            vec![0],
         )
     }
 
