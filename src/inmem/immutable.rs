@@ -15,7 +15,7 @@ use crate::{
     timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };
 
-pub trait ArrowArrays: Sized + Sync {
+pub trait ArrowArrays: Sized + Sync + Send {
     type Record: Record;
 
     type Builder: Builder<Self>;

@@ -36,8 +36,8 @@ async def test_table_level_local():
     temp_dir1 = tempfile.TemporaryDirectory()
 
     option = DbOption(from_filesystem_path(temp_dir.name))
-    option.level_path(0, from_filesystem_path(temp_dir0.name), FsOptions.Local())
-    option.level_path(1, from_filesystem_path(temp_dir1.name), FsOptions.Local())
+    option.level_path(0, from_filesystem_path(temp_dir0.name), FsOptions.Local(), False)
+    option.level_path(1, from_filesystem_path(temp_dir1.name), FsOptions.Local(), False)
 
     option.immutable_chunk_num = 1
     option.major_threshold_with_sst_size = 3

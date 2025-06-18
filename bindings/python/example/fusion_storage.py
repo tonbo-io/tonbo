@@ -21,8 +21,8 @@ async def main():
         os.makedirs("db_path/user/l1")
 
     option = DbOption(from_filesystem_path("db_path/user"))
-    option.level_path(0, from_filesystem_path("db_path/user/l0"), FsOptions.Local())
-    option.level_path(1, from_filesystem_path("db_path/user/l1"), FsOptions.Local())
+    option.level_path(0, from_filesystem_path("db_path/user/l0"), FsOptions.Local(), False)
+    option.level_path(1, from_filesystem_path("db_path/user/l1"), FsOptions.Local(), False)
 
     option.immutable_chunk_num = 1
     option.major_threshold_with_sst_size = 3
