@@ -236,6 +236,7 @@ where
                                 u32::MAX.into(),
                                 None,
                                 ProjectionMask::all(),
+                                false
                             )
                             .await?,
                     });
@@ -253,6 +254,7 @@ where
                     ProjectionMask::all(),
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    false,
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -277,6 +279,7 @@ where
                     ProjectionMask::all(),
                     level_l_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    false,
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 

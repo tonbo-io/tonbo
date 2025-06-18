@@ -227,13 +227,21 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        reverse: bool,
     ) -> Result<(), VersionError<R>> {
         let level_0_path = self
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
         let level_0_fs = ctx.manager.get_fs(level_0_path);
-        for scope in self.level_slice[0].iter() {
+        // For reverse iteration, process files in reverse order
+        let scope_iter: Box<dyn Iterator<Item = _>> = if reverse {
+            Box::new(self.level_slice[0].iter().rev())
+        } else {
+            Box::new(self.level_slice[0].iter())
+        };
+        
+        for scope in scope_iter {
             if !scope.meets_range(range) {
                 continue;
             }
@@ -248,7 +256,7 @@ where
 
             streams.push(ScanStream::SsTable {
                 inner: table
-                    .scan(range, ts, limit, projection_mask.clone())
+                    .scan(range, ts, limit, projection_mask.clone(), reverse)
                     .await
                     .map_err(VersionError::Parquet)?,
             })
@@ -290,6 +298,7 @@ where
                     projection_mask.clone(),
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    reverse,
                 )
                 .unwrap(),
             });
