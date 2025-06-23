@@ -12,9 +12,9 @@ use thiserror::Error;
 
 use crate::{
     fs::{FileId, FileType},
-    record::{Record, Schema},
+    record::Schema,
     trigger::TriggerType,
-    version::{Version, MAX_LEVEL},
+    version::MAX_LEVEL,
 };
 
 const DEFAULT_WAL_BUFFER_SIZE: usize = 4 * 1024;
@@ -238,15 +238,6 @@ impl DbOption {
 
     pub(crate) fn level_fs_path(&self, level: usize) -> Option<&Path> {
         self.level_paths[level].as_ref().map(|(path, _)| path)
-    }
-
-    pub(crate) fn is_threshold_exceeded_major<R: Record>(
-        &self,
-        version: &Version<R>,
-        level: usize,
-    ) -> bool {
-        Version::<R>::tables_len(version, level)
-            >= (self.major_threshold_with_sst_size * self.level_sst_magnification.pow(level as u32))
     }
 }
 
