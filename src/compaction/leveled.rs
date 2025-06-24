@@ -100,7 +100,7 @@ where
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
-                if self.option.is_threshold_exceeded_major(&version_ref, 0) {
+                if Self::is_threshold_exceeded_major(&self.option, &version_ref, 0) {
                     Self::major_compaction(
                         &version_ref,
                         &self.option,
@@ -205,7 +205,7 @@ where
         let mut level = 0;
 
         while level < MAX_LEVEL - 2 {
-            if !option.is_threshold_exceeded_major(version, level) {
+            if !Self::is_threshold_exceeded_major(option, version, level) {
                 break;
             }
             let (meet_scopes_l, start_l, end_l) = Self::this_level_scopes(version, min, max, level);
@@ -257,6 +257,9 @@ where
                     inner: level_scan_l,
                 });
             }
+
+            let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
+            let level_l_fs = ctx.manager.get_fs(level_l_path);
             if !meet_scopes_ll.is_empty() {
                 // Next Level
                 let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_ll)?;
@@ -269,7 +272,7 @@ where
                     u32::MAX.into(),
                     None,
                     ProjectionMask::all(),
-                    level_fs.clone(),
+                    level_l_fs.clone(),
                     ctx.parquet_lru.clone(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
@@ -279,8 +282,6 @@ where
                 });
             }
 
-            let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
-            let level_l_fs = ctx.manager.get_fs(level_l_path);
             Compactor::<R>::build_tables(
                 option,
                 version_edits,
@@ -387,6 +388,22 @@ where
             }
         }
         (meet_scopes_l, start_l, end_l - 1)
+    }
+
+    /// Checks if the number of SST files in a level exceeds the major compaction threshold
+    ///
+    /// The threshold is calculated by multiplying the base threshold with a magnification factor
+    /// that increases exponentially with the level number.
+    ///
+    /// Returns true if the number of tables in the level exceeds the threshold.
+    pub(crate) fn is_threshold_exceeded_major(
+        option: &DbOption,
+        version: &Version<R>,
+        level: usize,
+    ) -> bool {
+        Version::<R>::tables_len(version, level)
+            >= (option.major_threshold_with_sst_size
+                * option.level_sst_magnification.pow(level as u32))
     }
 }
 
@@ -554,7 +571,7 @@ pub(crate) mod tests {
     async fn dyn_minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let schema = Schema::new(vec![Field::new("id", ArrowDataType::Int32, false)], vec![0]);
+        let schema = Schema::new(vec![Field::new("id", ArrowDataType::Int32, false)], 0);
         let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         manager
             .base_fs()

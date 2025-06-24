@@ -93,7 +93,6 @@ mod tests {
             immutable::{tests::TestImmutableArrays, ArrowArrays},
             mutable::MutableMemTable,
         },
-        record::Schema,
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
         trigger::TriggerFactory,
@@ -109,7 +108,7 @@ mod tests {
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let schema = Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let schema = Arc::new(Test::schema());
 
         let trigger = TriggerFactory::create(option.trigger_type);
 

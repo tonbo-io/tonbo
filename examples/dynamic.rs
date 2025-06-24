@@ -18,7 +18,7 @@ async fn main() {
             Field::new("foo", ArrowDataType::Utf8, false),
             Field::new("bar", ArrowDataType::Int32, true),
         ],
-        vec![0],
+        0,
     );
 
     let options = DbOption::new(Path::from_filesystem_path("./db_path/users").unwrap());

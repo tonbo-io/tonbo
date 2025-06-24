@@ -20,90 +20,6 @@ use thiserror::Error;
 
 use crate::{inmem::immutable::ArrowArrays, magic};
 
-pub struct Schema {
-    schema: Arc<ArrowSchema>,
-    primary_keys: Vec<usize>,
-}
-
-impl Schema {
-    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
-    pub fn new(fields: Vec<Field>, primary_keys: Vec<usize>) -> Self {
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "primary_key_index".to_string(),
-            primary_keys
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<String>>()
-                .join(","),
-        );
-
-        let fields = [
-            Field::new("_null", ArrowDataType::Boolean, false),
-            Field::new(magic::TS, ArrowDataType::UInt32, false),
-        ]
-        .into_iter()
-        .chain(fields)
-        .collect::<Vec<Field>>();
-        let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
-
-        Self {
-            schema,
-            primary_keys,
-        }
-    }
-
-    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
-    pub fn from_arrow_schema(
-        arrow_schema: ArrowSchema,
-        primary_keys: Vec<usize>,
-    ) -> Result<Self, ArrowError> {
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "primary_key_index".to_string(),
-            primary_keys
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<String>>()
-                .join(","),
-        );
-
-        let schema = Arc::new(ArrowSchema::try_merge(vec![
-            ArrowSchema::new_with_metadata(
-                vec![
-                    Field::new("_null", ArrowDataType::Boolean, false),
-                    Field::new(magic::TS, ArrowDataType::UInt32, false),
-                ],
-                metadata,
-            ),
-            arrow_schema,
-        ])?);
-
-        Ok(Self {
-            schema,
-            primary_keys,
-        })
-    }
-
-    pub(crate) fn arrow_schema(&self) -> &Arc<ArrowSchema> {
-        &self.schema
-    }
-
-    /// Returns the index of the primary key column.
-    pub fn primary_key_index(&self) -> &[usize] {
-        &self.primary_keys
-    }
-
-    /// Returns the name of the primary key column.
-    pub fn primary_key_names(&self) -> Vec<String> {
-        let fields = self.schema.fields();
-        self.primary_keys
-            .iter()
-            .map(|idx| fields[*idx].name().to_string())
-            .collect::<Vec<String>>()
-    }
-}
-
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
     type Key: Key;
 
@@ -147,6 +63,73 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
         projection_mask: &'r ProjectionMask,
         full_schema: &'r Arc<ArrowSchema>,
     ) -> OptionRecordRef<'r, Self>;
+}
+
+pub struct Schema {
+    schema: Arc<ArrowSchema>,
+    primary_key: usize,
+}
+
+impl Schema {
+    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
+    pub fn new(fields: Vec<Field>, primary_key: usize) -> Self {
+        let mut metadata = HashMap::new();
+        metadata.insert("primary_key_index".to_string(), primary_key.to_string());
+
+        let fields = [
+            Field::new("_null", ArrowDataType::Boolean, false),
+            Field::new(magic::TS, ArrowDataType::UInt32, false),
+        ]
+        .into_iter()
+        .chain(fields)
+        .collect::<Vec<Field>>();
+        let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
+
+        Self {
+            schema,
+            primary_key,
+        }
+    }
+
+    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
+    pub fn from_arrow_schema(
+        arrow_schema: ArrowSchema,
+        primary_key: usize,
+    ) -> Result<Self, ArrowError> {
+        let mut metadata = HashMap::new();
+        metadata.insert("primary_key_index".to_string(), primary_key.to_string());
+
+        let schema = Arc::new(ArrowSchema::try_merge(vec![
+            ArrowSchema::new_with_metadata(
+                vec![
+                    Field::new("_null", ArrowDataType::Boolean, false),
+                    Field::new(magic::TS, ArrowDataType::UInt32, false),
+                ],
+                metadata,
+            ),
+            arrow_schema,
+        ])?);
+
+        Ok(Self {
+            schema,
+            primary_key,
+        })
+    }
+
+    pub(crate) fn arrow_schema(&self) -> &Arc<ArrowSchema> {
+        &self.schema
+    }
+
+    /// Returns the index of the primary key column.
+    pub fn primary_key_index(&self) -> usize {
+        self.primary_key + 2
+    }
+
+    /// Returns the name of the primary key column.
+    pub fn primary_key_name(&self) -> String {
+        let fields = self.schema.fields();
+        fields[self.primary_key].name().to_string()
+    }
 }
 
 #[derive(Debug, Error)]

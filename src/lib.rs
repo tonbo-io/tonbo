@@ -200,23 +200,14 @@ where
     ///
     /// For more configurable options, please refer to [`DbOption`].
     pub async fn new(option: DbOption, executor: E, schema: Schema) -> Result<Self, DbError<R>> {
-        let primary_keys = schema.primary_key_index();
-        let primary_key_names = schema.primary_key_names();
+        let primary_key = schema.primary_key_index();
+        let primary_key_name = schema.primary_key_name();
 
-        let column_paths = ColumnPath::new(
-            [magic::TS.to_string()]
-                .into_iter()
-                .chain(primary_key_names)
-                .collect::<Vec<String>>(),
-        );
-        let sorting_columns = [SortingColumn::new(1_i32, true, true)]
-            .into_iter()
-            .chain(
-                primary_keys
-                    .iter()
-                    .map(|idx| SortingColumn::new(*idx as i32, false, true)),
-            )
-            .collect::<Vec<SortingColumn>>();
+        let column_paths = ColumnPath::new(vec![magic::TS.to_string(), primary_key_name]);
+        let sorting_columns = vec![
+            SortingColumn::new(1_i32, true, true),
+            SortingColumn::new(primary_key as i32, false, true),
+        ];
 
         let write_parquet_properties = WriterProperties::builder()
             .set_compression(Compression::LZ4)
@@ -682,9 +673,8 @@ where
         let projection = match projection {
             Projection::All => ProjectionMask::all(),
             Projection::Parts(projection) => {
-                let mut fixed_projection: Vec<usize> = [0, 1]
+                let mut fixed_projection: Vec<usize> = [0, 1, primary_key_index]
                     .into_iter()
-                    .chain(primary_key_index.into_iter().map(|v| *v))
                     .chain(projection.into_iter().map(|name| {
                         schema
                             .index_of(name)
@@ -822,8 +812,7 @@ where
             })
             .collect::<Vec<usize>>();
         let primary_key_index = self.schema.record_schema.primary_key_index();
-        let mut fixed_projection = vec![0, 1];
-        fixed_projection.extend_from_slice(primary_key_index);
+        let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
 
@@ -846,8 +835,7 @@ where
             *p += USER_COLUMN_OFFSET;
         }
         let primary_key_index = self.schema.record_schema.primary_key_index();
-        let mut fixed_projection = vec![0, 1];
-        fixed_projection.extend_from_slice(primary_key_index);
+        let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
 
@@ -1057,6 +1045,7 @@ pub(crate) mod tests {
     }
 
     impl Test {
+        #[allow(unused)]
         /// return [`arrow::datatypes::Schema`]
         pub(crate) fn arrow_schema() -> Schema {
             Schema::new(vec![
@@ -1074,7 +1063,7 @@ pub(crate) mod tests {
                     Field::new("vu32", arrow::datatypes::DataType::UInt32, false),
                     Field::new("vbool", arrow::datatypes::DataType::Boolean, true),
                 ],
-                vec![0],
+                0,
             )
         }
     }
@@ -1261,13 +1250,9 @@ pub(crate) mod tests {
         option: DbOption,
         executor: E,
     ) -> RecordBatch {
-        let db: DB<Test, E> = DB::new(
-            option.clone(),
-            executor,
-            RecordSchema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap(),
-        )
-        .await
-        .unwrap();
+        let db: DB<Test, E> = DB::new(option.clone(), executor, Test::schema())
+            .await
+            .unwrap();
         let base_fs = db.ctx.manager.base_fs();
 
         db.write(
@@ -1317,8 +1302,7 @@ pub(crate) mod tests {
     ) -> Result<(crate::DbStorage<Test>, Receiver<CompactTask>), fusio::Error> {
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let schema =
-            Arc::new(RecordSchema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let schema = Arc::new(Test::schema());
         let mutable =
             MutableMemTable::new(&option, trigger.clone(), fs.clone(), schema.clone()).await?;
 
@@ -1531,13 +1515,9 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(
-            option,
-            TokioExecutor::current(),
-            RecordSchema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap(),
-        )
-        .await
-        .unwrap();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), Test::schema())
+            .await
+            .unwrap();
 
         for (i, item) in test_items().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
@@ -1573,7 +1553,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let schema = RecordSchema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
@@ -1629,7 +1609,7 @@ pub(crate) mod tests {
         let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap())
             .base_fs(s3_option.clone());
         {
-            let schema = RecordSchema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+            let schema = Test::schema();
             let db = DB::new(option.clone(), TokioExecutor::current(), schema)
                 .await
                 .unwrap();
@@ -1656,7 +1636,7 @@ pub(crate) mod tests {
         }
         // test recover from s3
         {
-            let schema = RecordSchema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+            let schema = Test::schema();
             let db: DB<Test, TokioExecutor> =
                 DB::new(option.clone(), TokioExecutor::current(), schema)
                     .await

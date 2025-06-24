@@ -239,7 +239,9 @@ pub(crate) mod tests {
             schema.arrow_schema().clone(),
             None,
         )?;
-        writer.write(immutable.as_record_batch()).await?;
+        let record_batch = immutable.as_record_batch();
+        writer.write(record_batch).await?;
+        // writer.write(immutable.as_record_batch()).await?;
         writer.close().await?;
 
         Ok(())

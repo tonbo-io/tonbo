@@ -393,7 +393,7 @@ fn struct_schema_codegen(
                         ::tonbo::arrow::datatypes::Field::new("_null", ::tonbo::arrow::datatypes::DataType::Boolean, false),
                         ::tonbo::arrow::datatypes::Field::new(::tonbo::magic::TS, ::tonbo::arrow::datatypes::DataType::UInt32, false),
                         #(#schema_fields)*
-                    ], vec![#primary_key_index])
+                    ], #primary_key_index)
             }
 
             pub fn arrow_schema() -> &'static ::std::sync::Arc<::tonbo::arrow::datatypes::Schema> {

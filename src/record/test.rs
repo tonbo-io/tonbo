@@ -7,10 +7,9 @@ use arrow::{
     },
     datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type},
 };
-use once_cell::sync::Lazy;
 use parquet::arrow::ProjectionMask;
 
-use super::{option::OptionRecordRef, Key, Record, RecordRef, Schema};
+use super::{option::OptionRecordRef, Key, Record, RecordRef};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic,

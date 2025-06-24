@@ -1,7 +1,10 @@
 use std::{any::Any, sync::Arc};
 
 use js_sys::{Object, Reflect, Uint8Array};
-use tonbo::{cast_arc_value, record::{DataType, DynRecord, Value, ValueDesc, F32, F64}};
+use tonbo::{
+    cast_arc_value,
+    record::{DataType, DynRecord, Value, ValueDesc, F32, F64},
+};
 use wasm_bindgen::{JsCast, JsValue};
 
 fn to_col_value<T: 'static + Send + Sync>(value: T, primary: bool) -> Arc<dyn Any + Send + Sync> {
@@ -22,10 +25,12 @@ fn none_value(datatype: DataType) -> Arc<dyn Any + Send + Sync> {
         DataType::Int32 => Arc::new(Option::<i32>::None),
         DataType::Int64 => Arc::new(Option::<i64>::None),
         DataType::Float32 => Arc::new(Option::<F32>::None),
-        DataType::Float64 =>  Arc::new(Option::<F64>::None),
+        DataType::Float64 => Arc::new(Option::<F64>::None),
         DataType::String => Arc::new(Option::<String>::None),
         DataType::Boolean => Arc::new(Option::<bool>::None),
         DataType::Bytes => Arc::new(Option::<Vec<u8>>::None),
+        DataType::Timestamp(_) => unimplemented!(),
+        _ => unimplemented!(),
     }
 }
 
@@ -62,6 +67,8 @@ pub(crate) fn parse_key(desc: &ValueDesc, key: JsValue, primary: bool) -> Result
         DataType::Bytes => {
             to_col_value::<Vec<u8>>(key.dyn_into::<Uint8Array>().unwrap().to_vec(), primary)
         }
+        DataType::Timestamp(_) => unimplemented!(),
+        _ => unimplemented!(),
     };
 
     Ok(Value::new(
@@ -89,7 +96,6 @@ pub(crate) fn parse_record(
 /// convert tonbo `DynRecord` values to `JsValue`
 ///
 pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue {
-    
     let obj = Object::new();
     for (idx, col) in cols.iter().enumerate() {
         let value = match col.datatype() {
@@ -127,11 +133,15 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
             },
             DataType::Float32 => match idx == primary_key_index {
                 true => f32::from(cast_arc_value!(col.value, F32)).into(),
-                false => cast_arc_value!(col.value, Option<F32>).map(|v| f32::from(v)).into()
+                false => cast_arc_value!(col.value, Option<F32>)
+                    .map(|v| f32::from(v))
+                    .into(),
             },
             DataType::Float64 => match idx == primary_key_index {
-                true =>f64::from(cast_arc_value!(col.value, F64)).into(),
-                false => cast_arc_value!(col.value, Option<F64>).map(|v| f64::from(v)).into()
+                true => f64::from(cast_arc_value!(col.value, F64)).into(),
+                false => cast_arc_value!(col.value, Option<F64>)
+                    .map(|v| f64::from(v))
+                    .into(),
             },
             DataType::String => match idx == primary_key_index {
                 true => (col.value.as_ref().downcast_ref::<String>().unwrap()).into(),
@@ -166,6 +176,8 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
                     .map(|v| Uint8Array::from(v.as_slice()).into())
                     .unwrap_or(JsValue::NULL),
             },
+            DataType::Timestamp(_) => unimplemented!(),
+            _ => unimplemented!(),
         };
 
         Reflect::set(&obj, &col.desc.name.as_str().into(), &value).unwrap();
@@ -176,7 +188,10 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
 #[cfg(test)]
 mod tests {
 
-    use tonbo::{cast_arc_value, record::{DataType, ValueDesc, F64}};
+    use tonbo::{
+        cast_arc_value,
+        record::{DataType, ValueDesc, F64},
+    };
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 

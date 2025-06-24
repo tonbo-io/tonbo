@@ -134,7 +134,7 @@ pub(crate) mod tests {
     use crate::{
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileType},
-        record::{Record, Schema},
+        record::Record,
         tests::{get_test_record_batch, Test},
         timestamp::Ts,
         DbOption,
@@ -151,7 +151,7 @@ pub(crate) mod tests {
                 .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
                 .build(),
         );
-        let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
 
         let mut writer = AsyncArrowWriter::try_new_with_options(
             AsyncWriter::new(file),
@@ -190,7 +190,7 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
-        let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
@@ -272,7 +272,7 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
-        let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
         let record_batch = get_test_record_batch::<TokioExecutor>(
             DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),

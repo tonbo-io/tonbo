@@ -91,8 +91,7 @@ where
                         })
                         .collect::<Vec<usize>>();
 
-                    let mut fixed_projection = vec![0, 1];
-                    fixed_projection.extend_from_slice(primary_key_index);
+                    let mut fixed_projection = vec![0, 1, primary_key_index];
                     fixed_projection.append(&mut projection);
                     fixed_projection.dedup();
 
@@ -317,7 +316,7 @@ mod tests {
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
 
-        let schema = Schema::from_arrow_schema(string_arrow_schema(), vec![0]).unwrap();
+        let schema = Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap();
         let db = DB::<String, TokioExecutor>::new(
             DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
@@ -370,8 +369,7 @@ mod tests {
             .await
             .unwrap();
 
-        let record_schema =
-            Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let record_schema = Arc::new(Test::schema());
         let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
@@ -450,7 +448,7 @@ mod tests {
     async fn transaction_remove() {
         let temp_dir = TempDir::new().unwrap();
 
-        let schema = Schema::from_arrow_schema(string_arrow_schema(), vec![0]).unwrap();
+        let schema = Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap();
         let db = DB::<String, TokioExecutor>::new(
             DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
@@ -491,7 +489,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let schema = Schema::from_arrow_schema(string_arrow_schema(), vec![0]).unwrap();
+        let schema = Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap();
         let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
@@ -525,7 +523,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
         let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
@@ -588,8 +586,7 @@ mod tests {
             .await
             .unwrap();
 
-        let record_schema =
-            Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let record_schema = Arc::new(Test::schema());
         let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
@@ -687,8 +684,7 @@ mod tests {
             .await
             .unwrap();
 
-        let record_schema =
-            Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let record_schema = Arc::new(Test::schema());
         let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
@@ -866,8 +862,7 @@ mod tests {
             .await
             .unwrap();
 
-        let record_schema =
-            Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let record_schema = Arc::new(Test::schema());
         let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await

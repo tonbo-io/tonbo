@@ -1,6 +1,5 @@
 use std::{ops::Bound, sync::Arc};
 
-// use arrow::datatypes::Schema as ArrowSchema;
 use async_lock::Mutex;
 use crossbeam_skiplist::{
     map::{Entry, Range},
@@ -221,7 +220,7 @@ mod tests {
 
     use fusio::{disk::TokioFs, path::Path, DynFs};
 
-    use super::{MutableMemTable, Schema};
+    use super::MutableMemTable;
     use crate::{
         record::{DataType, DynRecord, Record, Value},
         tests::{Test, TestRef},
@@ -242,7 +241,7 @@ mod tests {
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
-        let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
         let mem_table =
             MutableMemTable::<Test>::new(&option, trigger, fs.clone(), Arc::new(schema))
                 .await
@@ -293,7 +292,7 @@ mod tests {
         let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
-        let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
         let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable =
@@ -384,7 +383,7 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+        let schema = Test::schema();
         let mutable =
             MutableMemTable::<DynRecord>::new(&option, trigger, fs.clone(), Arc::new(schema))
                 .await

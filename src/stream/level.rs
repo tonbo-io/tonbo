@@ -226,8 +226,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version, fs::manager::StoreManager, record::Schema,
-        stream::level::LevelStream, tests::Test, DbOption,
+        compaction::tests::build_version, fs::manager::StoreManager, stream::level::LevelStream,
+        tests::Test, DbOption,
     };
 
     #[tokio::test(flavor = "multi_thread")]
@@ -249,7 +249,7 @@ mod tests {
             .await
             .unwrap();
 
-        let schema = Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let schema = Arc::new(Test::schema());
         let (_, version) = build_version(&option, &manager, &schema).await;
 
         {

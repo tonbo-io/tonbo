@@ -48,7 +48,7 @@ mod tests {
         let schema = User::schema();
         assert_eq!(user.key(), "cat");
         assert_eq!(user.size(), 24);
-        assert_eq!(schema.primary_key_index(), vec![4]);
+        assert_eq!(schema.primary_key_index(), 4);
     }
 
     #[tokio::test]

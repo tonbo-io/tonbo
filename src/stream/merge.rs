@@ -180,7 +180,7 @@ mod tests {
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
-        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), vec![0]).unwrap());
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
 
         let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema.clone())
             .await
@@ -282,7 +282,7 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), vec![0]).unwrap());
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
         let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
             .await
             .unwrap();
@@ -371,7 +371,7 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), vec![0]).unwrap());
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
         let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
             .await
             .unwrap();

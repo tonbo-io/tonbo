@@ -221,54 +221,10 @@ pub(crate) mod tests {
 
     use super::{ArrowArrays, Builder};
     use crate::{
-        record::{Record, Schema},
+        record::Record,
         tests::{Test, TestRef},
         timestamp::Ts,
     };
-
-    // #[derive(Debug)]
-    // pub struct TestSchema;
-
-    // impl Schema for TestSchema {
-    //     type Record = Test;
-
-    //     type Columns = TestImmutableArrays;
-
-    //     type Key = String;
-
-    //     fn arrow_schema(&self) -> &Arc<ArrowSchema> {
-    //         static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
-    //             Arc::new(ArrowSchema::new(vec![
-    //                 Field::new("_null", DataType::Boolean, false),
-    //                 Field::new(magic::TS, DataType::UInt32, false),
-    //                 Field::new("vstring", DataType::Utf8, false),
-    //                 Field::new("vu32", DataType::UInt32, false),
-    //                 Field::new("vbool", DataType::Boolean, true),
-    //             ]))
-    //         });
-
-    //         &SCHEMA
-    //     }
-
-    //     fn primary_key_index(&self) -> usize {
-    //         2
-    //     }
-
-    //     fn primary_key_path(
-    //         &self,
-    //     ) -> (
-    //         parquet::schema::types::ColumnPath,
-    //         Vec<parquet::format::SortingColumn>,
-    //     ) {
-    //         (
-    //             ColumnPath::new(vec![magic::TS.to_string(), "vstring".to_string()]),
-    //             vec![
-    //                 SortingColumn::new(1, true, true),
-    //                 SortingColumn::new(2, false, true),
-    //             ],
-    //         )
-    //     }
-    // }
 
     #[derive(Debug)]
     pub struct TestImmutableArrays {
@@ -374,7 +330,7 @@ pub(crate) mod tests {
             let vbool = Arc::new(self.vobool.finish());
             let _null = Arc::new(BooleanArray::new(self._null.finish(), None));
             let _ts = Arc::new(self._ts.finish());
-            let schema = Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap();
+            let schema = Test::schema();
             let mut record_batch = RecordBatch::try_new(
                 schema.arrow_schema().clone(),
                 vec![

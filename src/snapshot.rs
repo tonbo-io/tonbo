@@ -114,7 +114,6 @@ mod tests {
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
-        record::Schema,
         tests::{build_db, build_schema, Test},
         DbOption,
     };
@@ -126,8 +125,7 @@ mod tests {
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
         ));
-        let record_schema =
-            Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let record_schema = Arc::new(Test::schema());
 
         manager
             .base_fs()

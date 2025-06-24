@@ -63,9 +63,8 @@ mod tests {
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
-        inmem::mutable::MutableMemTable, record::Schema,
-        stream::mem_projection::MemProjectionStream, tests::Test, trigger::TriggerFactory,
-        wal::log::LogType, DbOption,
+        inmem::mutable::MutableMemTable, stream::mem_projection::MemProjectionStream, tests::Test,
+        trigger::TriggerFactory, wal::log::LogType, DbOption,
     };
 
     #[tokio::test]
@@ -78,7 +77,7 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let schema = Arc::new(Schema::from_arrow_schema(Test::arrow_schema(), vec![0]).unwrap());
+        let schema = Arc::new(Test::schema());
 
         let mutable = MutableMemTable::<Test>::new(&option, trigger, fs.clone(), schema.clone())
             .await
