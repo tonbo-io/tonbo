@@ -12,7 +12,7 @@ use crate::{
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
     inmem::{immutable::Immutable, mutable::MutableMemTable},
     ondisk::sstable::SsTable,
-    record::{Record, Schema as RecordSchema},
+    record::{Record, Schema},
     scope::Scope,
     stream::{level::LevelStream, ScanStream},
     version::{edit::VersionEdit, TransactionTs, Version, MAX_LEVEL},
@@ -26,7 +26,7 @@ where
     option: Arc<DbOption>,
     schema: Arc<RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
-    record_schema: Arc<R::Schema>,
+    record_schema: Arc<Schema>,
 }
 
 impl<R> LeveledCompactor<R>
@@ -35,7 +35,7 @@ where
 {
     pub(crate) fn new(
         schema: Arc<RwLock<DbStorage<R>>>,
-        record_schema: Arc<R::Schema>,
+        record_schema: Arc<Schema>,
         option: Arc<DbOption>,
         ctx: Arc<Context<R>>,
     ) -> Self {
@@ -137,11 +137,8 @@ where
     async fn minor_compaction(
         option: &DbOption,
         recover_wal_ids: Option<Vec<FileId>>,
-        batches: &[(
-            Option<FileId>,
-            Immutable<<R::Schema as RecordSchema>::Columns>,
-        )],
-        schema: &R::Schema,
+        batches: &[(Option<FileId>, Immutable<R::Columns>)],
+        schema: &Schema,
         manager: &StoreManager,
     ) -> Result<Option<Scope>, CompactionError<R>> {
         if !batches.is_empty() {
@@ -164,7 +161,7 @@ where
                         .await?,
                 ),
                 schema.arrow_schema().clone(),
-                Some(option.write_parquet_properties.clone()),
+                option.write_parquet_properties.clone(),
             )?;
 
             if let Some(mut recover_wal_ids) = recover_wal_ids {
@@ -203,7 +200,7 @@ where
         mut max: &dyn Value,
         version_edits: &mut Vec<VersionEdit>,
         delete_gens: &mut Vec<(FileId, usize)>,
-        instance: &R::Schema,
+        instance: &Schema,
         ctx: &Context<R>,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
@@ -415,6 +412,7 @@ where
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
+    use arrow::datatypes::{DataType as ArrowDataType, Field};
     use common::{datatype::DataType, AsValue, Key, PrimaryKey};
     use flume::bounded;
     use fusio::{path::Path, DynFs};
@@ -430,11 +428,8 @@ pub(crate) mod tests {
         context::Context,
         executor::tokio::TokioExecutor,
         fs::{generate_file_id, manager::StoreManager},
-        inmem::{
-            immutable::{tests::TestSchema, Immutable},
-            mutable::MutableMemTable,
-        },
-        record::{DynRecord, DynSchema, Record, Schema, ValueDesc},
+        inmem::{immutable::Immutable, mutable::MutableMemTable},
+        record::{DynRecord, Record, Schema, ValueDesc},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -447,9 +442,9 @@ pub(crate) mod tests {
     async fn build_immutable<R>(
         option: &DbOption,
         records: Vec<(LogType, R, Timestamp)>,
-        schema: &Arc<R::Schema>,
+        schema: &Arc<Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
+    ) -> Result<Immutable<R::Columns>, DbError>
     where
         R: Record + Send,
     {
@@ -468,16 +463,13 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_dir_l0 = tempfile::tempdir().unwrap();
 
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        )
-        .level_path(
-            0,
-            Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
-            FsOptions::Local,
-        )
-        .unwrap();
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .level_path(
+                0,
+                Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
+                FsOptions::Local,
+            )
+            .unwrap();
         let manager =
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
         manager
@@ -517,7 +509,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &Arc::new(TestSchema),
+            &Arc::new(Test::schema()),
             manager.base_fs(),
         )
         .await
@@ -554,7 +546,7 @@ pub(crate) mod tests {
                     0.into(),
                 ),
             ],
-            &Arc::new(TestSchema),
+            &Arc::new(Test::schema()),
             manager.base_fs(),
         )
         .await
@@ -567,7 +559,7 @@ pub(crate) mod tests {
                 (Some(generate_file_id()), batch_1),
                 (Some(generate_file_id()), batch_2),
             ],
-            &TestSchema,
+            &Test::schema(),
             &manager,
         )
         .await
@@ -583,14 +575,8 @@ pub(crate) mod tests {
     async fn dyn_minor_compaction() {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let schema = DynSchema::new(
-            vec![ValueDesc::new("id".to_owned(), DataType::Int32, false)],
-            0,
-        );
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &schema,
-        );
+        let schema = Schema::new(vec![Field::new("id", ArrowDataType::Int32, false)], 0);
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         manager
             .base_fs()
             .create_dir_all(&option.wal_dir_path())
@@ -668,22 +654,19 @@ pub(crate) mod tests {
         let temp_dir_l0 = TempDir::new().unwrap();
         let temp_dir_l1 = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        )
-        .level_path(
-            0,
-            Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
-            FsOptions::Local,
-        )
-        .unwrap()
-        .level_path(
-            1,
-            Path::from_filesystem_path(temp_dir_l1.path()).unwrap(),
-            FsOptions::Local,
-        )
-        .unwrap();
+        let mut option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .level_path(
+                0,
+                Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
+                FsOptions::Local,
+            )
+            .unwrap()
+            .level_path(
+                1,
+                Path::from_filesystem_path(temp_dir_l1.path()).unwrap(),
+                FsOptions::Local,
+            )
+            .unwrap();
         option.major_threshold_with_sst_size = 2;
         let option = Arc::new(option);
         let manager = Arc::new(
@@ -702,7 +685,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let ((table_gen_1, table_gen_2, table_gen_3, table_gen_4, _), version) =
-            build_version(&option, &manager, &Arc::new(TestSchema)).await;
+            build_version(&option, &manager, &Arc::new(Test::schema())).await;
 
         let min = 2.to_string();
         let max = 5.to_string();
@@ -716,7 +699,7 @@ pub(crate) mod tests {
             manager.clone(),
             Arc::new(NoCache::default()),
             version_set,
-            TestSchema.arrow_schema().clone(),
+            Arc::new(Test::schema()),
         );
 
         LeveledCompactor::<Test>::major_compaction(
@@ -726,7 +709,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
-            &TestSchema,
+            &Test::schema(),
             &ctx,
         )
         .await
@@ -765,10 +748,7 @@ pub(crate) mod tests {
     async fn major_panic() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
+        let mut option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.major_threshold_with_sst_size = 1;
         option.level_sst_magnification = 1;
         let manager = Arc::new(
@@ -819,7 +799,7 @@ pub(crate) mod tests {
             &option,
             table_gen0,
             records0,
-            &Arc::new(TestSchema),
+            &Arc::new(Test::schema()),
             0,
             level_0_fs,
         )
@@ -829,7 +809,7 @@ pub(crate) mod tests {
             &option,
             table_gen1,
             records1,
-            &Arc::new(TestSchema),
+            &Arc::new(Test::schema()),
             1,
             level_1_fs,
         )
@@ -865,7 +845,7 @@ pub(crate) mod tests {
             manager.clone(),
             Arc::new(NoCache::default()),
             version_set,
-            TestSchema.arrow_schema().clone(),
+            Arc::new(Test::schema()),
         );
         LeveledCompactor::<Test>::major_compaction(
             &version,
@@ -874,7 +854,7 @@ pub(crate) mod tests {
             &max,
             &mut version_edits,
             &mut vec![],
-            &TestSchema,
+            &Test::schema(),
             &ctx,
         )
         .await
@@ -886,10 +866,7 @@ pub(crate) mod tests {
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
+        let mut option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 0;
         option.major_threshold_with_sst_size = 2;
@@ -899,7 +876,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), Test::schema())
             .await
             .unwrap();
 

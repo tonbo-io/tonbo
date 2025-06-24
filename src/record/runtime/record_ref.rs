@@ -20,7 +20,7 @@ use fusio_log::Encode;
 use super::{null_value, DynRecord};
 use crate::{
     magic::USER_COLUMN_OFFSET,
-    record::{option::OptionRecordRef, Record, RecordRef, Schema},
+    record::{option::OptionRecordRef, Record, RecordRef},
 };
 
 #[derive(Clone)]
@@ -80,7 +80,7 @@ macro_rules! implement_record_ref {
         impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             type Record = DynRecord;
 
-            fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
+            fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
                 PrimaryKey::new(
                     vec![
                         self.columns
@@ -245,85 +245,74 @@ mod tests {
 
     use std::sync::Arc;
 
-    use common::{datatype::DataType, AsValue, TimeUnit, Timestamp, F32, F64};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit as ArrowTimeUnit};
+    use common::{AsValue, Timestamp, F32, F64};
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
-        dyn_record, dyn_schema, make_dyn_record, make_dyn_schema,
-        record::{Record, RecordRef, Schema},
+        dyn_record, make_dyn_record,
+        record::{Record, RecordRef},
     };
 
     #[test]
     fn test_float_projection() {
-        let schema = dyn_schema!(
-            ("_null", Boolean, false),
-            ("ts", UInt32, false),
-            ("id", Float64, false),
-            ("foo", Float32, false),
-            ("foo_opt", Float32, true),
-            ("bar", Float64, false),
-            ("bar_opt", Float64, true),
-            2
-        );
+        let arrow_schema = Arc::new(Schema::new(vec![
+            Field::new("_null", ArrowDataType::Boolean, false),
+            Field::new("ts", ArrowDataType::UInt32, false),
+            Field::new("id", ArrowDataType::Float64, false),
+            Field::new("foo", ArrowDataType::Float32, false),
+            Field::new("foo_opt", ArrowDataType::Float32, true),
+            Field::new("bar", ArrowDataType::Float64, false),
+            Field::new("bar_opt", ArrowDataType::Float64, true),
+        ]));
         let record = dyn_record!(
-            ("_null", Boolean, false, Arc::new(true)),
-            ("ts", UInt32, false, Arc::new(7u32)),
             ("id", Float64, false, Arc::new(F64::from(1.23))),
             ("foo", Float32, false, Arc::new(F32::from(1.23))),
             ("foo_opt", Float32, true, Arc::new(None::<F32>)),
             ("bar", Float64, false, Arc::new(F64::from(3.234))),
             ("bar_opt", Float64, true, Arc::new(Some(F64::from(13.234)))),
-            2
+            0
         );
         {
             // test project all
             let mut record_ref = record.as_record_ref();
             record_ref.projection(&ProjectionMask::all());
             let columns = record_ref.columns;
-            assert_eq!(columns[0].as_boolean_opt(), &Some(true));
-            assert_eq!(columns[1].as_u32_opt(), &Some(7u32));
-            assert_eq!(columns[2].as_f64(), &1.23.into());
-            assert_eq!(columns[3].as_f32_opt(), &Some(1.23.into()));
-            assert_eq!(columns[4].as_f32_opt(), &None,);
-            assert_eq!(columns[5].as_f64_opt(), &Some(3.234.into()));
-            assert_eq!(columns[6].as_f64_opt(), &Some(13.234.into()));
+            assert_eq!(columns[0].as_f64(), &1.23.into());
+            assert_eq!(columns[1].as_f32_opt(), &Some(1.23.into()));
+            assert_eq!(columns[2].as_f32_opt(), &None,);
+            assert_eq!(columns[3].as_f64_opt(), &Some(3.234.into()));
+            assert_eq!(columns[4].as_f64_opt(), &Some(13.234.into()));
         }
         {
             // test project no columns
             let mut record_ref = record.as_record_ref();
             let mask = ProjectionMask::roots(
-                &ArrowSchemaConverter::new()
-                    .convert(schema.arrow_schema())
-                    .unwrap(),
+                &ArrowSchemaConverter::new().convert(&arrow_schema).unwrap(),
                 vec![1],
             );
             record_ref.projection(&mask);
             let columns = record_ref.columns;
-            assert_eq!(columns[0].as_boolean_opt(), &None);
-            assert_eq!(columns[1].as_u32_opt(), &None);
-            assert_eq!(columns[2].as_f64(), &1.23.into());
-            assert_eq!(columns[3].as_f32_opt(), &None);
-            assert_eq!(columns[4].as_f32_opt(), &None);
-            assert_eq!(columns[5].as_f64_opt(), &None);
-            assert_eq!(columns[6].as_f64_opt(), &None);
+            assert_eq!(columns[0].as_f64(), &1.23.into());
+            assert_eq!(columns[1].as_f32_opt(), &None);
+            assert_eq!(columns[2].as_f32_opt(), &None);
+            assert_eq!(columns[3].as_f64_opt(), &None);
+            assert_eq!(columns[4].as_f64_opt(), &None);
         }
     }
 
     #[test]
     fn test_string_projection() {
-        let schema = dyn_schema!(
-            ("_null", Boolean, false),
-            ("ts", UInt32, false),
-            ("id", String, false),
-            ("name", String, false),
-            ("email", String, true),
-            ("adress", String, true),
-            ("data", Bytes, true),
-            2
-        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("_null", ArrowDataType::Boolean, false),
+            Field::new("ts", ArrowDataType::UInt32, false),
+            Field::new("id", ArrowDataType::Utf8, false),
+            Field::new("name", ArrowDataType::Utf8, false),
+            Field::new("email", ArrowDataType::Utf8, true),
+            Field::new("adress", ArrowDataType::Utf8, true),
+            Field::new("data", ArrowDataType::Binary, true),
+        ]));
         let record = dyn_record!(
-            ("_null", Boolean, false, Arc::new(true)),
-            ("ts", UInt32, false, Arc::new(7u32)),
             ("id", String, false, Arc::new("abcd".to_string())),
             ("name", String, false, Arc::new("Jack".to_string())),
             (
@@ -334,55 +323,63 @@ mod tests {
             ),
             ("adress", String, true, Arc::new(None::<String>)),
             ("data", Bytes, true, Arc::new(Some(b"hello,tonbo".to_vec()))),
-            2
+            0
         );
         {
             // test project all
             let mut record_ref = record.as_record_ref();
             record_ref.projection(&ProjectionMask::all());
             let columns = record_ref.columns;
-            assert_eq!(*columns[0].as_boolean_opt(), Some(true));
-            assert_eq!(*columns[1].as_u32_opt(), Some(7u32));
-            assert_eq!(columns[2].as_string(), "abcd");
-            assert_eq!(*columns[3].as_string_opt(), Some("Jack".into()),);
-            assert_eq!(*columns[4].as_string_opt(), Some("abc@tonbo.io".into()));
-            assert_eq!(*columns[6].as_bytes_opt(), Some(b"hello,tonbo".to_vec()));
+            assert_eq!(columns[0].as_string(), "abcd");
+            assert_eq!(columns[1].as_string_opt(), &Some("Jack".to_owned()));
+            assert_eq!(columns[2].as_string_opt(), &Some("abc@tonbo.io".into()));
+            assert_eq!(columns[3].as_string_opt(), &None);
+            assert_eq!(*columns[4].as_bytes_opt(), Some(b"hello,tonbo".to_vec()));
         }
         {
             // test project no columns
             let mut record_ref = record.as_record_ref();
             let mask = ProjectionMask::roots(
-                &ArrowSchemaConverter::new()
-                    .convert(schema.arrow_schema())
-                    .unwrap(),
+                &ArrowSchemaConverter::new().convert(&schema).unwrap(),
                 vec![1],
             );
             record_ref.projection(&mask);
             let columns = record_ref.columns;
-            assert_eq!(*columns[0].as_boolean_opt(), None);
-            assert_eq!(*columns[1].as_u32_opt(), None);
-            assert_eq!(columns[2].as_string(), "abcd");
+            assert_eq!(columns[0].as_string(), "abcd");
+            assert_eq!(*columns[1].as_string_opt(), None,);
+            assert_eq!(*columns[2].as_string_opt(), None,);
             assert_eq!(*columns[3].as_string_opt(), None,);
-            assert_eq!(*columns[4].as_string_opt(), None,);
-            assert_eq!(*columns[5].as_string_opt(), None,);
-            assert_eq!(*columns[6].as_bytes_opt(), None);
+            assert_eq!(*columns[4].as_bytes_opt(), None);
         }
     }
 
     #[test]
     fn test_timestamp_projection() {
-        let schema = make_dyn_schema!(
-            ("_null", DataType::Boolean, false),
-            ("_ts", DataType::UInt32, false),
-            ("id", DataType::Timestamp(TimeUnit::Millisecond), false),
-            ("ts1", DataType::Timestamp(TimeUnit::Millisecond), false),
-            ("ts2", DataType::Timestamp(TimeUnit::Millisecond), true),
-            ("ts3", DataType::Timestamp(TimeUnit::Millisecond), true),
-            2
-        );
+        let schema = Schema::new(vec![
+            Field::new("_null", ArrowDataType::Boolean, false),
+            Field::new("ts", ArrowDataType::UInt32, false),
+            Field::new(
+                "id",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "ts1",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "ts2",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new(
+                "ts3",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                true,
+            ),
+        ]);
         let record = make_dyn_record!(
-            ("_null", DataType::Boolean, false, Arc::new(true)),
-            ("_ts", DataType::UInt32, false, Arc::new(7u32)),
             (
                 "id",
                 DataType::Timestamp(TimeUnit::Millisecond),
@@ -407,7 +404,7 @@ mod tests {
                 true,
                 Arc::new(None::<Timestamp>)
             ),
-            2
+            0
         );
         {
             // test project all
@@ -415,38 +412,36 @@ mod tests {
             record_ref.projection(&ProjectionMask::all());
             let columns = record_ref.columns;
             assert_eq!(
-                columns[2].as_timestamp(),
+                columns[0].as_timestamp(),
                 &Timestamp::new_millis(1717507203412)
             );
             assert_eq!(
-                columns[3].as_timestamp_opt(),
+                columns[1].as_timestamp_opt(),
                 &Some(Timestamp::new_millis(1717507203432))
             );
             assert_eq!(
-                columns[4].as_timestamp_opt(),
+                columns[2].as_timestamp_opt(),
                 &Some(Timestamp::new_millis(1717507203442))
             );
 
-            assert_eq!(*columns[5].as_timestamp_opt(), None);
+            assert_eq!(*columns[3].as_timestamp_opt(), None);
         }
         {
             // test project no columns
             let mut record_ref = record.as_record_ref();
             let mask = ProjectionMask::roots(
-                &ArrowSchemaConverter::new()
-                    .convert(schema.arrow_schema())
-                    .unwrap(),
-                vec![1],
+                &ArrowSchemaConverter::new().convert(&schema).unwrap(),
+                vec![0],
             );
             record_ref.projection(&mask);
             let columns = record_ref.columns;
             assert_eq!(
-                *columns[2].as_timestamp(),
+                *columns[0].as_timestamp(),
                 Timestamp::new_millis(1717507203412)
             );
+            assert_eq!(*columns[1].as_timestamp_opt(), None);
+            assert_eq!(*columns[2].as_timestamp_opt(), None);
             assert_eq!(*columns[3].as_timestamp_opt(), None);
-            assert_eq!(*columns[4].as_timestamp_opt(), None);
-            assert_eq!(*columns[5].as_timestamp_opt(), None);
         }
     }
 }

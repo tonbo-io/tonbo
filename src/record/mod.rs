@@ -3,41 +3,26 @@ pub mod runtime;
 #[cfg(test)]
 pub(crate) mod test;
 
-use std::{error::Error, fmt::Debug, io, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt::Debug, io, sync::Arc};
 
-use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use arrow::{
+    array::RecordBatch,
+    datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema},
+    error::ArrowError,
+};
 use common::Key;
 use fusio_log::{Decode, Encode};
 use option::OptionRecordRef;
-use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+use parquet::arrow::ProjectionMask;
 pub use runtime::*;
 use thiserror::Error;
 
-use crate::inmem::immutable::ArrowArrays;
-
-pub trait Schema: Debug + Send + Sync {
-    type Record: Record<Schema = Self>;
-
-    type Columns: ArrowArrays<Record = Self::Record>;
-
-    type Key: Key;
-
-    /// Returns the [`arrow::datatypes::Schema`] of the record.
-    ///
-    /// **Note**: The first column should be `_null`, and the second column should be `_ts`.
-    fn arrow_schema(&self) -> &Arc<ArrowSchema>;
-
-    /// Returns the index of the primary key column.
-    fn primary_key_index(&self) -> usize;
-
-    /// Returns the ([`ColumnPath`], [`Vec<SortingColumn>`]) of the primary key column, representing
-    /// the location of the primary key column in the parquet schema and the sort order within a
-    /// RowGroup of a leaf column
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>);
-}
+use crate::{inmem::immutable::ArrowArrays, magic};
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
-    type Schema: Schema<Record = Self>;
+    type Key: Key;
+
+    type Columns: ArrowArrays<Record = Self>;
 
     type Ref<'r>: RecordRef<'r, Record = Self>
     where
@@ -45,7 +30,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
 
     /// Returns the primary key of the record. This should be the type defined in the
     /// [`Schema`].
-    fn key(&self) -> <<<Self as Record>::Schema as Schema>::Key as Key>::Ref<'_> {
+    fn key(&self) -> <Self::Key as Key>::Ref<'_> {
         self.as_record_ref().key()
     }
 
@@ -61,7 +46,7 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
 
     /// Returns the primary key of the record. This should be the type that defined in the
     /// [`Schema`].
-    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r>;
+    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;
 
     /// Do projection on the record. Only keep the columns specified in the projection mask.
     ///
@@ -77,6 +62,74 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
         projection_mask: &'r ProjectionMask,
         full_schema: &'r Arc<ArrowSchema>,
     ) -> OptionRecordRef<'r, Self>;
+}
+
+#[derive(Debug)]
+pub struct Schema {
+    schema: Arc<ArrowSchema>,
+    primary_key: usize,
+}
+
+impl Schema {
+    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
+    pub fn new(fields: Vec<Field>, primary_key: usize) -> Self {
+        let mut metadata = HashMap::new();
+        metadata.insert("primary_key_index".to_string(), primary_key.to_string());
+
+        let fields = [
+            Field::new("_null", ArrowDataType::Boolean, false),
+            Field::new(magic::TS, ArrowDataType::UInt32, false),
+        ]
+        .into_iter()
+        .chain(fields)
+        .collect::<Vec<Field>>();
+        let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
+
+        Self {
+            schema,
+            primary_key,
+        }
+    }
+
+    /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
+    pub fn from_arrow_schema(
+        arrow_schema: ArrowSchema,
+        primary_key: usize,
+    ) -> Result<Self, ArrowError> {
+        let mut metadata = HashMap::new();
+        metadata.insert("primary_key_index".to_string(), primary_key.to_string());
+
+        let schema = Arc::new(ArrowSchema::try_merge(vec![
+            ArrowSchema::new_with_metadata(
+                vec![
+                    Field::new("_null", ArrowDataType::Boolean, false),
+                    Field::new(magic::TS, ArrowDataType::UInt32, false),
+                ],
+                metadata,
+            ),
+            arrow_schema,
+        ])?);
+
+        Ok(Self {
+            schema,
+            primary_key,
+        })
+    }
+
+    pub fn arrow_schema(&self) -> &Arc<ArrowSchema> {
+        &self.schema
+    }
+
+    /// Returns the index of the primary key column.
+    pub fn primary_key_index(&self) -> usize {
+        self.primary_key + 2
+    }
+
+    /// Returns the name of the primary key column.
+    pub fn primary_key_name(&self) -> String {
+        let fields = self.schema.fields();
+        fields[self.primary_key].name().to_string()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -103,4 +156,39 @@ pub enum RecordDecodeError {
     Io(#[from] io::Error),
     #[error("record fusio error: {0}")]
     Fusio(#[from] fusio::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use arrow::datatypes::{DataType, Field, Fields, Schema as ArrowSchema};
+
+    use super::Schema;
+
+    #[test]
+    fn test_from_arrow_schema() {
+        let fields = vec![
+            Field::new("id", DataType::UInt64, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("bytes", DataType::Binary, true),
+        ];
+        let mut metadata = HashMap::new();
+        metadata.insert("k".to_string(), "v".to_string());
+        let arrow_schema = ArrowSchema::new_with_metadata(fields.clone(), metadata);
+
+        let schema = Schema::from_arrow_schema(arrow_schema, 0).unwrap();
+        let expected = [
+            Field::new("_null", DataType::Boolean, false),
+            Field::new("_ts", DataType::UInt32, false),
+        ]
+        .into_iter()
+        .chain(fields)
+        .collect::<Fields>();
+        let metadata = schema.arrow_schema().metadata();
+
+        assert_eq!(schema.arrow_schema().fields(), &expected);
+        assert_eq!(metadata.get("k"), Some(&"v".into()));
+        assert_eq!(metadata.get("primary_key_index"), Some(&"0".into()));
+    }
 }

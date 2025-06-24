@@ -136,7 +136,6 @@ impl PartialEq for dyn Value {
             return false;
         }
         if self.is_none() {
-            dbg!(self, other);
             return other.is_none() && other.data_type() == self.data_type();
         }
         if self.is_some() {

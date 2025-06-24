@@ -23,7 +23,7 @@ use crate::{
     context::Context,
     fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
-    record::{Record, Schema},
+    record::Record,
     scope::Scope,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TsRef},
@@ -125,7 +125,7 @@ where
     pub(crate) async fn query(
         &self,
         manager: &StoreManager,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<R::Key>,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
@@ -187,7 +187,7 @@ where
     async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<R::Key>,
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,
@@ -222,10 +222,7 @@ where
         &self,
         ctx: &Context<R>,
         streams: &mut Vec<ScanStream<'streams, R>>,
-        range: (
-            Bound<&'streams <R::Schema as Schema>::Key>,
-            Bound<&'streams <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,

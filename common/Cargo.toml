@@ -7,9 +7,7 @@ version = "0.3.2"
 [features]
 aws = ["fusio-log/aws"]
 default = []
-tokio = [
-    "fusio-log/tokio",
-]
+tokio = ["fusio-log/tokio"]
 web = ["fusio-log/web"]
 
 
@@ -23,3 +21,6 @@ ulid = { version = "1", features = ["serde"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+
+[lints]
+clippy.len_without_is_empty = "allow"

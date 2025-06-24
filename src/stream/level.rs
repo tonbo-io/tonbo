@@ -227,8 +227,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version, fs::manager::StoreManager,
-        inmem::immutable::tests::TestSchema, record::Schema, stream::level::LevelStream, DbOption,
+        compaction::tests::build_version, fs::manager::StoreManager, stream::level::LevelStream,
+        tests::Test, DbOption,
     };
 
     #[tokio::test(flavor = "multi_thread")]
@@ -237,7 +237,6 @@ mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema {},
         ));
 
         manager
@@ -251,7 +250,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let schema = Arc::new(Test::schema());
+        let (_, version) = build_version(&option, &manager, &schema).await;
 
         {
             let mut level_stream_1 = LevelStream::new(
@@ -264,7 +264,7 @@ mod tests {
                 None,
                 ProjectionMask::roots(
                     &ArrowSchemaConverter::new()
-                        .convert(TestSchema {}.arrow_schema())
+                        .convert(schema.arrow_schema())
                         .unwrap(),
                     [0, 1, 2, 3],
                 ),
@@ -303,7 +303,7 @@ mod tests {
                 None,
                 ProjectionMask::roots(
                     &ArrowSchemaConverter::new()
-                        .convert(TestSchema {}.arrow_schema())
+                        .convert(schema.arrow_schema())
                         .unwrap(),
                     [0, 1, 2, 4],
                 ),
@@ -342,7 +342,7 @@ mod tests {
                 None,
                 ProjectionMask::roots(
                     &ArrowSchemaConverter::new()
-                        .convert(TestSchema {}.arrow_schema())
+                        .convert(schema.arrow_schema())
                         .unwrap(),
                     [0, 1, 2],
                 ),

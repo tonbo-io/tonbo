@@ -1,10 +1,7 @@
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use crate::{
-    record::{Record, Schema},
-    timestamp::Ts,
-};
+use crate::{record::Record, timestamp::Ts};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -31,7 +28,7 @@ pub(crate) struct Log<R>
 where
     R: Record,
 {
-    pub(crate) key: Ts<<R::Schema as Schema>::Key>,
+    pub(crate) key: Ts<R::Key>,
     pub(crate) value: Option<R>,
     pub(crate) log_type: Option<LogType>,
 }
@@ -40,11 +37,7 @@ impl<R> Log<R>
 where
     R: Record,
 {
-    pub(crate) fn new(
-        ts: Ts<<R::Schema as Schema>::Key>,
-        value: Option<R>,
-        log_type: Option<LogType>,
-    ) -> Self {
+    pub(crate) fn new(ts: Ts<R::Key>, value: Option<R>, log_type: Option<LogType>) -> Self {
         Self {
             key: ts,
             value,
@@ -90,9 +83,7 @@ where
         R: SeqRead,
     {
         let log_type = LogType::from(u8::decode(reader).await?);
-        let key = Ts::<<Re::Schema as Schema>::Key>::decode(reader)
-            .await
-            .unwrap();
+        let key = Ts::<Re::Key>::decode(reader).await.unwrap();
         let record = Option::<Re>::decode(reader).await.unwrap();
 
         Ok(Log::new(key, record, Some(log_type)))

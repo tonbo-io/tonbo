@@ -43,12 +43,9 @@
 //!     // make sure the path exists
 //!     let _ = fs::create_dir_all("./db_path/users").await;
 //!
-//!     let options = DbOption::new(
-//!         Path::from_filesystem_path("./db_path/users").unwrap(),
-//!         &UserSchema,
-//!     );
+//!     let options = DbOption::new(Path::from_filesystem_path("./db_path/users").unwrap());
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new(options, TokioExecutor::current(), UserSchema)
+//!     let db = DB::new(options, TokioExecutor::current(), User::schema())
 //!         .await
 //!         .unwrap();
 //!     // insert with owned value
@@ -145,7 +142,11 @@ pub use once_cell;
 pub use parquet;
 use parquet::{
     arrow::{ArrowSchemaConverter, ProjectionMask},
+    basic::Compression,
     errors::ParquetError,
+    file::properties::{EnabledStatistics, WriterProperties},
+    format::SortingColumn,
+    schema::types::ColumnPath,
 };
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
@@ -181,14 +182,14 @@ where
 {
     schema: Arc<RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
-    lock_map: LockMap<<R::Schema as Schema>::Key>,
+    lock_map: LockMap<R::Key>,
     _p: PhantomData<E>,
 }
 
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
-    <R::Schema as Schema>::Columns: Send + Sync,
+    R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
     /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
@@ -196,7 +197,25 @@ where
     /// according to the configuration of [`DbOption`].
     ///
     /// For more configurable options, please refer to [`DbOption`].
-    pub async fn new(option: DbOption, executor: E, schema: R::Schema) -> Result<Self, DbError> {
+    pub async fn new(option: DbOption, executor: E, schema: Schema) -> Result<Self, DbError> {
+        let primary_key = schema.primary_key_index();
+        let primary_key_name = schema.primary_key_name();
+
+        let column_paths = ColumnPath::new(vec![magic::TS.to_string(), primary_key_name]);
+        let sorting_columns = vec![
+            SortingColumn::new(1_i32, true, true),
+            SortingColumn::new(primary_key as i32, false, true),
+        ];
+
+        let write_parquet_properties = WriterProperties::builder()
+            .set_compression(Compression::LZ4)
+            .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
+            .set_column_bloom_filter_enabled(column_paths.clone(), true)
+            .set_sorting_columns(Some(sorting_columns))
+            .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
+            .build();
+        let option = option.write_parquet_option(write_parquet_properties);
+
         Self::build(
             Arc::new(option),
             executor,
@@ -210,13 +229,13 @@ where
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
-    <R::Schema as Schema>::Columns: Send + Sync,
+    R::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
 {
     async fn build(
         option: Arc<DbOption>,
         executor: E,
-        schema: R::Schema,
+        schema: Schema,
         lru_cache: ParquetLru,
     ) -> Result<Self, DbError> {
         let record_schema = Arc::new(schema);
@@ -265,7 +284,7 @@ where
             manager,
             lru_cache.clone(),
             version_set,
-            record_schema.arrow_schema().clone(),
+            record_schema.clone(),
         ));
         let mut compactor = match option.compaction_option {
             CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
@@ -362,7 +381,7 @@ where
     }
 
     /// delete the record with the primary key as the `key`
-    pub async fn remove(&self, key: <R::Schema as Schema>::Key) -> Result<bool, CommitError<R>> {
+    pub async fn remove(&self, key: R::Key) -> Result<bool, CommitError<R>> {
         Ok(self
             .schema
             .read()
@@ -387,7 +406,7 @@ where
     /// get the record with `key` as the primary key and process it using closure `f`
     pub async fn get<T>(
         &self,
-        key: &<R::Schema as Schema>::Key,
+        key: &R::Key,
         mut f: impl FnMut(TransactionEntry<'_, R>) -> Option<T>,
     ) -> Result<Option<T>, CommitError<R>> {
         Ok(self
@@ -414,10 +433,7 @@ where
     /// scan records with primary keys in the `range` and process them using closure `f`
     pub async fn scan<'scan, T: 'scan>(
         &'scan self,
-        range: (
-            Bound<&'scan <R::Schema as Schema>::Key>,
-            Bound<&'scan <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
@@ -506,11 +522,11 @@ where
     R: Record,
 {
     pub mutable: MutableMemTable<R>,
-    pub immutables: Vec<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>)>,
+    pub immutables: Vec<(Option<FileId>, Immutable<R::Columns>)>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<dyn FreezeTrigger<R>>,
-    record_schema: Arc<R::Schema>,
+    record_schema: Arc<Schema>,
     option: Arc<DbOption>,
 }
 
@@ -522,7 +538,7 @@ where
         option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
         version_set: &VersionSet<R>,
-        record_schema: Arc<R::Schema>,
+        record_schema: Arc<Schema>,
         manager: &StoreManager,
     ) -> Result<Self, DbError> {
         let base_fs = manager.base_fs();
@@ -631,7 +647,7 @@ where
     async fn remove(
         &self,
         log_ty: LogType,
-        key: <R::Schema as Schema>::Key,
+        key: R::Key,
         ts: timestamp::Timestamp,
     ) -> Result<bool, DbError> {
         self.mutable.remove(log_ty, key, ts).await
@@ -639,7 +655,7 @@ where
 
     async fn recover_append(
         &self,
-        key: <R::Schema as Schema>::Key,
+        key: R::Key,
         ts: timestamp::Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError> {
@@ -650,7 +666,7 @@ where
         &'get self,
         ctx: &Context<R>,
         version: &'get Version<R>,
-        key: &'get <R::Schema as Schema>::Key,
+        key: &'get R::Key,
         ts: timestamp::Timestamp,
         projection: Projection<'get>,
     ) -> Result<Option<Entry<'get, R>>, DbError> {
@@ -701,7 +717,7 @@ where
             .map(|entry| Entry::RecordBatch(entry)))
     }
 
-    fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: timestamp::Timestamp) -> bool {
+    fn check_conflict(&self, key: &R::Key, ts: timestamp::Timestamp) -> bool {
         self.mutable.check_conflict(key, ts)
             || self
                 .immutables
@@ -737,8 +753,8 @@ where
     'range: 'scan,
 {
     schema: &'scan DbStorage<R>,
-    lower: Bound<&'range <R::Schema as Schema>::Key>,
-    upper: Bound<&'range <R::Schema as Schema>::Key>,
+    lower: Bound<&'range R::Key>,
+    upper: Bound<&'range R::Key>,
     ts: timestamp::Timestamp,
 
     version: &'scan Version<R>,
@@ -757,10 +773,7 @@ where
 {
     fn new(
         schema: &'scan DbStorage<R>,
-        (lower, upper): (
-            Bound<&'range <R::Schema as Schema>::Key>,
-            Bound<&'range <R::Schema as Schema>::Key>,
-        ),
+        (lower, upper): (Bound<&'range R::Key>, Bound<&'range R::Key>),
         ts: timestamp::Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
@@ -898,10 +911,7 @@ where
     pub async fn package(
         self,
         batch_size: usize,
-    ) -> Result<
-        impl Stream<Item = Result<<R::Schema as Schema>::Columns, ParquetError>> + 'scan,
-        DbError,
-    > {
+    ) -> Result<impl Stream<Item = Result<R::Columns, ParquetError>> + 'scan, DbError> {
         let mut streams = Vec::new();
         let is_projection = self.projection_indices.is_some();
 
@@ -995,7 +1005,7 @@ pub(crate) mod tests {
 
     use arrow::{
         array::{Array, AsArray, RecordBatch},
-        datatypes::{Schema, UInt32Type},
+        datatypes::{Field, Schema, UInt32Type},
     };
     use async_lock::RwLock;
     use common::{datatype::DataType, AsValue, Key, PrimaryKey, F32, F64};
@@ -1014,7 +1024,7 @@ pub(crate) mod tests {
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
-        inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
+        inmem::{immutable::tests::TestImmutableArrays, mutable::MutableMemTable},
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
@@ -1031,6 +1041,30 @@ pub(crate) mod tests {
         pub vstring: String,
         pub vu32: u32,
         pub vbool: Option<bool>,
+    }
+
+    impl Test {
+        #[allow(unused)]
+        /// return [`arrow::datatypes::Schema`]
+        pub(crate) fn arrow_schema() -> Schema {
+            Schema::new(vec![
+                Field::new("vstring", arrow::datatypes::DataType::Utf8, false),
+                Field::new("vu32", arrow::datatypes::DataType::UInt32, false),
+                Field::new("vbool", arrow::datatypes::DataType::Boolean, true),
+            ])
+        }
+
+        /// return [`crate::record::Schema`]
+        pub(crate) fn schema() -> crate::record::Schema {
+            crate::record::Schema::new(
+                vec![
+                    Field::new("vstring", arrow::datatypes::DataType::Utf8, false),
+                    Field::new("vu32", arrow::datatypes::DataType::UInt32, false),
+                    Field::new("vbool", arrow::datatypes::DataType::Boolean, true),
+                ],
+                0,
+            )
+        }
     }
 
     impl Decode for Test {
@@ -1051,7 +1085,8 @@ pub(crate) mod tests {
     }
 
     impl Record for Test {
-        type Schema = TestSchema;
+        type Key = String;
+        type Columns = TestImmutableArrays;
 
         type Ref<'r>
             = TestRef<'r>
@@ -1105,7 +1140,7 @@ pub(crate) mod tests {
     impl<'r> RecordRef<'r> for TestRef<'r> {
         type Record = Test;
 
-        fn key(self) -> <<<Self::Record as Record>::Schema as RecordSchema>::Key as Key>::Ref<'r> {
+        fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
             self.vstring
         }
 
@@ -1174,7 +1209,7 @@ pub(crate) mod tests {
         option: DbOption,
         executor: E,
     ) -> RecordBatch {
-        let db: DB<Test, E> = DB::new(option.clone(), executor, TestSchema {})
+        let db: DB<Test, E> = DB::new(option.clone(), executor, Test::schema())
             .await
             .unwrap();
         let base_fs = db.ctx.manager.base_fs();
@@ -1202,10 +1237,11 @@ pub(crate) mod tests {
 
         let mut schema = db.schema.write().await;
 
+        let record_schema = schema.record_schema.clone();
         let trigger = schema.trigger.clone();
         let mutable = mem::replace(
             &mut schema.mutable,
-            MutableMemTable::new(&option, trigger, base_fs.clone(), Arc::new(TestSchema {}))
+            MutableMemTable::new(&option, trigger, base_fs.clone(), record_schema)
                 .await
                 .unwrap(),
         );
@@ -1225,13 +1261,9 @@ pub(crate) mod tests {
     ) -> Result<(crate::DbStorage<Test>, Receiver<CompactTask>), fusio::Error> {
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let mutable = MutableMemTable::new(
-            &option,
-            trigger.clone(),
-            fs.clone(),
-            Arc::new(TestSchema {}),
-        )
-        .await?;
+        let schema = Arc::new(Test::schema());
+        let mutable =
+            MutableMemTable::new(&option, trigger.clone(), fs.clone(), schema.clone()).await?;
 
         mutable
             .insert(
@@ -1274,8 +1306,7 @@ pub(crate) mod tests {
             let trigger = TriggerFactory::create(option.trigger_type);
 
             let mutable: MutableMemTable<Test> =
-                MutableMemTable::new(&option, trigger.clone(), fs.clone(), Arc::new(TestSchema))
-                    .await?;
+                MutableMemTable::new(&option, trigger.clone(), fs.clone(), schema.clone()).await?;
 
             mutable
                 .insert(
@@ -1329,7 +1360,7 @@ pub(crate) mod tests {
                 compaction_tx,
                 recover_wal_ids: None,
                 trigger,
-                record_schema: Arc::new(TestSchema {}),
+                record_schema: schema,
                 option,
             },
             compaction_rx,
@@ -1341,13 +1372,13 @@ pub(crate) mod tests {
         compaction_rx: Receiver<CompactTask>,
         executor: E,
         schema: crate::DbStorage<R>,
-        record_schema: Arc<R::Schema>,
+        record_schema: Arc<RecordSchema>,
         version: Version<R>,
         manager: Arc<StoreManager>,
     ) -> Result<DB<R, E>, DbError>
     where
         R: Record + Send + Sync,
-        <R::Schema as RecordSchema>::Columns: Send + Sync,
+        R::Columns: Send + Sync,
         E: Executor + Send + Sync + 'static,
     {
         {
@@ -1357,6 +1388,7 @@ pub(crate) mod tests {
             let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
         }
 
+        let recored_schema = schema.record_schema.clone();
         let schema = Arc::new(RwLock::new(schema));
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
@@ -1366,7 +1398,7 @@ pub(crate) mod tests {
             manager,
             Arc::new(NoCache::default()),
             version_set,
-            TestSchema.arrow_schema().clone(),
+            recored_schema,
         ));
         let mut compactor = match option.compaction_option {
             CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
@@ -1431,7 +1463,7 @@ pub(crate) mod tests {
         let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
         let path_l0 = Path::from_filesystem_path(temp_dir_l0.path()).unwrap();
 
-        let mut option = DbOption::new(path, &TestSchema)
+        let mut option = DbOption::new(path)
             .level_path(0, path_l0, FsOptions::Local)
             .unwrap();
         option.immutable_chunk_num = 1;
@@ -1442,7 +1474,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), Test::schema())
             .await
             .unwrap();
 
@@ -1471,10 +1503,7 @@ pub(crate) mod tests {
     async fn test_flush() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
+        let mut option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1483,7 +1512,8 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let schema = Test::schema();
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
 
@@ -1535,13 +1565,11 @@ pub(crate) mod tests {
             sign_payload: None,
             checksum: None,
         };
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema {},
-        )
-        .base_fs(s3_option.clone());
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap())
+            .base_fs(s3_option.clone());
         {
-            let db = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+            let schema = Test::schema();
+            let db = DB::new(option.clone(), TokioExecutor::current(), schema)
                 .await
                 .unwrap();
 
@@ -1567,8 +1595,9 @@ pub(crate) mod tests {
         }
         // test recover from s3
         {
+            let schema = Test::schema();
             let db: DB<Test, TokioExecutor> =
-                DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                DB::new(option.clone(), TokioExecutor::current(), schema)
                     .await
                     .unwrap();
             let mut sort_items = BTreeMap::new();
@@ -1600,22 +1629,22 @@ pub(crate) mod tests {
 
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
         ));
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = TriggerFactory::create(option.trigger_type);
+        let record_schema = Arc::new(Test::schema());
         let schema: crate::DbStorage<Test> = crate::DbStorage {
-            mutable: MutableMemTable::new(&option, trigger.clone(), fs, Arc::new(TestSchema))
+            mutable: MutableMemTable::new(&option, trigger.clone(), fs, record_schema.clone())
                 .await
                 .unwrap(),
             immutables: Default::default(),
             compaction_tx: task_tx.clone(),
             recover_wal_ids: None,
             trigger,
-            record_schema: Arc::new(TestSchema),
+            record_schema,
             option: option.clone(),
         };
 
@@ -1631,7 +1660,7 @@ pub(crate) mod tests {
         let db: DB<Test, TokioExecutor> = DB::new(
             option.as_ref().to_owned(),
             TokioExecutor::current(),
-            TestSchema,
+            Test::schema(),
         )
         .await
         .unwrap();
@@ -1667,7 +1696,6 @@ pub(crate) mod tests {
         let dyn_schema = Arc::new(test_dyn_item_schema());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            dyn_schema.as_ref(),
         ));
         manager
             .base_fs()
@@ -1704,10 +1732,7 @@ pub(crate) mod tests {
         schema.flush_wal().await.unwrap();
         drop(schema);
 
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            dyn_schema.as_ref(),
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         let dyn_schema = test_dyn_item_schema();
         let db: DB<DynRecord, TokioExecutor> =
             DB::new(option, TokioExecutor::current(), dyn_schema)
@@ -1743,16 +1768,13 @@ pub(crate) mod tests {
     async fn test_get_removed() {
         let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
+        let mut option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), Test::schema())
             .await
             .unwrap();
 
@@ -1783,10 +1805,7 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let dyn_schema = test_dyn_item_schema();
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &dyn_schema,
-        );
+        let mut option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
         option.major_threshold_with_sst_size = 3;
@@ -1929,172 +1948,156 @@ pub(crate) mod tests {
         }
     }
 
-    // #[tokio::test(flavor = "multi_thread")]
-    // async fn test_dyn_multiple_db() {
-    //     let temp_dir1 = TempDir::with_prefix("db1").unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dyn_multiple_db() {
+        let temp_dir1 = TempDir::with_prefix("db1").unwrap();
 
-    //     let dyn_schema = test_dyn_item_schema();
-    //     let mut option = DbOption::new(
-    //         Path::from_filesystem_path(temp_dir1.path()).unwrap(),
-    //         &dyn_schema,
-    //     );
-    //     option.immutable_chunk_num = 1;
-    //     option.immutable_chunk_max_num = 1;
-    //     option.major_threshold_with_sst_size = 3;
-    //     option.major_default_oldest_table_num = 1;
-    //     option.trigger_type = TriggerType::Length(5);
+        let mut option = DbOption::new(Path::from_filesystem_path(temp_dir1.path()).unwrap());
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 3;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
 
-    //     let temp_dir2 = TempDir::with_prefix("db2").unwrap();
-    //     let mut option2 = DbOption::new(
-    //         Path::from_filesystem_path(temp_dir2.path()).unwrap(),
-    //         &dyn_schema,
-    //     );
-    //     option2.immutable_chunk_num = 1;
-    //     option2.immutable_chunk_max_num = 1;
-    //     option2.major_threshold_with_sst_size = 3;
-    //     option2.major_default_oldest_table_num = 1;
-    //     option2.trigger_type = TriggerType::Length(5);
+        let temp_dir2 = TempDir::with_prefix("db2").unwrap();
+        let mut option2 = DbOption::new(Path::from_filesystem_path(temp_dir2.path()).unwrap());
+        option2.immutable_chunk_num = 1;
+        option2.immutable_chunk_max_num = 1;
+        option2.major_threshold_with_sst_size = 3;
+        option2.major_default_oldest_table_num = 1;
+        option2.trigger_type = TriggerType::Length(5);
 
-    //     let temp_dir3 = TempDir::with_prefix("db3").unwrap();
-    //     let mut option3 = DbOption::new(
-    //         Path::from_filesystem_path(temp_dir3.path()).unwrap(),
-    //         &dyn_schema,
-    //     );
-    //     option3.immutable_chunk_num = 1;
-    //     option3.immutable_chunk_max_num = 1;
-    //     option3.major_threshold_with_sst_size = 3;
-    //     option3.major_default_oldest_table_num = 1;
-    //     option3.trigger_type = TriggerType::Length(5);
+        let temp_dir3 = TempDir::with_prefix("db3").unwrap();
+        let mut option3 = DbOption::new(Path::from_filesystem_path(temp_dir3.path()).unwrap());
+        option3.immutable_chunk_num = 1;
+        option3.immutable_chunk_max_num = 1;
+        option3.major_threshold_with_sst_size = 3;
+        option3.major_default_oldest_table_num = 1;
+        option3.trigger_type = TriggerType::Length(5);
 
-    //     let db1: DB<DynRecord, TokioExecutor> =
-    //         DB::new(option, TokioExecutor::current(), test_dyn_item_schema())
-    //             .await
-    //             .unwrap();
-    //     let db2: DB<DynRecord, TokioExecutor> =
-    //         DB::new(option2, TokioExecutor::current(), test_dyn_item_schema())
-    //             .await
-    //             .unwrap();
-    //     let db3: DB<DynRecord, TokioExecutor> =
-    //         DB::new(option3, TokioExecutor::current(), test_dyn_item_schema())
-    //             .await
-    //             .unwrap();
+        let db1: DB<DynRecord, TokioExecutor> =
+            DB::new(option, TokioExecutor::current(), test_dyn_item_schema())
+                .await
+                .unwrap();
+        let db2: DB<DynRecord, TokioExecutor> =
+            DB::new(option2, TokioExecutor::current(), test_dyn_item_schema())
+                .await
+                .unwrap();
+        let db3: DB<DynRecord, TokioExecutor> =
+            DB::new(option3, TokioExecutor::current(), test_dyn_item_schema())
+                .await
+                .unwrap();
 
-    //     for (i, item) in test_dyn_items().into_iter().enumerate() {
-    //         if i >= 40 {
-    //             db3.write(item, 0.into()).await.unwrap();
-    //         } else if i % 2 == 0 {
-    //             db1.write(item, 0.into()).await.unwrap();
-    //         } else {
-    //             db2.write(item, 0.into()).await.unwrap();
-    //         }
-    //     }
+        for (i, item) in test_dyn_items().into_iter().enumerate() {
+            if i >= 40 {
+                db3.write(item, 0.into()).await.unwrap();
+            } else if i % 2 == 0 {
+                db1.write(item, 0.into()).await.unwrap();
+            } else {
+                db2.write(item, 0.into()).await.unwrap();
+            }
+        }
 
-    //     // test get
-    //     {
-    //         let tx1 = db1.transaction().await;
-    //         let tx2 = db2.transaction().await;
-    //         let tx3 = db3.transaction().await;
+        // test get
+        {
+            let tx1 = db1.transaction().await;
+            let tx2 = db2.transaction().await;
+            let tx3 = db3.transaction().await;
 
-    //         for i in 0..50 {
-    //             let key = Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64),
-    // false);             let option1 = tx1.get(&key, Projection::All).await.unwrap();
-    //             let option2 = tx2.get(&key, Projection::All).await.unwrap();
-    //             let option3 = tx3.get(&key, Projection::All).await.unwrap();
-    //             let entry = if i >= 40 {
-    //                 assert!(option2.is_none());
-    //                 assert!(option1.is_none());
-    //                 option3.unwrap()
-    //             } else if i % 2 == 0 {
-    //                 assert!(option2.is_none());
-    //                 assert!(option3.is_none());
-    //                 option1.unwrap()
-    //             } else {
-    //                 assert!(option1.is_none());
-    //                 assert!(option3.is_none());
-    //                 option2.unwrap()
-    //             };
-    //             let record_ref = entry.get();
+            for i in 0..50 {
+                let key = PrimaryKey::new(vec![Arc::new(i as i64)]);
+                let option1 = tx1.get(&key, Projection::All).await.unwrap();
+                let option2 = tx2.get(&key, Projection::All).await.unwrap();
+                let option3 = tx3.get(&key, Projection::All).await.unwrap();
+                let entry = if i >= 40 {
+                    assert!(option2.is_none());
+                    assert!(option1.is_none());
+                    option3.unwrap()
+                } else if i % 2 == 0 {
+                    assert!(option2.is_none());
+                    assert!(option3.is_none());
+                    option1.unwrap()
+                } else {
+                    assert!(option1.is_none());
+                    assert!(option3.is_none());
+                    option2.unwrap()
+                };
+                let record_ref = entry.get();
 
-    //             assert_eq!(
-    //                 *cast_arc_value!(record_ref.columns.first().unwrap().value, i64),
-    //                 i as i64
-    //             );
-    //             assert_eq!(
-    //                 *cast_arc_value!(record_ref.columns.get(3).unwrap().value, Option<i32>),
-    //                 Some(200 * i),
-    //             );
-    //             assert_eq!(
-    //                 *cast_arc_value!(record_ref.columns.get(4).unwrap().value, Option<String>),
-    //                 Some(i.to_string()),
-    //             );
-    //         }
-    //         tx1.commit().await.unwrap();
-    //     }
-    //     // test scan
-    //     {
-    //         let tx1 = db1.transaction().await;
-    //         let lower = Value::new(DataType::Int64, "id".to_owned(), Arc::new(8_i64), false);
-    //         let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(43_i64), false);
-    //         let mut scan = tx1
-    //             .scan((Bound::Included(&lower), Bound::Included(&upper)))
-    //             .projection(&["id", "age"])
-    //             .take()
-    //             .await
-    //             .unwrap();
+                assert_eq!(*record_ref.columns.first().unwrap().as_i64(), i as i64);
+                assert_eq!(
+                    *record_ref.columns.get(3).unwrap().as_i32_opt(),
+                    Some(200 * i),
+                );
+                assert_eq!(
+                    *record_ref.columns.get(4).unwrap().as_string_opt(),
+                    Some(i.to_string()),
+                );
+            }
+            tx1.commit().await.unwrap();
+        }
+        // test scan
+        {
+            let tx1 = db1.transaction().await;
+            let lower = PrimaryKey::new(vec![Arc::new(8_i64)]);
+            let upper = PrimaryKey::new(vec![Arc::new(43_i64)]);
+            let mut scan = tx1
+                .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                .projection(&["id", "age"])
+                .take()
+                .await
+                .unwrap();
 
-    //         let mut i = 8_i64;
-    //         while let Some(entry) = scan.next().await.transpose().unwrap() {
-    //             let columns = entry.value().unwrap().columns;
+            let mut i = 8_i64;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
 
-    //             let primary_key_col = columns.first().unwrap();
-    //             assert_eq!(primary_key_col.datatype(), DataType::Int64);
-    //             assert_eq!(primary_key_col.desc.name, "id".to_string());
-    //             assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.data_type(), DataType::Int64);
+                assert_eq!(*primary_key_col.as_i64(), i);
 
-    //             i += 2
-    //         }
-    //         assert_eq!(i, 40);
-    //         let tx2 = db2.transaction().await;
-    //         let mut scan = tx2
-    //             .scan((Bound::Included(&lower), Bound::Included(&upper)))
-    //             .projection(&["id", "age"])
-    //             .take()
-    //             .await
-    //             .unwrap();
+                i += 2
+            }
+            assert_eq!(i, 40);
+            let tx2 = db2.transaction().await;
+            let mut scan = tx2
+                .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                .projection(&["id", "age"])
+                .take()
+                .await
+                .unwrap();
 
-    //         let mut i = 9_i64;
-    //         while let Some(entry) = scan.next().await.transpose().unwrap() {
-    //             let columns = entry.value().unwrap().columns;
+            let mut i = 9_i64;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
 
-    //             let primary_key_col = columns.first().unwrap();
-    //             assert_eq!(primary_key_col.datatype(), DataType::Int64);
-    //             assert_eq!(primary_key_col.desc.name, "id".to_string());
-    //             assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.data_type(), DataType::Int64);
+                assert_eq!(*primary_key_col.as_i64(), i);
 
-    //             i += 2
-    //         }
-    //         assert_eq!(i, 41);
-    //         let tx3 = db3.transaction().await;
-    //         let mut scan = tx3
-    //             .scan((Bound::Included(&lower), Bound::Included(&upper)))
-    //             .projection(&["id", "age"])
-    //             .take()
-    //             .await
-    //             .unwrap();
+                i += 2
+            }
+            assert_eq!(i, 41);
+            let tx3 = db3.transaction().await;
+            let mut scan = tx3
+                .scan((Bound::Included(&lower), Bound::Included(&upper)))
+                .projection(&["id", "age"])
+                .take()
+                .await
+                .unwrap();
 
-    //         let mut i = 40_i64;
-    //         while let Some(entry) = scan.next().await.transpose().unwrap() {
-    //             let columns = entry.value().unwrap().columns;
+            let mut i = 40_i64;
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                let columns = entry.value().unwrap().columns;
 
-    //             let primary_key_col = columns.first().unwrap();
-    //             assert_eq!(primary_key_col.datatype(), DataType::Int64);
-    //             assert_eq!(primary_key_col.desc.name, "id".to_string());
-    //             assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
+                let primary_key_col = columns.first().unwrap();
+                assert_eq!(primary_key_col.data_type(), DataType::Int64);
+                assert_eq!(*primary_key_col.as_i64(), i);
 
-    //             i += 1
-    //         }
-    //     }
-    // }
+                i += 1
+            }
+        }
+    }
 
     #[test]
     fn build_test() {

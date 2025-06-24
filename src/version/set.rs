@@ -399,7 +399,7 @@ pub(crate) mod tests {
 
     use crate::{
         fs::{generate_file_id, manager::StoreManager},
-        record::{test::StringSchema, Record},
+        record::Record,
         scope::Scope,
         version::{
             cleaner::CleanTag,
@@ -444,7 +444,6 @@ pub(crate) mod tests {
         let (sender, _) = bounded(1);
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
         ));
         manager
             .base_fs()
@@ -481,7 +480,7 @@ pub(crate) mod tests {
         let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::new(path, &StringSchema);
+        let mut option = DbOption::new(path);
         option.version_log_snapshot_threshold = 1000;
 
         let option = Arc::new(option);
@@ -647,7 +646,7 @@ pub(crate) mod tests {
     async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
         let manager = Arc::new(StoreManager::new(base_option, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::new(path, &StringSchema);
+        let mut option = DbOption::new(path);
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -830,7 +829,6 @@ pub(crate) mod tests {
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
         ));
 
         let (sender, _) = bounded(1);

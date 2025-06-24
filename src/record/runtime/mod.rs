@@ -1,17 +1,14 @@
 pub(crate) mod array;
 mod record;
 mod record_ref;
-mod schema;
 mod value;
 
 use std::sync::Arc;
 
 pub use array::*;
 use common::{datatype::DataType, Date32, Date64, Time32, Time64, Timestamp, Value, F32, F64};
-// use arrow::datatypes::DataType as ArrowDataType;
 pub use record::*;
 pub use record_ref::*;
-pub use schema::*;
 pub use value::*;
 
 /// Cast the `Arc<dyn Any>` to the value of given type.

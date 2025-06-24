@@ -24,12 +24,9 @@ async fn main() {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/users").await;
 
-    let options = DbOption::new(
-        Path::from_filesystem_path("./db_path/users").unwrap(),
-        &UserSchema,
-    );
+    let options = DbOption::new(Path::from_filesystem_path("./db_path/users").unwrap());
     // pluggable async runtime and I/O
-    let db = DB::new(options, TokioExecutor::current(), UserSchema)
+    let db = DB::new(options, TokioExecutor::current(), User::schema())
         .await
         .unwrap();
 

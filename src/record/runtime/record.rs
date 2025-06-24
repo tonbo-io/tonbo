@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use common::{
-    datatype::DataType, util::decode_value, Date32, Date64, LargeBinary, LargeString, Time32,
-    Time64, Timestamp, Value, F32, F64,
+    datatype::DataType, util::decode_value, Date32, Date64, LargeBinary, LargeString, PrimaryKey,
+    Time32, Time64, Timestamp, Value, F32, F64,
 };
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
-use super::{schema::DynSchema, DynRecordRef};
+use super::{DynRecordImmutableArrays, DynRecordRef};
 use crate::record::Record;
 
 #[derive(Debug)]
@@ -72,9 +72,11 @@ macro_rules! implement_record {
         }
 
         impl Record for DynRecord {
-            type Schema = DynSchema;
+            type Key = PrimaryKey;
 
             type Ref<'r> = DynRecordRef<'r>;
+
+            type Columns = DynRecordImmutableArrays;
 
             fn as_record_ref(&self) -> Self::Ref<'_> {
                 let mut columns = vec![];
@@ -196,32 +198,35 @@ pub(crate) mod test {
         sync::Arc,
     };
 
+    use arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
     use common::{datatype::DataType, TimeUnit, Timestamp, F32, F64};
     use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
 
-    use super::{DynRecord, DynSchema, Record};
-    use crate::{make_dyn_schema, record::DynRecordRef};
+    use super::{DynRecord, Record};
+    use crate::record::{DynRecordRef, Schema};
 
     #[allow(unused)]
-    pub(crate) fn test_dyn_item_schema() -> DynSchema {
-        make_dyn_schema!(
-            ("id", DataType::Int64, false),
-            ("age", DataType::Int8, true),
-            ("height", DataType::Int16, true),
-            ("weight", DataType::Int32, false),
-            ("name", DataType::String, false),
-            ("email", DataType::String, true),
-            ("enabled", DataType::Boolean, false),
-            ("bytes", DataType::Bytes, true),
-            ("grade", DataType::Float32, false),
-            ("price", DataType::Float64, true),
-            (
-                "timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond),
-                true
-            ),
-            0
+    pub(crate) fn test_dyn_item_schema() -> Schema {
+        Schema::new(
+            vec![
+                Field::new("id", ArrowDataType::Int64, false),
+                Field::new("age", ArrowDataType::Int8, true),
+                Field::new("height", ArrowDataType::Int16, true),
+                Field::new("weight", ArrowDataType::Int32, false),
+                Field::new("name", ArrowDataType::Utf8, false),
+                Field::new("email", ArrowDataType::Utf8, true),
+                Field::new("enabled", ArrowDataType::Boolean, false),
+                Field::new("bytes", ArrowDataType::Binary, true),
+                Field::new("grade", ArrowDataType::Float32, false),
+                Field::new("price", ArrowDataType::Float64, true),
+                Field::new(
+                    "timestamp",
+                    ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    true,
+                ),
+            ],
+            0,
         )
     }
 

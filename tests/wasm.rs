@@ -6,22 +6,25 @@ mod tests {
     use fusio::{path::Path, DynFs};
     use futures::StreamExt;
     use tonbo::{
+        arrow::datatypes::{DataType as ArrowDataType, Field},
         datatype::DataType,
         executor::opfs::OpfsExecutor,
-        record::{DynRecord, DynSchema, Record, RecordRef, Schema, ValueDesc},
+        record::{DynRecord, Record, RecordRef, Schema, ValueDesc},
         AsValue, DbOption, PrimaryKey, Projection, Value, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    fn test_dyn_item_schema() -> DynSchema {
-        let descs = vec![
-            ValueDesc::new("id".to_string(), DataType::Int64, false),
-            ValueDesc::new("age".to_string(), DataType::Int8, true),
-            ValueDesc::new("name".to_string(), DataType::String, false),
-            ValueDesc::new("email".to_string(), DataType::String, true),
-            ValueDesc::new("bytes".to_string(), DataType::Bytes, true),
-        ];
-        DynSchema::new(descs, 0)
+    fn test_dyn_item_schema() -> Schema {
+        Schema::new(
+            vec![
+                Field::new("id", ArrowDataType::Int64, false),
+                Field::new("age", ArrowDataType::Int8, true),
+                Field::new("name", ArrowDataType::Utf8, false),
+                Field::new("email", ArrowDataType::Utf8, true),
+                Field::new("bytes", ArrowDataType::Binary, true),
+            ],
+            0,
+        )
     }
 
     fn test_dyn_items() -> Vec<DynRecord> {
@@ -54,7 +57,7 @@ mod tests {
         let fs = fusio::disk::LocalFs {};
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::new(Path::from_opfs_path("opfs_dir_rw").unwrap(), &schema);
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir_rw").unwrap());
 
         let db: DB<DynRecord, OpfsExecutor> =
             DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
@@ -103,7 +106,7 @@ mod tests {
         let path = Path::from_opfs_path("opfs_dir_txn").unwrap();
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::new(Path::from_opfs_path("opfs_dir_txn").unwrap(), &schema);
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir_txn").unwrap());
 
         let db: DB<DynRecord, OpfsExecutor> =
             DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
@@ -167,7 +170,7 @@ mod tests {
         let fs = fusio::disk::LocalFs {};
         fs.create_dir_all(&path).await.unwrap();
 
-        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap(), &schema);
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap());
 
         {
             let db: DB<DynRecord, OpfsExecutor> =
@@ -181,7 +184,7 @@ mod tests {
         }
 
         let schema = test_dyn_item_schema();
-        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap(), &schema);
+        let option = DbOption::new(Path::from_opfs_path("opfs_dir").unwrap());
         let db: DB<DynRecord, OpfsExecutor> =
             DB::new(option, OpfsExecutor::new(), schema).await.unwrap();
 
@@ -292,7 +295,7 @@ mod tests {
             region,
         };
 
-        let option = DbOption::new(Path::from_opfs_path("s3_rw").unwrap(), &schema)
+        let option = DbOption::new(Path::from_opfs_path("s3_rw").unwrap())
             .level_path(
                 0,
                 Path::from_url_path("tonbo/l0").unwrap(),
