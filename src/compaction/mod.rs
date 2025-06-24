@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use crate::{
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
-    record::{KeyRef, Record, Schema as RecordSchema},
+    record::{KeyRef, Record, Schema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     transaction::CommitError,
@@ -48,17 +48,16 @@ where
 
     async fn build_tables<'scan>(
         option: &DbOption,
-        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
+        version_edits: &mut Vec<VersionEdit<R::Key>>,
         level: usize,
         streams: Vec<ScanStream<'scan, R>>,
-        schema: &R::Schema,
+        schema: &Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
-        let mut builder =
-            <R::Schema as RecordSchema>::Columns::builder(schema.arrow_schema().clone(), 8192);
+        let mut builder = R::Columns::builder(schema.arrow_schema().clone(), 8192);
         let mut min = None;
         let mut max = None;
 
@@ -103,14 +102,8 @@ where
     }
 
     fn full_scope<'a>(
-        meet_scopes: &[&'a Scope<<R::Schema as RecordSchema>::Key>],
-    ) -> Result<
-        (
-            &'a <R::Schema as RecordSchema>::Key,
-            &'a <R::Schema as RecordSchema>::Key,
-        ),
-        CompactionError<R>,
-    > {
+        meet_scopes: &[&'a Scope<R::Key>],
+    ) -> Result<(&'a R::Key, &'a R::Key), CompactionError<R>> {
         let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
         let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
         Ok((lower, upper))
@@ -119,12 +112,12 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn build_table(
         option: &DbOption,
-        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
+        version_edits: &mut Vec<VersionEdit<R::Key>>,
         level: usize,
-        builder: &mut <<R::Schema as RecordSchema>::Columns as ArrowArrays>::Builder,
-        min: &mut Option<<R::Schema as RecordSchema>::Key>,
-        max: &mut Option<<R::Schema as RecordSchema>::Key>,
-        schema: &R::Schema,
+        builder: &mut <R::Columns as ArrowArrays>::Builder,
+        min: &mut Option<R::Key>,
+        max: &mut Option<R::Key>,
+        schema: &Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
         debug_assert!(min.is_some());
@@ -141,7 +134,7 @@ where
                 .await?,
             ),
             schema.arrow_schema().clone(),
-            Some(option.write_parquet_properties.clone()),
+            option.write_parquet_properties.clone(),
         )?;
         writer.write(columns.as_record_batch()).await?;
         writer.close().await?;
@@ -192,10 +185,7 @@ pub(crate) mod tests {
 
     use crate::{
         fs::{generate_file_id, manager::StoreManager, FileId, FileType},
-        inmem::{
-            immutable::{tests::TestSchema, Immutable},
-            mutable::MutableMemTable,
-        },
+        inmem::{immutable::Immutable, mutable::MutableMemTable},
         record::{Record, Schema},
         scope::Scope,
         tests::Test,
@@ -209,9 +199,9 @@ pub(crate) mod tests {
     async fn build_immutable<R>(
         option: &DbOption,
         records: Vec<(LogType, R, Timestamp)>,
-        schema: &Arc<R::Schema>,
+        schema: &Arc<Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
+    ) -> Result<Immutable<R::Columns>, DbError<R>>
     where
         R: Record + Send,
     {
@@ -230,7 +220,7 @@ pub(crate) mod tests {
         option: &DbOption,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
-        schema: &Arc<R::Schema>,
+        schema: &Arc<Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), DbError<R>>
@@ -249,7 +239,9 @@ pub(crate) mod tests {
             schema.arrow_schema().clone(),
             None,
         )?;
-        writer.write(immutable.as_record_batch()).await?;
+        let record_batch = immutable.as_record_batch();
+        writer.write(record_batch).await?;
+        // writer.write(immutable.as_record_batch()).await?;
         writer.close().await?;
 
         Ok(())
@@ -258,7 +250,7 @@ pub(crate) mod tests {
     pub(crate) async fn build_version(
         option: &Arc<DbOption>,
         manager: &StoreManager,
-        schema: &Arc<TestSchema>,
+        schema: &Arc<Schema>,
     ) -> ((FileId, FileId, FileId, FileId, FileId), Version<Test>) {
         let level_0_fs = option
             .level_fs_path(0)

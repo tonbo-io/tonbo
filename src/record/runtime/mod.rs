@@ -1,14 +1,12 @@
 pub(crate) mod array;
 mod record;
 mod record_ref;
-mod schema;
 mod value;
 
 pub use array::*;
 use arrow::datatypes::DataType as ArrowDataType;
 pub use record::*;
 pub use record_ref::*;
-pub use schema::*;
 pub use value::*;
 
 use crate::record::TimeUnit;
@@ -76,6 +74,33 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::LargeBinary => DataType::LargeBinary,
             ArrowDataType::LargeUtf8 => DataType::LargeString,
             _ => todo!(),
+        }
+    }
+}
+
+impl From<&DataType> for ArrowDataType {
+    fn from(datatype: &DataType) -> Self {
+        match datatype {
+            DataType::UInt8 => ArrowDataType::UInt8,
+            DataType::UInt16 => ArrowDataType::UInt16,
+            DataType::UInt32 => ArrowDataType::UInt32,
+            DataType::UInt64 => ArrowDataType::UInt64,
+            DataType::Int8 => ArrowDataType::Int8,
+            DataType::Int16 => ArrowDataType::Int16,
+            DataType::Int32 => ArrowDataType::Int32,
+            DataType::Int64 => ArrowDataType::Int64,
+            DataType::Float32 => ArrowDataType::Float32,
+            DataType::Float64 => ArrowDataType::Float64,
+            DataType::String => ArrowDataType::Utf8,
+            DataType::Boolean => ArrowDataType::Boolean,
+            DataType::Bytes => ArrowDataType::Binary,
+            DataType::Timestamp(unit) => ArrowDataType::Timestamp((*unit).into(), None),
+            DataType::Time32(unit) => ArrowDataType::Time32((*unit).into()),
+            DataType::Time64(unit) => ArrowDataType::Time64((*unit).into()),
+            DataType::Date32 => ArrowDataType::Date32,
+            DataType::Date64 => ArrowDataType::Date64,
+            DataType::LargeBinary => ArrowDataType::LargeBinary,
+            DataType::LargeString => ArrowDataType::LargeUtf8,
         }
     }
 }

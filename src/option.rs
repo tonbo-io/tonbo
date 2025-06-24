@@ -4,15 +4,11 @@ pub use fusio::path::Path;
 #[cfg(feature = "aws")]
 pub use fusio::remotes::aws::AwsCredential;
 pub use fusio_dispatch::FsOptions;
-use parquet::{
-    basic::Compression,
-    file::properties::{EnabledStatistics, WriterProperties},
-};
+use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 
 use crate::{
     fs::{FileId, FileType},
-    record::Schema,
     trigger::TriggerType,
     version::MAX_LEVEL,
 };
@@ -42,15 +38,13 @@ pub struct DbOption {
     pub(crate) trigger_type: TriggerType,
     pub(crate) use_wal: bool,
     pub(crate) wal_buffer_size: usize,
-    pub(crate) write_parquet_properties: WriterProperties,
+    pub(crate) write_parquet_properties: Option<WriterProperties>,
     pub(crate) compaction_option: CompactionOption,
 }
 
 impl DbOption {
     /// build the default configured [`DbOption`] with base path and primary key
-    pub fn new<S: Schema>(base_path: Path, schema: &S) -> Self {
-        let (column_paths, sorting_columns) = schema.primary_key_path();
-
+    pub fn new(base_path: Path) -> Self {
         DbOption {
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
@@ -59,14 +53,7 @@ impl DbOption {
             max_sst_file_size: 256 * 1024 * 1024,
             clean_channel_buffer: 10,
             base_path,
-            write_parquet_properties: WriterProperties::builder()
-                .set_compression(Compression::LZ4)
-                .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
-                .set_column_bloom_filter_enabled(column_paths.clone(), true)
-                .set_sorting_columns(Some(sorting_columns))
-                .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
-                .build(),
-
+            write_parquet_properties: None,
             use_wal: true,
             wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
             major_default_oldest_table_num: 3,
@@ -130,9 +117,9 @@ impl DbOption {
     }
 
     /// specific settings for Parquet
-    pub fn write_parquet_option(self, write_parquet_properties: WriterProperties) -> Self {
+    pub(crate) fn write_parquet_option(self, write_parquet_properties: WriterProperties) -> Self {
         DbOption {
-            write_parquet_properties,
+            write_parquet_properties: Some(write_parquet_properties),
             ..self
         }
     }

@@ -36,6 +36,7 @@ impl ValueDesc {
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn arrow_field(&self) -> Field {
         let arrow_type = match self.datatype {
             DataType::UInt8 => ArrowDataType::UInt8,

@@ -1,5 +1,5 @@
 use pyo3::{pyclass, pymethods, PyResult};
-use tonbo::{option::Path, record::Schema};
+use tonbo::option::Path;
 
 use crate::{ExceedsMaxLevelError, FsOptions};
 
@@ -71,8 +71,8 @@ impl DbOption {
 }
 
 impl DbOption {
-    pub(crate) fn into_option<S: Schema>(self, schema: &S) -> tonbo::DbOption {
-        let mut opt = tonbo::DbOption::new(Path::from(self.path), schema)
+    pub(crate) fn into_option(self) -> tonbo::DbOption {
+        let mut opt = tonbo::DbOption::new(Path::from(self.path))
             .clean_channel_buffer(self.clean_channel_buffer)
             .immutable_chunk_num(self.immutable_chunk_num)
             .level_sst_magnification(self.level_sst_magnification)

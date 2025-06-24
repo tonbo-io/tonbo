@@ -22,12 +22,12 @@ use crate::{
 
 pub(crate) type MutableScan<'scan, R> = Range<
     'scan,
-    TsRef<<<R as Record>::Schema as Schema>::Key>,
+    TsRef<<R as Record>::Key>,
     (
-        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
-        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
+        Bound<&'scan TsRef<<R as Record>::Key>>,
+        Bound<&'scan TsRef<<R as Record>::Key>>,
     ),
-    Ts<<<R as Record>::Schema as Schema>::Key>,
+    Ts<<R as Record>::Key>,
     Option<R>,
 >;
 
@@ -35,10 +35,10 @@ pub(crate) struct MutableMemTable<R>
 where
     R: Record,
 {
-    data: SkipMap<Ts<<R::Schema as Schema>::Key>, Option<R>>,
+    data: SkipMap<Ts<R::Key>, Option<R>>,
     wal: Option<Mutex<WalFile<R>>>,
     trigger: Arc<dyn FreezeTrigger<R>>,
-    schema: Arc<R::Schema>,
+    schema: Arc<Schema>,
 }
 
 impl<R> MutableMemTable<R>
@@ -49,7 +49,7 @@ where
         option: &DbOption,
         trigger: Arc<dyn FreezeTrigger<R>>,
         fs: Arc<dyn DynFs>,
-        schema: Arc<R::Schema>,
+        schema: Arc<Schema>,
     ) -> Result<Self, fusio::Error> {
         let mut wal = None;
         if option.use_wal {
@@ -99,7 +99,7 @@ where
     pub(crate) async fn remove(
         &self,
         log_ty: LogType,
-        key: <R::Schema as Schema>::Key,
+        key: R::Key,
         ts: Timestamp,
     ) -> Result<bool, DbError<R>> {
         self.append(Some(log_ty), key, ts, None).await
@@ -108,7 +108,7 @@ where
     pub(crate) async fn append(
         &self,
         log_ty: Option<LogType>,
-        key: <R::Schema as Schema>::Key,
+        key: R::Key,
         ts: Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
@@ -134,11 +134,11 @@ where
 
     pub(crate) fn get(
         &self,
-        key: &<R::Schema as Schema>::Key,
+        key: &R::Key,
         ts: Timestamp,
-    ) -> Option<Entry<'_, Ts<<R::Schema as Schema>::Key>, Option<R>>> {
+    ) -> Option<Entry<'_, Ts<R::Key>, Option<R>>> {
         self.data
-            .range::<TsRef<<R::Schema as Schema>::Key>, _>((
+            .range::<TsRef<R::Key>, _>((
                 Bound::Included(TsRef::new(key, ts)),
                 Bound::Included(TsRef::new(key, EPOCH)),
             ))
@@ -147,10 +147,7 @@ where
 
     pub(crate) fn scan<'scan>(
         &'scan self,
-        range: (
-            Bound<&'scan <R::Schema as Schema>::Key>,
-            Bound<&'scan <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
     ) -> MutableScan<'scan, R> {
         let lower = match range.0 {
@@ -171,9 +168,9 @@ where
         self.data.is_empty()
     }
 
-    pub(crate) fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: Timestamp) -> bool {
+    pub(crate) fn check_conflict(&self, key: &R::Key, ts: Timestamp) -> bool {
         self.data
-            .range::<TsRef<<R::Schema as Schema>::Key>, _>((
+            .range::<TsRef<R::Key>, _>((
                 Bound::Excluded(TsRef::new(key, u32::MAX.into())),
                 Bound::Excluded(TsRef::new(key, ts)),
             ))
@@ -183,10 +180,7 @@ where
 
     pub(crate) async fn into_immutable(
         self,
-    ) -> Result<
-        (Option<FileId>, Immutable<<R::Schema as Schema>::Columns>),
-        fusio_log::error::LogError,
-    > {
+    ) -> Result<(Option<FileId>, Immutable<R::Columns>), fusio_log::error::LogError> {
         let mut file_id = None;
 
         if let Some(wal) = self.wal {
@@ -228,8 +222,7 @@ mod tests {
 
     use super::MutableMemTable;
     use crate::{
-        inmem::immutable::tests::TestSchema,
-        record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{DataType, DynRecord, Record, Value},
         tests::{Test, TestRef},
         timestamp::Ts,
         trigger::TriggerFactory,
@@ -244,15 +237,13 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
+        let schema = Test::schema();
         let mem_table =
-            MutableMemTable::<Test>::new(&option, trigger, fs.clone(), Arc::new(TestSchema {}))
+            MutableMemTable::<Test>::new(&option, trigger, fs.clone(), Arc::new(schema))
                 .await
                 .unwrap();
 
@@ -298,16 +289,14 @@ mod tests {
     async fn range() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
+        let schema = Test::schema();
         let trigger = TriggerFactory::create(option.trigger_type);
 
         let mutable =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
+            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(schema))
                 .await
                 .unwrap();
 
@@ -387,27 +376,18 @@ mod tests {
     #[tokio::test]
     async fn test_dyn_read() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let schema = DynSchema::new(
-            vec![
-                ValueDesc::new("age".to_string(), DataType::Int8, false),
-                ValueDesc::new("height".to_string(), DataType::Int16, true),
-            ],
-            0,
-        );
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &schema,
-        );
+
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let schema = Arc::new(schema);
-
-        let mutable = MutableMemTable::<DynRecord>::new(&option, trigger, fs.clone(), schema)
-            .await
-            .unwrap();
+        let schema = Test::schema();
+        let mutable =
+            MutableMemTable::<DynRecord>::new(&option, trigger, fs.clone(), Arc::new(schema))
+                .await
+                .unwrap();
 
         mutable
             .insert(
