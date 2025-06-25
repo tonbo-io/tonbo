@@ -242,7 +242,7 @@ mod tests {
         let secret_key = std::option_env!("AWS_SECRET_ACCESS_KEY")
             .unwrap()
             .to_string();
-        let token = Some(std::option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
+        let token = std::option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
         let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
         let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
 

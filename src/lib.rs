@@ -1468,7 +1468,7 @@ pub(crate) mod tests {
 
     fn test_items() -> Vec<Test> {
         let mut items = Vec::new();
-        for i in 0..32 {
+        for i in 0..100 {
             items.push(Test {
                 vstring: i.to_string(),
                 vu32: i,
@@ -1576,7 +1576,7 @@ pub(crate) mod tests {
             .to_string();
         let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
         let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
-        let token = Some(std::option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
+        let token = std::option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
 
         let s3_option = FsOptions::S3 {
             bucket,

@@ -200,7 +200,7 @@ where
                         level_0_cache_fs
                             .open_options(
                                 &option.cached_table_path(gen),
-                                FileType::Parquet.open_options(true),
+                                FileType::Parquet.open_options(false),
                             )
                             .await?,
                     ),
@@ -746,7 +746,8 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir_l2.path()).unwrap(),
             fs_option.clone(),
             true,
-        ).unwrap();
+        )
+        .unwrap();
 
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
@@ -761,7 +762,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let mut items = Vec::new();
-        for i in 0..10000 {
+        for i in 0..100 {
             items.push(Test {
                 vstring: i.to_string(),
                 vu32: i,
@@ -769,8 +770,13 @@ pub(crate) mod tests {
             });
         }
 
+        let mut count = 0;
         for (_, item) in items.clone().into_iter().enumerate() {
             db.write(item, 0.into()).await.unwrap();
+            count += 1;
+            if count % 5 == 0 {
+                db.flush().await.unwrap();
+            }
         }
 
         for (i, item) in items.clone().into_iter().enumerate() {

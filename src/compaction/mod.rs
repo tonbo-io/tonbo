@@ -9,6 +9,7 @@ use log::error;
 use parquet::arrow::AsyncArrowWriter;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use ulid::Ulid;
 
 use crate::{
     executor::Executor,
@@ -82,6 +83,7 @@ where
 
             if builder.written_size() >= option.max_sst_file_size {
                 let columns = Arc::new(builder.finish(None));
+                let gen = generate_file_id();
                 if cached_to_local {
                     let option = Arc::clone(option);
                     let schema = schema.clone();
@@ -93,6 +95,7 @@ where
                     executor.spawn(async move {
                         if let Err(e) = Self::build_table(
                             &option,
+                            gen,
                             level,
                             &columns,
                             &mut min,
@@ -110,6 +113,7 @@ where
                 }
                 Self::build_table(
                     option,
+                    gen,
                     level,
                     &columns,
                     &mut min,
@@ -124,6 +128,7 @@ where
         }
         if builder.written_size() > 0 {
             let columns = Arc::new(builder.finish(None));
+            let gen = generate_file_id();
             if cached_to_local {
                 let option = Arc::clone(option);
                 let schema = schema.clone();
@@ -135,6 +140,7 @@ where
                 executor.spawn(async move {
                     if let Err(err) = Self::build_table(
                         &option,
+                        gen,
                         level,
                         &columns,
                         &mut min,
@@ -152,6 +158,7 @@ where
             }
             Self::build_table(
                 option,
+                gen,
                 level,
                 &columns,
                 &mut min,
@@ -187,6 +194,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn build_table(
         option: &DbOption,
+        gen: Ulid,
         level: usize,
         columns: &Arc<<<R as Record>::Schema as RecordSchema>::Columns>,
         min: &mut Option<<R::Schema as RecordSchema>::Key>,
@@ -199,7 +207,6 @@ where
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
-        let gen = generate_file_id();
         let path = if cached_to_local {
             &option.cached_table_path(gen)
         } else {

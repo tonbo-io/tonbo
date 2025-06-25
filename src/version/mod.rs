@@ -198,11 +198,14 @@ where
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+        let cached = self.option.level_fs_cached(level);
+        let path = if cached {
+            self.option.cached_table_path(gen)
+        } else {
+            self.option.table_path(gen, level)
+        };
         let file = store
-            .open_options(
-                &self.option.table_path(gen, level),
-                FileType::Parquet.open_options(true),
-            )
+            .open_options(&path, FileType::Parquet.open_options(true))
             .await
             .map_err(VersionError::Fusio)?;
         SsTable::<R>::open(parquet_lru, gen, file)
