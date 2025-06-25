@@ -302,7 +302,7 @@ where
                     inner: level_scan_l,
                 });
             }
-          
+
             let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
             let level_l_fs = ctx.manager.get_fs(level_l_path);
             let level_l_cache = ctx.manager.get_cache(level_l_path);
@@ -747,8 +747,8 @@ pub(crate) mod tests {
         .level_path(
             0,
             Path::from_filesystem_path(temp_dir_l0.path()).unwrap(),
-            fs_option.clone(),
-            true,
+            FsOptions::Local,
+            false,
         )
         .unwrap()
         .level_path(
