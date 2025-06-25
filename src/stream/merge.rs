@@ -163,27 +163,28 @@ mod tests {
 
     use super::MergeStream;
     use crate::{
-        inmem::mutable::MutableMemTable, record::test::StringSchema, stream::Entry,
-        trigger::TriggerFactory, wal::log::LogType, DbOption,
+        inmem::mutable::MutableMemTable,
+        record::{test::string_arrow_schema, Schema},
+        stream::Entry,
+        trigger::TriggerFactory,
+        wal::log::LogType,
+        DbOption,
     };
 
     #[tokio::test]
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
 
-        let m1 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema.clone())
+            .await
+            .unwrap();
 
         m1.remove(LogType::Full, "b".into(), 3.into())
             .await
@@ -197,10 +198,9 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m2 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let m2 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema.clone())
+            .await
+            .unwrap();
         m2.insert(LogType::Full, "a".into(), 1.into())
             .await
             .unwrap();
@@ -213,10 +213,9 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m3 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let m3 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
+            .await
+            .unwrap();
         m3.insert(LogType::Full, "e".into(), 4.into())
             .await
             .unwrap();
@@ -277,19 +276,16 @@ mod tests {
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
+        let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
+            .await
+            .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();
@@ -369,19 +365,16 @@ mod tests {
     async fn merge_mutable_limit() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
+        let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
+            .await
+            .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();

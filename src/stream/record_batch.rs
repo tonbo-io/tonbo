@@ -9,7 +9,7 @@ use arrow::{array::RecordBatch, datatypes::Schema};
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{option::OptionRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
+    record::{option::OptionRecordRef, Key, Record, RecordRef},
     timestamp::Ts,
 };
 
@@ -35,11 +35,11 @@ where
         }
     }
 
-    pub(crate) fn internal_key(&self) -> Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {
+    pub(crate) fn internal_key(&self) -> Ts<<R::Key as Key>::Ref<'_>> {
         self.record_ref.key()
     }
 
-    pub fn key(&self) -> <<R::Schema as RecordSchema>::Key as Key>::Ref<'_> {
+    pub fn key(&self) -> <R::Key as Key>::Ref<'_> {
         self.internal_key().value().clone()
     }
 

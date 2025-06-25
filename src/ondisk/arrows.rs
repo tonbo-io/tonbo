@@ -15,14 +15,14 @@ use parquet::{
 };
 
 use crate::{
-    record::{Key, Record, Schema},
+    record::{Key, Record},
     timestamp::Timestamp,
 };
 
 unsafe fn get_range_bound_fn<R>(
-    range: Bound<&<R::Schema as Schema>::Key>,
+    range: Bound<&R::Key>,
 ) -> (
-    Option<&'static <R::Schema as Schema>::Key>,
+    Option<&'static R::Key>,
     &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync),
 )
 where
@@ -54,10 +54,7 @@ where
 
 pub(crate) unsafe fn get_range_filter<R>(
     schema_descriptor: &SchemaDescriptor,
-    range: (
-        Bound<&<R::Schema as Schema>::Key>,
-        Bound<&<R::Schema as Schema>::Key>,
-    ),
+    range: (Bound<&R::Key>, Bound<&R::Key>),
     ts: Timestamp,
 ) -> RowFilter
 where

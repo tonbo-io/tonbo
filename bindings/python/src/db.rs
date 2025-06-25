@@ -8,8 +8,9 @@ use pyo3::{
 };
 use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tonbo::{
+    arrow::datatypes::Field,
     executor::tokio::TokioExecutor,
-    record::{DynRecord, DynSchema, Value, ValueDesc},
+    record::{DynRecord, Schema, Value},
     DB,
 };
 
@@ -52,11 +53,11 @@ impl TonboDB {
                     primary_key_index = Some(desc.len());
                 }
                 cols.push(col.clone());
-                desc.push(ValueDesc::from(col));
+                desc.push(Field::from(col));
             }
         }
-        let schema = DynSchema::new(desc, primary_key_index.unwrap());
-        let option = option.into_option(&schema);
+        let schema = Schema::new(desc, primary_key_index.unwrap());
+        let option = option.into_option();
         let db = get_runtime()
             .block_on(async { DB::new(option, TokioExecutor::current(), schema).await })
             .unwrap();
