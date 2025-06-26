@@ -58,8 +58,11 @@ fn single_write(c: &mut Criterion) {
     let _ = std::fs::create_dir_all("/tmp/tonbo");
 
     for batch in batches {
-        let option = DbOption::from(fusio::path::Path::from_filesystem_path("/tmp/tonbo").unwrap())
-            .disable_wal();
+        let option = DbOption::new(
+            fusio::path::Path::from_filesystem_path("/tmp/tonbo").unwrap(),
+            &KVSchema,
+        )
+        .disable_wal();
         let db = runtime
             .block_on(async { DB::new(option, TokioExecutor::current(), KVSchema).await })
             .unwrap();
