@@ -257,30 +257,35 @@ impl BenchDatabase for TonboS3BenchDataBase {
                 0,
                 fusio::path::Path::from_url_path("/l0").unwrap(),
                 fs_options.clone(),
+                false,
             )
             .unwrap()
             .level_path(
                 1,
                 fusio::path::Path::from_url_path("/l1").unwrap(),
                 fs_options.clone(),
+                false,
             )
             .unwrap()
             .level_path(
                 2,
                 fusio::path::Path::from_url_path("/l2").unwrap(),
                 fs_options.clone(),
+                false,
             )
             .unwrap()
             .level_path(
                 3,
                 fusio::path::Path::from_url_path("/l3").unwrap(),
                 fs_options.clone(),
+                false,
             )
             .unwrap()
             .level_path(
                 4,
                 fusio::path::Path::from_url_path("/l4").unwrap(),
                 fs_options.clone(),
+                false,
             )
             .unwrap()
             .disable_wal();

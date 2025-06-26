@@ -361,15 +361,17 @@ mod tests {
                 0,
                 Path::from_url_path("tonbo/l0").unwrap(),
                 fs_option.clone(),
+                true,
             )
             .unwrap()
             .level_path(
                 1,
                 Path::from_url_path("tonbo/l1").unwrap(),
                 fs_option.clone(),
+                false,
             )
             .unwrap()
-            .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
+            .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option, true)
             .unwrap()
             .major_threshold_with_sst_size(3)
             .level_sst_magnification(1)

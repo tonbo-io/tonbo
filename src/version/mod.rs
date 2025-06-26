@@ -128,7 +128,12 @@ where
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
-        let level_0_fs = manager.get_fs(level_0_path);
+        let level_0_cached = self.option.level_fs_cached(0);
+        let level_0_fs = if level_0_cached {
+            manager.get_cache(level_0_path)
+        } else {
+            manager.get_fs(level_0_path)
+        };
         for scope in self.level_slice[0].iter().rev() {
             if !scope.contains(key.value()) {
                 continue;
@@ -153,7 +158,12 @@ where
                 .option
                 .level_fs_path(leve)
                 .unwrap_or(&self.option.base_path);
-            let level_fs = manager.get_fs(level_path);
+            let level_cached = self.option.level_fs_cached(leve);
+            let level_fs = if level_cached {
+                manager.get_cache(level_path)
+            } else {
+                manager.get_fs(level_path)
+            };
             if sort_runs.is_empty() {
                 continue;
             }
@@ -188,11 +198,14 @@ where
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+        let cached = self.option.level_fs_cached(level);
+        let path = if cached {
+            self.option.cached_table_path(gen)
+        } else {
+            self.option.table_path(gen, level)
+        };
         let file = store
-            .open_options(
-                &self.option.table_path(gen, level),
-                FileType::Parquet.open_options(true),
-            )
+            .open_options(&path, FileType::Parquet.open_options(true))
             .await
             .map_err(VersionError::Fusio)?;
         SsTable::<R>::open(parquet_lru, gen, file)

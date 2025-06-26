@@ -202,7 +202,7 @@ async fn main() {
     };
 
     let options = DbOption::new(Path::from_filesystem_path("s3_path").unwrap(), &UserSchema)
-        .level_path(2, "l2", fs_option);
+        .level_path(2, "l2", fs_option, false);
 
     let db = DB::<User, TokioExecutor>::new(options, TokioExecutor::current(), UserSchema)
         .await

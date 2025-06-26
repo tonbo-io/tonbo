@@ -38,7 +38,7 @@ pub struct DbOption {
     path: String,
     #[pyo3(get, set)]
     base_fs: FsOptions,
-    level_paths: Vec<Option<(String, FsOptions)>>,
+    level_paths: Vec<Option<(String, FsOptions, bool)>>,
 }
 
 #[pymethods]
@@ -61,11 +61,11 @@ impl DbOption {
         }
     }
 
-    fn level_path(&mut self, level: usize, path: String, fs_options: FsOptions) -> PyResult<()> {
+    fn level_path(&mut self, level: usize, path: String, fs_options: FsOptions, cached: bool) -> PyResult<()> {
         if level >= MAX_LEVEL {
             ExceedsMaxLevelError::new_err("Exceeds max level");
         }
-        self.level_paths[level] = Some((path, fs_options));
+        self.level_paths[level] = Some((path, fs_options, cached));
         Ok(())
     }
 }
@@ -82,12 +82,13 @@ impl DbOption {
             .version_log_snapshot_threshold(self.version_log_snapshot_threshold)
             .base_fs(tonbo::option::FsOptions::from(self.base_fs));
         for (level, path) in self.level_paths.into_iter().enumerate() {
-            if let Some((path, fs_options)) = path {
+            if let Some((path, fs_options, cached)) = path {
                 opt = opt
                     .level_path(
                         level,
                         Path::from(path),
                         tonbo::option::FsOptions::from(fs_options),
+                        cached,
                     )
                     .unwrap();
             }
