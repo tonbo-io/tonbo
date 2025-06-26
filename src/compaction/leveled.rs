@@ -194,6 +194,8 @@ where
 
             let level_0_cached = option.level_fs_cached(0);
             if level_0_cached {
+                let mut min = None;
+                let mut max = None;
                 let level_0_cache_fs = manager.get_cache(level_0_path);
                 let mut writer = AsyncArrowWriter::try_new(
                     AsyncWriter::new(
@@ -207,7 +209,7 @@ where
                     schema.arrow_schema().clone(),
                     Some(option.write_parquet_properties.clone()),
                 )?;
-                for (file_id, batch) in batches {
+                for (_, batch) in batches {
                     if let (Some(batch_min), Some(batch_max)) = batch.scope() {
                         if matches!(min.as_ref().map(|min| min > batch_min), Some(true) | None) {
                             min = Some(batch_min.clone())
@@ -217,9 +219,6 @@ where
                         }
                     }
                     writer.write(batch.as_record_batch()).await?;
-                    if let Some(file_id) = file_id {
-                        wal_ids.push(*file_id);
-                    }
                 }
                 writer.close().await?;
             }
@@ -780,11 +779,16 @@ pub(crate) mod tests {
 
         let mut items = Vec::new();
         for i in 0..100 {
-            items.push(Test {
+            let item = Test {
                 vstring: i.to_string(),
                 vu32: i,
                 vbool: Some(true),
-            });
+            };
+            items.push(item.clone());
+            db.write(item, 0.into()).await.unwrap();
+            if i % 5 == 0 {
+                db.flush().await.unwrap();
+            }
         }
 
         let mut count = 0;

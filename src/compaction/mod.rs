@@ -63,6 +63,7 @@ where
         executor: &Arc<E>,
         cached_to_local: bool,
     ) -> Result<(), CompactionError<R>> {
+        println!("cached_to_local = {}", cached_to_local);
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
@@ -84,12 +85,12 @@ where
             if builder.written_size() >= option.max_sst_file_size {
                 let columns = Arc::new(builder.finish(None));
                 let gen = generate_file_id();
-                {
+                if cached_to_local {
                     let option = Arc::clone(option);
                     let schema = schema.clone();
-                    let fs = Arc::clone(fs);
                     let mut min = min.clone();
                     let mut max = max.clone();
+                    let cache = Arc::clone(cache);
                     let columns = Arc::clone(&columns);
                     let manifest_tx = manifest_tx.clone();
                     executor.spawn(async move {
@@ -101,9 +102,9 @@ where
                             &mut min,
                             &mut max,
                             &schema,
-                            &fs,
+                            &cache,
                             &manifest_tx,
-                            true,
+                            false,
                         )
                         .await
                         {
@@ -111,32 +112,30 @@ where
                         }
                     });
                 }
-                if cached_to_local {
-                    Self::build_table(
-                        &option,
-                        gen,
-                        level,
-                        &columns,
-                        &mut min,
-                        &mut max,
-                        &schema,
-                        &cache,
-                        &manifest_tx,
-                        false,
-                    )
-                    .await?;
-                }
+                Self::build_table(
+                    &option,
+                    gen,
+                    level,
+                    &columns,
+                    &mut min,
+                    &mut max,
+                    &schema,
+                    &fs,
+                    &manifest_tx,
+                    true,
+                )
+                .await?;
             }
         }
         if builder.written_size() > 0 {
             let columns = Arc::new(builder.finish(None));
             let gen = generate_file_id();
-            {
+            if cached_to_local {
                 let option = Arc::clone(option);
                 let schema = schema.clone();
-                let fs = Arc::clone(fs);
                 let mut min = min.clone();
                 let mut max = max.clone();
+                let cache = Arc::clone(cache);
                 let columns = Arc::clone(&columns);
                 let manifest_tx = manifest_tx.clone();
                 executor.spawn(async move {
@@ -148,9 +147,9 @@ where
                         &mut min,
                         &mut max,
                         &schema,
-                        &fs,
+                        &cache,
                         &manifest_tx,
-                        true,
+                        false,
                     )
                     .await
                     {
@@ -158,24 +157,22 @@ where
                     }
                 });
             }
-            if cached_to_local {
-                Self::build_table(
-                    &option,
-                    gen,
-                    level,
-                    &columns,
-                    &mut min,
-                    &mut max,
-                    &schema,
-                    &cache,
-                    &manifest_tx,
-                    false,
-                )
-                .await?;
-            }
+            Self::build_table(
+                &option,
+                gen,
+                level,
+                &columns,
+                &mut min,
+                &mut max,
+                &schema,
+                &fs,
+                &manifest_tx,
+                true,
+            )
+            .await?;
         }
         drop(manifest_tx);
-        while let Ok(version_edit) = manifest_cx.recv_async().await {
+        while let Ok(version_edit) = manifest_cx.recv() {
             version_edits.push(version_edit);
         }
         Ok(())
@@ -229,7 +226,7 @@ where
 
         if upload_to_s3 {
             manifest_tx
-                .send_async(VersionEdit::Add {
+                .send(VersionEdit::Add {
                     level: level as u8,
                     scope: Scope {
                         min: min.take().ok_or(CompactionError::EmptyLevel)?,
@@ -238,7 +235,6 @@ where
                         wal_ids: None,
                     },
                 })
-                .await
                 .map_err(|_| CompactionError::ChannelClose)?;
         }
         Ok(())

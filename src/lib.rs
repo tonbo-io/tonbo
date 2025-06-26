@@ -380,6 +380,7 @@ where
 
     /// trigger compaction manually. This will flush the WAL and trigger compaction
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
+        println!("fffflush");
         let (tx, rx) = oneshot::channel();
         let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
         compaction_tx

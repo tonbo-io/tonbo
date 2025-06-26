@@ -119,8 +119,7 @@ where
                 FutureStatus::Init(gen) => {
                     let gen = *gen;
                     self.path = Some(self.option.table_path(gen, self.level));
-                    println!("path: {:?}", self.path);
-                    println!("gen: {:?}", gen);
+
                     let reader = self.fs.open_options(
                         self.path.as_ref().unwrap(),
                         FileType::Parquet.open_options(true),
