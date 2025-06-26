@@ -48,7 +48,7 @@ pub enum ProjectionResult<'a> {
     Owned(ProjectionField),
 }
 
-#[derive(Record, Debug, ::serde::Serialize, ::serde::Deserialize)]
+#[derive(Record, Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
 pub struct Customer {
     #[record(primary_key)]
     pub c_custkey: i32,
@@ -130,13 +130,13 @@ pub(crate) fn read_tbl(file_path: impl AsRef<Path>) -> Box<dyn Iterator<Item = C
     }))
 }
 
-pub(crate) fn gen_records(num_records: usize) -> Box<dyn Iterator<Item = Customer>> {
+pub(crate) fn gen_records(num_records: usize) -> Vec<Customer> {
     let mut data = Vec::with_capacity(num_records);
     let mut rng = make_rng();
     for i in 0..num_records {
         data.push(gen_record(&mut rng));
     }
-    Box::new(data.into_iter())
+    data
 }
 
 pub trait BenchDatabase {
