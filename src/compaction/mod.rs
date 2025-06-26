@@ -63,7 +63,6 @@ where
         executor: &Arc<E>,
         cached_to_local: bool,
     ) -> Result<(), CompactionError<R>> {
-        println!("cached_to_local = {}", cached_to_local);
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
@@ -86,12 +85,12 @@ where
                 let columns = Arc::new(builder.finish(None));
                 let gen = generate_file_id();
                 if cached_to_local {
-                    let option = Arc::clone(option);
+                    let option = option.clone();
                     let schema = schema.clone();
                     let mut min = min.clone();
                     let mut max = max.clone();
-                    let cache = Arc::clone(cache);
-                    let columns = Arc::clone(&columns);
+                    let cache = cache.clone();
+                    let columns = columns.clone();
                     let manifest_tx = manifest_tx.clone();
                     executor.spawn(async move {
                         if let Err(e) = Self::build_table(
@@ -105,6 +104,7 @@ where
                             &cache,
                             &manifest_tx,
                             false,
+                            cached_to_local,
                         )
                         .await
                         {
@@ -123,6 +123,7 @@ where
                     &fs,
                     &manifest_tx,
                     true,
+                    !cached_to_local,
                 )
                 .await?;
             }
@@ -131,12 +132,12 @@ where
             let columns = Arc::new(builder.finish(None));
             let gen = generate_file_id();
             if cached_to_local {
-                let option = Arc::clone(option);
+                let option = option.clone();
                 let schema = schema.clone();
                 let mut min = min.clone();
                 let mut max = max.clone();
-                let cache = Arc::clone(cache);
-                let columns = Arc::clone(&columns);
+                let cache = cache.clone();
+                let columns = columns.clone();
                 let manifest_tx = manifest_tx.clone();
                 executor.spawn(async move {
                     if let Err(e) = Self::build_table(
@@ -150,6 +151,7 @@ where
                         &cache,
                         &manifest_tx,
                         false,
+                        cached_to_local,
                     )
                     .await
                     {
@@ -168,6 +170,7 @@ where
                 &fs,
                 &manifest_tx,
                 true,
+                !cached_to_local,
             )
             .await?;
         }
@@ -200,10 +203,11 @@ where
         columns: &Arc<<<R as Record>::Schema as RecordSchema>::Columns>,
         min: &mut Option<<R::Schema as RecordSchema>::Key>,
         max: &mut Option<<R::Schema as RecordSchema>::Key>,
-        schema: &R::Schema,
+        schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
         manifest_tx: &flume::Sender<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         upload_to_s3: bool,
+        send_manifest: bool,
     ) -> Result<(), CompactionError<R>> {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
@@ -224,7 +228,7 @@ where
         writer.write(columns.as_record_batch()).await?;
         writer.close().await?;
 
-        if upload_to_s3 {
+        if send_manifest {
             manifest_tx
                 .send(VersionEdit::Add {
                     level: level as u8,
