@@ -12,7 +12,7 @@ use futures_util::{future::join_all, StreamExt};
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::common::{
-    read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, RedbBenchDatabase,
+    read_tbl, BenchDatabase, BenchReadTransaction, BenchReader, Customer, RedbBenchDatabase,
     RocksdbBenchDatabase, SledBenchDatabase, TonboBenchDataBase, TonboS3BenchDataBase, ITERATIONS,
     NUM_SCAN, READ_TIMES,
 };
@@ -36,16 +36,6 @@ async fn benchmark<T: BenchDatabase + Send + Sync>(
     let db = Arc::new(T::build(path).await);
     let txn = db.read_transaction().await;
     {
-        // {
-        //     let start = Instant::now();
-        //     let len = txn.get_reader().len();
-        //     assert_eq!(len, ELEMENTS as u64 + 100_000 + 100);
-        //     let end = Instant::now();
-        //     let duration = end - start;
-        //     println!("{}: len() in {}ms", T::db_type_name(), duration.as_millis());
-        //     results.push(("len()".to_string(), duration));
-        // }
-
         for _ in 0..ITERATIONS {
             let start = Instant::now();
             let reader = txn.get_reader();
@@ -146,9 +136,9 @@ async fn main() {
     {
         use crate::common::{BenchInserter, BenchWriteTransaction};
 
-        let tbl_path = data_dir.join("customer.tbl");
+        let records = gen_records(NUMBER_RECORD);
 
-        async fn load<T: BenchDatabase>(tbl_path: impl AsRef<Path>, path: impl AsRef<Path>) {
+        async fn load<T: BenchDatabase>(path: impl AsRef<Path>, records: &[Customer]) {
             if path.as_ref().exists() {
                 return;
             }
@@ -156,19 +146,19 @@ async fn main() {
             println!("{}: start loading", T::db_type_name());
             let database = T::build(path).await;
 
-            for customer in gen_records(NUMBER_RECORD) {
+            for customer in records.iter() {
                 let mut tx = database.write_transaction().await;
                 let mut inserter = tx.get_inserter();
-                inserter.insert(customer).unwrap();
+                inserter.insert(customer.clone()).unwrap();
                 drop(inserter);
                 tx.commit().await.unwrap();
             }
             println!("{}: loading completed", T::db_type_name());
         }
 
-        load::<TonboBenchDataBase>(&tbl_path, data_dir.join("tonbo")).await;
-        load::<RocksdbBenchDatabase>(&tbl_path, data_dir.join("rocksdb")).await;
-        load::<TonboS3BenchDataBase>(&tbl_path, data_dir.join("tonbo_s3")).await;
+        load::<TonboBenchDataBase>(data_dir.join("tonbo"), &records).await;
+        load::<RocksdbBenchDatabase>(data_dir.join("rocksdb"), &records).await;
+        load::<TonboS3BenchDataBase>(data_dir.join("tonbo_s3"), &records).await;
     }
 
     let ranges = ranges();
