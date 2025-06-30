@@ -483,7 +483,7 @@ where
     /// necessary to call this method before exiting if data loss is not acceptable. See also
     /// [`DbOption::disable_wal`] and [`DbOption::wal_buffer_size`].
     pub async fn flush_wal(&self) -> Result<(), DbError<R>> {
-        self.schema.write().await.flush_wal().await?;
+        self.schema.read().await.flush_wal().await?;
         Ok(())
     }
 
