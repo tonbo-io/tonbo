@@ -83,7 +83,7 @@ bytes = { version = "1.7", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["wasmbind"] }
 crc32fast = "1"
 crossbeam-skiplist = "0.1"
-datafusion = { version = "47", optional = true }
+datafusion = { version = "48", optional = true }
 flume = { version = "0.11", features = ["async"] }
 fusio = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio", features = [
     "dyn",
