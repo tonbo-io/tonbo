@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
+use arrow::datatypes::Schema as ArrowSchema;
 
 use crate::{
     fs::manager::StoreManager,
-    record::Record,
+    record::{Record, Schema},
     timestamp::Timestamp,
     version::{set::VersionSet, TransactionTs},
     ParquetLru,
@@ -14,7 +14,7 @@ pub(crate) struct Context<R: Record> {
     pub(crate) manager: Arc<StoreManager>,
     pub(crate) parquet_lru: ParquetLru,
     pub(crate) version_set: VersionSet<R>,
-    pub(crate) arrow_schema: Arc<Schema>,
+    pub(crate) schema: Arc<Schema>,
 }
 
 impl<R> Context<R>
@@ -25,13 +25,13 @@ where
         manager: Arc<StoreManager>,
         parquet_lru: ParquetLru,
         version_set: VersionSet<R>,
-        arrow_schema: Arc<Schema>,
+        schema: Arc<Schema>,
     ) -> Self {
         Self {
             manager,
             parquet_lru,
             version_set,
-            arrow_schema,
+            schema,
         }
     }
 
@@ -47,8 +47,8 @@ where
         &self.parquet_lru
     }
 
-    pub(crate) fn arrow_schema(&self) -> &Arc<Schema> {
-        &self.arrow_schema
+    pub(crate) fn arrow_schema(&self) -> &Arc<ArrowSchema> {
+        self.schema.arrow_schema()
     }
 
     pub(crate) fn load_ts(&self) -> Timestamp {

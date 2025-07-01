@@ -3,8 +3,9 @@ use std::{mem::transmute, sync::Arc};
 use futures::TryStreamExt;
 use js_sys::{Array, Function, JsString, Object, Reflect};
 use tonbo::{
+    arrow::datatypes::Field,
     executor::opfs::OpfsExecutor,
-    record::{DynRecord, DynSchema, ValueDesc},
+    record::{DynRecord, Schema, ValueDesc},
     DB,
 };
 use wasm_bindgen::prelude::*;
@@ -78,9 +79,13 @@ impl TonboDB {
     #[wasm_bindgen(constructor)]
     pub async fn new(option: DbOption, schema: Object) -> Self {
         let (desc, primary_key_index) = Self::parse_schema(schema);
-        let schema = DynSchema::new(desc.clone(), primary_key_index);
+        let schema = Schema::new(
+            desc.iter()
+                .map(|v| Field::new(v.name.as_str(), (&v.datatype).into(), v.is_nullable)).collect(),
+            primary_key_index,
+        );
 
-        let db = DB::new(option.into_option(&schema), JsExecutor::new(), schema)
+        let db = DB::new(option.into_option(), JsExecutor::new(), schema)
             .await
             .unwrap();
 
@@ -297,7 +302,8 @@ mod tests {
                 &JsValue::from_str(i.to_string().as_str()),
             )
             .unwrap();
-            js_sys::Reflect::set(&item, &JsValue::from_str("price"), &JsValue::from(i as f64)).unwrap();
+            js_sys::Reflect::set(&item, &JsValue::from_str("price"), &JsValue::from(i as f64))
+                .unwrap();
 
             items.push(item);
         }

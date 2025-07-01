@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
-    record::{Record, Schema},
+    record::Record,
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
@@ -140,7 +140,7 @@ where
             .flatten()
         {
             Some(log_id) => {
-                let recover_edits = VersionEdit::<<R::Schema as Schema>::Key>::recover(
+                let recover_edits = VersionEdit::<R::Key>::recover(
                     option.version_log_path(log_id),
                     option.base_fs.clone(),
                 )
@@ -189,7 +189,7 @@ where
 
     pub(crate) async fn apply_edits(
         &self,
-        mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
+        mut version_edits: Vec<VersionEdit<R::Key>>,
         delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {
@@ -323,7 +323,7 @@ where
         &self,
         log_id: FileId,
         old_log_id: FileId,
-        edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
+        edits: impl ExactSizeIterator<Item = &'r VersionEdit<R::Key>>,
     ) -> Result<(), VersionError<R>> {
         if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
             // push local manifest to base file system
@@ -344,7 +344,7 @@ where
         option: &DbOption,
         fs: Arc<dyn DynFs>,
         gen: FileId,
-    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
+    ) -> Result<Logger<VersionEdit<R::Key>>, VersionError<R>> {
         Options::new(option.version_log_path(gen))
             .build_with_fs(fs)
             .await
@@ -399,7 +399,7 @@ pub(crate) mod tests {
 
     use crate::{
         fs::{generate_file_id, manager::StoreManager},
-        record::{test::StringSchema, Record},
+        record::Record,
         scope::Scope,
         version::{
             cleaner::CleanTag,
@@ -444,7 +444,6 @@ pub(crate) mod tests {
         let (sender, _) = bounded(1);
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
         ));
         manager
             .base_fs()
@@ -481,7 +480,7 @@ pub(crate) mod tests {
         let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::new(path, &StringSchema);
+        let mut option = DbOption::new(path);
         option.version_log_snapshot_threshold = 1000;
 
         let option = Arc::new(option);
@@ -647,7 +646,7 @@ pub(crate) mod tests {
     async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
         let manager = Arc::new(StoreManager::new(base_option, vec![]).unwrap());
         let (sender, _) = bounded(1);
-        let mut option = DbOption::new(path, &StringSchema);
+        let mut option = DbOption::new(path);
         option.version_log_snapshot_threshold = 4;
 
         let option = Arc::new(option);
@@ -831,7 +830,6 @@ pub(crate) mod tests {
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
         ));
 
         let (sender, _) = bounded(1);

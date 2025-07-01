@@ -16,7 +16,7 @@ use ulid::Ulid;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    record::{Record, Schema},
+    record::Record,
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TsRef},
 };
@@ -70,7 +70,7 @@ where
 
     pub(crate) async fn get(
         self,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<R::Key>,
         projection_mask: ProjectionMask,
     ) -> ParquetResult<Option<RecordBatchEntry<R>>> {
         self.scan(
@@ -87,10 +87,7 @@ where
 
     pub(crate) async fn scan<'scan>(
         self,
-        range: (
-            Bound<&'scan <R::Schema as Schema>::Key>,
-            Bound<&'scan <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
@@ -137,8 +134,7 @@ pub(crate) mod tests {
     use crate::{
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileType},
-        inmem::immutable::tests::TestSchema,
-        record::{Record, Schema},
+        record::Record,
         tests::{get_test_record_batch, Test},
         timestamp::Ts,
         DbOption,
@@ -155,9 +151,11 @@ pub(crate) mod tests {
                 .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
                 .build(),
         );
+        let schema = Test::schema();
+
         let mut writer = AsyncArrowWriter::try_new_with_options(
             AsyncWriter::new(file),
-            TestSchema {}.arrow_schema().clone(),
+            schema.arrow_schema().clone(),
             options,
         )
         .expect("Failed to create writer");
@@ -192,11 +190,9 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
+        let schema = Test::schema();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::new(
-                Path::from_filesystem_path(temp_dir.path()).unwrap(),
-                &TestSchema,
-            ),
+            DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
         )
         .await;
@@ -219,7 +215,7 @@ pub(crate) mod tests {
                     key.borrow(),
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 3],
                     ),
@@ -238,7 +234,7 @@ pub(crate) mod tests {
                     key.borrow(),
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 4],
                     ),
@@ -257,7 +253,7 @@ pub(crate) mod tests {
                     key.borrow(),
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2],
                     ),
@@ -276,11 +272,9 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
+        let schema = Test::schema();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::new(
-                Path::from_filesystem_path(temp_dir.path()).unwrap(),
-                &TestSchema,
-            ),
+            DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
         )
         .await;
@@ -303,7 +297,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 3],
                     ),
@@ -330,7 +324,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 4],
                     ),
@@ -357,7 +351,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2],
                     ),

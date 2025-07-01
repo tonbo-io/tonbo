@@ -21,7 +21,7 @@ use crate::{
     context::Context,
     fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
-    record::{Record, Schema},
+    record::Record,
     scope::Scope,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TsRef},
@@ -45,7 +45,7 @@ where
     R: Record,
 {
     ts: Timestamp,
-    pub(crate) level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
+    pub(crate) level_slice: [Vec<Scope<R::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
     timestamp: Arc<AtomicU32>,
@@ -120,7 +120,7 @@ where
     pub(crate) async fn query(
         &self,
         manager: &StoreManager,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<R::Key>,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
@@ -182,7 +182,7 @@ where
     async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<R::Key>,
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,
@@ -202,10 +202,7 @@ where
             .map_err(VersionError::Parquet)
     }
 
-    pub(crate) fn scope_search(
-        key: &<R::Schema as Schema>::Key,
-        level: &[Scope<<R::Schema as Schema>::Key>],
-    ) -> usize {
+    pub(crate) fn scope_search(key: &R::Key, level: &[Scope<R::Key>]) -> usize {
         level
             .binary_search_by(|scope| scope.min.cmp(key))
             .unwrap_or_else(|index| index.saturating_sub(1))
@@ -220,10 +217,7 @@ where
         &self,
         ctx: &Context<R>,
         streams: &mut Vec<ScanStream<'streams, R>>,
-        range: (
-            Bound<&'streams <R::Schema as Schema>::Key>,
-            Bound<&'streams <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
@@ -297,7 +291,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn to_edits(&self) -> Vec<VersionEdit<<R::Schema as Schema>::Key>> {
+    pub(crate) fn to_edits(&self) -> Vec<VersionEdit<R::Key>> {
         let mut edits = Vec::new();
 
         for (level, scopes) in self.level_slice.iter().enumerate() {
@@ -331,7 +325,7 @@ where
     R: Record,
 {
     #[error("version encode error: {0}")]
-    Encode(#[source] <<R::Schema as Schema>::Key as Encode>::Error),
+    Encode(#[source] <R::Key as Encode>::Error),
     #[error("version io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("version parquet error: {0}")]
