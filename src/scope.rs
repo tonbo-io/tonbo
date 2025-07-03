@@ -11,6 +11,8 @@ pub(crate) struct Scope<K> {
     pub(crate) max: K,
     pub(crate) gen: FileId,
     pub(crate) wal_ids: Option<Vec<FileId>>,
+    /// Approximate file size in bytes
+    pub(crate) file_size: u64,
 }
 
 impl<K> Clone for Scope<K>
@@ -23,6 +25,7 @@ where
             max: self.max.clone(),
             gen: self.gen,
             wal_ids: self.wal_ids.clone(),
+            file_size: self.file_size,
         }
     }
 }
@@ -91,6 +94,8 @@ where
         let (result, _) = writer.write_all(&self.gen.to_bytes()[..]).await;
         result?;
 
+        self.file_size.encode(writer).await?;
+
         match &self.wal_ids {
             None => {
                 0u8.encode(writer).await?;
@@ -129,6 +134,8 @@ where
             result?;
             FileId::from_bytes(buf)
         };
+        let size = u64::decode(reader).await?;
+
         let wal_ids = match u8::decode(reader).await? {
             0 => None,
             1 => {
@@ -150,13 +157,20 @@ where
             max,
             gen,
             wal_ids,
+            file_size: size,
         })
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::ops::Bound;
+    use std::{
+        io::{Cursor, SeekFrom},
+        ops::Bound,
+    };
+
+    use fusio_log::{Decode, Encode};
+    use tokio::io::AsyncSeekExt;
 
     use super::Scope;
     use crate::fs::generate_file_id;
@@ -168,6 +182,7 @@ mod test {
             max: 200,
             gen: generate_file_id(),
             wal_ids: None,
+            file_size: 8,
         };
 
         // test out of range
@@ -221,5 +236,24 @@ mod test {
             assert!(scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&201))));
             assert!(scope.meets_range((Bound::Excluded(&100), Bound::Excluded(&200))));
         }
+    }
+
+    #[tokio::test]
+    async fn test_encode_scope() {
+        let scope = Scope::<i32> {
+            min: 100,
+            max: 200,
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 8,
+        };
+
+        let mut bytes = Vec::new();
+        let mut buf = Cursor::new(&mut bytes);
+        scope.encode(&mut buf).await.unwrap();
+
+        buf.seek(SeekFrom::Start(0)).await.unwrap();
+        let decoded = Scope::<i32>::decode(&mut buf).await.unwrap();
+        assert_eq!(scope, decoded)
     }
 }
