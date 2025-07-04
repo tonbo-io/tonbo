@@ -17,16 +17,17 @@ use arrow::{
         Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
+use common::{
+    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, Time32, Time64, TimeUnit,
+    Timestamp, F32, F64,
+};
 
-use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, DataType};
+use super::{record::DynRecord, record_ref::DynRecordRef, value::Value};
 use crate::{
     cast_arc_value,
     inmem::immutable::{ArrowArrays, Builder},
     magic::USER_COLUMN_OFFSET,
-    record::{
-        Date32, Date64, Key, LargeBinary, LargeString, Record, Schema, Time32, Time64, TimeUnit,
-        Timestamp, F32, F64,
-    },
+    record::{Record, Schema},
     timestamp::Ts,
 };
 
@@ -563,12 +564,13 @@ implement_builder_array!(
 #[cfg(test)]
 mod tests {
 
+    use common::{F32, F64};
     use parquet::arrow::ProjectionMask;
 
     use crate::{
         dyn_record, dyn_schema,
         inmem::immutable::{ArrowArrays, Builder},
-        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema, F32, F64},
+        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema},
     };
 
     #[tokio::test]

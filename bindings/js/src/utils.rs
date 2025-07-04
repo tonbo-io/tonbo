@@ -3,7 +3,9 @@ use std::{any::Any, sync::Arc};
 use js_sys::{Object, Reflect, Uint8Array};
 use tonbo::{
     cast_arc_value,
-    record::{DataType, DynRecord, Value, ValueDesc, F32, F64},
+    datatype::DataType,
+    record::{DynRecord, Value, ValueDesc},
+    F32, F64,
 };
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -188,10 +190,7 @@ pub(crate) fn to_record(cols: &Vec<Value>, primary_key_index: usize) -> JsValue 
 #[cfg(test)]
 mod tests {
 
-    use tonbo::{
-        cast_arc_value,
-        record::{DataType, ValueDesc, F64},
-    };
+    use tonbo::{cast_arc_value, datatype::DataType, record::ValueDesc, F64};
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 

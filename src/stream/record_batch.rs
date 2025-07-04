@@ -6,10 +6,11 @@ use std::{
 };
 
 use arrow::{array::RecordBatch, datatypes::Schema};
+use common::Key;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{option::OptionRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
+    record::{option::OptionRecordRef, Record, RecordRef, Schema as RecordSchema},
     timestamp::Ts,
 };
 

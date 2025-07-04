@@ -7,6 +7,7 @@ use std::{
     mem::transmute,
 };
 
+use common::{Key, KeyRef};
 use flume::SendError;
 use lockable::AsyncLimit;
 use parquet::{
@@ -17,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
-    record::{Key, KeyRef, RecordRef, Schema as RecordSchema},
+    record::{RecordRef, Schema as RecordSchema},
     snapshot::Snapshot,
     stream::{self, mem_projection::MemProjectionStream},
     timestamp::{Timestamp, Ts},
@@ -302,6 +303,7 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
+    use common::datatype::DataType;
     use fusio::path::Path;
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
@@ -313,7 +315,7 @@ mod tests {
         fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema,
         record::{
-            runtime::{test::test_dyn_item_schema, DataType, DynRecord, Value},
+            runtime::{test::test_dyn_item_schema, DynRecord, Value},
             test::StringSchema,
         },
         tests::{build_db, build_schema, Test},

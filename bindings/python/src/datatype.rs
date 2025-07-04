@@ -5,7 +5,7 @@ use std::{
 };
 
 use pyo3::pyclass;
-use tonbo::record::{DataType as TonboDataType, F64};
+use tonbo::{datatype::DataType as TonboDataType, F64};
 
 #[pyclass]
 #[derive(PartialEq, Clone)]

@@ -10,7 +10,7 @@ use arrow::array::{
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use fusio_log::{Decode, Encode};
 
-use crate::record::{Key, KeyRef, TimeUnit};
+use crate::key::{Key, KeyRef, TimeUnit};
 
 /// Number of seconds in a day
 pub const SECONDS_IN_DAY: i64 = 86_400;

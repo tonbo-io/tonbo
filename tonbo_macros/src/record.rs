@@ -232,7 +232,7 @@ fn trait_record_codegen(
             where
                 Self: 'r;
 
-            fn key(&self) -> <<Self::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_> {
+            fn key(&self) -> <<Self::Schema as ::tonbo::record::Schema>::Key as ::tonbo::Key>::Ref<'_> {
                 #fn_primary_key
             }
 
@@ -513,7 +513,7 @@ fn trait_decode_ref_codegen(
         impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_type {
             type Record = #struct_name;
 
-            fn key(self) -> <<<<#struct_ref_type as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'r> {
+            fn key(self) -> <<<<#struct_ref_type as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::Key>::Ref<'r> {
                 self.#primary_key_name
             }
 
@@ -834,7 +834,7 @@ fn struct_builder_codegen(
         }
 
         impl ::tonbo::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
-            fn push(&mut self, key: ::tonbo::timestamp::Ts<<<<#struct_name as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
+            fn push(&mut self, key: ::tonbo::timestamp::Ts<<<<#struct_name as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {
                     Some(row) => {
