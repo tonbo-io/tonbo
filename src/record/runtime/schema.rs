@@ -134,7 +134,7 @@ macro_rules! dyn_schema {
             $crate::record::DynSchema::new(
                 vec![
                     $(
-                        $crate::record::ValueDesc::new($name.into(), $crate::record::DataType::$type, $nullable),
+                        $crate::record::ValueDesc::new($name.into(), $crate::datatype::DataType::$type, $nullable),
                     )*
                 ],
                 $primary,

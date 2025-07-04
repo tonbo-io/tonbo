@@ -425,6 +425,7 @@ where
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
+    use common::datatype::DataType;
     use flume::bounded;
     use fusio::{path::Path, DynFs};
     use fusio_dispatch::FsOptions;
@@ -443,7 +444,7 @@ pub(crate) mod tests {
             immutable::{tests::TestSchema, Immutable},
             mutable::MutableMemTable,
         },
-        record::{DataType, DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
+        record::{DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,

@@ -4,10 +4,7 @@ use pyo3::{
     types::{PyBytes, PyDict, PyDictMethods},
     Bound, Py, PyAny, Python,
 };
-use tonbo::{
-    cast_arc_value,
-    record::{DataType as TonboDataType, Value, F64},
-};
+use tonbo::{cast_arc_value, datatype::DataType as TonboDataType, record::Value, F64};
 
 use crate::{column::Column, datatype::DataType, range};
 

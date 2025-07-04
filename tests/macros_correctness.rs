@@ -1,4 +1,4 @@
-use tonbo::record::F32;
+use tonbo::F32;
 use tonbo_macros::Record;
 
 #[derive(Record, Debug, PartialEq)]

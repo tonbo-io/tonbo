@@ -10,16 +10,17 @@ use arrow::{
         UInt32Type, UInt64Type, UInt8Type,
     },
 };
+use common::{
+    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, Time32, Time64, TimeUnit,
+    Timestamp, F32, F64,
+};
 use fusio::Write;
 use fusio_log::Encode;
 
-use super::{DataType, DynRecord, Value};
+use super::{DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
-    record::{
-        option::OptionRecordRef, Date32, Date64, Key, LargeBinary, LargeString, Record,
-        RecordEncodeError, RecordRef, Schema, Time32, Time64, TimeUnit, Timestamp, F32, F64,
-    },
+    record::{option::OptionRecordRef, Record, RecordEncodeError, RecordRef, Schema},
 };
 
 #[derive(Clone)]
@@ -253,11 +254,12 @@ implement_record_ref!(
 #[cfg(test)]
 mod tests {
 
+    use common::{datatype::DataType, TimeUnit, Timestamp, F32, F64};
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
         cast_arc_value, dyn_record, dyn_schema, make_dyn_record, make_dyn_schema,
-        record::{DataType, Record, RecordRef, Schema, TimeUnit, Timestamp, F32, F64},
+        record::{Record, RecordRef, Schema},
     };
 
     #[test]

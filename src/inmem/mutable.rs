@@ -1,6 +1,7 @@
 use std::{ops::Bound, sync::Arc};
 
 use async_lock::Mutex;
+use common::KeyRef;
 use crossbeam_skiplist::{
     map::{Entry, Range},
     SkipMap,
@@ -10,7 +11,7 @@ use fusio::DynFs;
 use crate::{
     fs::{generate_file_id, FileId},
     inmem::immutable::Immutable,
-    record::{KeyRef, Record, Schema},
+    record::{Record, Schema},
     timestamp::{Timestamp, Ts, TsRef, EPOCH},
     trigger::FreezeTrigger,
     wal::{
@@ -224,12 +225,13 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
+    use common::datatype::DataType;
     use fusio::{disk::TokioFs, path::Path, DynFs};
 
     use super::MutableMemTable;
     use crate::{
         inmem::immutable::tests::TestSchema,
-        record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{test::StringSchema, DynRecord, DynSchema, Record, Value, ValueDesc},
         tests::{Test, TestRef},
         timestamp::Ts,
         trigger::TriggerFactory,

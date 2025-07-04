@@ -11,14 +11,12 @@ use arrow::{
     },
     datatypes::{DataType as ArrowDataType, Field},
 };
+use common::{
+    datatype::DataType, Date32, Date64, Key, KeyRef, LargeBinary, LargeString, Time32, Time64,
+    TimeUnit, Timestamp, F32, F64,
+};
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, DecodeError, Encode};
-
-use super::DataType;
-use crate::record::{
-    Date32, Date64, Key, KeyRef, LargeBinary, LargeString, Time32, Time64, TimeUnit, Timestamp,
-    F32, F64,
-};
 
 #[derive(Debug, Clone)]
 pub struct ValueDesc {
@@ -558,8 +556,9 @@ for_datatype! { implement_encode_col }
 mod tests {
     use std::sync::Arc;
 
+    use common::{datatype::DataType, TimeUnit, Timestamp};
+
     use super::Value;
-    use crate::record::{DataType, TimeUnit, Timestamp};
 
     #[test]
     fn test_value_eq() {

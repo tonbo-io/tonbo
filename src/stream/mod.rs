@@ -12,6 +12,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use common::Key;
 use futures_core::Stream;
 use futures_util::{ready, stream};
 use parquet::arrow::ProjectionMask;
@@ -21,7 +22,7 @@ use record_batch::RecordBatchEntry;
 use crate::{
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
-    record::{Key, Record, RecordRef, Schema},
+    record::{Record, RecordRef, Schema},
     stream::{level::LevelStream, mem_projection::MemProjectionStream},
     timestamp::Ts,
     transaction::TransactionScan,

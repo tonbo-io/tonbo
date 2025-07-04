@@ -129,6 +129,7 @@ use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::p
 pub use arrow;
 use async_lock::RwLock;
 use async_stream::stream;
+pub use common::*;
 use compaction::leveled::LeveledCompactor;
 use context::Context;
 use flume::{bounded, Sender};
@@ -149,7 +150,7 @@ use parquet::{
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
 use thiserror::Error;
-use timestamp::{Timestamp, TsRef};
+use timestamp::TsRef;
 use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
@@ -437,7 +438,11 @@ where
         }
     }
 
-    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), DbError<R>> {
+    pub(crate) async fn write(
+        &self,
+        record: R,
+        ts: timestamp::Timestamp,
+    ) -> Result<(), DbError<R>> {
         let schema = self.schema.read().await;
 
         if schema.write(LogType::Full, record, ts).await? {
@@ -450,7 +455,7 @@ where
     pub(crate) async fn write_batch(
         &self,
         mut records: impl ExactSizeIterator<Item = R>,
-        ts: Timestamp,
+        ts: timestamp::Timestamp,
     ) -> Result<(), DbError<R>> {
         let schema = self.schema.read().await;
 
@@ -618,7 +623,12 @@ where
         Ok(schema)
     }
 
-    async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
+    async fn write(
+        &self,
+        log_ty: LogType,
+        record: R,
+        ts: timestamp::Timestamp,
+    ) -> Result<bool, DbError<R>> {
         self.mutable.insert(log_ty, record, ts).await
     }
 
@@ -626,7 +636,7 @@ where
         &self,
         log_ty: LogType,
         key: <R::Schema as Schema>::Key,
-        ts: Timestamp,
+        ts: timestamp::Timestamp,
     ) -> Result<bool, DbError<R>> {
         self.mutable.remove(log_ty, key, ts).await
     }
@@ -634,7 +644,7 @@ where
     async fn recover_append(
         &self,
         key: <R::Schema as Schema>::Key,
-        ts: Timestamp,
+        ts: timestamp::Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
         self.mutable.append(None, key, ts, value).await
@@ -645,7 +655,7 @@ where
         ctx: &Context<R>,
         version: &'get Version<R>,
         key: &'get <R::Schema as Schema>::Key,
-        ts: Timestamp,
+        ts: timestamp::Timestamp,
         projection: Projection<'get>,
     ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
         let primary_key_index = self.record_schema.primary_key_index();
@@ -695,7 +705,7 @@ where
             .map(|entry| Entry::RecordBatch(entry)))
     }
 
-    fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: Timestamp) -> bool {
+    fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: timestamp::Timestamp) -> bool {
         self.mutable.check_conflict(key, ts)
             || self
                 .immutables
@@ -733,7 +743,7 @@ where
     schema: &'scan DbStorage<R>,
     lower: Bound<&'range <R::Schema as Schema>::Key>,
     upper: Bound<&'range <R::Schema as Schema>::Key>,
-    ts: Timestamp,
+    ts: timestamp::Timestamp,
 
     version: &'scan Version<R>,
     fn_pre_stream:
@@ -755,7 +765,7 @@ where
             Bound<&'range <R::Schema as Schema>::Key>,
             Bound<&'range <R::Schema as Schema>::Key>,
         ),
-        ts: Timestamp,
+        ts: timestamp::Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
@@ -995,6 +1005,7 @@ pub(crate) mod tests {
         datatypes::{Schema, UInt32Type},
     };
     use async_lock::RwLock;
+    use common::{datatype::DataType, Key, F32, F64};
     use flume::{bounded, Receiver};
     use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
     use fusio_dispatch::FsOptions;
@@ -1015,8 +1026,8 @@ pub(crate) mod tests {
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
-            DataType, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
-            Schema as RecordSchema, Value, F32, F64,
+            DynRecord, RecordDecodeError, RecordEncodeError, RecordRef, Schema as RecordSchema,
+            Value,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},

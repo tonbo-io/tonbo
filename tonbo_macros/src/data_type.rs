@@ -86,10 +86,10 @@ impl DataType {
                 quote!(bytes::Bytes)
             }
             DataType::Float32 => {
-                quote!(::tonbo::record::F32)
+                quote!(::tonbo::F32)
             }
             DataType::Float64 => {
-                quote!(::tonbo::record::F64)
+                quote!(::tonbo::F64)
             }
         }
     }
@@ -478,10 +478,10 @@ impl DataType {
                 }
             }
             DataType::Float32 => {
-                quote! {std::mem::size_of::<::tonbo::record::F32>()}
+                quote! {std::mem::size_of::<::tonbo::F32>()}
             }
             DataType::Float64 => {
-                quote! {std::mem::size_of::<::tonbo::record::F64>()}
+                quote! {std::mem::size_of::<::tonbo::F64>()}
             }
         }
     }

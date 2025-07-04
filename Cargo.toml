@@ -1,4 +1,15 @@
-workspace = { members = ["parquet-lru", "tonbo_macros"] }
+
+[workspace]
+members = ["parquet-lru", "tonbo_macros", "common"]
+[workspace.dependencies]
+arrow = "55"
+fusio = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio", features = [
+    "dyn",
+    "fs",
+] }
+fusio-log = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-log", default-features = false, features = [
+    "bytes",
+] }
 
 [package]
 description = "An embedded persistent KV database in Rust."
@@ -14,7 +25,7 @@ version = "0.3.2"
 msrv = "1.79.0"
 
 [features]
-aws = ["fusio-dispatch/aws", "fusio-log/aws", "fusio/aws"]
+aws = ["common/aws", "fusio-dispatch/aws", "fusio-log/aws", "fusio/aws"]
 bench = ["redb", "rocksdb", "sled"]
 bytes = ["dep:bytes"]
 datafusion = ["dep:async-trait", "dep:datafusion"]
@@ -22,6 +33,7 @@ default = ["aws", "bytes", "tokio", "tokio-http"]
 load_tbl = []
 object-store = ["fusio/object_store"]
 opfs = [
+    "common/web",
     "dep:wasm-bindgen-futures",
     "fusio-dispatch/opfs",
     "fusio-log/web",
@@ -33,6 +45,7 @@ rocksdb = ["dep:rocksdb"]
 sled = ["dep:sled"]
 sync = ["fusio/sync"]
 tokio = [
+    "common/tokio",
     "fusio-dispatch/tokio",
     "fusio-log/tokio",
     "fusio-parquet/tokio",
@@ -75,12 +88,13 @@ path = "benches/criterion/writes.rs"
 required-features = ["sled"]
 
 [dependencies]
-arrow = "55"
+arrow = { workspace = true }
 async-lock = "3"
 async-stream = "0.3"
 async-trait = { version = "0.1", optional = true }
 bytes = { version = "1.7", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["wasmbind"] }
+common = { version = "0.3.2", path = "common" }
 crc32fast = "1"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "47", optional = true }
@@ -90,9 +104,7 @@ fusio = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9
     "fs",
 ] }
 fusio-dispatch = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-dispatch" }
-fusio-log = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-log", default-features = false, features = [
-    "bytes",
-] }
+fusio-log = { workspace = true }
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio", rev = "278eb79091b24df29eb9f3ac78ae6c3305ea3ee6", version = "0.3.8", package = "fusio-parquet" }
 futures-core = "0.3"
 futures-util = "0.3"

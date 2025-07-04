@@ -7,7 +7,7 @@ use arrow::array::{
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use crate::record::{Key, KeyRef};
+use crate::key::{Key, KeyRef};
 
 #[macro_export]
 macro_rules! implement_key {
@@ -175,7 +175,7 @@ mod tests {
 
     use arrow::array::ArrowNativeTypeOp;
 
-    use crate::record::key::num::F32;
+    use crate::key::num::F32;
 
     #[tokio::test]
     async fn test_zero() {
