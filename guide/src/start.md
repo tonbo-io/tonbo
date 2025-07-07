@@ -15,6 +15,7 @@ For native platforms, [Tokio](https://github.com/tokio-rs/tokio) is the most pop
 ```toml
 tokio = { version = "1", features = ["full"] }
 tonbo = { git = "https://github.com/tonbo-io/tonbo" }
+fusio = { version = "*", features = ["tokio"] }
 ```
 
 For browser targets using OPFS as the storage backend, disable the `tokio` feature and enable the `wasm` feature because Tokio is incompatible with OPFS. Since `tokio` is enabled by default, you must disable default features. If you plan to use S3 as the backend, also enable the `wasm-http` feature:
