@@ -15,7 +15,6 @@ For native platforms, [Tokio](https://github.com/tokio-rs/tokio) is the most pop
 ```toml
 tokio = { version = "1", features = ["full"] }
 tonbo = { git = "https://github.com/tonbo-io/tonbo" }
-fusio = { version = "*", features = ["tokio"] }
 ```
 
 For browser targets using OPFS as the storage backend, disable the `tokio` feature and enable the `wasm` feature because Tokio is incompatible with OPFS. Since `tokio` is enabled by default, you must disable default features. If you plan to use S3 as the backend, also enable the `wasm-http` feature:
@@ -61,7 +60,9 @@ After defining your schema, you can create a `DB` instance using a customized `D
 
 ```rust
 use std::fs;
-use fusio::path::Path;
+// TODO : delete if approved
+// use fusio::path::Path;
+use tonbo::Path;
 use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
 
 #[tokio::main]
@@ -70,6 +71,9 @@ async fn main() {
     fs::create_dir_all("./db_path/users").unwrap();
 
     let options = DbOption::new(
+
+        // TODO : delete comment if needed
+        // NOTE : if you use fusio::path::Path, cargo will throw an error since it was expecting Tonbo::Path.
         Path::from_filesystem_path("./db_path/users").unwrap(),
         &UserSchema,
     );
