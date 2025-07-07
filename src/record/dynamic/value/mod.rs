@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field};
 pub use cast::*;
 use thiserror::Error;
 pub(crate) use util::*;
@@ -52,6 +52,7 @@ pub enum Value {
     Time32(i32, TimeUnit),
     Time64(i64, TimeUnit),
     Timestamp(i64, TimeUnit),
+    List(Vec<Value>),
 }
 
 impl Value {
@@ -99,6 +100,15 @@ impl Value {
                 };
                 DataType::Time64(arrow_unit)
             }
+            Value::List(vec) => {
+                if vec.is_empty() {
+                    // TODO: handle empty list
+                    DataType::List(Arc::new(Field::new("item", DataType::Null, false)))
+                } else {
+                    let inner_type = vec[0].data_type();
+                    DataType::List(Arc::new(Field::new("item", inner_type, false)))
+                }
+            }
         }
     }
 
@@ -132,6 +142,7 @@ impl Key for Value {
             Value::Timestamp(v, time_unit) => ValueRef::Timestamp(*v, *time_unit),
             Value::Time32(v, time_unit) => ValueRef::Time32(*v, *time_unit),
             Value::Time64(v, time_unit) => ValueRef::Time64(*v, *time_unit),
+            Value::List(vec) => ValueRef::List(vec.clone()),
         }
     }
 
@@ -181,6 +192,9 @@ impl Key for Value {
                 }
                 _ => unreachable!("Time64 only supports microsecond and nanosecond"),
             },
+            Value::List(_vec) => {
+                unimplemented!("List value cannot be be used as primary key for now")
+            }
         }
     }
 }
@@ -232,6 +246,7 @@ impl PartialEq for Value {
                 let (o_sec, o_nsec) = split_second_ns(*b, *unit2);
                 s_sec == o_sec && s_nsec == o_nsec
             }
+            (Value::List(a), Value::List(b)) => a.eq(b),
             _ => {
                 panic!("cannot compare different types: {self:?} and {other:?}")
             }
@@ -278,6 +293,7 @@ impl Ord for Value {
                     Ordering::Equal => s_nsec.cmp(&o_nsec),
                 }
             }
+            (Value::List(a), Value::List(b)) => a.cmp(b),
             _ => {
                 panic!("cannot compare different types: {self:?} and {other:?}")
             }
@@ -319,6 +335,9 @@ impl Hash for Value {
                 v.hash(state);
                 time_unit.hash(state);
             }
+            Value::List(vec) => {
+                vec.hash(state);
+            }
         }
     }
 }
@@ -345,12 +364,22 @@ impl fmt::Display for Value {
             Value::Timestamp(v, unit) => write!(f, "Timestamp({v}, {unit:?})"),
             Value::Time32(v, unit) => write!(f, "Time32({v}, {unit:?})"),
             Value::Time64(v, unit) => write!(f, "Time64({v}, {unit:?})"),
+            Value::List(vec) => write!(
+                f,
+                "List({:?})",
+                vec.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::vec;
+
     use arrow::datatypes::DataType;
 
     use crate::record::{AsValue, TimeUnit, Value};
@@ -450,5 +479,75 @@ mod tests {
         assert!(t1 == t2);
         assert!(t1 < t3);
         assert!(t1 > t4);
+    }
+
+    #[test]
+    fn test_list_value_cmp() {
+        {
+            let l1 = Value::List(vec![Value::Int32(1), Value::Int32(2)]);
+            let l2 = Value::List(vec![Value::Int32(1), Value::Int32(2)]);
+            let l3 = Value::List(vec![Value::Int32(1), Value::Int32(3)]);
+            let l4 = Value::List(vec![Value::Int32(0), Value::Int32(4)]);
+            assert!(l1 == l2);
+            assert!(l1 < l3);
+            assert!(l3 > l4);
+        }
+        {
+            let l1 = Value::List(vec![
+                Value::List(vec![Value::Date32(1), Value::Date32(2), Value::Date32(3)]),
+                Value::List(vec![Value::Date32(1), Value::Date32(3), Value::Date32(2)]),
+            ]);
+            let l2 = Value::List(vec![
+                Value::List(vec![Value::Date32(1), Value::Date32(2), Value::Date32(3)]),
+                Value::List(vec![Value::Date32(1), Value::Date32(3), Value::Date32(2)]),
+            ]);
+            let l3 = Value::List(vec![
+                Value::List(vec![Value::Date32(1), Value::Date32(2), Value::Date32(3)]),
+                Value::List(vec![Value::Date32(2), Value::Date32(1), Value::Date32(2)]),
+            ]);
+            assert!(l1 == l2);
+            assert!(l1 < l3);
+            assert!(l3 > l2);
+        }
+    }
+
+    #[test]
+    fn test_list_value_with_null_cmp() {
+        {
+            let l1 = Value::List(vec![Value::Date64(1), Value::Null]);
+            let l2 = Value::List(vec![Value::Date64(1), Value::Null]);
+            let l3 = Value::List(vec![Value::Null, Value::Date64(3)]);
+            let l4 = Value::List(vec![Value::Null, Value::Null]);
+            assert!(l1 == l2);
+            assert!(l1 > l3);
+            assert!(l4 < l3);
+        }
+        {
+            let l1 = Value::Null;
+            let l2 = Value::List(vec![Value::Null]);
+            let l3 = Value::List(vec![Value::List(vec![Value::Null])]);
+            let l4 = Value::List(vec![Value::List(vec![Value::Null, Value::Null])]);
+            assert!(l1 < l2);
+            assert!(l2 < l3);
+            assert!(l3 < l4);
+        }
+        {
+            let l1 = Value::List(vec![Value::List(vec![
+                Value::Float32(0.001),
+                Value::Float32(2.2),
+                Value::Float32(3.4),
+            ])]);
+            let l2 = Value::List(vec![
+                Value::List(vec![
+                    Value::Null,
+                    Value::Float32(2222.2),
+                    Value::Float32(2223.4),
+                ]),
+                Value::Null,
+            ]);
+            let l3 = Value::List(vec![Value::Null]);
+            assert!(l1 > l2);
+            assert!(l2 > l3);
+        }
     }
 }

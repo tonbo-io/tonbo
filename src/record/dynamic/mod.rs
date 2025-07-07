@@ -1,4 +1,5 @@
 pub(crate) mod array;
+mod builder;
 mod record;
 mod record_ref;
 mod schema;

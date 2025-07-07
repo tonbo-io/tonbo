@@ -1,12 +1,12 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 
 use arrow::{
     array::{
-        ArrayRef, AsArray, Date32Array, Date64Array, TimestampMicrosecondArray,
+        Array, ArrayRef, AsArray, Date32Array, Date64Array, ListArray, TimestampMicrosecondArray,
         TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
     },
     datatypes::{
-        DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
+        DataType, Field, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
         TimeUnit as ArrowTimeUnit, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
@@ -14,7 +14,7 @@ use arrow::{
 use crate::record::{split_second_ns, KeyRef, TimeUnit, Value, ValueError};
 
 /// A reference type for Value that avoids cloning
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub enum ValueRef<'a> {
     Null,
     Boolean(bool),
@@ -35,6 +35,34 @@ pub enum ValueRef<'a> {
     Timestamp(i64, TimeUnit),
     Time32(i32, TimeUnit),
     Time64(i64, TimeUnit),
+    List(Vec<Value>),
+}
+
+impl Clone for ValueRef<'_> {
+    fn clone(&self) -> Self {
+        match self {
+            ValueRef::Null => ValueRef::Null,
+            ValueRef::Boolean(v) => ValueRef::Boolean(*v),
+            ValueRef::Int8(v) => ValueRef::Int8(*v),
+            ValueRef::Int16(v) => ValueRef::Int16(*v),
+            ValueRef::Int32(v) => ValueRef::Int32(*v),
+            ValueRef::Int64(v) => ValueRef::Int64(*v),
+            ValueRef::UInt8(v) => ValueRef::UInt8(*v),
+            ValueRef::UInt16(v) => ValueRef::UInt16(*v),
+            ValueRef::UInt32(v) => ValueRef::UInt32(*v),
+            ValueRef::UInt64(v) => ValueRef::UInt64(*v),
+            ValueRef::Float32(v) => ValueRef::Float32(*v),
+            ValueRef::Float64(v) => ValueRef::Float64(*v),
+            ValueRef::String(v) => ValueRef::String(v),
+            ValueRef::Binary(v) => ValueRef::Binary(v),
+            ValueRef::Date32(v) => ValueRef::Date32(*v),
+            ValueRef::Date64(v) => ValueRef::Date64(*v),
+            ValueRef::Timestamp(v, u) => ValueRef::Timestamp(*v, *u),
+            ValueRef::Time32(v, u) => ValueRef::Time32(*v, *u),
+            ValueRef::Time64(v, u) => ValueRef::Time64(*v, *u),
+            ValueRef::List(v) => ValueRef::List(v.clone()),
+        }
+    }
 }
 
 /// A reference type for [`Value`] that avoids cloning
@@ -183,6 +211,26 @@ impl<'a> ValueRef<'a> {
                     Ok(ValueRef::Timestamp(arr.value(index), TimeUnit::Nanosecond))
                 }
             },
+
+            DataType::List(_field) => {
+                let arr = array
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .ok_or_else(|| ValueError::InvalidConversion("List cast failed".into()))?;
+                let data = arr.value(index);
+
+                let mut values = Vec::new();
+                for i in 0..data.len() {
+                    if data.is_null(i) {
+                        values.push(Value::Null);
+                    } else {
+                        let value = ValueRef::from_array_ref(&data, i)?;
+                        values.push(value.to_owned());
+                    }
+                }
+
+                Ok(ValueRef::List(values))
+            }
             _ => Err(ValueError::InvalidConversion(format!(
                 "Unsupported data type: {:?}",
                 array.data_type()
@@ -234,6 +282,15 @@ impl<'a> ValueRef<'a> {
                 };
                 DataType::Time64(arrow_unit)
             }
+            ValueRef::List(v) => {
+                if v.is_empty() {
+                    // TODO: handle empty list
+                    DataType::List(Arc::new(Field::new("item", DataType::Null, false)))
+                } else {
+                    let inner_type = v[0].data_type();
+                    DataType::List(Arc::new(Field::new("item", inner_type, false)))
+                }
+            }
         }
     }
 
@@ -246,26 +303,27 @@ impl<'a> ValueRef<'a> {
 impl ValueRef<'_> {
     /// Convert to an owned Value
     pub fn to_owned(&self) -> Value {
-        match *self {
+        match self {
             ValueRef::Null => Value::Null,
-            ValueRef::Boolean(v) => Value::Boolean(v),
-            ValueRef::Int8(v) => Value::Int8(v),
-            ValueRef::Int16(v) => Value::Int16(v),
-            ValueRef::Int32(v) => Value::Int32(v),
-            ValueRef::Int64(v) => Value::Int64(v),
-            ValueRef::UInt8(v) => Value::UInt8(v),
-            ValueRef::UInt16(v) => Value::UInt16(v),
-            ValueRef::UInt32(v) => Value::UInt32(v),
-            ValueRef::UInt64(v) => Value::UInt64(v),
-            ValueRef::Float32(v) => Value::Float32(v),
-            ValueRef::Float64(v) => Value::Float64(v),
+            ValueRef::Boolean(v) => Value::Boolean(*v),
+            ValueRef::Int8(v) => Value::Int8(*v),
+            ValueRef::Int16(v) => Value::Int16(*v),
+            ValueRef::Int32(v) => Value::Int32(*v),
+            ValueRef::Int64(v) => Value::Int64(*v),
+            ValueRef::UInt8(v) => Value::UInt8(*v),
+            ValueRef::UInt16(v) => Value::UInt16(*v),
+            ValueRef::UInt32(v) => Value::UInt32(*v),
+            ValueRef::UInt64(v) => Value::UInt64(*v),
+            ValueRef::Float32(v) => Value::Float32(*v),
+            ValueRef::Float64(v) => Value::Float64(*v),
             ValueRef::String(s) => Value::String(s.to_string()),
             ValueRef::Binary(b) => Value::Binary(b.to_vec()),
-            ValueRef::Date32(v) => Value::Date32(v),
-            ValueRef::Date64(v) => Value::Date64(v),
-            ValueRef::Timestamp(v, unit) => Value::Timestamp(v, unit),
-            ValueRef::Time32(v, unit) => Value::Time32(v, unit),
-            ValueRef::Time64(v, unit) => Value::Time64(v, unit),
+            ValueRef::Date32(v) => Value::Date32(*v),
+            ValueRef::Date64(v) => Value::Date64(*v),
+            ValueRef::Timestamp(v, unit) => Value::Timestamp(*v, *unit),
+            ValueRef::Time32(v, unit) => Value::Time32(*v, *unit),
+            ValueRef::Time64(v, unit) => Value::Time64(*v, *unit),
+            ValueRef::List(v) => Value::List(v.clone()),
         }
     }
 }
@@ -292,6 +350,7 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Timestamp(v, unit) => ValueRef::Timestamp(*v, *unit),
             Value::Time32(v, unit) => ValueRef::Time32(*v, *unit),
             Value::Time64(v, unit) => ValueRef::Time64(*v, *unit),
+            Value::List(vec) => ValueRef::List(vec.clone()),
         }
     }
 }
@@ -343,6 +402,7 @@ impl PartialEq for ValueRef<'_> {
                 let (o_sec, o_nsec) = split_second_ns(*b, *unit2);
                 s_sec == o_sec && s_nsec == o_nsec
             }
+            (ValueRef::List(a), ValueRef::List(b)) => a.eq(b),
             _ => {
                 panic!("can not compare different types: {self:?} and {other:?}")
             }
@@ -389,6 +449,7 @@ impl Ord for ValueRef<'_> {
                     Ordering::Equal => s_nsec.cmp(&o_nsec),
                 }
             }
+            (ValueRef::List(a), ValueRef::List(b)) => a.cmp(b),
             _ => {
                 panic!("can not compare different types: {self:?} and {other:?}")
             }
@@ -419,6 +480,7 @@ impl<'a> KeyRef<'a> for ValueRef<'a> {
             ValueRef::Timestamp(v, time_unit) => Value::Timestamp(v, time_unit),
             ValueRef::Time32(v, time_unit) => Value::Time32(v, time_unit),
             ValueRef::Time64(v, time_unit) => Value::Time64(v, time_unit),
+            ValueRef::List(v) => Value::List(v.clone()),
         }
     }
 }
@@ -432,7 +494,7 @@ mod tests {
         datatypes::DataType,
     };
 
-    use crate::record::{AsValue, TimeUnit, ValueRef};
+    use crate::record::{AsValue, TimeUnit, Value, ValueRef};
 
     #[test]
     fn test_value_ref_basic_types() {
@@ -561,6 +623,118 @@ mod tests {
                 ValueRef::from_array_ref(&array, 1).unwrap(),
                 ValueRef::Timestamp(2, TimeUnit::Millisecond)
             );
+        }
+    }
+
+    #[test]
+    fn test_list_value_ref_from_array() {
+        use arrow::{
+            array::{Int32Array, ListArray},
+            datatypes::{DataType, Field},
+        };
+
+        // Create a list array with some integer values
+        let values = Int32Array::from(vec![1, 2, 3, 4, 5]);
+        let field = Arc::new(Field::new("item", DataType::Int32, false));
+        let list_array = ListArray::new(
+            field,
+            arrow::buffer::OffsetBuffer::new(vec![0, 2, 5].into()),
+            Arc::new(values),
+            None,
+        );
+        let array = Arc::new(list_array) as ArrayRef;
+
+        // Test extracting the first list [1, 2]
+        let result = ValueRef::from_array_ref(&array, 0).unwrap();
+        match result {
+            ValueRef::List(values) => {
+                assert_eq!(values.len(), 2);
+                assert_eq!(values[0], Value::Int32(1));
+                assert_eq!(values[1], Value::Int32(2));
+            }
+            _ => panic!("Expected ValueRef::List"),
+        }
+
+        // Test extracting the second list [3, 4, 5]
+        let result = ValueRef::from_array_ref(&array, 1).unwrap();
+        match result {
+            ValueRef::List(values) => {
+                assert_eq!(values.len(), 3);
+                assert_eq!(values[0], Value::Int32(3));
+                assert_eq!(values[1], Value::Int32(4));
+                assert_eq!(values[2], Value::Int32(5));
+            }
+            _ => panic!("Expected ValueRef::List"),
+        }
+    }
+
+    #[test]
+    fn test_list_value_ref_cmp() {
+        {
+            let l1 = ValueRef::List(vec![Value::Int32(1), Value::Int32(2)]);
+            let l2 = ValueRef::List(vec![Value::Int32(1), Value::Int32(2)]);
+            let l3 = ValueRef::List(vec![Value::Int32(1), Value::Int32(3)]);
+            let l4 = ValueRef::List(vec![Value::Int32(0), Value::Int32(4)]);
+            assert!(l1 == l2);
+            assert!(l1 < l3);
+            assert!(l3 > l4);
+        }
+        {
+            let l1 = ValueRef::List(vec![
+                Value::List(vec![Value::Date32(1), Value::Date32(2), Value::Date32(3)]),
+                Value::List(vec![Value::Date32(1), Value::Date32(3), Value::Date32(2)]),
+            ]);
+            let l2 = ValueRef::List(vec![
+                Value::List(vec![Value::Date32(1), Value::Date32(2), Value::Date32(3)]),
+                Value::List(vec![Value::Date32(1), Value::Date32(3), Value::Date32(2)]),
+            ]);
+            let l3 = ValueRef::List(vec![
+                Value::List(vec![Value::Date32(1), Value::Date32(2), Value::Date32(3)]),
+                Value::List(vec![Value::Date32(2), Value::Date32(1), Value::Date32(2)]),
+            ]);
+            assert!(l1 == l2);
+            assert!(l1 < l3);
+            assert!(l3 > l2);
+        }
+    }
+
+    #[test]
+    fn test_list_value_ref_with_null_cmp() {
+        {
+            let l1 = ValueRef::List(vec![Value::Date64(1), Value::Null]);
+            let l2 = ValueRef::List(vec![Value::Date64(1), Value::Null]);
+            let l3 = ValueRef::List(vec![Value::Null, Value::Date64(3)]);
+            let l4 = ValueRef::List(vec![Value::Null, Value::Null]);
+            assert!(l1 == l2);
+            assert!(l1 > l3);
+            assert!(l4 < l3);
+        }
+        {
+            let l1 = ValueRef::Null;
+            let l2 = ValueRef::List(vec![Value::Null]);
+            let l3 = ValueRef::List(vec![Value::List(vec![Value::Null])]);
+            let l4 = ValueRef::List(vec![Value::List(vec![Value::Null, Value::Null])]);
+            assert!(l1 < l2);
+            assert!(l2 < l3);
+            assert!(l3 < l4);
+        }
+        {
+            let l1 = ValueRef::List(vec![Value::List(vec![
+                Value::Float32(0.001),
+                Value::Float32(2.2),
+                Value::Float32(3.4),
+            ])]);
+            let l2 = ValueRef::List(vec![
+                Value::List(vec![
+                    Value::Null,
+                    Value::Float32(2222.2),
+                    Value::Float32(2223.4),
+                ]),
+                Value::Null,
+            ]);
+            let l3 = ValueRef::List(vec![Value::Null]);
+            assert!(l1 > l2);
+            assert!(l2 > l3);
         }
     }
 }
