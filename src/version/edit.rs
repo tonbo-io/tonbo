@@ -41,9 +41,7 @@ impl<K> Encode for VersionEdit<K>
 where
     K: Encode + Sync,
 {
-    type Error = <K as Encode>::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
@@ -88,9 +86,7 @@ impl<K> Decode for VersionEdit<K>
 where
     K: Decode + Send,
 {
-    type Error = <K as Decode>::Error;
-
-    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let edit_type = u8::decode(reader).await?;
 
         Ok(match edit_type {

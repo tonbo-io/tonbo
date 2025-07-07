@@ -79,9 +79,7 @@ impl<K> Encode for Scope<K>
 where
     K: Encode + Sync,
 {
-    type Error = <K as Encode>::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
@@ -117,9 +115,7 @@ impl<K> Decode for Scope<K>
 where
     K: Decode + Send,
 {
-    type Error = <K as Decode>::Error;
-
-    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
+    async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let mut buf = [0u8; 16];
         let min = K::decode(reader).await?;
         let max = K::decode(reader).await?;
