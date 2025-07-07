@@ -71,9 +71,7 @@ impl From<&ArrowDataType> for DataType {
 }
 
 impl Encode for DataType {
-    type Error = fusio::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: fusio::Write,
     {
@@ -113,9 +111,7 @@ impl Encode for DataType {
 }
 
 impl Decode for DataType {
-    type Error = fusio::Error;
-
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
     where
         R: fusio::SeqRead,
     {

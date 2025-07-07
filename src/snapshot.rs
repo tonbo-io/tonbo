@@ -30,7 +30,7 @@ where
         &'get self,
         key: &'get <R::Schema as RecordSchema>::Key,
         projection: Projection<'get>,
-    ) -> Result<Option<stream::Entry<'get, R>>, DbError<R>> {
+    ) -> Result<Option<stream::Entry<'get, R>>, DbError> {
         Ok(self
             .share
             .get(&self.ctx, &self.version, key, self.ts, projection)

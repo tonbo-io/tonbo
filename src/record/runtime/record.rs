@@ -35,9 +35,8 @@ macro_rules! implement_record {
         { $( { $clone_ty:ty, $clone_pat:pat}), * $(,)? },
     ) => {
         impl Decode for DynRecord {
-            type Error = RecordDecodeError;
 
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
             where
                 R: SeqRead,
             {

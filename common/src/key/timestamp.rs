@@ -109,9 +109,7 @@ impl<'r> KeyRef<'r> for Timestamp {
 }
 
 impl Decode for Timestamp {
-    type Error = fusio::Error;
-
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
     where
         R: fusio::SeqRead,
     {
@@ -128,9 +126,7 @@ impl Decode for Timestamp {
 }
 
 impl Encode for Timestamp {
-    type Error = fusio::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: fusio::Write,
     {

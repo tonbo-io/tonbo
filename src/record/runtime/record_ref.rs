@@ -42,16 +42,14 @@ impl<'r> DynRecordRef<'r> {
 }
 
 impl<'r> Encode for DynRecordRef<'r> {
-    type Error = RecordEncodeError;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
         (self.columns.len() as u32).encode(writer).await?;
         (self.primary_index as u32).encode(writer).await?;
         for col in self.columns.iter() {
-            col.encode(writer).await.map_err(RecordEncodeError::Fusio)?;
+            col.encode(writer).await?;
         }
         Ok(())
     }

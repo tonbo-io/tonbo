@@ -75,7 +75,7 @@ where
         })
     }
 
-    pub(crate) async fn destroy(&mut self) -> Result<(), DbError<R>> {
+    pub(crate) async fn destroy(&mut self) -> Result<(), DbError> {
         if let Some(wal) = self.wal.take() {
             wal.into_inner().remove().await?;
         }
@@ -92,7 +92,7 @@ where
         log_ty: LogType,
         record: R,
         ts: Timestamp,
-    ) -> Result<bool, DbError<R>> {
+    ) -> Result<bool, DbError> {
         self.append(Some(log_ty), record.key().to_key(), ts, Some(record))
             .await
     }
@@ -102,7 +102,7 @@ where
         log_ty: LogType,
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
-    ) -> Result<bool, DbError<R>> {
+    ) -> Result<bool, DbError> {
         self.append(Some(log_ty), key, ts, None).await
     }
 
@@ -112,7 +112,7 @@ where
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<bool, DbError<R>> {
+    ) -> Result<bool, DbError> {
         let timestamped_key = Ts::new(key, ts);
 
         let record_entry = Log::new(timestamped_key, value, log_ty);
@@ -202,7 +202,7 @@ where
         ))
     }
 
-    pub(crate) async fn flush_wal(&self) -> Result<(), DbError<R>> {
+    pub(crate) async fn flush_wal(&self) -> Result<(), DbError> {
         if let Some(wal) = self.wal.as_ref() {
             let mut wal_guard = wal.lock().await;
             wal_guard.flush().await?;

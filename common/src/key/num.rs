@@ -53,9 +53,7 @@ pub type F64 = FloatType<f64>;
 macro_rules! implement_float_encode_decode {
     ($ty:ident) => {
         impl Encode for FloatType<$ty> {
-            type Error = fusio::Error;
-
-            async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
+            async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), fusio::Error> {
                 let (result, _) = writer.write_all(&self.to_le_bytes()[..]).await;
                 result?;
 
@@ -68,9 +66,7 @@ macro_rules! implement_float_encode_decode {
         }
 
         impl Decode for FloatType<$ty> {
-            type Error = fusio::Error;
-
-            async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
+            async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
                 let mut bytes = [0u8; size_of::<Self>()];
                 let (result, _) = reader.read_exact(&mut bytes[..]).await;
                 result?;
