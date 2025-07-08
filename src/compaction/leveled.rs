@@ -1,6 +1,7 @@
 use std::{cmp, collections::Bound, mem, sync::Arc};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use common::{Key, Value};
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 
@@ -104,8 +105,8 @@ where
                     Self::major_compaction(
                         &version_ref,
                         &self.option,
-                        &scope.min,
-                        &scope.max,
+                        scope.min.as_ref(),
+                        scope.max.as_ref(),
                         &mut version_edits,
                         &mut delete_gens,
                         &guard.record_schema,
@@ -142,7 +143,7 @@ where
         )],
         schema: &R::Schema,
         manager: &StoreManager,
-    ) -> Result<Option<Scope<<R::Schema as RecordSchema>::Key>>, CompactionError<R>> {
+    ) -> Result<Option<Scope>, CompactionError<R>> {
         if !batches.is_empty() {
             let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
             let level_0_fs = manager.get_fs(level_0_path);
@@ -185,8 +186,8 @@ where
             }
             writer.close().await?;
             return Ok(Some(Scope {
-                min: min.ok_or(CompactionError::EmptyLevel)?,
-                max: max.ok_or(CompactionError::EmptyLevel)?,
+                min: min.map(Arc::new).ok_or(CompactionError::EmptyLevel)?,
+                max: max.map(Arc::new).ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: Some(wal_ids),
             }));
@@ -198,9 +199,9 @@ where
     async fn major_compaction(
         version: &Version<R>,
         option: &DbOption,
-        mut min: &<R::Schema as RecordSchema>::Key,
-        mut max: &<R::Schema as RecordSchema>::Key,
-        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
+        mut min: &dyn Value,
+        mut max: &dyn Value,
+        version_edits: &mut Vec<VersionEdit>,
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &R::Schema,
         ctx: &Context<R>,
@@ -317,18 +318,11 @@ where
 
     fn next_level_scopes<'a>(
         version: &'a Version<R>,
-        min: &mut &'a <R::Schema as RecordSchema>::Key,
-        max: &mut &'a <R::Schema as RecordSchema>::Key,
+        min: &mut &'a dyn Value,
+        max: &mut &'a dyn Value,
         level: usize,
-        meet_scopes_l: &[&'a Scope<<R::Schema as RecordSchema>::Key>],
-    ) -> Result<
-        (
-            Vec<&'a Scope<<R::Schema as RecordSchema>::Key>>,
-            usize,
-            usize,
-        ),
-        CompactionError<R>,
-    > {
+        meet_scopes_l: &[&'a Scope],
+    ) -> Result<(Vec<&'a Scope>, usize, usize), CompactionError<R>> {
         let mut meet_scopes_ll = Vec::new();
         let mut start_ll = 0;
         let mut end_ll = 0;
@@ -336,25 +330,25 @@ where
         if !version.level_slice[level + 1].is_empty() {
             *min = meet_scopes_l
                 .iter()
-                .map(|scope| &scope.min)
+                .map(|scope| scope.min.as_ref())
                 .min()
                 .ok_or(CompactionError::EmptyLevel)?;
 
             *max = meet_scopes_l
                 .iter()
-                .map(|scope| &scope.max)
+                .map(|scope| scope.max.as_ref())
                 .max()
                 .ok_or(CompactionError::EmptyLevel)?;
 
-            start_ll = Version::<R>::scope_search(min, &version.level_slice[level + 1]);
-            end_ll = Version::<R>::scope_search(max, &version.level_slice[level + 1]);
+            start_ll = Version::<R>::scope_search(*min, &version.level_slice[level + 1]);
+            end_ll = Version::<R>::scope_search(*max, &version.level_slice[level + 1]);
 
             let next_level_len = version.level_slice[level + 1].len();
             for scope in version.level_slice[level + 1]
                 [start_ll..cmp::min(end_ll + 1, next_level_len)]
                 .iter()
             {
-                if scope.contains(min) || scope.contains(max) {
+                if scope.contains(*min) || scope.contains(*max) {
                     meet_scopes_ll.push(scope);
                 }
             }
@@ -364,14 +358,10 @@ where
 
     fn this_level_scopes<'a>(
         version: &'a Version<R>,
-        min: &<R::Schema as RecordSchema>::Key,
-        max: &<R::Schema as RecordSchema>::Key,
+        min: &dyn Value,
+        max: &dyn Value,
         level: usize,
-    ) -> (
-        Vec<&'a Scope<<R::Schema as RecordSchema>::Key>>,
-        usize,
-        usize,
-    ) {
+    ) -> (Vec<&'a Scope>, usize, usize) {
         let mut meet_scopes_l = Vec::new();
         let mut start_l = Version::<R>::scope_search(min, &version.level_slice[level]);
         let mut end_l = start_l;
@@ -425,7 +415,7 @@ where
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
-    use common::datatype::DataType;
+    use common::{datatype::DataType, Key};
     use flume::bounded;
     use fusio::{path::Path, DynFs};
     use fusio_dispatch::FsOptions;
@@ -583,8 +573,8 @@ pub(crate) mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(scope.min, 1.to_string());
-        assert_eq!(scope.max, 6.to_string());
+        assert_eq!(scope.min.as_ref(), 1.to_string().as_value());
+        assert_eq!(scope.max.as_ref(), 6.to_string().as_value());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -646,13 +636,19 @@ pub(crate) mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(
-            scope.min,
-            Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
+        dbg!(scope.min.as_ref());
+        dbg!(
+            crate::record::Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
+                .as_value()
         );
         assert_eq!(
-            scope.max,
-            Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false)
+            scope.min.as_ref(),
+            crate::record::Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
+                .as_value()
+        );
+        assert_eq!(
+            scope.max.as_ref(),
+            Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false).as_value()
         );
     }
 
@@ -728,8 +724,8 @@ pub(crate) mod tests {
 
         if let VersionEdit::Add { level, scope } = &version_edits[0] {
             assert_eq!(*level, 1);
-            assert_eq!(scope.min, 1.to_string());
-            assert_eq!(scope.max, 6.to_string());
+            assert_eq!(scope.min.as_ref(), 1.to_string().as_value());
+            assert_eq!(scope.max.as_ref(), 6.to_string().as_value());
         }
         assert_eq!(
             version_edits[1..5].to_vec(),
@@ -835,14 +831,14 @@ pub(crate) mod tests {
         let mut version =
             Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
         version.level_slice[0].push(Scope {
-            min: 0.to_string(),
-            max: 4.to_string(),
+            min: Arc::new(0.to_string()),
+            max: Arc::new(4.to_string()),
             gen: table_gen0,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: 5.to_string(),
-            max: 9.to_string(),
+            min: Arc::new(5.to_string()),
+            max: Arc::new(9.to_string()),
             gen: table_gen1,
             wal_ids: None,
         });
@@ -977,13 +973,13 @@ pub(crate) mod tests {
                 let current = &sort_runs[pos];
                 let next = &sort_runs[pos + 1];
 
-                assert!(current.min < current.max);
-                assert!(next.min < next.max);
+                assert!(current.min.as_ref() < current.max.as_ref());
+                assert!(next.min.as_ref() < next.max.as_ref());
 
                 if level == 0 {
                     continue;
                 }
-                assert!(current.max < next.min);
+                assert!(current.max.as_ref() < next.min.as_ref());
             }
         }
         dbg!(version);

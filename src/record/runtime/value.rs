@@ -219,6 +219,63 @@ macro_rules! implement_key_col {
         { $( { $wrapped_ty:ty, $wrapped_pat:pat, $wrapped_array_ty:ty, $value_fn:ident} ),* }
     )
      => {
+        impl crate::Value for Value {
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn data_type(&self) -> DataType {
+                self.desc.datatype.clone()
+            }
+
+            fn size_of(&self) -> usize {
+                self.size()
+            }
+
+            fn is_none(&self) -> bool {
+                todo!()
+            }
+
+            fn is_some(&self) -> bool {
+                todo!()
+            }
+
+            fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+                match self.datatype() {
+                    $(
+                        $primitive_pat => Arc::new(<$primitive_array_ty>::new_scalar(
+                            *self
+                                .value
+                                .as_ref()
+                                .downcast_ref::<$primitive_ty>()
+                                .expect(stringify!("unexpected datatype, expected " $primitive_ty))
+                        )),
+                    )*
+                    $(
+                        $native_pat => Arc::new(<$native_array_ty>::new_scalar(
+                            self
+                                .value
+                                .as_ref()
+                                .downcast_ref::<$native_ty>()
+                                .expect(stringify!("unexpected datatype, expected " $native_ty))
+                        )),
+                    )*
+                    $(
+                        $wrapped_pat => Arc::new(<$wrapped_array_ty>::new_scalar(
+                            self
+                                .value
+                                .as_ref()
+                                .downcast_ref::<$wrapped_ty>()
+                                .expect(stringify!("unexpected datatype, expected " $ty))
+                                .$value_fn()
+                        )),
+                    )*
+                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
+                }
+            }
+        }
+
         impl Key for Value {
             type Ref<'a> = Value;
 
@@ -258,6 +315,10 @@ macro_rules! implement_key_col {
                     )*
                     DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                 }
+            }
+
+            fn as_value(&self) -> &dyn crate::Value {
+                self
             }
         }
     }

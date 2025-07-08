@@ -6,6 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use common::Value;
 use fusio::{
     dynamic::{DynFile, MaybeSendFuture},
     path::Path,
@@ -19,7 +20,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
-    record::{Record, Schema},
+    record::Record,
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
     timestamp::Timestamp,
@@ -47,8 +48,8 @@ pub(crate) struct LevelStream<'level, R>
 where
     R: Record,
 {
-    lower: Bound<&'level <R::Schema as Schema>::Key>,
-    upper: Bound<&'level <R::Schema as Schema>::Key>,
+    lower: Bound<&'level dyn Value>,
+    upper: Bound<&'level dyn Value>,
     ts: Timestamp,
     level: usize,
     option: Arc<DbOption>,
@@ -72,10 +73,7 @@ where
         level: usize,
         start: usize,
         end: usize,
-        range: (
-            Bound<&'level <R::Schema as Schema>::Key>,
-            Bound<&'level <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'level dyn Value>, Bound<&'level dyn Value>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,

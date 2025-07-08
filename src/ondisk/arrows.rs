@@ -6,7 +6,7 @@ use arrow::{
     compute::kernels::cmp::{gt, gt_eq, lt_eq},
     error::ArrowError,
 };
-use common::Key;
+use common::{Key, Value};
 use parquet::{
     arrow::{
         arrow_reader::{ArrowPredicate, ArrowPredicateFn, RowFilter},
@@ -15,15 +15,12 @@ use parquet::{
     schema::types::SchemaDescriptor,
 };
 
-use crate::{
-    record::{Record, Schema},
-    timestamp::Timestamp,
-};
+use crate::{record::Record, timestamp::Timestamp};
 
 unsafe fn get_range_bound_fn<R>(
-    range: Bound<&<R::Schema as Schema>::Key>,
+    range: Bound<&dyn Value>,
 ) -> (
-    Option<&'static <R::Schema as Schema>::Key>,
+    Option<&'static dyn Value>,
     &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync),
 )
 where
@@ -55,10 +52,7 @@ where
 
 pub(crate) unsafe fn get_range_filter<R>(
     schema_descriptor: &SchemaDescriptor,
-    range: (
-        Bound<&<R::Schema as Schema>::Key>,
-        Bound<&<R::Schema as Schema>::Key>,
-    ),
+    range: (Bound<&dyn Value>, Bound<&dyn Value>),
     ts: Timestamp,
 ) -> RowFilter
 where

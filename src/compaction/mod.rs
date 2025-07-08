@@ -1,7 +1,7 @@
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
-use common::KeyRef;
+use common::{KeyRef, Value};
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
@@ -49,7 +49,7 @@ where
 
     async fn build_tables<'scan>(
         option: &DbOption,
-        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
+        version_edits: &mut Vec<VersionEdit>,
         level: usize,
         streams: Vec<ScanStream<'scan, R>>,
         schema: &R::Schema,
@@ -104,23 +104,25 @@ where
     }
 
     fn full_scope<'a>(
-        meet_scopes: &[&'a Scope<<R::Schema as RecordSchema>::Key>],
-    ) -> Result<
-        (
-            &'a <R::Schema as RecordSchema>::Key,
-            &'a <R::Schema as RecordSchema>::Key,
-        ),
-        CompactionError<R>,
-    > {
-        let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
-        let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
+        meet_scopes: &[&'a Scope],
+    ) -> Result<(&'a dyn Value, &'a dyn Value), CompactionError<R>> {
+        let lower = meet_scopes
+            .first()
+            .ok_or(CompactionError::EmptyLevel)?
+            .min
+            .as_ref();
+        let upper = meet_scopes
+            .last()
+            .ok_or(CompactionError::EmptyLevel)?
+            .max
+            .as_ref();
         Ok((lower, upper))
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn build_table(
         option: &DbOption,
-        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
+        version_edits: &mut Vec<VersionEdit>,
         level: usize,
         builder: &mut <<R::Schema as RecordSchema>::Columns as ArrowArrays>::Builder,
         min: &mut Option<<R::Schema as RecordSchema>::Key>,
@@ -149,8 +151,14 @@ where
         version_edits.push(VersionEdit::Add {
             level: level as u8,
             scope: Scope {
-                min: min.take().ok_or(CompactionError::EmptyLevel)?,
-                max: max.take().ok_or(CompactionError::EmptyLevel)?,
+                min: min
+                    .take()
+                    .map(|v| Arc::new(v))
+                    .ok_or(CompactionError::EmptyLevel)?,
+                max: max
+                    .take()
+                    .map(|v| Arc::new(v))
+                    .ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: None,
             },
@@ -473,32 +481,32 @@ pub(crate) mod tests {
         let mut version =
             Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
         version.level_slice[0].push(Scope {
-            min: 1.to_string(),
-            max: 3.to_string(),
+            min: Arc::new(1.to_string()),
+            max: Arc::new(3.to_string()),
             gen: table_gen_1,
             wal_ids: None,
         });
         version.level_slice[0].push(Scope {
-            min: 4.to_string(),
-            max: 6.to_string(),
+            min: Arc::new(4.to_string()),
+            max: Arc::new(6.to_string()),
             gen: table_gen_2,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: 1.to_string(),
-            max: 3.to_string(),
+            min: Arc::new(1.to_string()),
+            max: Arc::new(3.to_string()),
             gen: table_gen_3,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: 4.to_string(),
-            max: 6.to_string(),
+            min: Arc::new(4.to_string()),
+            max: Arc::new(6.to_string()),
             gen: table_gen_4,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: 7.to_string(),
-            max: 9.to_string(),
+            min: Arc::new(7.to_string()),
+            max: Arc::new(9.to_string()),
             gen: table_gen_5,
             wal_ids: None,
         });

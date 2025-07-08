@@ -1,4 +1,4 @@
-use std::{hash::Hash, ops::Deref, sync::Arc};
+use std::{any::Any, hash::Hash, ops::Deref, sync::Arc};
 
 use arrow::array::{
     Datum, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array,
@@ -7,11 +7,15 @@ use arrow::array::{
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use crate::key::{Key, KeyRef};
+use super::Value;
+use crate::{
+    datatype::DataType,
+    key::{Key, KeyRef},
+};
 
 #[macro_export]
 macro_rules! implement_key {
-    ($struct_name:ident, $array_name:ident) => {
+    ($struct_name:ident, $array_name:ident, $data_type:expr) => {
         impl Key for $struct_name {
             type Ref<'r> = $struct_name;
 
@@ -22,6 +26,10 @@ macro_rules! implement_key {
             fn to_arrow_datum(&self) -> Arc<dyn Datum> {
                 Arc::new($array_name::new_scalar(*self))
             }
+
+            fn as_value(&self) -> &dyn Value {
+                self
+            }
         }
 
         impl<'a> KeyRef<'a> for $struct_name {
@@ -31,17 +39,87 @@ macro_rules! implement_key {
                 self
             }
         }
+
+        impl Value for $struct_name {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn size_of(&self) -> usize {
+                std::mem::size_of::<$struct_name>()
+            }
+
+            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+                Arc::new($array_name::new_scalar(*self))
+            }
+
+            fn is_none(&self) -> bool {
+                false
+            }
+
+            fn is_some(&self) -> bool {
+                false
+            }
+        }
+
+        impl Value for Option<$struct_name> {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn size_of(&self) -> usize {
+                std::mem::size_of::<$struct_name>()
+            }
+
+            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+                panic!("can not convert `Option` type to `Datum`")
+            }
+
+            fn is_none(&self) -> bool {
+                self.is_none()
+            }
+
+            fn is_some(&self) -> bool {
+                self.is_some()
+            }
+        }
     };
 }
 
-implement_key!(i8, Int8Array);
-implement_key!(i16, Int16Array);
-implement_key!(i32, Int32Array);
-implement_key!(i64, Int64Array);
-implement_key!(u8, UInt8Array);
-implement_key!(u16, UInt16Array);
-implement_key!(u32, UInt32Array);
-implement_key!(u64, UInt64Array);
+// macro_rules! implement_value {
+//     ($ty:ty, $array_name:ident) => {};
+// }
+
+// implement_value!(i8, DataType::Int8, Int8Array);
+// implement_value!(i16, DataType::Int16, Int16Array);
+// implement_value!(i32, DataType::Int32, Int32Array);
+// implement_value!(i64, DataType::Int64, Int64Array);
+// implement_value!(u8, DataType::UInt8, UInt8Array);
+// implement_value!(u16, DataType::UInt16, UInt16Array);
+// implement_value!(u32, DataType::UInt32, UInt32Array);
+// implement_value!(u64, DataType::UInt64, UInt64Array);
+// implement_value!(F32, DataType::Float32, Float32Array);
+// implement_value!(F64, DataType::Float64, Float64Array);
+// implement_value!(String, DataType::String, StringArray);
+// implement_value!(Date32, DataType::Date32, Date32Array);
+// implement_value!(Date64, DataType::Date64, Date64Array);
+
+implement_key!(i8, Int8Array, DataType::Int8);
+implement_key!(i16, Int16Array, DataType::Int16);
+implement_key!(i32, Int32Array, DataType::Int32);
+implement_key!(i64, Int64Array, DataType::Int64);
+implement_key!(u8, UInt8Array, DataType::UInt8);
+implement_key!(u16, UInt16Array, DataType::UInt16);
+implement_key!(u32, UInt32Array, DataType::UInt32);
+implement_key!(u64, UInt64Array, DataType::UInt64);
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FloatType<T>(pub T);
@@ -79,7 +157,7 @@ macro_rules! implement_float_encode_decode {
 
 #[macro_export]
 macro_rules! implement_float_key {
-    ($ty:ty, $array_name:ident) => {
+    ($ty:ty, $array_name:ident, $data_type:expr) => {
         impl Ord for FloatType<$ty> {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
                 self.0.total_cmp(&other.0)
@@ -141,6 +219,10 @@ macro_rules! implement_float_key {
             fn to_arrow_datum(&self) -> Arc<dyn Datum> {
                 Arc::new($array_name::new_scalar(self.0))
             }
+
+            fn as_value(&self) -> &dyn Value {
+                self
+            }
         }
 
         impl<'a> KeyRef<'a> for FloatType<$ty> {
@@ -156,14 +238,40 @@ macro_rules! implement_float_key {
                 self.0
             }
         }
+
+        impl Value for FloatType<$ty> {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn size_of(&self) -> usize {
+                std::mem::size_of::<$ty>()
+            }
+
+            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+                Arc::new($array_name::new_scalar(self.0))
+            }
+
+            fn is_none(&self) -> bool {
+                false
+            }
+
+            fn is_some(&self) -> bool {
+                false
+            }
+        }
     };
 }
 
 implement_float_encode_decode!(f32);
 implement_float_encode_decode!(f64);
 
-implement_float_key!(f32, Float32Array);
-implement_float_key!(f64, Float64Array);
+implement_float_key!(f32, Float32Array, DataType::Float32);
+implement_float_key!(f64, Float64Array, DataType::Float64);
 
 #[cfg(test)]
 mod tests {

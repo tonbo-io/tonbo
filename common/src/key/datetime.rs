@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -10,7 +11,10 @@ use arrow::array::{
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use fusio_log::{Decode, Encode};
 
-use crate::key::{Key, KeyRef, TimeUnit};
+use crate::{
+    datatype::DataType,
+    key::{Key, KeyRef, TimeUnit, Value},
+};
 
 /// Number of seconds in a day
 pub const SECONDS_IN_DAY: i64 = 86_400;
@@ -144,12 +148,41 @@ macro_rules! make_date_type {
             fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
                 Arc::new(<$array_ty>::new_scalar(self.0))
             }
+
+            fn as_value(&self) -> &dyn Value {
+                self
+            }
         }
         impl<'r> KeyRef<'r> for $struct_name {
             type Key = $struct_name;
 
             fn to_key(self) -> Self::Key {
                 self
+            }
+        }
+        impl Value for $struct_name {
+            fn data_type(&self) -> DataType {
+                DataType::$struct_name
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn size_of(&self) -> usize {
+                self.0.size()
+            }
+
+            fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
+                Arc::new(<$array_ty>::new_scalar(self.0))
+            }
+
+            fn is_none(&self) -> bool {
+                false
+            }
+
+            fn is_some(&self) -> bool {
+                false
             }
         }
 
@@ -216,6 +249,10 @@ impl Key for Time32 {
             }
         }
     }
+
+    fn as_value(&self) -> &dyn Value {
+        self
+    }
 }
 
 impl Key for Time64 {
@@ -233,6 +270,10 @@ impl Key for Time64 {
                 unreachable!("second and millisecond is not supported")
             }
         }
+    }
+
+    fn as_value(&self) -> &dyn Value {
+        self
     }
 }
 
@@ -283,6 +324,43 @@ impl Time32 {
             time,
             unit: TimeUnit::Second,
         }
+    }
+}
+
+impl Value for Time32 {
+    fn data_type(&self) -> DataType {
+        match &self.unit {
+            TimeUnit::Second => DataType::Time32(TimeUnit::Second),
+            TimeUnit::Millisecond => DataType::Time32(TimeUnit::Millisecond),
+            TimeUnit::Microsecond => unreachable!(),
+            TimeUnit::Nanosecond => unreachable!(),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn size_of(&self) -> usize {
+        4
+    }
+
+    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+        match self.unit {
+            TimeUnit::Second => Arc::new(Time32SecondArray::new_scalar(self.time)),
+            TimeUnit::Millisecond => Arc::new(Time32MillisecondArray::new_scalar(self.time)),
+            TimeUnit::Microsecond | TimeUnit::Nanosecond => {
+                unreachable!("microsecond and nanosecond is not supported")
+            }
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        false
+    }
+
+    fn is_some(&self) -> bool {
+        false
     }
 }
 
@@ -337,6 +415,77 @@ impl Time64 {
             time,
             unit: TimeUnit::Nanosecond,
         }
+    }
+}
+
+impl Value for Time64 {
+    fn data_type(&self) -> DataType {
+        match &self.unit {
+            TimeUnit::Second => unreachable!(),
+            TimeUnit::Millisecond => unreachable!(),
+            TimeUnit::Microsecond => DataType::Time64(TimeUnit::Microsecond),
+            TimeUnit::Nanosecond => DataType::Time64(TimeUnit::Nanosecond),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn size_of(&self) -> usize {
+        8
+    }
+
+    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+        match self.unit {
+            TimeUnit::Microsecond => Arc::new(Time64MicrosecondArray::new_scalar(self.time)),
+            TimeUnit::Nanosecond => Arc::new(Time64NanosecondArray::new_scalar(self.time)),
+            TimeUnit::Second | TimeUnit::Millisecond => {
+                unreachable!("second and millisecond is not supported")
+            }
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        false
+    }
+
+    fn is_some(&self) -> bool {
+        false
+    }
+}
+
+impl Value for Option<Time64> {
+    fn data_type(&self) -> DataType {
+        match self {
+            Some(time) => match &time.unit {
+                TimeUnit::Second => unreachable!(),
+                TimeUnit::Millisecond => unreachable!(),
+                TimeUnit::Microsecond => DataType::Time64(TimeUnit::Microsecond),
+                TimeUnit::Nanosecond => DataType::Time64(TimeUnit::Nanosecond),
+            },
+            None => DataType::Time64(TimeUnit::Microsecond),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn size_of(&self) -> usize {
+        8
+    }
+
+    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+        panic!("can not make arrow datum from Option type")
+    }
+
+    fn is_none(&self) -> bool {
+        todo!()
+    }
+
+    fn is_some(&self) -> bool {
+        todo!()
     }
 }
 

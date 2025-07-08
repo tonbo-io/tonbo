@@ -619,7 +619,12 @@ where
         Ok(schema)
     }
 
-    async fn write(&self, log_ty: LogType, record: R, ts: timestamp::Timestamp) -> Result<bool, DbError> {
+    async fn write(
+        &self,
+        log_ty: LogType,
+        record: R,
+        ts: timestamp::Timestamp,
+    ) -> Result<bool, DbError> {
         self.mutable.insert(log_ty, record, ts).await
     }
 
@@ -1014,8 +1019,7 @@ pub(crate) mod tests {
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
-            DynRecord, RecordDecodeError, RecordEncodeError, RecordRef, Schema as RecordSchema,
-            Value,
+            DynRecord, RecordRef, Schema as RecordSchema, Value,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},

@@ -7,24 +7,21 @@ use futures_util::TryStreamExt;
 use crate::{fs::FileId, scope::Scope, timestamp::Timestamp};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum VersionEdit<K> {
-    Add { level: u8, scope: Scope<K> },
+pub(crate) enum VersionEdit {
+    Add { level: u8, scope: Scope },
     Remove { level: u8, gen: FileId },
     LatestTimeStamp { ts: Timestamp },
     NewLogLength { len: u32 },
 }
 
-impl<K> VersionEdit<K>
-where
-    K: Decode + Send,
-{
-    pub(crate) async fn recover(path: Path, fs_option: FsOptions) -> Vec<VersionEdit<K>> {
+impl VersionEdit {
+    pub(crate) async fn recover(path: Path, fs_option: FsOptions) -> Vec<VersionEdit> {
         let mut edits = vec![];
 
         let mut edits_stream = Options::new(path)
             .disable_buf()
             .fs(fs_option)
-            .recover::<VersionEdit<K>>()
+            .recover::<VersionEdit>()
             .await
             .unwrap();
         while let Ok(batch) = edits_stream.try_next().await {
@@ -37,10 +34,7 @@ where
     }
 }
 
-impl<K> Encode for VersionEdit<K>
-where
-    K: Encode + Sync,
-{
+impl Encode for VersionEdit {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
@@ -82,17 +76,14 @@ where
     }
 }
 
-impl<K> Decode for VersionEdit<K>
-where
-    K: Decode + Send,
-{
+impl Decode for VersionEdit {
     async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let edit_type = u8::decode(reader).await?;
 
         Ok(match edit_type {
             0 => {
                 let level = u8::decode(reader).await?;
-                let scope = Scope::<K>::decode(reader).await?;
+                let scope = Scope::decode(reader).await?;
 
                 VersionEdit::Add { level, scope }
             }
@@ -121,7 +112,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{io::Cursor, sync::Arc};
 
     use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
@@ -134,8 +125,8 @@ mod tests {
             VersionEdit::Add {
                 level: 0,
                 scope: Scope {
-                    min: "Min".to_string(),
-                    max: "Max".to_string(),
+                    min: Arc::new("Min".to_string()),
+                    max: Arc::new("Max".to_string()),
                     gen: Default::default(),
                     wal_ids: Some(vec![generate_file_id(), generate_file_id()]),
                 },

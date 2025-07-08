@@ -3,6 +3,7 @@ pub(crate) mod edit;
 pub(crate) mod set;
 
 use std::{
+    marker::PhantomData,
     ops::Bound,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -10,6 +11,7 @@ use std::{
     },
 };
 
+use common::{Key, Value};
 use flume::{SendError, Sender};
 use fusio::DynFs;
 use fusio_log::error::LogError;
@@ -45,11 +47,12 @@ where
     R: Record,
 {
     ts: Timestamp,
-    pub(crate) level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
+    pub(crate) level_slice: [Vec<Scope>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
     timestamp: Arc<AtomicU32>,
     log_length: u32,
+    _mark: PhantomData<R>,
 }
 
 impl<R> Version<R>
@@ -70,6 +73,7 @@ where
             option: option.clone(),
             timestamp,
             log_length: 0,
+            _mark: PhantomData,
         }
     }
 
@@ -109,6 +113,7 @@ where
             option: self.option.clone(),
             timestamp: self.timestamp.clone(),
             log_length: self.log_length,
+            _mark: PhantomData,
         }
     }
 }
@@ -202,12 +207,9 @@ where
             .map_err(VersionError::Parquet)
     }
 
-    pub(crate) fn scope_search(
-        key: &<R::Schema as Schema>::Key,
-        level: &[Scope<<R::Schema as Schema>::Key>],
-    ) -> usize {
+    pub(crate) fn scope_search(key: &dyn Value, level: &[Scope]) -> usize {
         level
-            .binary_search_by(|scope| scope.min.cmp(key))
+            .binary_search_by(|scope| scope.min.as_ref().cmp(key))
             .unwrap_or_else(|index| index.saturating_sub(1))
     }
 
@@ -228,6 +230,7 @@ where
         limit: Option<usize>,
         projection_mask: ProjectionMask,
     ) -> Result<(), VersionError> {
+        let range = (range.0.map(|v| v.as_value()), range.1.map(|v| v.as_value()));
         let level_0_path = self
             .option
             .level_fs_path(0)
@@ -297,7 +300,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn to_edits(&self) -> Vec<VersionEdit<<R::Schema as Schema>::Key>> {
+    pub(crate) fn to_edits(&self) -> Vec<VersionEdit> {
         let mut edits = Vec::new();
 
         for (level, scopes) in self.level_slice.iter().enumerate() {

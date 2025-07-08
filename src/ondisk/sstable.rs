@@ -1,5 +1,6 @@
 use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
+use common::Value;
 use fusio::{dynamic::DynFile, DynRead};
 use fusio_parquet::reader::AsyncReader;
 use futures_util::StreamExt;
@@ -87,10 +88,7 @@ where
 
     pub(crate) async fn scan<'scan>(
         self,
-        range: (
-            Bound<&'scan <R::Schema as Schema>::Key>,
-            Bound<&'scan <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'scan dyn Value>, Bound<&'scan dyn Value>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,

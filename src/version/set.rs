@@ -1,5 +1,6 @@
 use std::{
     collections::BinaryHeap,
+    marker::PhantomData,
     mem,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -16,7 +17,7 @@ use futures_util::StreamExt;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
-    record::{Record, Schema},
+    record::Record,
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
@@ -140,11 +141,9 @@ where
             .flatten()
         {
             Some(log_id) => {
-                let recover_edits = VersionEdit::<<R::Schema as Schema>::Key>::recover(
-                    option.version_log_path(log_id),
-                    option.base_fs.clone(),
-                )
-                .await;
+                let recover_edits =
+                    VersionEdit::recover(option.version_log_path(log_id), option.base_fs.clone())
+                        .await;
                 edits = recover_edits;
                 log_id
             }
@@ -168,6 +167,7 @@ where
                     option: option.clone(),
                     timestamp: timestamp.clone(),
                     log_length: 0,
+                    _mark: PhantomData,
                 }),
                 log_id,
                 deleted_wal: Default::default(),
@@ -189,7 +189,7 @@ where
 
     pub(crate) async fn apply_edits(
         &self,
-        mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
+        mut version_edits: Vec<VersionEdit>,
         delete_gens: Option<Vec<(FileId, usize)>>,
         is_recover: bool,
     ) -> Result<(), VersionError> {
@@ -323,7 +323,7 @@ where
         &self,
         log_id: FileId,
         old_log_id: FileId,
-        edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
+        edits: impl ExactSizeIterator<Item = &'r VersionEdit>,
     ) -> Result<(), VersionError> {
         if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
             // push local manifest to base file system
@@ -344,7 +344,7 @@ where
         option: &DbOption,
         fs: Arc<dyn DynFs>,
         gen: FileId,
-    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError> {
+    ) -> Result<Logger<VersionEdit>, VersionError> {
         Options::new(option.version_log_path(gen))
             .build_with_fs(fs)
             .await
@@ -509,8 +509,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: "0".to_string(),
-                        max: "1".to_string(),
+                        min: Arc::new("0".to_string()),
+                        max: Arc::new("1".to_string()),
                         gen: gen_0,
                         wal_ids: None,
                     },
@@ -526,8 +526,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: "2".to_string(),
-                        max: "3".to_string(),
+                        min: Arc::new("2".to_string()),
+                        max: Arc::new("3".to_string()),
                         gen: gen_1,
                         wal_ids: None,
                     },
@@ -542,8 +542,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: "4".to_string(),
-                        max: "5".to_string(),
+                        min: Arc::new("4".to_string()),
+                        max: Arc::new("5".to_string()),
                         gen: gen_2,
                         wal_ids: None,
                     },
@@ -556,7 +556,7 @@ pub(crate) mod tests {
 
         {
             let guard = version_set.inner.write().await;
-            let edits = VersionEdit::<String>::recover(
+            let edits = VersionEdit::recover(
                 option.version_log_path(guard.log_id),
                 option.base_fs.clone(),
             )
@@ -569,8 +569,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: "0".to_string(),
-                            max: "1".to_string(),
+                            min: Arc::new("0".to_string()),
+                            max: Arc::new("1".to_string()),
                             gen: gen_0,
                             wal_ids: None,
                         },
@@ -579,8 +579,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: "2".to_string(),
-                            max: "3".to_string(),
+                            min: Arc::new("2".to_string()),
+                            max: Arc::new("3".to_string()),
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -589,8 +589,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: "4".to_string(),
-                            max: "5".to_string(),
+                            min: Arc::new("4".to_string()),
+                            max: Arc::new("5".to_string()),
                             gen: gen_2,
                             wal_ids: None,
                         },
@@ -629,8 +629,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: "2".to_string(),
-                            max: "3".to_string(),
+                            min: Arc::new("2".to_string()),
+                            max: Arc::new("3".to_string()),
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -676,8 +676,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: "0".to_string(),
-                            max: "1".to_string(),
+                            min: Arc::new("0".to_string()),
+                            max: Arc::new("1".to_string()),
                             gen: gen_0,
                             wal_ids: None,
                         },
@@ -685,8 +685,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: "2".to_string(),
-                            max: "3".to_string(),
+                            min: Arc::new("2".to_string()),
+                            max: Arc::new("3".to_string()),
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -694,8 +694,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: "4".to_string(),
-                            max: "5".to_string(),
+                            min: Arc::new("4".to_string()),
+                            max: Arc::new("5".to_string()),
                             gen: gen_2,
                             wal_ids: None,
                         },
@@ -717,7 +717,7 @@ pub(crate) mod tests {
 
         let guard = version_set.inner.write().await;
 
-        let edits = VersionEdit::<String>::recover(
+        let edits = VersionEdit::recover(
             option.version_log_path(guard.log_id),
             option.base_fs.clone(),
         )
@@ -730,8 +730,8 @@ pub(crate) mod tests {
                 VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: "2".to_string(),
-                        max: "3".to_string(),
+                        min: Arc::new("2".to_string()),
+                        max: Arc::new("3".to_string()),
                         gen: gen_1,
                         wal_ids: None,
                     },
@@ -752,8 +752,7 @@ pub(crate) mod tests {
         }
         logs.sort_by(|meta_a, meta_b| meta_a.path.cmp(&meta_b.path));
 
-        let edits =
-            VersionEdit::<String>::recover(logs.pop().unwrap().path, option.base_fs.clone()).await;
+        let edits = VersionEdit::recover(logs.pop().unwrap().path, option.base_fs.clone()).await;
 
         assert_eq!(edits.len(), 3);
         assert_eq!(
@@ -762,8 +761,8 @@ pub(crate) mod tests {
                 VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: "2".to_string(),
-                        max: "3".to_string(),
+                        min: Arc::new("2".to_string()),
+                        max: Arc::new("3".to_string()),
                         gen: gen_1,
                         wal_ids: None,
                     },
@@ -854,8 +853,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 1,
                     scope: Scope {
-                        min: "4".to_string(),
-                        max: "6".to_string(),
+                        min: Arc::new("4".to_string()),
+                        max: Arc::new("6".to_string()),
                         gen: gen_0,
                         wal_ids: None,
                     },
@@ -871,8 +870,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 1,
                         scope: Scope {
-                            min: "1".to_string(),
-                            max: "3".to_string(),
+                            min: Arc::new("1".to_string()),
+                            max: Arc::new("3".to_string()),
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -880,8 +879,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 1,
                         scope: Scope {
-                            min: "7".to_string(),
-                            max: "9".to_string(),
+                            min: Arc::new("7".to_string()),
+                            max: Arc::new("9".to_string()),
                             gen: gen_2,
                             wal_ids: None,
                         },
@@ -889,8 +888,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 1,
                         scope: Scope {
-                            min: "0".to_string(),
-                            max: "0".to_string(),
+                            min: Arc::new("0".to_string()),
+                            max: Arc::new("0".to_string()),
                             gen: gen_3,
                             wal_ids: None,
                         },
@@ -905,7 +904,14 @@ pub(crate) mod tests {
         dbg!(guard.current.level_slice.clone());
         let slice: Vec<String> = guard.current.level_slice[1]
             .iter()
-            .map(|scope| scope.min.clone())
+            .map(|scope| {
+                scope
+                    .min
+                    .as_any()
+                    .downcast_ref::<String>()
+                    .unwrap()
+                    .to_string()
+            })
             .collect();
         assert_eq!(
             slice,

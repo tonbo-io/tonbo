@@ -1,22 +1,32 @@
-use std::ops::Bound;
+use std::{ops::Bound, sync::Arc};
 
+use common::{Date32, Date64, Time32, Time64, Timestamp, F32, F64};
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
+use ulid::Ulid;
 
-use crate::fs::FileId;
+use crate::{datatype::DataType, Value};
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct Scope<K> {
-    pub(crate) min: K,
-    pub(crate) max: K,
+pub type FileId = Ulid;
+
+#[derive(Debug, Eq)]
+pub(crate) struct Scope {
+    pub(crate) min: Arc<dyn Value>,
+    pub(crate) max: Arc<dyn Value>,
     pub(crate) gen: FileId,
     pub(crate) wal_ids: Option<Vec<FileId>>,
 }
 
-impl<K> Clone for Scope<K>
-where
-    K: Clone,
-{
+impl PartialEq for Scope {
+    fn eq(&self, other: &Self) -> bool {
+        self.gen.eq(&other.gen())
+            && self.wal_ids.eq(&other.wal_ids)
+            && self.min.eq(&other.min)
+            && self.max.eq(&other.max)
+    }
+}
+
+impl Clone for Scope {
     fn clone(&self) -> Self {
         Scope {
             min: self.min.clone(),
@@ -27,22 +37,21 @@ where
     }
 }
 
-impl<K> Scope<K>
-where
-    K: Ord,
-{
-    pub(crate) fn contains(&self, key: &K) -> bool {
-        &self.min <= key && key <= &self.max
+impl Scope {
+    pub(crate) fn contains(&self, key: &dyn Value) -> bool {
+        self.min.as_ref() <= key && key <= self.max.as_ref()
     }
 
     #[allow(unused)]
     pub(crate) fn meets(&self, target: &Self) -> bool {
-        self.contains(&target.min) || self.contains(&target.max)
+        self.contains(target.min.as_ref()) || self.contains(target.max.as_ref())
     }
 
-    pub(crate) fn meets_range(&self, range: (Bound<&K>, Bound<&K>)) -> bool {
-        let excluded_contains = |key| -> bool { &self.min < key && key < &self.max };
-        let included_by = |min, max| -> bool { min <= &self.min && &self.max <= max };
+    pub(crate) fn meets_range(&self, range: (Bound<&dyn Value>, Bound<&dyn Value>)) -> bool {
+        let excluded_contains =
+            |key| -> bool { self.min.as_ref() < key && key < self.max.as_ref() };
+        let included_by =
+            |min, max| -> bool { min <= self.min.as_ref() && self.max.as_ref() <= max };
 
         match (range.0, range.1) {
             (Bound::Included(start), Bound::Included(end)) => {
@@ -62,10 +71,10 @@ where
                         || excluded_contains(end)
                         || included_by(start, end))
             }
-            (Bound::Included(start), Bound::Unbounded) => start <= &self.max,
-            (Bound::Excluded(start), Bound::Unbounded) => start < &self.max,
-            (Bound::Unbounded, Bound::Included(end)) => end >= &self.min,
-            (Bound::Unbounded, Bound::Excluded(end)) => end > &self.min,
+            (Bound::Included(start), Bound::Unbounded) => start <= self.max.as_ref(),
+            (Bound::Excluded(start), Bound::Unbounded) => start < self.max.as_ref(),
+            (Bound::Unbounded, Bound::Included(end)) => end >= self.min.as_ref(),
+            (Bound::Unbounded, Bound::Excluded(end)) => end > self.min.as_ref(),
             (Bound::Unbounded, Bound::Unbounded) => true,
         }
     }
@@ -75,14 +84,13 @@ where
     }
 }
 
-impl<K> Encode for Scope<K>
-where
-    K: Encode + Sync,
-{
+impl Encode for Scope {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
+        let data_type = self.min.data_type();
+        data_type.encode(writer).await?;
         self.min.encode(writer).await?;
         self.max.encode(writer).await?;
 
@@ -111,14 +119,88 @@ where
     }
 }
 
-impl<K> Decode for Scope<K>
-where
-    K: Decode + Send,
-{
+impl Decode for Scope {
     async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let mut buf = [0u8; 16];
-        let min = K::decode(reader).await?;
-        let max = K::decode(reader).await?;
+
+        let data_type = DataType::decode(reader).await?;
+        let (min, max): (Arc<dyn Value>, Arc<dyn Value>) = match data_type {
+            DataType::UInt8 => (
+                Arc::new(u8::decode(reader).await?),
+                Arc::new(u8::decode(reader).await?),
+            ),
+            DataType::UInt16 => (
+                Arc::new(u16::decode(reader).await?),
+                Arc::new(u16::decode(reader).await?),
+            ),
+            DataType::UInt32 => (
+                Arc::new(u32::decode(reader).await?),
+                Arc::new(u32::decode(reader).await?),
+            ),
+            DataType::UInt64 => (
+                Arc::new(u64::decode(reader).await?),
+                Arc::new(u64::decode(reader).await?),
+            ),
+            DataType::Int8 => (
+                Arc::new(i8::decode(reader).await?),
+                Arc::new(i8::decode(reader).await?),
+            ),
+            DataType::Int16 => (
+                Arc::new(i16::decode(reader).await?),
+                Arc::new(i16::decode(reader).await?),
+            ),
+            DataType::Int32 => (
+                Arc::new(i32::decode(reader).await?),
+                Arc::new(i32::decode(reader).await?),
+            ),
+            DataType::Int64 => (
+                Arc::new(i64::decode(reader).await?),
+                Arc::new(i64::decode(reader).await?),
+            ),
+            DataType::Boolean => (
+                Arc::new(bool::decode(reader).await?),
+                Arc::new(bool::decode(reader).await?),
+            ),
+            DataType::String | DataType::LargeString => (
+                Arc::new(String::decode(reader).await?),
+                Arc::new(String::decode(reader).await?),
+            ),
+            DataType::Bytes | DataType::LargeBinary => {
+                (
+                    todo!()
+                    // Arc::new(Vec::<u8>::decode(reader).await?),
+                    // Arc::new(Vec::<u8>::decode(reader).await?),
+                )
+            }
+            DataType::Float32 => (
+                Arc::new(F32::decode(reader).await?),
+                Arc::new(F32::decode(reader).await?),
+            ),
+            DataType::Float64 => (
+                Arc::new(F64::decode(reader).await?),
+                Arc::new(F64::decode(reader).await?),
+            ),
+            DataType::Timestamp(_) => (
+                Arc::new(Timestamp::decode(reader).await?),
+                Arc::new(Timestamp::decode(reader).await?),
+            ),
+            DataType::Time32(_) => (
+                Arc::new(Time32::decode(reader).await?),
+                Arc::new(Time32::decode(reader).await?),
+            ),
+            DataType::Time64(_) => (
+                Arc::new(Time64::decode(reader).await?),
+                Arc::new(Time64::decode(reader).await?),
+            ),
+            DataType::Date32 => (
+                Arc::new(Date32::decode(reader).await?),
+                Arc::new(Date32::decode(reader).await?),
+            ),
+            DataType::Date64 => (
+                Arc::new(Date64::decode(reader).await?),
+                Arc::new(Date64::decode(reader).await?),
+            ),
+        };
 
         let gen = {
             let (result, _) = reader.read_exact(buf.as_mut_slice()).await;
@@ -152,17 +234,17 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::ops::Bound;
+    use std::{ops::Bound, sync::Arc};
 
     use super::Scope;
-    use crate::fs::generate_file_id;
 
     #[tokio::test]
     async fn test_meets_range() {
+        let gen = ulid::Ulid::new();
         let scope = Scope {
-            min: 100,
-            max: 200,
-            gen: generate_file_id(),
+            min: Arc::new(100),
+            max: Arc::new(200),
+            gen,
             wal_ids: None,
         };
 

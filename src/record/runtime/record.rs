@@ -8,10 +8,7 @@ use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
 use super::{schema::DynSchema, DynRecordRef, Value};
-use crate::{
-    cast_arc_value,
-    record::{Record, RecordDecodeError},
-};
+use crate::{cast_arc_value, record::Record};
 
 #[derive(Debug)]
 pub struct DynRecord {
