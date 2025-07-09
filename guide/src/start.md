@@ -60,8 +60,6 @@ After defining your schema, you can create a `DB` instance using a customized `D
 
 ```rust
 use std::fs;
-// TODO : delete if approved
-// use fusio::path::Path;
 use tonbo::Path;
 use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
 
@@ -71,9 +69,6 @@ async fn main() {
     fs::create_dir_all("./db_path/users").unwrap();
 
     let options = DbOption::new(
-
-        // TODO : delete comment if needed
-        // NOTE : if you use fusio::path::Path, cargo will throw an error since it was expecting Tonbo::Path.
         Path::from_filesystem_path("./db_path/users").unwrap(),
         &UserSchema,
     );
