@@ -4,13 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use arrow::array::{
-    Date32Array, Date64Array, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
-    Time64NanosecondArray,
-};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use fusio_log::{Decode, Encode};
 
+use super::ValueRef;
 use crate::{
     datatype::DataType,
     key::{Key, KeyRef, TimeUnit, Value},
@@ -145,9 +142,9 @@ macro_rules! make_date_type {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-                Arc::new(<$array_ty>::new_scalar(self.0))
-            }
+            // fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
+            //     Arc::new(<$array_ty>::new_scalar(self.0))
+            // }
 
             fn as_value(&self) -> &dyn Value {
                 self
@@ -173,9 +170,9 @@ macro_rules! make_date_type {
                 self.0.size()
             }
 
-            fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-                Arc::new(<$array_ty>::new_scalar(self.0))
-            }
+            // fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
+            //     Arc::new(<$array_ty>::new_scalar(self.0))
+            // }
 
             fn is_none(&self) -> bool {
                 false
@@ -183,6 +180,10 @@ macro_rules! make_date_type {
 
             fn is_some(&self) -> bool {
                 false
+            }
+
+            fn clone_arc(&self) -> super::ValueRef {
+                Arc::new(*self)
             }
         }
 
@@ -240,15 +241,15 @@ impl Key for Time32 {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Second => Arc::new(Time32SecondArray::new_scalar(self.time)),
-            TimeUnit::Millisecond => Arc::new(Time32MillisecondArray::new_scalar(self.time)),
-            TimeUnit::Microsecond | TimeUnit::Nanosecond => {
-                unreachable!("microsecond and nanosecond is not supported")
-            }
-        }
-    }
+    // fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
+    //     match self.unit {
+    //         TimeUnit::Second => Arc::new(Time32SecondArray::new_scalar(self.time)),
+    //         TimeUnit::Millisecond => Arc::new(Time32MillisecondArray::new_scalar(self.time)),
+    //         TimeUnit::Microsecond | TimeUnit::Nanosecond => {
+    //             unreachable!("microsecond and nanosecond is not supported")
+    //         }
+    //     }
+    // }
 
     fn as_value(&self) -> &dyn Value {
         self
@@ -262,15 +263,15 @@ impl Key for Time64 {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Microsecond => Arc::new(Time64MicrosecondArray::new_scalar(self.time)),
-            TimeUnit::Nanosecond => Arc::new(Time64NanosecondArray::new_scalar(self.time)),
-            TimeUnit::Second | TimeUnit::Millisecond => {
-                unreachable!("second and millisecond is not supported")
-            }
-        }
-    }
+    // fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
+    //     match self.unit {
+    //         TimeUnit::Microsecond => Arc::new(Time64MicrosecondArray::new_scalar(self.time)),
+    //         TimeUnit::Nanosecond => Arc::new(Time64NanosecondArray::new_scalar(self.time)),
+    //         TimeUnit::Second | TimeUnit::Millisecond => {
+    //             unreachable!("second and millisecond is not supported")
+    //         }
+    //     }
+    // }
 
     fn as_value(&self) -> &dyn Value {
         self
@@ -345,15 +346,15 @@ impl Value for Time32 {
         4
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Second => Arc::new(Time32SecondArray::new_scalar(self.time)),
-            TimeUnit::Millisecond => Arc::new(Time32MillisecondArray::new_scalar(self.time)),
-            TimeUnit::Microsecond | TimeUnit::Nanosecond => {
-                unreachable!("microsecond and nanosecond is not supported")
-            }
-        }
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+    //     match self.unit {
+    //         TimeUnit::Second => Arc::new(Time32SecondArray::new_scalar(self.time)),
+    //         TimeUnit::Millisecond => Arc::new(Time32MillisecondArray::new_scalar(self.time)),
+    //         TimeUnit::Microsecond | TimeUnit::Nanosecond => {
+    //             unreachable!("microsecond and nanosecond is not supported")
+    //         }
+    //     }
+    // }
 
     fn is_none(&self) -> bool {
         false
@@ -361,6 +362,10 @@ impl Value for Time32 {
 
     fn is_some(&self) -> bool {
         false
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
     }
 }
 
@@ -436,15 +441,15 @@ impl Value for Time64 {
         8
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Microsecond => Arc::new(Time64MicrosecondArray::new_scalar(self.time)),
-            TimeUnit::Nanosecond => Arc::new(Time64NanosecondArray::new_scalar(self.time)),
-            TimeUnit::Second | TimeUnit::Millisecond => {
-                unreachable!("second and millisecond is not supported")
-            }
-        }
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+    //     match self.unit {
+    //         TimeUnit::Microsecond => Arc::new(Time64MicrosecondArray::new_scalar(self.time)),
+    //         TimeUnit::Nanosecond => Arc::new(Time64NanosecondArray::new_scalar(self.time)),
+    //         TimeUnit::Second | TimeUnit::Millisecond => {
+    //             unreachable!("second and millisecond is not supported")
+    //         }
+    //     }
+    // }
 
     fn is_none(&self) -> bool {
         false
@@ -452,6 +457,10 @@ impl Value for Time64 {
 
     fn is_some(&self) -> bool {
         false
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
     }
 }
 
@@ -476,16 +485,20 @@ impl Value for Option<Time64> {
         8
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-        panic!("can not make arrow datum from Option type")
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+    //     panic!("can not make arrow datum from Option type")
+    // }
 
     fn is_none(&self) -> bool {
-        todo!()
+        self.is_none()
     }
 
     fn is_some(&self) -> bool {
-        todo!()
+        self.is_some()
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
     }
 }
 

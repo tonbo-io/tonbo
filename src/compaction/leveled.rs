@@ -636,19 +636,13 @@ pub(crate) mod tests {
         .await
         .unwrap()
         .unwrap();
-        dbg!(scope.min.as_ref());
-        dbg!(
-            crate::record::Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
-                .as_value()
+        assert_eq!(
+            scope.min.as_any().downcast_ref::<Value>().unwrap(),
+            &crate::record::Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
         );
         assert_eq!(
-            scope.min.as_ref(),
-            crate::record::Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
-                .as_value()
-        );
-        assert_eq!(
-            scope.max.as_ref(),
-            Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false).as_value()
+            scope.max.as_any().downcast_ref::<Value>().unwrap(),
+            &Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false)
         );
     }
 

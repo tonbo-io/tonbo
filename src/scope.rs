@@ -165,13 +165,10 @@ impl Decode for Scope {
                 Arc::new(String::decode(reader).await?),
                 Arc::new(String::decode(reader).await?),
             ),
-            DataType::Bytes | DataType::LargeBinary => {
-                (
-                    todo!()
-                    // Arc::new(Vec::<u8>::decode(reader).await?),
-                    // Arc::new(Vec::<u8>::decode(reader).await?),
-                )
-            }
+            DataType::Bytes | DataType::LargeBinary => (
+                Arc::new(Vec::<u8>::decode(reader).await?),
+                Arc::new(Vec::<u8>::decode(reader).await?),
+            ),
             DataType::Float32 => (
                 Arc::new(F32::decode(reader).await?),
                 Arc::new(F32::decode(reader).await?),

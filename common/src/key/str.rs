@@ -2,7 +2,7 @@ use std::{any::Any, sync::Arc};
 
 use arrow::array::{Datum, StringArray};
 
-use super::{Key, KeyRef, Value};
+use super::{Key, KeyRef, Value, ValueRef};
 use crate::datatype::DataType;
 
 pub type LargeString = String;
@@ -14,9 +14,9 @@ impl Key for String {
         self
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-        Arc::new(StringArray::new_scalar(self))
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+    //     Arc::new(StringArray::new_scalar(self))
+    // }
 
     fn as_value(&self) -> &dyn Value {
         self
@@ -44,9 +44,9 @@ impl Value for String {
         self.len()
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-        Arc::new(StringArray::new_scalar(self))
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+    //     Arc::new(StringArray::new_scalar(self))
+    // }
 
     fn is_none(&self) -> bool {
         false
@@ -54,5 +54,9 @@ impl Value for String {
 
     fn is_some(&self) -> bool {
         false
+    }
+
+    fn clone_arc(&self) -> ValueRef {
+        Arc::new(self.clone())
     }
 }

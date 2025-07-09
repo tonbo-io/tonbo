@@ -12,7 +12,7 @@ use arrow::array::{
 use chrono::{DateTime, NaiveDateTime};
 use fusio_log::{Decode, Encode};
 
-use super::{Date32, Date64, Key, KeyRef, Time32, Time64, Value};
+use super::{Date32, Date64, Key, KeyRef, Time32, Time64, Value, ValueRef};
 use crate::{
     datatype::DataType,
     key::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY},
@@ -94,14 +94,14 @@ impl Key for Timestamp {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(self.ts)),
-            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(self.ts)),
-            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(self.ts)),
-            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(self.ts)),
-        }
-    }
+    // fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
+    //     match self.unit {
+    //         TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(self.ts)),
+    //         TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(self.ts)),
+    //         TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(self.ts)),
+    //         TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(self.ts)),
+    //     }
+    // }
 
     fn as_value(&self) -> &dyn Value {
         self
@@ -134,14 +134,14 @@ impl Value for Timestamp {
         8
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(self.ts)),
-            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(self.ts)),
-            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(self.ts)),
-            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(self.ts)),
-        }
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+    //     match self.unit {
+    //         TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(self.ts)),
+    //         TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(self.ts)),
+    //         TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(self.ts)),
+    //         TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(self.ts)),
+    //     }
+    // }
 
     fn is_none(&self) -> bool {
         false
@@ -149,6 +149,10 @@ impl Value for Timestamp {
 
     fn is_some(&self) -> bool {
         false
+    }
+
+    fn clone_arc(&self) -> ValueRef {
+        Arc::new(*self)
     }
 }
 
@@ -168,9 +172,9 @@ impl Value for Option<Timestamp> {
         8
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-        panic!("can not convert Option type to arrow Datum.")
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
+    //     panic!("can not convert Option type to arrow Datum.")
+    // }
 
     fn is_none(&self) -> bool {
         self.is_none()
@@ -178,6 +182,10 @@ impl Value for Option<Timestamp> {
 
     fn is_some(&self) -> bool {
         self.is_some()
+    }
+
+    fn clone_arc(&self) -> ValueRef {
+        Arc::new(*self)
     }
 }
 

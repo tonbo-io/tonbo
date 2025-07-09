@@ -3,21 +3,24 @@ mod cast;
 mod datetime;
 mod list;
 mod num;
-// mod pk;
+mod pk;
 mod str;
 mod timestamp;
 
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
-use arrow::array::Datum;
 pub use datetime::*;
 use fusio_log::{Decode, Encode};
 pub use list::*;
 pub use num::*;
+pub use pk::*;
 pub use str::*;
 pub use timestamp::*;
 
 use crate::{datatype::DataType, key::cast::AsValue};
+
+pub type ValueRef = Arc<dyn Value>;
+
 pub trait Value: 'static + Send + Sync + Debug {
     fn as_any(&self) -> &dyn Any;
 
@@ -25,11 +28,13 @@ pub trait Value: 'static + Send + Sync + Debug {
 
     fn size_of(&self) -> usize;
 
-    fn to_arrow_datum(&self) -> Arc<dyn Datum>;
+    // fn to_arrow_datum(&self) -> Arc<dyn Datum>;
 
     fn is_none(&self) -> bool;
 
     fn is_some(&self) -> bool;
+
+    fn clone_arc(&self) -> ValueRef;
 }
 
 pub trait Key:
@@ -41,7 +46,7 @@ pub trait Key:
 
     fn as_key_ref(&self) -> Self::Ref<'_>;
 
-    fn to_arrow_datum(&self) -> Arc<dyn Datum>;
+    // fn to_arrow_datum(&self) -> Arc<dyn Datum>;
 
     fn as_value(&self) -> &dyn Value;
 }

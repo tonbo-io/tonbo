@@ -7,10 +7,10 @@ use arrow::array::{
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use super::Value;
 use crate::{
     datatype::DataType,
     key::{Key, KeyRef},
+    Value, ValueRef,
 };
 
 #[macro_export]
@@ -23,9 +23,9 @@ macro_rules! implement_key {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(*self))
-            }
+            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+            //     Arc::new($array_name::new_scalar(*self))
+            // }
 
             fn as_value(&self) -> &dyn Value {
                 self
@@ -53,9 +53,9 @@ macro_rules! implement_key {
                 std::mem::size_of::<$struct_name>()
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(*self))
-            }
+            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+            //     Arc::new($array_name::new_scalar(*self))
+            // }
 
             fn is_none(&self) -> bool {
                 false
@@ -63,6 +63,10 @@ macro_rules! implement_key {
 
             fn is_some(&self) -> bool {
                 false
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
             }
         }
 
@@ -79,9 +83,9 @@ macro_rules! implement_key {
                 std::mem::size_of::<$struct_name>()
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                panic!("can not convert `Option` type to `Datum`")
-            }
+            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+            //     panic!("can not convert `Option` type to `Datum`")
+            // }
 
             fn is_none(&self) -> bool {
                 self.is_none()
@@ -89,6 +93,10 @@ macro_rules! implement_key {
 
             fn is_some(&self) -> bool {
                 self.is_some()
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
             }
         }
     };
@@ -216,9 +224,9 @@ macro_rules! implement_float_key {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(self.0))
-            }
+            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+            //     Arc::new($array_name::new_scalar(self.0))
+            // }
 
             fn as_value(&self) -> &dyn Value {
                 self
@@ -252,9 +260,9 @@ macro_rules! implement_float_key {
                 std::mem::size_of::<$ty>()
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(self.0))
-            }
+            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+            //     Arc::new($array_name::new_scalar(self.0))
+            // }
 
             fn is_none(&self) -> bool {
                 false
@@ -262,6 +270,10 @@ macro_rules! implement_float_key {
 
             fn is_some(&self) -> bool {
                 false
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
             }
         }
     };

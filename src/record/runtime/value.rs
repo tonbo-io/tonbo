@@ -1,16 +1,6 @@
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
-use arrow::{
-    array::{
-        BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, GenericBinaryArray,
-        Int16Array, Int32Array, Int64Array, Int8Array, LargeBinaryArray, LargeStringArray,
-        StringArray, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
-        Time64NanosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array,
-        UInt8Array,
-    },
-    datatypes::{DataType as ArrowDataType, Field},
-};
+use arrow::datatypes::{DataType as ArrowDataType, Field};
 use common::{
     datatype::DataType, Date32, Date64, Key, KeyRef, LargeBinary, LargeString, Time32, Time64,
     TimeUnit, Timestamp, F32, F64,
@@ -217,10 +207,8 @@ macro_rules! implement_key_col {
         { $( { $primitive_ty:ty, $primitive_pat:pat, $primitive_array_ty:ty}), * $(,)? },
         { $( { $native_ty:ty, $native_pat:pat, $native_array_ty:ty}), * $(,)? },
         { $( { $wrapped_ty:ty, $wrapped_pat:pat, $wrapped_array_ty:ty, $value_fn:ident} ),* }
-    )
-     => {
+    ) => {
         impl crate::Value for Value {
-
             fn as_any(&self) -> &dyn Any {
                 self
             }
@@ -234,45 +222,199 @@ macro_rules! implement_key_col {
             }
 
             fn is_none(&self) -> bool {
-                todo!()
+                match self.data_type() {
+                    DataType::UInt8 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u8>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::UInt16 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u16>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::UInt32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u32>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::UInt64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u64>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Int8 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i8>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Int16 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i16>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Int32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i32>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Int64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i64>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::String | DataType::LargeString => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<String>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Boolean => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<bool>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Bytes | DataType::LargeBinary => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Vec<u8>>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Float32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<F32>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Float64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<F32>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Timestamp(_) => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Timestamp>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Time32(_) => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Time32>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Time64(_) => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Time64>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Date32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Date32>>() {
+                            return v.is_none();
+                        }
+                    }
+                    DataType::Date64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Date64>>() {
+                            return v.is_none();
+                        }
+                    }
+                };
+                false
             }
 
             fn is_some(&self) -> bool {
-                todo!()
+                match self.data_type() {
+                    DataType::UInt8 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u8>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::UInt16 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u16>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::UInt32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u32>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::UInt64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<u64>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Int8 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i8>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Int16 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i16>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Int32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i32>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Int64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<i64>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::String | DataType::LargeString => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<String>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Boolean => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<bool>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Bytes | DataType::LargeBinary => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Vec<u8>>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Float32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<F32>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Float64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<F32>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Timestamp(_) => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Timestamp>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Time32(_) => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Time32>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Time64(_) => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Time64>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Date32 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Date32>>() {
+                            return v.is_some();
+                        }
+                    }
+                    DataType::Date64 => {
+                        if let Some(v) = self.as_any().downcast_ref::<Option<Date64>>() {
+                            return v.is_some();
+                        }
+                    }
+                };
+                false
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-                match self.datatype() {
-                    $(
-                        $primitive_pat => Arc::new(<$primitive_array_ty>::new_scalar(
-                            *self
-                                .value
-                                .as_ref()
-                                .downcast_ref::<$primitive_ty>()
-                                .expect(stringify!("unexpected datatype, expected " $primitive_ty))
-                        )),
-                    )*
-                    $(
-                        $native_pat => Arc::new(<$native_array_ty>::new_scalar(
-                            self
-                                .value
-                                .as_ref()
-                                .downcast_ref::<$native_ty>()
-                                .expect(stringify!("unexpected datatype, expected " $native_ty))
-                        )),
-                    )*
-                    $(
-                        $wrapped_pat => Arc::new(<$wrapped_array_ty>::new_scalar(
-                            self
-                                .value
-                                .as_ref()
-                                .downcast_ref::<$wrapped_ty>()
-                                .expect(stringify!("unexpected datatype, expected " $ty))
-                                .$value_fn()
-                        )),
-                    )*
-                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
-                }
+            fn clone_arc(&self) -> crate::ValueRef {
+                Arc::new(self.clone())
             }
         }
 
@@ -283,45 +425,11 @@ macro_rules! implement_key_col {
                 self.clone()
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-                match self.datatype() {
-                    $(
-                        $primitive_pat => Arc::new(<$primitive_array_ty>::new_scalar(
-                            *self
-                                .value
-                                .as_ref()
-                                .downcast_ref::<$primitive_ty>()
-                                .expect(stringify!("unexpected datatype, expected " $primitive_ty))
-                        )),
-                    )*
-                    $(
-                        $native_pat => Arc::new(<$native_array_ty>::new_scalar(
-                            self
-                                .value
-                                .as_ref()
-                                .downcast_ref::<$native_ty>()
-                                .expect(stringify!("unexpected datatype, expected " $native_ty))
-                        )),
-                    )*
-                    $(
-                        $wrapped_pat => Arc::new(<$wrapped_array_ty>::new_scalar(
-                            self
-                                .value
-                                .as_ref()
-                                .downcast_ref::<$wrapped_ty>()
-                                .expect(stringify!("unexpected datatype, expected " $ty))
-                                .$value_fn()
-                        )),
-                    )*
-                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
-                }
-            }
-
             fn as_value(&self) -> &dyn crate::Value {
                 self
             }
         }
-    }
+    };
 }
 
 impl<'r> KeyRef<'r> for Value {

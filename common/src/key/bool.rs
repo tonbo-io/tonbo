@@ -42,9 +42,9 @@ impl Value for bool {
         1
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-        Arc::new(BooleanArray::new_scalar(*self))
-    }
+    // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
+    //     Arc::new(BooleanArray::new_scalar(*self))
+    // }
 
     fn is_none(&self) -> bool {
         false
@@ -52,5 +52,9 @@ impl Value for bool {
 
     fn is_some(&self) -> bool {
         false
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
     }
 }

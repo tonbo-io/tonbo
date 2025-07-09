@@ -1,4 +1,4 @@
-use std::ops::Bound;
+use std::{ops::Bound, sync::Arc};
 
 use arrow::{
     array::{BooleanArray, Datum},
@@ -6,7 +6,7 @@ use arrow::{
     compute::kernels::cmp::{gt, gt_eq, lt_eq},
     error::ArrowError,
 };
-use common::{Key, Value};
+use common::{PrimaryKey, Value};
 use parquet::{
     arrow::{
         arrow_reader::{ArrowPredicate, ArrowPredicateFn, RowFilter},
@@ -69,7 +69,8 @@ where
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                lower_cmp(record_batch.column(0), lower_key.to_arrow_datum().as_ref())
+                let pk = PrimaryKey::new(vec![lower_key.clone_arc()]);
+                lower_cmp(record_batch.column(0), pk.arrow_datum(0).unwrap().as_ref())
             },
         )));
     }
@@ -77,7 +78,8 @@ where
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                upper_cmp(upper_key.to_arrow_datum().as_ref(), record_batch.column(0))
+                let pk = PrimaryKey::new(vec![upper_key.clone_arc()]);
+                upper_cmp(pk.arrow_datum(0).unwrap().as_ref(), record_batch.column(0))
             },
         )));
     }
