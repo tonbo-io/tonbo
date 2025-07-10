@@ -1,9 +1,5 @@
 use std::{any::Any, hash::Hash, ops::Deref, sync::Arc};
 
-use arrow::array::{
-    Datum, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array,
-    UInt32Array, UInt64Array, UInt8Array,
-};
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
@@ -22,10 +18,6 @@ macro_rules! implement_key {
             fn as_key_ref(&self) -> Self::Ref<'_> {
                 *self
             }
-
-            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-            //     Arc::new($array_name::new_scalar(*self))
-            // }
 
             fn as_value(&self) -> &dyn Value {
                 self
@@ -53,10 +45,6 @@ macro_rules! implement_key {
                 std::mem::size_of::<$struct_name>()
             }
 
-            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-            //     Arc::new($array_name::new_scalar(*self))
-            // }
-
             fn is_none(&self) -> bool {
                 false
             }
@@ -83,10 +71,6 @@ macro_rules! implement_key {
                 std::mem::size_of::<$struct_name>()
             }
 
-            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-            //     panic!("can not convert `Option` type to `Datum`")
-            // }
-
             fn is_none(&self) -> bool {
                 self.is_none()
             }
@@ -101,24 +85,6 @@ macro_rules! implement_key {
         }
     };
 }
-
-// macro_rules! implement_value {
-//     ($ty:ty, $array_name:ident) => {};
-// }
-
-// implement_value!(i8, DataType::Int8, Int8Array);
-// implement_value!(i16, DataType::Int16, Int16Array);
-// implement_value!(i32, DataType::Int32, Int32Array);
-// implement_value!(i64, DataType::Int64, Int64Array);
-// implement_value!(u8, DataType::UInt8, UInt8Array);
-// implement_value!(u16, DataType::UInt16, UInt16Array);
-// implement_value!(u32, DataType::UInt32, UInt32Array);
-// implement_value!(u64, DataType::UInt64, UInt64Array);
-// implement_value!(F32, DataType::Float32, Float32Array);
-// implement_value!(F64, DataType::Float64, Float64Array);
-// implement_value!(String, DataType::String, StringArray);
-// implement_value!(Date32, DataType::Date32, Date32Array);
-// implement_value!(Date64, DataType::Date64, Date64Array);
 
 implement_key!(i8, Int8Array, DataType::Int8);
 implement_key!(i16, Int16Array, DataType::Int16);
@@ -224,10 +190,6 @@ macro_rules! implement_float_key {
                 *self
             }
 
-            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-            //     Arc::new($array_name::new_scalar(self.0))
-            // }
-
             fn as_value(&self) -> &dyn Value {
                 self
             }
@@ -270,6 +232,35 @@ macro_rules! implement_float_key {
 
             fn is_some(&self) -> bool {
                 false
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
+            }
+        }
+
+        impl Value for Option<FloatType<$ty>> {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn size_of(&self) -> usize {
+                match self {
+                    Some(v) => v.size_of(),
+                    None => 1,
+                }
+            }
+
+            fn is_none(&self) -> bool {
+                self.is_none()
+            }
+
+            fn is_some(&self) -> bool {
+                self.is_some()
             }
 
             fn clone_arc(&self) -> ValueRef {

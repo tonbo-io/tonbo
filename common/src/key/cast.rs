@@ -1,5 +1,3 @@
-use arrow::array::AsArray;
-
 use super::{Date32, Date64, Time32, Time64, Timestamp, Value, F32, F64};
 
 mod sealed {

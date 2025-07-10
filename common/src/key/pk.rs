@@ -23,6 +23,10 @@ impl PrimaryKey {
         Self { keys }
     }
 
+    pub fn get(&self, index: usize) -> Option<&Arc<dyn Value>> {
+        self.keys.get(index)
+    }
+
     pub fn len(&self) -> usize {
         self.keys.len()
     }

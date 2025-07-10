@@ -1,6 +1,6 @@
 use std::{ops::Bound, sync::Arc};
 
-use common::{Date32, Date64, Time32, Time64, Timestamp, F32, F64};
+use common::util::decode_value;
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 use ulid::Ulid;
@@ -123,81 +123,9 @@ impl Decode for Scope {
     async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let mut buf = [0u8; 16];
 
-        let data_type = DataType::decode(reader).await?;
-        let (min, max): (Arc<dyn Value>, Arc<dyn Value>) = match data_type {
-            DataType::UInt8 => (
-                Arc::new(u8::decode(reader).await?),
-                Arc::new(u8::decode(reader).await?),
-            ),
-            DataType::UInt16 => (
-                Arc::new(u16::decode(reader).await?),
-                Arc::new(u16::decode(reader).await?),
-            ),
-            DataType::UInt32 => (
-                Arc::new(u32::decode(reader).await?),
-                Arc::new(u32::decode(reader).await?),
-            ),
-            DataType::UInt64 => (
-                Arc::new(u64::decode(reader).await?),
-                Arc::new(u64::decode(reader).await?),
-            ),
-            DataType::Int8 => (
-                Arc::new(i8::decode(reader).await?),
-                Arc::new(i8::decode(reader).await?),
-            ),
-            DataType::Int16 => (
-                Arc::new(i16::decode(reader).await?),
-                Arc::new(i16::decode(reader).await?),
-            ),
-            DataType::Int32 => (
-                Arc::new(i32::decode(reader).await?),
-                Arc::new(i32::decode(reader).await?),
-            ),
-            DataType::Int64 => (
-                Arc::new(i64::decode(reader).await?),
-                Arc::new(i64::decode(reader).await?),
-            ),
-            DataType::Boolean => (
-                Arc::new(bool::decode(reader).await?),
-                Arc::new(bool::decode(reader).await?),
-            ),
-            DataType::String | DataType::LargeString => (
-                Arc::new(String::decode(reader).await?),
-                Arc::new(String::decode(reader).await?),
-            ),
-            DataType::Bytes | DataType::LargeBinary => (
-                Arc::new(Vec::<u8>::decode(reader).await?),
-                Arc::new(Vec::<u8>::decode(reader).await?),
-            ),
-            DataType::Float32 => (
-                Arc::new(F32::decode(reader).await?),
-                Arc::new(F32::decode(reader).await?),
-            ),
-            DataType::Float64 => (
-                Arc::new(F64::decode(reader).await?),
-                Arc::new(F64::decode(reader).await?),
-            ),
-            DataType::Timestamp(_) => (
-                Arc::new(Timestamp::decode(reader).await?),
-                Arc::new(Timestamp::decode(reader).await?),
-            ),
-            DataType::Time32(_) => (
-                Arc::new(Time32::decode(reader).await?),
-                Arc::new(Time32::decode(reader).await?),
-            ),
-            DataType::Time64(_) => (
-                Arc::new(Time64::decode(reader).await?),
-                Arc::new(Time64::decode(reader).await?),
-            ),
-            DataType::Date32 => (
-                Arc::new(Date32::decode(reader).await?),
-                Arc::new(Date32::decode(reader).await?),
-            ),
-            DataType::Date64 => (
-                Arc::new(Date64::decode(reader).await?),
-                Arc::new(Date64::decode(reader).await?),
-            ),
-        };
+        let _data_type = DataType::decode(reader).await?;
+        let min = decode_value(reader).await?;
+        let max = decode_value(reader).await?;
 
         let gen = {
             let (result, _) = reader.read_exact(buf.as_mut_slice()).await;
@@ -231,9 +159,34 @@ impl Decode for Scope {
 
 #[cfg(test)]
 mod test {
-    use std::{ops::Bound, sync::Arc};
+    use std::{
+        io::{Cursor, SeekFrom},
+        ops::Bound,
+        sync::Arc,
+    };
+
+    use fusio_log::{Decode, Encode};
+    use tokio::io::AsyncSeekExt;
 
     use super::Scope;
+    use crate::fs::generate_file_id;
+
+    #[tokio::test]
+    async fn test_encode_decode_scope() {
+        let scope = Scope {
+            min: Arc::new(100),
+            max: Arc::new(200),
+            gen: generate_file_id(),
+            wal_ids: None,
+        };
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        scope.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+        let decoded = Scope::decode(&mut cursor).await.unwrap();
+        assert_eq!(scope, decoded);
+    }
 
     #[tokio::test]
     async fn test_meets_range() {

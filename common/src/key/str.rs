@@ -1,7 +1,5 @@
 use std::{any::Any, sync::Arc};
 
-use arrow::array::{Datum, StringArray};
-
 use super::{Key, KeyRef, Value, ValueRef};
 use crate::datatype::DataType;
 
@@ -13,10 +11,6 @@ impl Key for String {
     fn as_key_ref(&self) -> Self::Ref<'_> {
         self
     }
-
-    // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-    //     Arc::new(StringArray::new_scalar(self))
-    // }
 
     fn as_value(&self) -> &dyn Value {
         self
@@ -44,16 +38,41 @@ impl Value for String {
         self.len()
     }
 
-    // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-    //     Arc::new(StringArray::new_scalar(self))
-    // }
-
     fn is_none(&self) -> bool {
         false
     }
 
     fn is_some(&self) -> bool {
         false
+    }
+
+    fn clone_arc(&self) -> ValueRef {
+        Arc::new(self.clone())
+    }
+}
+
+impl Value for Option<String> {
+    fn data_type(&self) -> DataType {
+        DataType::String
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn size_of(&self) -> usize {
+        match self {
+            Some(v) => v.size_of() + 1,
+            None => 1,
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        self.is_none()
+    }
+
+    fn is_some(&self) -> bool {
+        self.is_some()
     }
 
     fn clone_arc(&self) -> ValueRef {

@@ -9,6 +9,7 @@ mod timestamp;
 
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
+pub use cast::*;
 pub use datetime::*;
 use fusio_log::{Decode, Encode};
 pub use list::*;
@@ -17,7 +18,7 @@ pub use pk::*;
 pub use str::*;
 pub use timestamp::*;
 
-use crate::{datatype::DataType, key::cast::AsValue};
+use crate::datatype::DataType;
 
 pub type ValueRef = Arc<dyn Value>;
 
@@ -27,8 +28,6 @@ pub trait Value: 'static + Send + Sync + Debug {
     fn data_type(&self) -> DataType;
 
     fn size_of(&self) -> usize;
-
-    // fn to_arrow_datum(&self) -> Arc<dyn Datum>;
 
     fn is_none(&self) -> bool;
 
@@ -46,8 +45,6 @@ pub trait Key:
 
     fn as_key_ref(&self) -> Self::Ref<'_>;
 
-    // fn to_arrow_datum(&self) -> Arc<dyn Datum>;
-
     fn as_value(&self) -> &dyn Value;
 }
 
@@ -58,14 +55,20 @@ pub trait KeyRef<'r>: Clone + Encode + Send + Sync + Ord + std::fmt::Debug {
 }
 
 impl Encode for dyn Value {
+    /// Value layout
+    /// ```ignore
+    /// +-------------------------------------+
+    /// | datatype(1) | is_option(1) |  value |
+    /// +-------------------------------------+
+    /// ```
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: fusio::Write,
     {
-        if self.is_none() {
-            0u8.encode(writer).await?;
-        } else if self.is_some() {
-            let data_type = self.data_type();
+        let data_type = self.data_type();
+        data_type.encode(writer).await?;
+        if self.is_none() || self.is_some() {
+            1u8.encode(writer).await?;
             match &data_type {
                 DataType::UInt8 => self.as_u8_opt().encode(writer).await?,
                 DataType::UInt16 => self.as_u16_opt().encode(writer).await?,
@@ -91,7 +94,7 @@ impl Encode for dyn Value {
                 DataType::Date64 => self.as_date64_opt().encode(writer).await?,
             };
         } else {
-            let data_type = self.data_type();
+            0u8.encode(writer).await?;
             match &data_type {
                 DataType::UInt8 => self.as_u8().encode(writer).await?,
                 DataType::UInt16 => self.as_u16().encode(writer).await?,
