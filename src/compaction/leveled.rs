@@ -1,7 +1,7 @@
 use std::{cmp, collections::Bound, mem, sync::Arc};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
-use common::{Key, Value};
+use common::Value;
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 
@@ -415,7 +415,7 @@ where
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
-    use common::{datatype::DataType, Key};
+    use common::{datatype::DataType, AsValue, Key, PrimaryKey};
     use flume::bounded;
     use fusio::{path::Path, DynFs};
     use fusio_dispatch::FsOptions;
@@ -434,7 +434,7 @@ pub(crate) mod tests {
             immutable::{tests::TestSchema, Immutable},
             mutable::MutableMemTable,
         },
-        record::{DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
+        record::{DynRecord, DynSchema, Record, Schema, ValueDesc},
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -573,6 +573,8 @@ pub(crate) mod tests {
         .await
         .unwrap()
         .unwrap();
+        dbg!(&scope);
+
         assert_eq!(scope.min.as_ref(), 1.to_string().as_value());
         assert_eq!(scope.max.as_ref(), 6.to_string().as_value());
     }
@@ -600,7 +602,7 @@ pub(crate) mod tests {
         let mut batch1_data = vec![];
         let mut batch2_data = vec![];
         for i in 0..40 {
-            let col = Value::new(DataType::Int32, "id".to_owned(), Arc::new(i), false);
+            let col = Arc::new(i);
             if i % 4 == 0 {
                 continue;
             }
@@ -637,12 +639,26 @@ pub(crate) mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(
-            scope.min.as_any().downcast_ref::<Value>().unwrap(),
-            &crate::record::Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
+            scope
+                .min
+                .as_any()
+                .downcast_ref::<PrimaryKey>()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_i32(),
+            &2
         );
         assert_eq!(
-            scope.max.as_any().downcast_ref::<Value>().unwrap(),
-            &Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false)
+            scope
+                .max
+                .as_any()
+                .downcast_ref::<PrimaryKey>()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_i32(),
+            &39
         );
     }
 

@@ -4,10 +4,11 @@ use arrow::{
     datatypes::{DataType, Field, Schema as ArrowSchema},
     error::ArrowError,
 };
+use common::PrimaryKey;
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
 use thiserror::Error;
 
-use super::{array::DynRecordImmutableArrays, DynRecord, Value, ValueDesc};
+use super::{array::DynRecordImmutableArrays, DynRecord, ValueDesc};
 use crate::{magic, record::Schema};
 
 #[derive(Debug)]
@@ -82,7 +83,7 @@ impl Schema for DynSchema {
 
     type Columns = DynRecordImmutableArrays;
 
-    type Key = Value;
+    type Key = PrimaryKey;
 
     fn arrow_schema(&self) -> &Arc<ArrowSchema> {
         &self.arrow_schema

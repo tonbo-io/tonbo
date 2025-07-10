@@ -102,7 +102,7 @@ where
 
         // Safety: filter's lifetime relies on range's lifetime, sstable must not live longer than
         // it
-        let filter = unsafe { get_range_filter::<R>(schema_descriptor, range, ts) };
+        let filter = unsafe { get_range_filter(schema_descriptor, range, ts) };
 
         Ok(SsTableScan::new(
             builder.with_row_filter(filter).build()?,

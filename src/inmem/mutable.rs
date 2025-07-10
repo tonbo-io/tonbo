@@ -225,13 +225,13 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
-    use common::datatype::DataType;
+    use common::{datatype::DataType, PrimaryKey};
     use fusio::{disk::TokioFs, path::Path, DynFs};
 
     use super::MutableMemTable;
     use crate::{
         inmem::immutable::tests::TestSchema,
-        record::{test::StringSchema, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{test::StringSchema, DynRecord, DynSchema, Record, ValueDesc},
         tests::{Test, TestRef},
         timestamp::Ts,
         trigger::TriggerFactory,
@@ -414,18 +414,7 @@ mod tests {
         mutable
             .insert(
                 LogType::Full,
-                DynRecord::new(
-                    vec![
-                        Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                        Value::new(
-                            DataType::Int16,
-                            "height".to_string(),
-                            Arc::new(1236_i16),
-                            true,
-                        ),
-                    ],
-                    0,
-                ),
+                DynRecord::new(vec![Arc::new(1_i8), Arc::new(1236_i16)], 0),
                 0_u32.into(),
             )
             .await
@@ -434,14 +423,8 @@ mod tests {
         {
             let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
             let entry = scan.next().unwrap();
-            assert_eq!(
-                entry.key(),
-                &Ts::new(
-                    Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                    0_u32.into()
-                )
-            );
-            dbg!(entry.clone().value().as_ref().unwrap());
+            assert_eq!(entry.key().value, PrimaryKey::new(vec![Arc::new(1_i8)]));
+            assert_eq!(entry.key().ts, 0u32.into());
         }
     }
 }

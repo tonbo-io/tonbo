@@ -1,4 +1,4 @@
-use std::{ops::Bound, sync::Arc};
+use std::ops::Bound;
 
 use arrow::{
     array::{BooleanArray, Datum},
@@ -15,17 +15,14 @@ use parquet::{
     schema::types::SchemaDescriptor,
 };
 
-use crate::{record::Record, timestamp::Timestamp};
+use crate::timestamp::Timestamp;
 
-unsafe fn get_range_bound_fn<R>(
+unsafe fn get_range_bound_fn(
     range: Bound<&dyn Value>,
 ) -> (
     Option<&'static dyn Value>,
     &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync),
-)
-where
-    R: Record,
-{
+) {
     let cmp: &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync);
     let key = match range {
         Bound::Included(key) => {
@@ -50,16 +47,13 @@ where
     (key, cmp)
 }
 
-pub(crate) unsafe fn get_range_filter<R>(
+pub(crate) unsafe fn get_range_filter(
     schema_descriptor: &SchemaDescriptor,
     range: (Bound<&dyn Value>, Bound<&dyn Value>),
     ts: Timestamp,
-) -> RowFilter
-where
-    R: Record,
-{
-    let (lower_key, lower_cmp) = get_range_bound_fn::<R>(range.0);
-    let (upper_key, upper_cmp) = get_range_bound_fn::<R>(range.1);
+) -> RowFilter {
+    let (lower_key, lower_cmp) = get_range_bound_fn(range.0);
+    let (upper_key, upper_cmp) = get_range_bound_fn(range.1);
 
     let mut predictions: Vec<Box<dyn ArrowPredicate>> = vec![Box::new(ArrowPredicateFn::new(
         ProjectionMask::roots(schema_descriptor, [1]),

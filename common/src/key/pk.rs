@@ -204,6 +204,8 @@ impl PartialOrd for PrimaryKey {
 
 impl Ord for PrimaryKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        debug_assert_eq!(self.keys.len(), other.keys.len());
+
         for (lkey, rkey) in self.keys.iter().zip(&other.keys) {
             let res = lkey.cmp(rkey);
             if res != Ordering::Equal {

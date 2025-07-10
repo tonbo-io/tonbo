@@ -1,8 +1,9 @@
 use std::{fs, sync::Arc};
 
-use common::datatype::DataType;
 use fusio::path::Path;
-use tonbo::{dyn_record, dyn_schema, executor::tokio::TokioExecutor, record::Value, DbOption, DB};
+use tonbo::{
+    dyn_record, dyn_schema, executor::tokio::TokioExecutor, AsValue, DbOption, PrimaryKey, DB,
+};
 
 #[tokio::main]
 async fn main() {
@@ -21,27 +22,20 @@ async fn main() {
     {
         let mut txn = db.transaction().await;
         txn.insert(dyn_record!(
-            ("foo", String, false, "hello".to_owned()),
-            ("bar", Int32, true, 1),
+            ("foo", String, false, Arc::new("hello".to_owned())),
+            ("bar", Int32, true, Arc::new(1)),
             0
         ));
 
         txn.commit().await.unwrap();
     }
 
-    db.get(
-        &Value::new(
-            DataType::String,
-            "foo".into(),
-            Arc::new("hello".to_owned()),
-            false,
-        ),
-        |v| {
-            let v = v.get();
-            println!("{:?}", v.columns[0].value.downcast_ref::<String>());
-            Some(())
-        },
-    )
+    let key = PrimaryKey::new(vec![Arc::new("hello".to_owned())]);
+    db.get(&key, |v| {
+        let v = v.get();
+        println!("{:?}", v.columns[0].as_string());
+        Some(())
+    })
     .await
     .unwrap();
 }

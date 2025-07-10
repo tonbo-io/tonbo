@@ -1,7 +1,7 @@
-use std::{any::Any, marker::PhantomData, mem, sync::Arc};
+use std::{marker::PhantomData, mem, sync::Arc};
 
 use arrow::{
-    array::{Array, ArrayRef, ArrowPrimitiveType, AsArray},
+    array::{Array, AsArray},
     datatypes::{
         Date32Type, Date64Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
         Int8Type, Schema as ArrowSchema, Time32MillisecondType, Time32SecondType,
@@ -11,31 +11,39 @@ use arrow::{
     },
 };
 use common::{
-    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, Time32, Time64, TimeUnit,
-    Timestamp, F32, F64,
+    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, PrimaryKey, Time32, Time64,
+    TimeUnit, Timestamp, Value, F32, F64,
 };
 use fusio::Write;
 use fusio_log::Encode;
 
-use super::{DynRecord, Value};
+use super::{null_value, DynRecord};
 use crate::{
     magic::USER_COLUMN_OFFSET,
-    record::{option::OptionRecordRef, Record, RecordEncodeError, RecordRef, Schema},
+    record::{option::OptionRecordRef, Record, RecordRef, Schema},
 };
 
 #[derive(Clone)]
 pub struct DynRecordRef<'r> {
-    pub columns: Vec<Value>,
+    pub columns: Vec<Arc<dyn Value>>,
+    // TODO: replace mask with bitmap.
+    pub opt_mask: Vec<bool>,
     // XXX: log encode should keep the same behavior
     pub primary_index: usize,
     _marker: PhantomData<&'r ()>,
 }
 
 impl<'r> DynRecordRef<'r> {
-    pub(crate) fn new(columns: Vec<Value>, primary_index: usize) -> Self {
+    pub(crate) fn new(columns: Vec<Arc<dyn Value>>, primary_index: usize) -> Self {
+        let opt_mask = columns
+            .iter()
+            .map(|col| col.is_none() || col.is_some())
+            .collect::<Vec<bool>>();
+
         Self {
             columns,
             primary_index,
+            opt_mask,
             _marker: PhantomData,
         }
     }
@@ -48,7 +56,8 @@ impl<'r> Encode for DynRecordRef<'r> {
     {
         (self.columns.len() as u32).encode(writer).await?;
         (self.primary_index as u32).encode(writer).await?;
-        for col in self.columns.iter() {
+        for (col, is_option) in self.columns.iter().zip(self.opt_mask.iter()) {
+            is_option.encode(writer).await?;
             col.encode(writer).await?;
         }
         Ok(())
@@ -63,29 +72,6 @@ impl<'r> Encode for DynRecordRef<'r> {
     }
 }
 
-impl<'r> DynRecordRef<'r> {
-    fn primitive_value<T>(
-        col: &ArrayRef,
-        offset: usize,
-        idx: usize,
-        projection_mask: &'r parquet::arrow::ProjectionMask,
-        primary: bool,
-    ) -> Arc<dyn Any + Send + Sync>
-    where
-        T: ArrowPrimitiveType,
-    {
-        let v = col.as_primitive::<T>();
-
-        if primary {
-            Arc::new(v.value(offset)) as Arc<dyn Any + Send + Sync>
-        } else {
-            let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
-                .then_some(v.value(offset));
-            Arc::new(value) as Arc<dyn Any + Send + Sync>
-        }
-    }
-}
-
 macro_rules! implement_record_ref {
     (
         { $( { $primitive_ty:ty, $primitive_pat:pat, $arrow_ty:ty } ),* $(,)? },
@@ -95,10 +81,14 @@ macro_rules! implement_record_ref {
             type Record = DynRecord;
 
             fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
-                self.columns
-                    .get(self.primary_index)
-                    .cloned()
-                    .expect("The primary key must exist")
+                PrimaryKey::new(
+                    vec![
+                        self.columns
+                            .get(self.primary_index)
+                            .cloned()
+                            .expect("The primary key must exist")
+                    ]
+                )
             }
 
             fn from_record_batch(
@@ -122,6 +112,7 @@ macro_rules! implement_record_ref {
                     .into();
 
                 let mut columns = vec![];
+                let mut opt_mask = vec![];
 
                 let schema = record_batch.schema();
                 let flattened_fields = schema.flattened_fields();
@@ -133,63 +124,62 @@ macro_rules! implement_record_ref {
                         .enumerate()
                         .find(|(_idx, f)| field.contains(f));
                     if batch_field.is_none() {
-                        columns.push(Value::with_none_value(
-                            datatype,
-                            field.name().to_owned(),
-                            field.is_nullable(),
-                        ));
+                        columns.push(null_value(&datatype));
                         continue;
                     }
                     let col = record_batch.column(batch_field.unwrap().0);
                     let is_nullable = field.is_nullable();
-                    let value = match datatype {
+                    let value: Arc<dyn Value> = match datatype {
                         $(
-                            $primitive_pat => Self::primitive_value::<$arrow_ty>(
-                                col,
-                                offset,
-                                idx,
-                                projection_mask,
-                                primary_index == idx - 2,
-                            ),
+                            $primitive_pat => {
+
+                                let v = col.as_primitive::<$arrow_ty>();
+
+                                if primary_index == idx - 2 {
+                                    Arc::new(v.value(offset))
+                                } else {
+                                    let value = (!v.is_null(offset) && projection_mask.leaf_included(idx))
+                                        .then_some(v.value(offset));
+                                    Arc::new(value)
+                                }
+
+                            }
                         )*
                         DataType::Boolean => {
                             let v = col.as_boolean();
 
                             if primary_index == idx - 2 {
-                                Arc::new(v.value(offset)) as Arc<dyn Any + Send + Sync>
+                                Arc::new(v.value(offset))
                             } else {
                                 let value = (!v.is_null(offset)
                                     && projection_mask.leaf_included(idx))
                                 .then_some(v.value(offset));
-                                Arc::new(value) as Arc<dyn Any + Send + Sync>
+                                Arc::new(value)
                             }
                         }
                         $(
                             $alt_variant2 => {
                                 let array = col.$as_array2::<$arrow_ty3>();
                                 if primary_index == idx - 2 {
-                                    Arc::new($new_fn(array.value(offset))) as Arc<dyn Any + Send + Sync>
+                                    Arc::new($new_fn(array.value(offset)))
                                 } else {
                                     let value = (!array.is_null(offset)
                                         && projection_mask.leaf_included(idx))
                                     .then_some($new_fn(array.value(offset)));
-                                    Arc::new(value) as Arc<dyn Any + Send + Sync>
+                                    Arc::new(value)
                                 }
                             },
                         )*
                         DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     };
-                    columns.push(Value::new(
-                        datatype,
-                        field.name().to_owned(),
-                        value,
-                        is_nullable,
-                    ));
+                    opt_mask.push(is_nullable);
+                    columns.push(value);
                 }
 
                 let record = DynRecordRef {
                     columns,
                     primary_index,
+                    opt_mask,
                     _marker: PhantomData,
                 };
                 OptionRecordRef::new(ts, record, null)
@@ -199,13 +189,13 @@ macro_rules! implement_record_ref {
                 for (idx, col) in self.columns.iter_mut().enumerate() {
                     if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
                     {
-                        match col.datatype() {
+                        *col = match col.data_type() {
                             $(
-                                $primitive_pat => col.value = Arc::<Option<$primitive_ty>>::new(None),
+                                $primitive_pat => Arc::<Option<$primitive_ty>>::new(None) as Arc<dyn Value>,
                             )*
-                            DataType::Boolean => col.value = Arc::<Option<bool>>::new(None),
+                            DataType::Boolean => Arc::<Option<bool>>::new(None) as Arc<dyn Value>,
                             $(
-                                $alt_variant2 => col.value = Arc::<Option<$alt_ty2>>::new(None),
+                                $alt_variant2 => Arc::<Option<$alt_ty2>>::new(None) as Arc<dyn Value>,
                             )*
                             DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                         };
@@ -215,6 +205,7 @@ macro_rules! implement_record_ref {
         }
     };
 }
+
 implement_record_ref!(
     {
         // primitive_ty type
@@ -252,11 +243,13 @@ implement_record_ref!(
 #[cfg(test)]
 mod tests {
 
-    use common::{datatype::DataType, TimeUnit, Timestamp, F32, F64};
+    use std::sync::Arc;
+
+    use common::{datatype::DataType, AsValue, TimeUnit, Timestamp, F32, F64};
     use parquet::arrow::{ArrowSchemaConverter, ProjectionMask};
 
     use crate::{
-        cast_arc_value, dyn_record, dyn_schema, make_dyn_record, make_dyn_schema,
+        dyn_record, dyn_schema, make_dyn_record, make_dyn_schema,
         record::{Record, RecordRef, Schema},
     };
 
@@ -273,13 +266,13 @@ mod tests {
             2
         );
         let record = dyn_record!(
-            ("_null", Boolean, false, true),
-            ("ts", UInt32, false, 7u32),
-            ("id", Float64, false, F64::from(1.23)),
-            ("foo", Float32, false, F32::from(1.23)),
-            ("foo_opt", Float32, true, None::<F32>),
-            ("bar", Float64, false, F64::from(3.234)),
-            ("bar_opt", Float64, true, Some(F64::from(13.234))),
+            ("_null", Boolean, false, Arc::new(true)),
+            ("ts", UInt32, false, Arc::new(7u32)),
+            ("id", Float64, false, Arc::new(F64::from(1.23))),
+            ("foo", Float32, false, Arc::new(F32::from(1.23))),
+            ("foo_opt", Float32, true, Arc::new(None::<F32>)),
+            ("bar", Float64, false, Arc::new(F64::from(3.234))),
+            ("bar_opt", Float64, true, Arc::new(Some(F64::from(13.234)))),
             2
         );
         {
@@ -287,22 +280,13 @@ mod tests {
             let mut record_ref = record.as_record_ref();
             record_ref.projection(&ProjectionMask::all());
             let columns = record_ref.columns;
-            assert_eq!(*cast_arc_value!(columns[0].value, Option<bool>), Some(true));
-            assert_eq!(*cast_arc_value!(columns[1].value, Option<u32>), Some(7u32));
-            assert_eq!(*cast_arc_value!(columns[2].value, F64), 1.23.into());
-            assert_eq!(
-                *cast_arc_value!(columns[3].value, Option<F32>),
-                Some(1.23.into())
-            );
-            assert_eq!(*cast_arc_value!(columns[4].value, Option<F32>), None,);
-            assert_eq!(
-                *cast_arc_value!(columns[5].value, Option<F64>),
-                Some(3.234.into())
-            );
-            assert_eq!(
-                *cast_arc_value!(columns[6].value, Option<F64>),
-                Some(13.234.into())
-            );
+            assert_eq!(columns[0].as_boolean_opt(), &Some(true));
+            assert_eq!(columns[1].as_u32_opt(), &Some(7u32));
+            assert_eq!(columns[2].as_f64(), &1.23.into());
+            assert_eq!(columns[3].as_f32_opt(), &Some(1.23.into()));
+            assert_eq!(columns[4].as_f32_opt(), &None,);
+            assert_eq!(columns[5].as_f64_opt(), &Some(3.234.into()));
+            assert_eq!(columns[6].as_f64_opt(), &Some(13.234.into()));
         }
         {
             // test project no columns
@@ -315,13 +299,13 @@ mod tests {
             );
             record_ref.projection(&mask);
             let columns = record_ref.columns;
-            assert_eq!(*cast_arc_value!(columns[0].value, Option<bool>), None);
-            assert_eq!(*cast_arc_value!(columns[1].value, Option<u32>), None);
-            assert_eq!(*cast_arc_value!(columns[2].value, F64), 1.23.into());
-            assert_eq!(*cast_arc_value!(columns[3].value, Option<F32>), None);
-            assert_eq!(*cast_arc_value!(columns[4].value, Option<F32>), None);
-            assert_eq!(*cast_arc_value!(columns[5].value, Option<F64>), None);
-            assert_eq!(*cast_arc_value!(columns[6].value, Option<F64>), None);
+            assert_eq!(columns[0].as_boolean_opt(), &None);
+            assert_eq!(columns[1].as_u32_opt(), &None);
+            assert_eq!(columns[2].as_f64(), &1.23.into());
+            assert_eq!(columns[3].as_f32_opt(), &None);
+            assert_eq!(columns[4].as_f32_opt(), &None);
+            assert_eq!(columns[5].as_f64_opt(), &None);
+            assert_eq!(columns[6].as_f64_opt(), &None);
         }
     }
 
@@ -338,13 +322,18 @@ mod tests {
             2
         );
         let record = dyn_record!(
-            ("_null", Boolean, false, true),
-            ("ts", UInt32, false, 7u32),
-            ("id", String, false, "abcd".to_string()),
-            ("name", String, false, "Jack".to_string()),
-            ("email", String, true, Some("abc@tonbo.io".to_string())),
-            ("adress", String, true, None::<String>),
-            ("data", Bytes, true, Some(b"hello,tonbo".to_vec())),
+            ("_null", Boolean, false, Arc::new(true)),
+            ("ts", UInt32, false, Arc::new(7u32)),
+            ("id", String, false, Arc::new("abcd".to_string())),
+            ("name", String, false, Arc::new("Jack".to_string())),
+            (
+                "email",
+                String,
+                true,
+                Arc::new(Some("abc@tonbo.io".to_string()))
+            ),
+            ("adress", String, true, Arc::new(None::<String>)),
+            ("data", Bytes, true, Arc::new(Some(b"hello,tonbo".to_vec()))),
             2
         );
         {
@@ -352,22 +341,12 @@ mod tests {
             let mut record_ref = record.as_record_ref();
             record_ref.projection(&ProjectionMask::all());
             let columns = record_ref.columns;
-            assert_eq!(*cast_arc_value!(columns[0].value, Option<bool>), Some(true));
-            assert_eq!(*cast_arc_value!(columns[1].value, Option<u32>), Some(7u32));
-            assert_eq!(cast_arc_value!(columns[2].value, String), "abcd");
-            assert_eq!(
-                *cast_arc_value!(columns[3].value, Option<String>),
-                Some("Jack".into()),
-            );
-            assert_eq!(
-                *cast_arc_value!(columns[4].value, Option<String>),
-                Some("abc@tonbo.io".into())
-            );
-            cast_arc_value!(columns[6].value, Option<Vec<u8>>);
-            assert_eq!(
-                *cast_arc_value!(columns[6].value, Option<Vec<u8>>),
-                Some(b"hello,tonbo".to_vec())
-            );
+            assert_eq!(*columns[0].as_boolean_opt(), Some(true));
+            assert_eq!(*columns[1].as_u32_opt(), Some(7u32));
+            assert_eq!(columns[2].as_string(), "abcd");
+            assert_eq!(*columns[3].as_string_opt(), Some("Jack".into()),);
+            assert_eq!(*columns[4].as_string_opt(), Some("abc@tonbo.io".into()));
+            assert_eq!(*columns[6].as_bytes_opt(), Some(b"hello,tonbo".to_vec()));
         }
         {
             // test project no columns
@@ -380,13 +359,13 @@ mod tests {
             );
             record_ref.projection(&mask);
             let columns = record_ref.columns;
-            assert_eq!(*cast_arc_value!(columns[0].value, Option<bool>), None);
-            assert_eq!(*cast_arc_value!(columns[1].value, Option<u32>), None);
-            assert_eq!(cast_arc_value!(columns[2].value, String), "abcd");
-            assert_eq!(*cast_arc_value!(columns[3].value, Option<String>), None,);
-            assert_eq!(*cast_arc_value!(columns[4].value, Option<String>), None,);
-            assert_eq!(*cast_arc_value!(columns[5].value, Option<String>), None,);
-            assert_eq!(*cast_arc_value!(columns[6].value, Option<Vec<u8>>), None);
+            assert_eq!(*columns[0].as_boolean_opt(), None);
+            assert_eq!(*columns[1].as_u32_opt(), None);
+            assert_eq!(columns[2].as_string(), "abcd");
+            assert_eq!(*columns[3].as_string_opt(), None,);
+            assert_eq!(*columns[4].as_string_opt(), None,);
+            assert_eq!(*columns[5].as_string_opt(), None,);
+            assert_eq!(*columns[6].as_bytes_opt(), None);
         }
     }
 
@@ -402,31 +381,31 @@ mod tests {
             2
         );
         let record = make_dyn_record!(
-            ("_null", DataType::Boolean, false, true),
-            ("_ts", DataType::UInt32, false, 7u32),
+            ("_null", DataType::Boolean, false, Arc::new(true)),
+            ("_ts", DataType::UInt32, false, Arc::new(7u32)),
             (
                 "id",
                 DataType::Timestamp(TimeUnit::Millisecond),
                 false,
-                Timestamp::new_millis(1717507203412)
+                Arc::new(Timestamp::new_millis(1717507203412))
             ),
             (
                 "ts1",
                 DataType::Timestamp(TimeUnit::Millisecond),
                 false,
-                Timestamp::new_millis(1717507203432)
+                Arc::new(Timestamp::new_millis(1717507203432))
             ),
             (
                 "ts2",
                 DataType::Timestamp(TimeUnit::Millisecond),
                 true,
-                Some(Timestamp::new_millis(1717507203442))
+                Arc::new(Some(Timestamp::new_millis(1717507203442)))
             ),
             (
                 "ts3",
                 DataType::Timestamp(TimeUnit::Millisecond),
                 true,
-                None::<Timestamp>
+                Arc::new(None::<Timestamp>)
             ),
             2
         );
@@ -436,19 +415,19 @@ mod tests {
             record_ref.projection(&ProjectionMask::all());
             let columns = record_ref.columns;
             assert_eq!(
-                cast_arc_value!(columns[2].value, Timestamp),
+                columns[2].as_timestamp(),
                 &Timestamp::new_millis(1717507203412)
             );
             assert_eq!(
-                cast_arc_value!(columns[3].value, Option<Timestamp>),
+                columns[3].as_timestamp_opt(),
                 &Some(Timestamp::new_millis(1717507203432))
             );
             assert_eq!(
-                cast_arc_value!(columns[4].value, Option<Timestamp>),
+                columns[4].as_timestamp_opt(),
                 &Some(Timestamp::new_millis(1717507203442))
             );
 
-            assert_eq!(*cast_arc_value!(columns[5].value, Option<Timestamp>), None);
+            assert_eq!(*columns[5].as_timestamp_opt(), None);
         }
         {
             // test project no columns
@@ -462,12 +441,12 @@ mod tests {
             record_ref.projection(&mask);
             let columns = record_ref.columns;
             assert_eq!(
-                *cast_arc_value!(columns[2].value, Timestamp),
+                *columns[2].as_timestamp(),
                 Timestamp::new_millis(1717507203412)
             );
-            assert_eq!(*cast_arc_value!(columns[3].value, Option<Timestamp>), None);
-            assert_eq!(*cast_arc_value!(columns[4].value, Option<Timestamp>), None);
-            assert_eq!(*cast_arc_value!(columns[5].value, Option<Timestamp>), None);
+            assert_eq!(*columns[3].as_timestamp_opt(), None);
+            assert_eq!(*columns[4].as_timestamp_opt(), None);
+            assert_eq!(*columns[5].as_timestamp_opt(), None);
         }
     }
 }

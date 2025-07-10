@@ -303,7 +303,7 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
-    use common::datatype::DataType;
+    use common::{datatype::DataType, AsValue, PrimaryKey};
     use fusio::path::Path;
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
@@ -315,7 +315,7 @@ mod tests {
         fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema,
         record::{
-            runtime::{test::test_dyn_item_schema, DynRecord, Value},
+            runtime::{test::test_dyn_item_schema, DynRecord},
             test::StringSchema,
         },
         tests::{build_db, build_schema, Test},
@@ -939,21 +939,7 @@ mod tests {
             .unwrap();
 
         db.insert(DynRecord::new(
-            vec![
-                Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                Value::new(
-                    DataType::Int16,
-                    "height".to_string(),
-                    Arc::new(Some(180_i16)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int32,
-                    "weight".to_string(),
-                    Arc::new(56_i32),
-                    false,
-                ),
-            ],
+            vec![Arc::new(1_i8), Arc::new(Some(180_i16)), Arc::new(56_i32)],
             0,
         ))
         .await
@@ -961,7 +947,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false);
+            let key = PrimaryKey::new(vec![Arc::new(1_i8)]);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());
@@ -970,20 +956,18 @@ mod tests {
 
             assert_eq!(record_ref.columns.len(), 3);
             let col = record_ref.columns.first().unwrap();
-            assert_eq!(col.datatype(), DataType::Int8);
-            let name = col.value.as_ref().downcast_ref::<i8>();
-            assert!(name.is_some());
-            assert_eq!(*name.unwrap(), 1);
+            assert_eq!(col.data_type(), DataType::Int8);
+            let name = col.as_i8();
+            assert_eq!(*name, 1);
 
             let col = record_ref.columns.get(1).unwrap();
-            let height = col.value.as_ref().downcast_ref::<Option<i16>>();
-            assert!(height.is_some());
-            assert_eq!(*height.unwrap(), Some(180_i16));
+            let height = col.as_i16_opt();
+            assert_eq!(*height, Some(180_i16));
 
             let col = record_ref.columns.get(2).unwrap();
-            let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
+            let weight = col.as_i32_opt();
             assert!(weight.is_some());
-            assert_eq!(*weight.unwrap(), Some(56_i32));
+            assert_eq!(*weight, Some(56_i32));
         }
         {
             let mut scan = txn
@@ -996,27 +980,19 @@ mod tests {
                 assert_eq!(entry.value().unwrap().primary_index, 0);
                 assert_eq!(entry.value().unwrap().columns.len(), 3);
                 let columns = entry.value().unwrap().columns;
-                dbg!(columns.clone());
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int8);
-                assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
-                    1
-                );
+                assert_eq!(primary_key_col.data_type(), DataType::Int8);
+                assert_eq!(*primary_key_col.as_i8(), 1);
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype(), DataType::Int16);
-                assert_eq!(
-                    *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
-                    Some(180)
-                );
+                assert_eq!(col.data_type(), DataType::Int16);
+                assert_eq!(*col.as_i16_opt(), Some(180));
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::Int32);
-                let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
-                assert!(weight.is_some());
-                assert_eq!(*weight.unwrap(), Some(56_i32));
+                assert_eq!(col.data_type(), DataType::Int32);
+                let weight = col.as_i32_opt();
+                assert_eq!(*weight, Some(56_i32));
             }
         }
     }

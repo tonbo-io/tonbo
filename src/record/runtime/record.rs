@@ -1,24 +1,24 @@
 use std::sync::Arc;
 
 use common::{
-    datatype::DataType, Date32, Date64, LargeBinary, LargeString, Time32, Time64, Timestamp, F32,
-    F64,
+    datatype::DataType, util::decode_value, Date32, Date64, LargeBinary, LargeString, Time32,
+    Time64, Timestamp, Value, F32, F64,
 };
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
-use super::{schema::DynSchema, DynRecordRef, Value};
-use crate::{cast_arc_value, record::Record};
+use super::{schema::DynSchema, DynRecordRef};
+use crate::record::Record;
 
 #[derive(Debug)]
 pub struct DynRecord {
-    values: Vec<Value>,
+    values: Vec<Arc<dyn Value>>,
     primary_index: usize,
 }
 
 #[allow(unused)]
 impl DynRecord {
-    pub fn new(values: Vec<Value>, primary_index: usize) -> Self {
+    pub fn new(values: Vec<Arc<dyn Value>>, primary_index: usize) -> Self {
         Self {
             values,
             primary_index,
@@ -42,22 +42,26 @@ macro_rules! implement_record {
                 let mut values = Vec::with_capacity(len);
                 // keep invariant for record: nullable --> Some(v); non-nullable --> v
                 for i in 0..len {
-                    let mut col = Value::decode(reader).await?;
-                    if i != primary_index && !col.is_nullable() {
-                        col.value = match col.datatype() {
+                    let is_nullable = bool::decode(reader).await?;
+                    let col = decode_value(reader).await?;
+                    if is_nullable || i == primary_index {
+                        values.push(col);
+                    } else {
+                        let val: Arc<dyn Value> = match col.data_type() {
                             $(
                                 $copy_pat => {
-                                    Arc::new(cast_arc_value!(col.value, Option<$copy_ty>).unwrap())
+                                    Arc::new(col.as_any().downcast_ref::<Option<$copy_ty>>().unwrap().unwrap())
                                 }
                             )*
                             $(
                                 $clone_pat => {
-                                    Arc::new(cast_arc_value!(col.value, Option<$clone_ty>).clone().unwrap())
+                                    Arc::new(col.as_any().downcast_ref::<Option<$clone_ty>>().unwrap().clone().unwrap())
                                 }
                             )*
                         };
+                        values.push(val);
                     }
-                    values.push(col);
+
                 }
 
                 Ok(DynRecord {
@@ -75,31 +79,21 @@ macro_rules! implement_record {
             fn as_record_ref(&self) -> Self::Ref<'_> {
                 let mut columns = vec![];
                 for (idx, col) in self.values.iter().enumerate() {
-                    let datatype = col.datatype();
-                    let is_nullable = col.is_nullable();
-                    let mut value = col.value.clone();
+                    let datatype = col.data_type();
+                    let is_nullable = col.is_some() || col.is_none();
+                    let mut value = col.clone();
                     if idx != self.primary_index && !is_nullable {
                         value = match datatype {
-
                             $(
-                                $copy_pat => {
-                                    Arc::new(Some(*cast_arc_value!(col.value, $copy_ty)))
-                                }
+                                $copy_pat => Arc::new(Some(*col.as_any().downcast_ref::<$copy_ty>().unwrap())),
                             )*
                             $(
-                                $clone_pat => {
-                                    Arc::new(Some(cast_arc_value!(col.value, $clone_ty).to_owned()))
-                                }
+                                $clone_pat => Arc::new(Some(col.as_any().downcast_ref::<$clone_ty>().unwrap().clone())),
                             )*
                         };
                     }
 
-                    columns.push(Value::new(
-                        datatype,
-                        col.desc.name.to_owned(),
-                        value,
-                        is_nullable,
-                    ));
+                    columns.push(value,);
                 }
                 DynRecordRef::new(columns, self.primary_index)
             }
@@ -152,12 +146,14 @@ implement_record!(
 /// //      (name, type, nullable, value),
 /// //      primary_key_index
 /// // );
+/// use std::sync::Arc;
+///
 /// use tonbo::dyn_record;
 ///
 /// let record = dyn_record!(
-///     ("foo", String, false, "hello".to_owned()),
-///     ("bar", Int32, true, 1_i32),
-///     ("baz", UInt64, true, 1_u64),
+///     ("foo", String, false, Arc::new("hello".to_owned())),
+///     ("bar", Int32, true, Arc::new(1_i32)),
+///     ("baz", UInt64, true, Arc::new(1_u64)),
 ///     0
 /// );
 /// ```
@@ -168,12 +164,7 @@ macro_rules! dyn_record {
             $crate::record::DynRecord::new(
                 vec![
                     $(
-                        $crate::record::Value::new(
-                            $crate::datatype::DataType::$type,
-                            $name.into(),
-                            std::sync::Arc::new($value),
-                            $nullable,
-                        ),
+                        $value,
                     )*
                 ],
                 $primary,
@@ -189,12 +180,7 @@ macro_rules! make_dyn_record {
             $crate::record::DynRecord::new(
                 vec![
                     $(
-                        $crate::record::Value::new(
-                            $type,
-                            $name.into(),
-                            std::sync::Arc::new($value),
-                            $nullable,
-                        ),
+                        $value,
                     )*
                 ],
                 $primary,
@@ -215,10 +201,7 @@ pub(crate) mod test {
     use tokio::io::AsyncSeekExt;
 
     use super::{DynRecord, DynSchema, Record};
-    use crate::{
-        make_dyn_schema,
-        record::{DynRecordRef, Value},
-    };
+    use crate::{make_dyn_schema, record::DynRecordRef};
 
     #[allow(unused)]
     pub(crate) fn test_dyn_item_schema() -> DynSchema {
@@ -247,46 +230,51 @@ pub(crate) mod test {
         let mut items = vec![];
         for i in 0..50 {
             let mut record = make_dyn_record!(
-                ("id", DataType::Int64, false, i as i64),
-                ("age", DataType::Int8, true, Some(i as i8)),
-                ("height", DataType::Int16, true, Some(i as i16 * 20)),
-                ("weight", DataType::Int32, false, i * 200_i32),
-                ("name", DataType::String, false, i.to_string()),
+                ("id", DataType::Int64, false, Arc::new(i as i64)),
+                ("age", DataType::Int8, true, Arc::new(Some(i as i8))),
+                (
+                    "height",
+                    DataType::Int16,
+                    true,
+                    Arc::new(Some(i as i16 * 20))
+                ),
+                ("weight", DataType::Int32, false, Arc::new(i * 200_i32)),
+                ("name", DataType::String, false, Arc::new(i.to_string())),
                 (
                     "email",
                     DataType::String,
                     true,
-                    Some(format!("{}@tonbo.io", i))
+                    Arc::new(Some(format!("{}@tonbo.io", i)))
                 ),
-                ("enabled", DataType::Boolean, false, i % 2 == 0),
+                ("enabled", DataType::Boolean, false, Arc::new(i % 2 == 0)),
                 (
                     "bytes",
                     DataType::Bytes,
                     true,
-                    Some(i.to_le_bytes().to_vec())
+                    Arc::new(Some(i.to_le_bytes().to_vec()))
                 ),
                 (
                     "grade",
                     DataType::Float32,
                     false,
-                    F32::from(i as f32 * 1.11)
+                    Arc::new(F32::from(i as f32 * 1.11))
                 ),
                 (
                     "price",
                     DataType::Float64,
                     true,
-                    Some(F64::from(i as f64 * 1.01))
+                    Arc::new(Some(F64::from(i as f64 * 1.01)))
                 ),
                 (
                     "timestamp",
                     DataType::Timestamp(TimeUnit::Millisecond),
                     true,
-                    Some(Timestamp::new_millis(i as i64))
+                    Arc::new(Some(Timestamp::new_millis(i as i64)))
                 ),
                 0
             );
             if i >= 45 {
-                record.values[2].value = Arc::<Option<i16>>::new(None);
+                record.values[2] = Arc::<Option<i16>>::new(None);
             }
 
             items.push(record);
@@ -296,31 +284,46 @@ pub(crate) mod test {
 
     fn test_dyn_record() -> DynRecord {
         make_dyn_record!(
-            ("id", DataType::Int64, false, 10i64),
-            ("age", DataType::Int8, true, Some(10i8)),
-            ("height", DataType::Int16, true, Some(183i16)),
-            ("weight", DataType::Int32, false, 56i32),
-            ("name", DataType::String, false, "tonbo".to_string()),
+            ("id", DataType::Int64, false, Arc::new(10i64)),
+            ("age", DataType::Int8, true, Arc::new(Some(10i8))),
+            ("height", DataType::Int16, true, Arc::new(Some(183i16))),
+            ("weight", DataType::Int32, false, Arc::new(56i32)),
+            (
+                "name",
+                DataType::String,
+                false,
+                Arc::new("tonbo".to_string())
+            ),
             (
                 "email",
                 DataType::String,
                 true,
-                Some("contact@tonbo.io".to_string())
+                Arc::new(Some("contact@tonbo.io".to_string()))
             ),
-            ("enabled", DataType::Boolean, false, true),
+            ("enabled", DataType::Boolean, false, Arc::new(true)),
             (
                 "bytes",
                 DataType::Bytes,
                 true,
-                Some(b"hello tonbo".to_vec())
+                Arc::new(Some(b"hello tonbo".to_vec()))
             ),
-            ("grade", DataType::Float32, false, F32::from(1.1234)),
-            ("price", DataType::Float64, true, Some(F64::from(1.01))),
+            (
+                "grade",
+                DataType::Float32,
+                false,
+                Arc::new(F32::from(1.1234))
+            ),
+            (
+                "price",
+                DataType::Float64,
+                true,
+                Arc::new(Some(F64::from(1.01)))
+            ),
             (
                 "timestamp",
                 DataType::Timestamp(TimeUnit::Millisecond),
                 true,
-                Some(Timestamp::new_millis(1717507203412))
+                Arc::new(Some(Timestamp::new_millis(1717507203412)))
             ),
             0
         )
@@ -332,73 +335,23 @@ pub(crate) mod test {
         let record_ref = record.as_record_ref();
         let expected = DynRecordRef::new(
             vec![
-                Value::new(DataType::Int64, "id".to_string(), Arc::new(10i64), false),
-                Value::new(
-                    DataType::Int8,
-                    "age".to_string(),
-                    Arc::new(Some(10i8)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int16,
-                    "height".to_string(),
-                    Arc::new(Some(183i16)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int32,
-                    "weight".to_string(),
-                    Arc::new(Some(56i32)),
-                    false,
-                ),
-                Value::new(
-                    DataType::String,
-                    "name".to_string(),
-                    Arc::new(Some("tonbo".to_string())),
-                    false,
-                ),
-                Value::new(
-                    DataType::String,
-                    "email".to_string(),
-                    Arc::new(Some("contact@tonbo.io".to_string())),
-                    true,
-                ),
-                Value::new(
-                    DataType::Boolean,
-                    "enabled".to_string(),
-                    Arc::new(Some(true)),
-                    false,
-                ),
-                Value::new(
-                    DataType::Bytes,
-                    "bytes".to_string(),
-                    Arc::new(Some(b"hello tonbo".to_vec())),
-                    true,
-                ),
-                Value::new(
-                    DataType::Float32,
-                    "grade".to_string(),
-                    Arc::new(Some(F32::from(1.1234))),
-                    false,
-                ),
-                Value::new(
-                    DataType::Float64,
-                    "price".to_string(),
-                    Arc::new(Some(F64::from(1.01))),
-                    true,
-                ),
-                Value::new(
-                    DataType::Timestamp(TimeUnit::Millisecond),
-                    "timestamp".to_string(),
-                    Arc::new(Some(Timestamp::new_millis(1717507203412))),
-                    true,
-                ),
+                Arc::new(10i64),
+                Arc::new(Some(10i8)),
+                Arc::new(Some(183i16)),
+                Arc::new(Some(56i32)),
+                Arc::new(Some("tonbo".to_string())),
+                Arc::new(Some("contact@tonbo.io".to_string())),
+                Arc::new(Some(true)),
+                Arc::new(Some(b"hello tonbo".to_vec())),
+                Arc::new(Some(F32::from(1.1234))),
+                Arc::new(Some(F64::from(1.01))),
+                Arc::new(Some(Timestamp::new_millis(1717507203412))),
             ],
             0,
         );
 
         for (actual, expected) in record_ref.columns.iter().zip(expected.columns) {
-            assert_eq!(*actual, expected)
+            assert_eq!(actual, &expected)
         }
     }
 
