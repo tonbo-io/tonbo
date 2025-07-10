@@ -1,9 +1,29 @@
 use std::sync::Arc;
 
-use super::Value;
+use super::{Key, KeyRef, Value};
 use crate::datatype::DataType;
 
 pub type LargeBinary = Vec<u8>;
+
+impl Key for Vec<u8> {
+    type Ref<'r> = &'r [u8];
+
+    fn as_key_ref(&self) -> Self::Ref<'_> {
+        self.as_slice()
+    }
+
+    fn as_value(&self) -> &dyn Value {
+        self
+    }
+}
+
+impl<'r> KeyRef<'r> for &'r [u8] {
+    type Key = Vec<u8>;
+
+    fn to_key(self) -> Self::Key {
+        self.to_vec()
+    }
+}
 
 impl Value for Vec<u8> {
     fn as_any(&self) -> &dyn std::any::Any {
