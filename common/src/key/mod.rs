@@ -266,7 +266,7 @@ mod tests {
 
     use std::{cmp::Ordering, sync::Arc};
 
-    use crate::{Date32, Key, Timestamp, Value};
+    use crate::{util::decode_value, Date32, Key, Timestamp, Value};
 
     #[test]
     fn test_value_eq() {
@@ -357,21 +357,22 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tokio")]
     #[tokio::test]
     async fn test_encode_value_trait() {
         use std::io::{Cursor, SeekFrom};
 
-        use fusio_log::{Decode, Encode};
+        use fusio_log::Encode;
         use tokio::io::AsyncSeekExt;
 
-        let value = 123u16;
+        let value = Arc::new(123u16) as Arc<dyn Value>;
         let mut bytes = Vec::new();
         let mut buf = Cursor::new(&mut bytes);
         value.encode(&mut buf).await.unwrap();
 
         buf.seek(SeekFrom::Start(0)).await.unwrap();
-        let decoded = u16::decode(&mut buf).await.unwrap();
+        let decoded = decode_value(&mut buf).await.unwrap();
 
-        assert_eq!(value, decoded);
+        assert_eq!(&value, &decoded);
     }
 }

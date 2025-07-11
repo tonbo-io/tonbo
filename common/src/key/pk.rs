@@ -10,12 +10,21 @@ use arrow::array::{
 use fusio_log::{Decode, Encode};
 
 use super::{Key, KeyRef, TimeUnit, Value, ValueRef, F32, F64};
-use crate::{datatype::DataType, key::cast::AsValue, Date32, Date64, Time32, Time64, Timestamp};
+use crate::{
+    datatype::DataType, key::cast::AsValue, util::decode_value, Date32, Date64, Time32, Time64,
+    Timestamp,
+};
 
 #[derive(Debug, Clone)]
 pub struct PrimaryKey {
     // TODO: Composite primary key
     pub keys: Vec<Arc<dyn Value>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrimaryKeyRef<'r> {
+    // TODO: Composite primary key
+    pub keys: Vec<&'r dyn Value>,
 }
 
 impl PrimaryKey {
@@ -167,29 +176,8 @@ impl Decode for PrimaryKey {
         let len = u32::decode(reader).await?;
         let mut keys = Vec::with_capacity(len as usize);
         for _ in 0..len {
-            let data_type = DataType::decode(reader).await?;
-            let key: Arc<dyn Value> = match data_type {
-                DataType::UInt8 => Arc::new(u8::decode(reader).await?),
-                DataType::UInt16 => Arc::new(u16::decode(reader).await?),
-                DataType::UInt32 => Arc::new(u32::decode(reader).await?),
-                DataType::UInt64 => Arc::new(u64::decode(reader).await?),
-                DataType::Int8 => Arc::new(i8::decode(reader).await?),
-                DataType::Int16 => Arc::new(i16::decode(reader).await?),
-                DataType::Int32 => Arc::new(i32::decode(reader).await?),
-                DataType::Int64 => Arc::new(i64::decode(reader).await?),
-                DataType::String => Arc::new(String::decode(reader).await?),
-                DataType::LargeString => Arc::new(String::decode(reader).await?),
-                DataType::Boolean => Arc::new(bool::decode(reader).await?),
-                DataType::Bytes => Arc::new(Vec::<u8>::decode(reader).await?),
-                DataType::LargeBinary => Arc::new(Vec::<u8>::decode(reader).await?),
-                DataType::Timestamp(_) => Arc::new(Timestamp::decode(reader).await?),
-                DataType::Time32(_) => Arc::new(Time32::decode(reader).await?),
-                DataType::Time64(_) => Arc::new(Time64::decode(reader).await?),
-                DataType::Date32 => Arc::new(Date32::decode(reader).await?),
-                DataType::Date64 => Arc::new(Date64::decode(reader).await?),
-                DataType::Float32 => Arc::new(F32::decode(reader).await?),
-                DataType::Float64 => Arc::new(F64::decode(reader).await?),
-            };
+            let _data_type = DataType::decode(reader).await?;
+            let key = decode_value(reader).await?;
             keys.push(key);
         }
         Ok(Self { keys })
@@ -256,5 +244,50 @@ impl Hash for PrimaryKey {
                 DataType::Date64 => key.as_date64().hash(state),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_primary_key_ordering() {
+        let pk1 = PrimaryKey::new(vec![Arc::new(1), Arc::new(2)]);
+        let pk2 = PrimaryKey::new(vec![Arc::new(1), Arc::new(3)]);
+        assert!(pk1 < pk2);
+
+        let pk3 = PrimaryKey::new(vec![Arc::new(1), Arc::new(2)]);
+        let pk4 = PrimaryKey::new(vec![Arc::new(1), Arc::new(2)]);
+        assert!(pk3 == pk4);
+
+        let pk5 = PrimaryKey::new(vec![Arc::new(2), Arc::new(1)]);
+        let pk6 = PrimaryKey::new(vec![Arc::new(1), Arc::new(2)]);
+        assert!(pk5 > pk6);
+    }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn test_primary_encode_decode() {
+        use std::io::{Cursor, SeekFrom};
+
+        use fusio_log::{Decode, Encode};
+        use tokio::io::AsyncSeekExt;
+
+        let pk = PrimaryKey::new(vec![
+            Arc::new(Timestamp::new_millis(1234567890)),
+            Arc::new(1u64),
+            Arc::new(2i32),
+            Arc::new("abc".to_string()),
+        ]);
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        pk.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+        let decoded = PrimaryKey::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(pk, decoded);
     }
 }

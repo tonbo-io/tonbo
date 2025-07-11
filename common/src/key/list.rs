@@ -79,3 +79,46 @@ impl Value for Option<Vec<u8>> {
         Arc::new(self.clone())
     }
 }
+
+#[cfg(all(test, feature = "tokio"))]
+mod tests {
+    use std::io::{Cursor, SeekFrom};
+
+    use fusio_log::{Decode, Encode};
+    use tokio::io::AsyncSeekExt;
+
+    use super::*;
+    use crate::util::decode_value;
+
+    #[tokio::test]
+    async fn test_list_encode_decode() {
+        let list = vec![1u8, 2, 3];
+
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        list.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+        let decoded = Vec::<u8>::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(list, decoded);
+    }
+
+    #[tokio::test]
+    async fn test_list_encode_decode_value() {
+        let list = Arc::new(vec![1u8, 2, 3]) as Arc<dyn Value>;
+
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        list.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+        let decoded = decode_value(&mut cursor).await.unwrap();
+
+        assert_eq!(&list, &decoded);
+        assert_eq!(
+            decoded.as_any().downcast_ref::<Vec<u8>>().unwrap(),
+            &vec![1u8, 2, 3]
+        );
+    }
+}

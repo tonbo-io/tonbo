@@ -61,7 +61,7 @@ where
     Ok(v)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::io::{Cursor, SeekFrom};
 
