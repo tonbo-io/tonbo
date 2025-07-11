@@ -178,7 +178,7 @@ where
     R: Record,
     E: Executor,
 {
-    schema: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     lock_map: LockMap<<R::Schema as Schema>::Key>,
     _p: PhantomData<E>,
@@ -250,7 +250,7 @@ where
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
-        let schema = Arc::new(RwLock::new(
+        let mem_storage = Arc::new(RwLock::new(
             DbStorage::new(
                 option.clone(),
                 task_tx,
@@ -268,7 +268,7 @@ where
         ));
         let mut compactor = match option.compaction_option {
             CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
-                schema.clone(),
+                mem_storage.clone(),
                 record_schema,
                 option.clone(),
                 ctx.clone(),
@@ -301,7 +301,7 @@ where
         });
 
         Ok(Self {
-            schema,
+            mem_storage,
             lock_map: Arc::new(Default::default()),
             ctx,
             _p: Default::default(),
@@ -341,7 +341,7 @@ where
 
     pub async fn snapshot(&self) -> Snapshot<'_, R> {
         Snapshot::new(
-            self.schema.read().await,
+            self.mem_storage.read().await,
             self.ctx.version_set().current().await,
             self.ctx.clone(),
         )
@@ -363,7 +363,7 @@ where
     /// delete the record with the primary key as the `key`
     pub async fn remove(&self, key: <R::Schema as Schema>::Key) -> Result<bool, CommitError<R>> {
         Ok(self
-            .schema
+            .mem_storage
             .read()
             .await
             .remove(LogType::Full, key, self.ctx.increase_ts())
@@ -373,7 +373,7 @@ where
     /// trigger compaction manually. This will flush the WAL and trigger compaction
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
         let (tx, rx) = oneshot::channel();
-        let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
+        let compaction_tx = { self.mem_storage.read().await.compaction_tx.clone() };
         compaction_tx
             .send_async(CompactTask::Flush(Some(tx)))
             .await?;
@@ -390,7 +390,7 @@ where
         mut f: impl FnMut(TransactionEntry<'_, R>) -> Option<T>,
     ) -> Result<Option<T>, CommitError<R>> {
         Ok(self
-            .schema
+            .mem_storage
             .read()
             .await
             .get(
@@ -420,7 +420,7 @@ where
         mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
-            let schema = self.schema.read().await;
+            let schema = self.mem_storage.read().await;
             let current = self.ctx.version_set.current().await;
             let mut scan = Scan::new(
                 &schema,
@@ -438,10 +438,10 @@ where
     }
 
     pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), DbError<R>> {
-        let schema = self.schema.read().await;
+        let mem_storage = self.mem_storage.read().await;
 
-        if schema.write(LogType::Full, record, ts).await? {
-            let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
+        if mem_storage.write(LogType::Full, record, ts).await? {
+            let _ = mem_storage.compaction_tx.try_send(CompactTask::Freeze);
         }
 
         Ok(())
@@ -452,25 +452,25 @@ where
         mut records: impl ExactSizeIterator<Item = R>,
         ts: Timestamp,
     ) -> Result<(), DbError<R>> {
-        let schema = self.schema.read().await;
+        let mem_storage = self.mem_storage.read().await;
 
         if let Some(first) = records.next() {
             let is_excess = if let Some(record) = records.next() {
-                schema.write(LogType::First, first, ts).await?;
+                mem_storage.write(LogType::First, first, ts).await?;
 
                 let mut last_buf = record;
 
                 for record in records {
-                    schema
+                    mem_storage
                         .write(LogType::Middle, mem::replace(&mut last_buf, record), ts)
                         .await?;
                 }
-                schema.write(LogType::Last, last_buf, ts).await?
+                mem_storage.write(LogType::Last, last_buf, ts).await?
             } else {
-                schema.write(LogType::Full, first, ts).await?
+                mem_storage.write(LogType::Full, first, ts).await?
             };
             if is_excess {
-                let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
+                let _ = mem_storage.compaction_tx.try_send(CompactTask::Freeze);
             }
         };
 
@@ -483,7 +483,7 @@ where
     /// necessary to call this method before exiting if data loss is not acceptable. See also
     /// [`DbOption::disable_wal`] and [`DbOption::wal_buffer_size`].
     pub async fn flush_wal(&self) -> Result<(), DbError<R>> {
-        self.schema.write().await.flush_wal().await?;
+        self.mem_storage.write().await.flush_wal().await?;
         Ok(())
     }
 
@@ -491,7 +491,11 @@ where
     ///
     /// **Note:** This will remove all wal and manifest file in the directory.
     pub async fn destroy(self) -> Result<(), DbError<R>> {
-        self.schema.write().await.destroy(&self.ctx.manager).await?;
+        self.mem_storage
+            .write()
+            .await
+            .destroy(&self.ctx.manager)
+            .await?;
         if let Some(ctx) = Arc::into_inner(self.ctx) {
             ctx.version_set.destroy().await?;
         }
@@ -544,7 +548,7 @@ where
         };
 
         let trigger = TriggerFactory::create(option.trigger_type);
-        let mut schema = DbStorage {
+        let mut mem_storage = DbStorage {
             mutable: MutableMemTable::new(
                 &option,
                 trigger.clone(),
@@ -583,7 +587,7 @@ where
 
                     let is_excess = match log_type.unwrap() {
                         LogType::Full => {
-                            schema
+                            mem_storage
                                 .recover_append(key, version_set.increase_ts(), value)
                                 .await?
                         }
@@ -602,20 +606,21 @@ where
 
                             let ts = version_set.increase_ts();
                             for (key, value_option) in records {
-                                is_excess = schema.recover_append(key, ts, value_option).await?;
+                                is_excess =
+                                    mem_storage.recover_append(key, ts, value_option).await?;
                             }
                             is_excess
                         }
                     };
                     if is_excess {
-                        let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
+                        let _ = mem_storage.compaction_tx.try_send(CompactTask::Freeze);
                     }
                 }
             }
         }
-        schema.recover_wal_ids = Some(wal_ids);
+        mem_storage.recover_wal_ids = Some(wal_ids);
 
-        Ok(schema)
+        Ok(mem_storage)
     }
 
     async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
@@ -730,7 +735,7 @@ where
     R: Record,
     'range: 'scan,
 {
-    schema: &'scan DbStorage<R>,
+    mem_storage: &'scan DbStorage<R>,
     lower: Bound<&'range <R::Schema as Schema>::Key>,
     upper: Bound<&'range <R::Schema as Schema>::Key>,
     ts: Timestamp,
@@ -750,7 +755,7 @@ where
     R: Record + Send,
 {
     fn new(
-        schema: &'scan DbStorage<R>,
+        mem_storage: &'scan DbStorage<R>,
         (lower, upper): (
             Bound<&'range <R::Schema as Schema>::Key>,
             Bound<&'range <R::Schema as Schema>::Key>,
@@ -763,7 +768,7 @@ where
         ctx: Arc<Context<R>>,
     ) -> Self {
         Self {
-            schema,
+            mem_storage,
             lower,
             upper,
             ts,
@@ -786,7 +791,7 @@ where
 
     /// fields in projection Record by field indices
     pub fn projection(self, projection: &[&str]) -> Self {
-        let schema = self.schema.record_schema.arrow_schema();
+        let schema = self.mem_storage.record_schema.arrow_schema();
         let mut projection = projection
             .iter()
             .map(|name| {
@@ -795,7 +800,7 @@ where
                     .unwrap_or_else(|_| panic!("unexpected field {}", name))
             })
             .collect::<Vec<usize>>();
-        let primary_key_index = self.schema.record_schema.primary_key_index();
+        let primary_key_index = self.mem_storage.record_schema.primary_key_index();
         let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
@@ -818,14 +823,14 @@ where
         for p in &mut projection {
             *p += USER_COLUMN_OFFSET;
         }
-        let primary_key_index = self.schema.record_schema.primary_key_index();
+        let primary_key_index = self.mem_storage.record_schema.primary_key_index();
         let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
 
         let mask = ProjectionMask::roots(
             &ArrowSchemaConverter::new()
-                .convert(self.schema.record_schema.arrow_schema())
+                .convert(self.mem_storage.record_schema.arrow_schema())
                 .unwrap(),
             fixed_projection.clone(),
         );
@@ -853,7 +858,7 @@ where
         // Mutable
         {
             let mut mutable_scan = self
-                .schema
+                .mem_storage
                 .mutable
                 .scan((self.lower, self.upper), self.ts)
                 .into();
@@ -863,7 +868,7 @@ where
             }
             streams.push(mutable_scan);
         }
-        for (_, immutable) in self.schema.immutables.iter().rev() {
+        for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
@@ -908,7 +913,7 @@ where
         // Mutable
         {
             let mut mutable_scan = self
-                .schema
+                .mem_storage
                 .mutable
                 .scan((self.lower, self.upper), self.ts)
                 .into();
@@ -918,7 +923,7 @@ where
             }
             streams.push(mutable_scan);
         }
-        for (_, immutable) in self.schema.immutables.iter().rev() {
+        for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
                     .scan((self.lower, self.upper), self.ts, self.projection.clone())
@@ -1238,7 +1243,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let mut schema = db.schema.write().await;
+        let mut schema = db.mem_storage.write().await;
 
         let trigger = schema.trigger.clone();
         let mutable = mem::replace(
@@ -1378,7 +1383,7 @@ pub(crate) mod tests {
         option: Arc<DbOption>,
         compaction_rx: Receiver<CompactTask>,
         executor: E,
-        schema: crate::DbStorage<R>,
+        mem_storage: crate::DbStorage<R>,
         record_schema: Arc<R::Schema>,
         version: Version<R>,
         manager: Arc<StoreManager>,
@@ -1395,7 +1400,7 @@ pub(crate) mod tests {
             let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
         }
 
-        let schema = Arc::new(RwLock::new(schema));
+        let mem_storage = Arc::new(RwLock::new(mem_storage));
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let version_set =
@@ -1408,7 +1413,7 @@ pub(crate) mod tests {
         ));
         let mut compactor = match option.compaction_option {
             CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
-                schema.clone(),
+                mem_storage.clone(),
                 record_schema,
                 option.clone(),
                 ctx.clone(),
@@ -1442,7 +1447,7 @@ pub(crate) mod tests {
         });
 
         Ok(DB {
-            schema,
+            mem_storage,
             lock_map: Arc::new(Default::default()),
             ctx,
             _p: Default::default(),
@@ -1645,7 +1650,7 @@ pub(crate) mod tests {
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = TriggerFactory::create(option.trigger_type);
-        let schema: crate::DbStorage<Test> = crate::DbStorage {
+        let mem_storage: crate::DbStorage<Test> = crate::DbStorage {
             mutable: MutableMemTable::new(&option, trigger.clone(), fs, Arc::new(TestSchema))
                 .await
                 .unwrap(),
@@ -1658,13 +1663,13 @@ pub(crate) mod tests {
         };
 
         for (i, item) in test_items().into_iter().enumerate() {
-            schema
+            mem_storage
                 .write(LogType::Full, item, (i as u32).into())
                 .await
                 .unwrap();
         }
-        schema.flush_wal().await.unwrap();
-        drop(schema);
+        mem_storage.flush_wal().await.unwrap();
+        drop(mem_storage);
 
         let db: DB<Test, TokioExecutor> = DB::new(
             option.as_ref().to_owned(),
@@ -1716,7 +1721,7 @@ pub(crate) mod tests {
         let (task_tx, _task_rx) = bounded(1);
 
         let trigger = TriggerFactory::create(option.trigger_type);
-        let schema: crate::DbStorage<DynRecord> = crate::DbStorage {
+        let mem_storage: crate::DbStorage<DynRecord> = crate::DbStorage {
             mutable: MutableMemTable::new(
                 &option,
                 trigger.clone(),
@@ -1734,13 +1739,13 @@ pub(crate) mod tests {
         };
 
         for item in test_dyn_items().into_iter() {
-            schema
+            mem_storage
                 .write(LogType::Full, item, 0_u32.into())
                 .await
                 .unwrap();
         }
-        schema.flush_wal().await.unwrap();
-        drop(schema);
+        mem_storage.flush_wal().await.unwrap();
+        drop(mem_storage);
 
         let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),

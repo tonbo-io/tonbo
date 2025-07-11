@@ -23,7 +23,7 @@ where
     R: Record,
 {
     option: Arc<DbOption>,
-    schema: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     record_schema: Arc<R::Schema>,
 }
@@ -33,14 +33,14 @@ where
     R: Record,
 {
     pub(crate) fn new(
-        schema: Arc<RwLock<DbStorage<R>>>,
+        mem_storage: Arc<RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
         option: Arc<DbOption>,
         ctx: Arc<Context<R>>,
     ) -> Self {
         LeveledCompactor::<R> {
             option,
-            schema,
+            mem_storage,
             ctx,
             record_schema,
         }
@@ -50,7 +50,7 @@ where
         &mut self,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
-        let mut guard = self.schema.write().await;
+        let mut guard = self.mem_storage.write().await;
 
         guard.trigger.reset();
 
@@ -79,7 +79,7 @@ where
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
-            let guard = self.schema.upgradable_read().await;
+            let guard = self.mem_storage.upgradable_read().await;
             let chunk_num = if is_manual {
                 guard.immutables.len()
             } else {

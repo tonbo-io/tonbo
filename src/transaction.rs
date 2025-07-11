@@ -85,9 +85,12 @@ where
             Some(v) => v.as_ref().map(|v| {
                 let mut record_ref = v.as_record_ref();
                 if let Projection::Parts(projection) = projection {
-                    let primary_key_index =
-                        self.snapshot.schema().record_schema.primary_key_index();
-                    let schema = self.snapshot.schema().record_schema.arrow_schema();
+                    let primary_key_index = self
+                        .snapshot
+                        .mem_storage()
+                        .record_schema
+                        .primary_key_index();
+                    let schema = self.snapshot.mem_storage().record_schema.arrow_schema();
                     let mut projection = projection
                         .iter()
                         .map(|name| {
@@ -200,7 +203,7 @@ where
         for (key, _) in self.local.iter() {
             if self
                 .snapshot
-                .schema()
+                .mem_storage()
                 .check_conflict(key, self.snapshot.ts())
             {
                 return Err(CommitError::WriteConflict(key.clone()));
@@ -213,28 +216,55 @@ where
             1 => {
                 let new_ts = self.snapshot.increase_ts();
                 let (key, record) = self.local.pop_first().unwrap();
-                Self::append(self.snapshot.schema(), LogType::Full, key, record, new_ts).await?
+                Self::append(
+                    self.snapshot.mem_storage(),
+                    LogType::Full,
+                    key,
+                    record,
+                    new_ts,
+                )
+                .await?
             }
             _ => {
                 let new_ts = self.snapshot.increase_ts();
                 let mut iter = self.local.into_iter();
 
                 let (key, record) = iter.next().unwrap();
-                Self::append(self.snapshot.schema(), LogType::First, key, record, new_ts).await?;
+                Self::append(
+                    self.snapshot.mem_storage(),
+                    LogType::First,
+                    key,
+                    record,
+                    new_ts,
+                )
+                .await?;
 
                 for (key, record) in (&mut iter).take(len - 2) {
-                    Self::append(self.snapshot.schema(), LogType::Middle, key, record, new_ts)
-                        .await?;
+                    Self::append(
+                        self.snapshot.mem_storage(),
+                        LogType::Middle,
+                        key,
+                        record,
+                        new_ts,
+                    )
+                    .await?;
                 }
 
                 let (key, record) = iter.next().unwrap();
-                Self::append(self.snapshot.schema(), LogType::Last, key, record, new_ts).await?
+                Self::append(
+                    self.snapshot.mem_storage(),
+                    LogType::Last,
+                    key,
+                    record,
+                    new_ts,
+                )
+                .await?
             }
         };
         if is_excess {
             let _ = self
                 .snapshot
-                .schema()
+                .mem_storage()
                 .compaction_tx
                 .try_send(CompactTask::Freeze);
         }
