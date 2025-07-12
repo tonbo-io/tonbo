@@ -249,12 +249,12 @@ where
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
+        let manifest = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
         let mem_storage = Arc::new(RwLock::new(
             DbStorage::new(
                 option.clone(),
                 task_tx,
-                &version_set,
+                &manifest,
                 record_schema.clone(),
                 &manager,
             )
@@ -263,7 +263,7 @@ where
         let ctx = Arc::new(Context::new(
             manager,
             lru_cache.clone(),
-            version_set,
+            manifest,
             record_schema.arrow_schema().clone(),
         ));
         let mut compactor = match option.compaction_option {
@@ -342,7 +342,7 @@ where
     pub async fn snapshot(&self) -> Snapshot<'_, R> {
         Snapshot::new(
             self.mem_storage.read().await,
-            self.ctx.version_set().current().await,
+            self.ctx.manifest().current().await,
             self.ctx.clone(),
         )
     }
@@ -395,7 +395,7 @@ where
             .await
             .get(
                 &self.ctx,
-                &*self.ctx.version_set.current().await,
+                &*self.ctx.manifest().current().await,
                 key,
                 self.ctx.load_ts(),
                 Projection::All,
@@ -421,7 +421,7 @@ where
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
             let schema = self.mem_storage.read().await;
-            let current = self.ctx.version_set.current().await;
+            let current = self.ctx.manifest().current().await;
             let mut scan = Scan::new(
                 &schema,
                 range,
@@ -497,7 +497,7 @@ where
             .destroy(&self.ctx.manager)
             .await?;
         if let Some(ctx) = Arc::into_inner(self.ctx) {
-            ctx.version_set.destroy().await?;
+            ctx.manifest.destroy().await?;
         }
 
         Ok(())
@@ -524,7 +524,7 @@ where
     async fn new(
         option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
-        version_set: &VersionSet<R>,
+        manifest: &VersionSet<R>,
         record_schema: Arc<R::Schema>,
         manager: &StoreManager,
     ) -> Result<Self, DbError<R>> {
@@ -588,7 +588,7 @@ where
                     let is_excess = match log_type.unwrap() {
                         LogType::Full => {
                             mem_storage
-                                .recover_append(key, version_set.increase_ts(), value)
+                                .recover_append(key, manifest.increase_ts(), value)
                                 .await?
                         }
                         LogType::First => {
@@ -604,7 +604,7 @@ where
                             let mut records = transaction_map.remove(&ts).unwrap();
                             records.push((key, value));
 
-                            let ts = version_set.increase_ts();
+                            let ts = manifest.increase_ts();
                             for (key, value_option) in records {
                                 is_excess =
                                     mem_storage.recover_append(key, ts, value_option).await?;
@@ -1403,12 +1403,12 @@ pub(crate) mod tests {
         let mem_storage = Arc::new(RwLock::new(mem_storage));
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let version_set =
+        let manifest =
             build_version_set(version, clean_sender, option.clone(), manager.clone()).await?;
         let ctx = Arc::new(Context::new(
             manager,
             Arc::new(NoCache::default()),
-            version_set,
+            manifest,
             TestSchema.arrow_schema().clone(),
         ));
         let mut compactor = match option.compaction_option {
@@ -1500,9 +1500,9 @@ pub(crate) mod tests {
         let key = 20.to_string();
         let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
 
-        dbg!(db.ctx.version_set.current().await);
+        dbg!(db.ctx.manifest.current().await);
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         assert!(!version.level_slice[1].is_empty());
 
         assert_eq!(option1.get().vstring, "20");
@@ -1538,11 +1538,11 @@ pub(crate) mod tests {
             db.write(item.clone(), 0.into()).await.unwrap();
         }
 
-        dbg!(db.ctx.version_set.current().await);
+        dbg!(db.ctx.manifest.current().await);
         db.flush().await.unwrap();
-        dbg!(db.ctx.version_set.current().await);
+        dbg!(db.ctx.manifest.current().await);
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         assert!(!version.level_slice[0].is_empty());
     }
 
@@ -1851,7 +1851,7 @@ pub(crate) mod tests {
             }
         }
 
-        dbg!(db.ctx.version_set.current().await);
+        dbg!(db.ctx.manifest.current().await);
         // test get
         {
             let tx = db.transaction().await;

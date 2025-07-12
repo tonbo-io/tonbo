@@ -96,7 +96,7 @@ where
             )
             .await?
             {
-                let version_ref = self.ctx.version_set.current().await;
+                let version_ref = self.ctx.manifest().current().await;
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
@@ -119,7 +119,7 @@ where
                 });
 
                 self.ctx
-                    .version_set
+                    .manifest()
                     .apply_edits(version_edits, Some(delete_gens), false)
                     .await?;
             }
@@ -128,7 +128,7 @@ where
             let _ = mem::replace(&mut guard.immutables, sources);
         }
         if is_manual {
-            self.ctx.version_set.rewrite().await.unwrap();
+            self.ctx.manifest().rewrite().await.unwrap();
         }
         Ok(())
     }
@@ -702,13 +702,13 @@ pub(crate) mod tests {
         let mut version_edits = Vec::new();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
+        let manifest = VersionSet::new(clean_sender, option.clone(), manager.clone())
             .await
             .unwrap();
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),
-            version_set,
+            manifest,
             TestSchema.arrow_schema().clone(),
         );
 
@@ -851,13 +851,13 @@ pub(crate) mod tests {
         let max = 9.to_string();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
+        let manifest = VersionSet::new(clean_sender, option.clone(), manager.clone())
             .await
             .unwrap();
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),
-            version_set,
+            manifest,
             TestSchema.arrow_schema().clone(),
         );
         LeveledCompactor::<Test>::major_compaction(
@@ -964,7 +964,7 @@ pub(crate) mod tests {
         .unwrap();
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest().current().await;
 
         for level in 0..MAX_LEVEL {
             let sort_runs = &version.level_slice[level];
