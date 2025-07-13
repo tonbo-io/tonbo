@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_lock::RwLock;
+use async_trait::async_trait;
 use flume::Sender;
 use fusio::{fs::FileMeta, DynFs};
 use fusio_log::{Logger, Options};
@@ -16,6 +17,7 @@ use futures_util::StreamExt;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
+    manifest::{ManifestStorage, ManifestStorageError},
     record::{Record, Schema},
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
@@ -183,11 +185,7 @@ where
         Ok(set)
     }
 
-    pub(crate) async fn current(&self) -> VersionRef<R> {
-        self.inner.read().await.current.clone()
-    }
-
-    pub(crate) async fn apply_edits(
+    async fn apply_edits(
         &self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<(FileId, usize)>>,
@@ -260,13 +258,13 @@ where
 
         drop(guard);
         if edit_len >= option.version_log_snapshot_threshold || is_recover {
-            self.rewrite().await?;
+            self.compact_log().await?;
             self.clean().await?;
         }
         Ok(())
     }
 
-    pub(crate) async fn rewrite(&self) -> Result<(), VersionError<R>> {
+    async fn compact_log(&self) -> Result<(), VersionError<R>> {
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
         let fs = self.manager.local_fs();
@@ -351,7 +349,7 @@ where
             .map_err(VersionError::Logger)
     }
 
-    pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
+    async fn destroy_log(&mut self) -> Result<(), VersionError<R>> {
         let log_dir_path = self.option.version_log_dir_path();
         let log_fs = self.manager.base_fs();
         let mut log_stream = log_fs.list(&log_dir_path).await?;
@@ -362,6 +360,11 @@ where
             }
         }
 
+        Ok(())
+    }
+
+    async fn destroy_levels(&mut self) -> Result<(), VersionError<R>> {
+        let log_fs = self.manager.base_fs();
         for level in 0..MAX_LEVEL {
             let level_path = self
                 .option
@@ -381,6 +384,43 @@ where
                 }
             }
         }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<R> ManifestStorage<R> for VersionSet<R>
+where
+    R: Record,
+{
+    async fn current(&self) -> VersionRef<R> {
+        self.inner.read().await.current.clone()
+    }
+
+    async fn recover(
+        &self,
+        version_edits: Vec<VersionEdit<<<R as Record>::Schema as Schema>::Key>>,
+        delete_gens: Option<Vec<(FileId, usize)>>,
+    ) -> Result<(), ManifestStorageError<R>> {
+        Ok(self.apply_edits(version_edits, delete_gens, true).await?)
+    }
+
+    async fn update(
+        &self,
+        version_edits: Vec<VersionEdit<<<R as Record>::Schema as Schema>::Key>>,
+        delete_gens: Option<Vec<(FileId, usize)>>,
+    ) -> Result<(), ManifestStorageError<R>> {
+        Ok(self.apply_edits(version_edits, delete_gens, false).await?)
+    }
+
+    async fn rewrite(&self) -> Result<(), ManifestStorageError<R>> {
+        Ok(self.compact_log().await?)
+    }
+
+    async fn destroy(&mut self) -> Result<(), ManifestStorageError<R>> {
+        self.destroy_log().await?;
+        self.destroy_levels().await?;
 
         Ok(())
     }

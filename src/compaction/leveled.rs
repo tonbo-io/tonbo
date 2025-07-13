@@ -120,7 +120,7 @@ where
 
                 self.ctx
                     .manifest()
-                    .apply_edits(version_edits, Some(delete_gens), false)
+                    .update(version_edits, Some(delete_gens))
                     .await?;
             }
             let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
@@ -702,9 +702,11 @@ pub(crate) mod tests {
         let mut version_edits = Vec::new();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let manifest = VersionSet::new(clean_sender, option.clone(), manager.clone())
-            .await
-            .unwrap();
+        let manifest = Box::new(
+            VersionSet::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
+        );
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),
@@ -851,9 +853,11 @@ pub(crate) mod tests {
         let max = 9.to_string();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let manifest = VersionSet::new(clean_sender, option.clone(), manager.clone())
-            .await
-            .unwrap();
+        let manifest = Box::new(
+            VersionSet::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
+        );
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),

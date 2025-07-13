@@ -112,6 +112,7 @@ pub mod executor;
 pub mod fs;
 pub mod inmem;
 pub mod magic;
+mod manifest;
 mod ondisk;
 pub mod option;
 pub mod record;
@@ -140,6 +141,7 @@ use futures_util::StreamExt;
 use inmem::{immutable::Immutable, mutable::MutableMemTable};
 use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
+use manifest::ManifestStorageError;
 pub use once_cell;
 pub use parquet;
 use parquet::{
@@ -249,7 +251,11 @@ where
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
-        let manifest = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
+        let manifest = Box::new(
+            VersionSet::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .map_err(ManifestStorageError::Version)?,
+        );
         let mem_storage = Arc::new(RwLock::new(
             DbStorage::new(
                 option.clone(),
@@ -496,7 +502,7 @@ where
             .await
             .destroy(&self.ctx.manager)
             .await?;
-        if let Some(ctx) = Arc::into_inner(self.ctx) {
+        if let Some(mut ctx) = Arc::into_inner(self.ctx) {
             ctx.manifest.destroy().await?;
         }
 
@@ -960,6 +966,8 @@ where
     Io(#[from] io::Error),
     #[error("write version error: {0}")]
     Version(#[from] VersionError<R>),
+    #[error("write manifest storage error: {0}")]
+    Manifest(#[from] ManifestStorageError<R>),
     #[error("write parquet error: {0}")]
     Parquet(#[from] ParquetError),
     #[error("write ulid decode error: {0}")]
@@ -1017,6 +1025,7 @@ pub(crate) mod tests {
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
         inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
+        manifest::ManifestStorageError,
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
@@ -1403,8 +1412,11 @@ pub(crate) mod tests {
         let mem_storage = Arc::new(RwLock::new(mem_storage));
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let manifest =
-            build_version_set(version, clean_sender, option.clone(), manager.clone()).await?;
+        let manifest = Box::new(
+            build_version_set(version, clean_sender, option.clone(), manager.clone())
+                .await
+                .map_err(ManifestStorageError::Version)?,
+        );
         let ctx = Arc::new(Context::new(
             manager,
             Arc::new(NoCache::default()),

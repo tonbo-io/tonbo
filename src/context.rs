@@ -3,17 +3,14 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 
 use crate::{
-    fs::manager::StoreManager,
-    record::Record,
-    timestamp::Timestamp,
-    version::{set::VersionSet, TransactionTs},
+    fs::manager::StoreManager, manifest::ManifestStorage, record::Record, timestamp::Timestamp,
     ParquetLru,
 };
 
 pub(crate) struct Context<R: Record> {
     pub(crate) manager: Arc<StoreManager>,
     pub(crate) parquet_lru: ParquetLru,
-    pub(crate) manifest: VersionSet<R>,
+    pub(crate) manifest: Box<dyn ManifestStorage<R>>,
     pub(crate) arrow_schema: Arc<Schema>,
 }
 
@@ -24,7 +21,7 @@ where
     pub(crate) fn new(
         manager: Arc<StoreManager>,
         parquet_lru: ParquetLru,
-        manifest: VersionSet<R>,
+        manifest: Box<dyn ManifestStorage<R>>,
         arrow_schema: Arc<Schema>,
     ) -> Self {
         Self {
@@ -35,7 +32,7 @@ where
         }
     }
 
-    pub(crate) fn manifest(&self) -> &VersionSet<R> {
+    pub(crate) fn manifest(&self) -> &Box<dyn ManifestStorage<R>> {
         &self.manifest
     }
 
