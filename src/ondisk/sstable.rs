@@ -24,7 +24,9 @@ use crate::{
 
 #[derive(Clone)]
 pub struct SsTableID {
+    // File id for the SStable
     file_id: FileId,
+    // The level where the SSTable is located
     level: usize,
 }
 
