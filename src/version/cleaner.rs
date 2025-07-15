@@ -4,27 +4,20 @@ use flume::{Receiver, Sender};
 
 use crate::{
     fs::{manager::StoreManager, FileId},
+    ondisk::sstable::SsTableID,
     timestamp::Timestamp,
     DbOption,
 };
 
 pub enum CleanTag {
-    Add {
-        ts: Timestamp,
-        gens: Vec<(FileId, usize)>,
-    },
-    Clean {
-        ts: Timestamp,
-    },
-    RecoverClean {
-        wal_id: FileId,
-        level: usize,
-    },
+    Add { ts: Timestamp, gens: Vec<SsTableID> },
+    Clean { ts: Timestamp },
+    RecoverClean { wal_id: FileId, level: usize },
 }
 
 pub(crate) struct Cleaner {
     tag_recv: Receiver<CleanTag>,
-    gens_map: BTreeMap<Timestamp, (Vec<(FileId, usize)>, bool)>,
+    gens_map: BTreeMap<Timestamp, (Vec<SsTableID>, bool)>,
     option: Arc<DbOption>,
     manager: Arc<StoreManager>,
 }
@@ -62,13 +55,14 @@ impl Cleaner {
                             let _ = self.gens_map.insert(first_version, (gens, false));
                             break;
                         }
-                        for (gen, level) in gens {
+                        for gen in gens {
                             let fs = self
                                 .option
-                                .level_fs_path(level)
+                                .level_fs_path(gen.level())
                                 .map(|path| self.manager.get_fs(path))
                                 .unwrap_or(self.manager.base_fs());
-                            fs.remove(&self.option.table_path(gen, level)).await?;
+                            fs.remove(&self.option.table_path(gen.file_id(), gen.level()))
+                                .await?;
                         }
                     }
                 }
@@ -101,6 +95,7 @@ pub(crate) mod tests {
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager, FileType},
         inmem::immutable::tests::TestSchema,
+        ondisk::sstable::SsTableID,
         version::cleaner::{CleanTag, Cleaner},
         DbOption,
     };
@@ -161,19 +156,19 @@ pub(crate) mod tests {
 
         tx.send_async(CleanTag::Add {
             ts: 1.into(),
-            gens: vec![(gen_1, 0)],
+            gens: vec![SsTableID::new(gen_1, 0)],
         })
         .await
         .unwrap();
         tx.send_async(CleanTag::Add {
             ts: 0.into(),
-            gens: vec![(gen_0, 0)],
+            gens: vec![SsTableID::new(gen_0, 0)],
         })
         .await
         .unwrap();
         tx.send_async(CleanTag::Add {
             ts: 2.into(),
-            gens: vec![(gen_2, 0)],
+            gens: vec![SsTableID::new(gen_2, 0)],
         })
         .await
         .unwrap();
