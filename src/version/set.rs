@@ -1,5 +1,5 @@
 use std::{
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashMap},
     mem,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -17,6 +17,7 @@ use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
     record::{Record, Schema},
+    scope::Scope,
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
@@ -210,6 +211,8 @@ where
                 .map_err(VersionError::Logger)?;
         }
 
+        // Batch `add SST` operations because adds can be consecutive
+        let mut batch_add: HashMap<u8, Vec<Scope<<R::Schema as Schema>::Key>>> = HashMap::new();
         for version_edit in version_edits {
             match version_edit {
                 VersionEdit::Add { mut scope, level } => {
@@ -217,15 +220,11 @@ where
                     if let Some(wal_ids) = scope.wal_ids.take() {
                         guard.deleted_wal.extend(wal_ids);
                     }
+
                     if level == 0 {
                         new_version.level_slice[level as usize].push(scope);
                     } else {
-                        // TODO: Add is often consecutive, so repeated queries can be avoided
-                        let sort_runs = &mut new_version.level_slice[level as usize];
-                        let pos = sort_runs
-                            .binary_search_by(|s| s.min.cmp(&scope.min))
-                            .unwrap_or_else(|index| index);
-                        sort_runs.insert(pos, scope);
+                        batch_add.entry(level).or_default().push(scope);
                     }
                 }
                 VersionEdit::Remove { gen, level } => {
@@ -251,6 +250,38 @@ where
                 }
             }
         }
+
+        // Due to many compaction add operations being consecutive, this checks if the 
+        // SSTs can be splice inserted instead of inserting eac one individually
+        if !batch_add.is_empty() {
+            for (level, mut scopes) in batch_add.into_iter() {
+                scopes.sort_unstable_by_key(|scope| scope.min.clone());
+                let sort_runs = &mut new_version.level_slice[level as usize];
+                
+                let mut ptr = 0;
+                while ptr < scopes.len() {
+                    let pos = sort_runs
+                        .binary_search_by(|s| s.min.cmp(&scopes[ptr].min))
+                        .unwrap_or_else(|index| index);
+
+                    // Check if the next value in scopes is also less than the next SST
+                    let mut end = ptr + 1;
+                    while end < scopes.len() {
+                        if pos + (end - ptr) < sort_runs.len()
+                            && scopes[end].min < sort_runs[pos + (end - ptr)].min
+                        {
+                            end += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    sort_runs.splice(pos..pos, scopes[ptr..end].iter().cloned());
+                    ptr = end;
+                }
+            }
+        }
+
         if let Some(delete_gens) = delete_gens {
             guard.deleted_sst.extend(delete_gens);
         }
