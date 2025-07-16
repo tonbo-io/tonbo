@@ -252,7 +252,7 @@ where
         }
 
         // Due to many compaction add operations being consecutive, this checks if the
-        // SSTs can be splice inserted instead of inserting eac one individually
+        // SSTs can be splice inserted instead of inserting each one individually
         if !batch_add.is_empty() {
             for (level, mut scopes) in batch_add.into_iter() {
                 scopes.sort_unstable_by_key(|scope| scope.min.clone());
