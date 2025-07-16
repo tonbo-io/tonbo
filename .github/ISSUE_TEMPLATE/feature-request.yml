@@ -4,26 +4,26 @@ labels: enhancement
 body:
   - type: textarea
     attributes:
-      label: What is the current?
+      label: What is the current issue?
     validations:
       required: true
   - type: textarea
     attributes:
-      label: What will it become?
+      label: What is your solution?
     validations:
       required: true
   - type: textarea
     attributes:
-      label: What are the benefits?
+      label: What does this improve?
     validations:
       required: true
   - type: textarea
     attributes:
       label: Are there any alternatives?
     validations:
-      required: true
+      required: false
   - type: textarea
     attributes:
       label: Does it have a reference?
     validations:
-      required: true
+      required: false
