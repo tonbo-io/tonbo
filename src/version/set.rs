@@ -675,6 +675,95 @@ pub(crate) mod tests {
         drop(version_set);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_apply_edits_batch_add() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+        let (sender, _) = bounded(1);
+        let mut option = DbOption::new(path, &StringSchema);
+        option.version_log_snapshot_threshold = u32::MAX;
+        let option = Arc::new(option);
+
+        manager
+            .local_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager.clone())
+                .await
+                .unwrap();
+
+        let gen_d = generate_file_id();
+        {
+            let mut guard = version_set.inner.write().await;
+            let mut v = Version::clone(&guard.current);
+            v.level_slice[1].push(Scope {
+                min: "4".to_string(),
+                max: "4".to_string(),
+                gen: gen_d,
+                wal_ids: None,
+            });
+            guard.current = Arc::new(v);
+        }
+
+        let gen_a = generate_file_id();
+        let gen_b = generate_file_id();
+        let gen_c = generate_file_id();
+        version_set
+            .apply_edits(
+                vec![
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "2".to_string(),
+                            max: "2".to_string(),
+                            gen: gen_b,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "1".to_string(),
+                            max: "1".to_string(),
+                            gen: gen_a,
+                            wal_ids: None,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "2".to_string(),
+                            max: "2".to_string(),
+                            gen: gen_c,
+                            wal_ids: None,
+                        },
+                    },
+                ],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        {
+            let guard = version_set.inner.read().await;
+            let keys: Vec<_> = guard.current.level_slice[1]
+                .iter()
+                .map(|scope| scope.min.clone())
+                .collect();
+            assert_eq!(keys, vec!["1", "2", "2", "4"]);
+        }
+    }
+
     async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
         let manager = Arc::new(StoreManager::new(base_option, vec![]).unwrap());
         let (sender, _) = bounded(1);
