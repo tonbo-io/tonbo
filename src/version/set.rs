@@ -61,15 +61,15 @@ where
 }
 
 /// Coordinator for tracking and managing versions of on-disk state
-/// 
+///
 /// `VersionSet` keeps track of the `VersionRef` which specifies which WALs
-/// and SST files currently make up the database. When a reader does a scan 
-/// it will use the `VersionRef` to return the `Version` which contains the 
-/// frozen view of its own timestamp and file lists. 
+/// and SST files currently make up the database. When a reader does a scan
+/// it will use the `VersionRef` to return the `Version` which contains the
+/// frozen view of its own timestamp and file lists.
 pub(crate) struct VersionSet<R>
 where
     R: Record,
-{   
+{
     // Current snapshot version
     inner: Arc<RwLock<VersionSetInner<R>>>,
     // Channel sender for deleting WAL/SST
@@ -124,9 +124,9 @@ where
         let mut log_stream = fs.list(&version_dir).await?;
         let mut log_binary_heap = BinaryHeap::with_capacity(3);
 
-        // Only keep the two most recent version-logs. If a crash happened while 
-        // writing the newest snapshot, it may corrupt. Therefore the second newest 
-        // file is guaranteed to be a complete + correct version. Delete any older 
+        // Only keep the two most recent version-logs. If a crash happened while
+        // writing the newest snapshot, it may corrupt. Therefore the second newest
+        // file is guaranteed to be a complete + correct version. Delete any older
         // logs that are older than the second newest.
         while let Some(result) = log_stream.next().await {
             let file_meta = result?;
@@ -144,7 +144,7 @@ where
         let second_log_id = log_binary_heap.pop();
         let latest_log_id = log_binary_heap.pop();
 
-        // If both ids are valid we want to use the second log id instead because it 
+        // If both ids are valid we want to use the second log id instead because it
         // is guaranteed to be safe.
         if let (Some(log_id), Some(_)) = (&latest_log_id, &second_log_id) {
             fs.remove(&log_id.0.path).await?;
@@ -157,7 +157,7 @@ where
             .map(|file_meta| parse_file_id(&file_meta.0.path, FileType::Log))
             .transpose()?
             .flatten()
-        {   
+        {
             // If the log id exists we retrieve `VersionEdit`s from the version log
             Some(log_id) => {
                 let recover_edits = VersionEdit::<<R::Schema as Schema>::Key>::recover(
@@ -168,7 +168,8 @@ where
                 edits = recover_edits;
                 log_id
             }
-            // If the log id does not already exist, we generate a new one and create version log path for it
+            // If the log id does not already exist, we generate a new one and create version log
+            // path for it
             None => {
                 let log_id = generate_file_id();
                 let base_fs = manager.base_fs();
@@ -242,7 +243,7 @@ where
 
         for version_edit in version_edits {
             match version_edit {
-                // [`VersionEdit::Add`]: the WAL is garbage collected and we push the new 
+                // [`VersionEdit::Add`]: the WAL is garbage collected and we push the new
                 // SST into the specified level
                 VersionEdit::Add { mut scope, level } => {
                     // TODO: remove after apply
