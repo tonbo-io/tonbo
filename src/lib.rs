@@ -159,7 +159,7 @@ use wal::log::Log;
 
 pub use crate::option::*;
 use crate::{
-    compaction::{CompactTask, CompactionError, Compactor},
+    compaction::{error::CompactionError, CompactTask, Compactor},
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileType},
     record::Schema,
@@ -1007,7 +1007,7 @@ pub(crate) mod tests {
 
     use crate::{
         cast_arc_value,
-        compaction::{leveled::LeveledCompactor, CompactTask, CompactionError, Compactor},
+        compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
