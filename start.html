@@ -219,7 +219,7 @@ pub struct User {
 <h3 id="creating-database"><a class="header" href="#creating-database">Creating database</a></h3>
 <p>After defining your schema, you can create a <code>DB</code> instance using a customized <code>DbOption</code>.</p>
 <pre><code class="language-rust">use std::fs;
-use fusio::path::Path;
+use tonbo::Path;
 use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
 
 #[tokio::main]
