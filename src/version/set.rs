@@ -251,13 +251,13 @@ where
             }
         }
 
-        // Due to many compaction add operations being consecutive, this checks if the 
+        // Due to many compaction add operations being consecutive, this checks if the
         // SSTs can be splice inserted instead of inserting eac one individually
         if !batch_add.is_empty() {
             for (level, mut scopes) in batch_add.into_iter() {
                 scopes.sort_unstable_by_key(|scope| scope.min.clone());
                 let sort_runs = &mut new_version.level_slice[level as usize];
-                
+
                 let mut ptr = 0;
                 while ptr < scopes.len() {
                     let pos = sort_runs
