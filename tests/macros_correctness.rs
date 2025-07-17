@@ -33,10 +33,8 @@ mod tests {
     };
     use tokio::io::AsyncSeekExt;
     use tonbo::{
-        inmem::immutable::{ArrowArrays, Builder},
-        magic,
         record::{Record, RecordRef, Schema},
-        timestamp::Ts,
+        ArrowArrays, Builder, Ts, TS,
     };
 
     use crate::{Point, User, UserImmutableArrays, UserRef, UserSchema};
@@ -56,7 +54,7 @@ mod tests {
         assert_eq!(
             UserSchema {}.primary_key_path(),
             (
-                ColumnPath::new(vec![magic::TS.to_string(), "name".to_string()]),
+                ColumnPath::new(vec![TS.to_string(), "name".to_string()]),
                 vec![
                     SortingColumn::new(1, true, true),
                     SortingColumn::new(4, false, true),
