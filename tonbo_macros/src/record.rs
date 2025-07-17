@@ -265,33 +265,23 @@ fn trait_decode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
         if field.primary_key.unwrap_or_default() {
             decode_method_fields.push(quote! {
-                            let #field_name = #field_ty::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
-                                field_name: stringify!(#field_name).to_string(),
-                                error: Box::new(err),
-                            })?;
-                        });
+                let #field_name = #field_ty::decode(reader).await?;
+            });
         } else if is_nullable {
             decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
-                                    field_name: stringify!(#field_name).to_string(),
-                                    error: Box::new(err),
-                                })?;
-                            });
+                let #field_name = Option::<#field_ty>::decode(reader).await?;
+            });
         } else {
             decode_method_fields.push(quote! {
-                                let #field_name = Option::<#field_ty>::decode(reader).await.map_err(|err| ::tonbo::record::RecordDecodeError::Decode {
-                                    field_name: stringify!(#field_name).to_string(),
-                                    error: Box::new(err),
-                                })?.unwrap();
-                            });
+                let #field_name = Option::<#field_ty>::decode(reader).await?.unwrap();
+            });
         }
     }
     quote! {
 
         impl ::tonbo::Decode for #struct_name {
-            type Error = ::tonbo::record::RecordDecodeError;
 
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            async fn decode<R>(reader: &mut R) -> Result<Self, ::fusio::Error>
             where
                 R: ::tonbo::SeqRead,
             {
@@ -563,11 +553,8 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
             has_ref = true;
         }
         encode_method_fields.push(quote! {
-                    ::tonbo::Encode::encode(&self.#field_name, writer).await.map_err(|err| ::tonbo::record::RecordEncodeError::Encode {
-                        field_name: stringify!(#field_name).to_string(),
-                        error: Box::new(err),
-                    })?;
-                });
+            ::tonbo::Encode::encode(&self.#field_name, writer).await?;
+        });
         encode_size_fields.push(quote! {
             + self.#field_name.size()
         });
@@ -578,9 +565,8 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
     if has_ref {
         quote! {
             impl<'r> ::tonbo::Encode for #struct_ref_name<'r> {
-                type Error = ::tonbo::record::RecordEncodeError;
 
-                async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+                async fn encode<W>(&self, writer: &mut W) -> Result<(), ::fusio::Error>
                 where
                     W: ::tonbo::Write,
                 {
@@ -597,9 +583,8 @@ fn trait_encode_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
     } else {
         quote! {
             impl ::tonbo::Encode for #struct_ref_name {
-                type Error = ::tonbo::record::RecordEncodeError;
 
-                async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+                async fn encode<W>(&self, writer: &mut W) -> Result<(), ::fusio::Error>
                 where
                     W: ::tonbo::Write,
                 {

@@ -143,9 +143,7 @@ impl<V> Encode for Ts<V>
 where
     V: Encode + Sync,
 {
-    type Error = V::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
@@ -162,9 +160,7 @@ impl<V> Decode for Ts<V>
 where
     V: Decode,
 {
-    type Error = V::Error;
-
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
     where
         R: SeqRead,
     {

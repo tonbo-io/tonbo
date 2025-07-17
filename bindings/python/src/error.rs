@@ -35,7 +35,7 @@ pub(crate) fn repeated_commit_err() -> PyErr {
 }
 
 #[pyclass]
-pub(crate) struct DbError(tonbo::DbError<DynRecord>);
+pub(crate) struct DbError(tonbo::DbError);
 
 #[pyclass]
 pub(crate) struct CommitError(tonbo::transaction::CommitError<DynRecord>);
@@ -73,8 +73,8 @@ impl From<CommitError> for PyErr {
     }
 }
 
-impl From<tonbo::DbError<DynRecord>> for DbError {
-    fn from(err: tonbo::DbError<DynRecord>) -> Self {
+impl From<tonbo::DbError> for DbError {
+    fn from(err: tonbo::DbError) -> Self {
         DbError(err)
     }
 }

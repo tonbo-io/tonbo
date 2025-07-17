@@ -12,7 +12,7 @@ use std::{
 
 use flume::{SendError, Sender};
 use fusio::DynFs;
-use fusio_log::{error::LogError, Encode};
+use fusio_log::error::LogError;
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
@@ -123,7 +123,7 @@ where
         key: &TsRef<<R::Schema as Schema>::Key>,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
         let level_0_path = self
             .option
             .level_fs_path(0)
@@ -187,7 +187,7 @@ where
         gen: FileId,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
         let file = store
             .open_options(
                 &self.option.table_path(gen, level),
@@ -227,7 +227,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         let level_0_path = self
             .option
             .level_fs_path(0)
@@ -326,12 +326,9 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum VersionError<R>
-where
-    R: Record,
-{
+pub enum VersionError {
     #[error("version encode error: {0}")]
-    Encode(#[source] <<R::Schema as Schema>::Key as Encode>::Error),
+    Encode(#[source] fusio::Error),
     #[error("version io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("version parquet error: {0}")]
