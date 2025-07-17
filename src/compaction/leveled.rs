@@ -22,22 +22,20 @@ use crate::{
 ///
 /// The `LeveledCompactor` drives both minor flush‐to‐level‐0 compactions and
 /// multi‐level major compactions, combining SST files up through the levels.
-/// It combines immutable memtables into sorted SSTs (minor compaction), then 
+/// It combines immutable memtables into sorted SSTs (minor compaction), then
 /// repeatedly merges overlapping SSTs across adjacent levels (major compaction):
 ///
-/// 1. Minor compaction (level 0): 
-///    - Converts the current in‑memory memtable into one or more SST files  
-///    - Ensures L0 does not grow unbounded by merging small SSTs once their
-///      count exceeds a configured chunk size  
+/// 1. Minor compaction (level 0):
+///    - Converts the current in‑memory memtable into one or more SST files
+///    - Ensures L0 does not grow unbounded by merging small SSTs once their count exceeds a
+///      configured chunk size
 ///
-/// 2. Major compaction (levels ≥ 1):  
-///    - Scans all SSTs in level L that overlap a given key range, plus any
-///      overlapping SSTs in level L+1  
-///    - Merges and rewrites them into new SSTs in level L+1, bounded by size
-///      thresholds  
-///    - Deletes the old SST files from both levels after the new files are
-///      safely written  
-/// 
+/// 2. Major compaction (levels ≥ 1):
+///    - Scans all SSTs in level L that overlap a given key range, plus any overlapping SSTs in
+///      level L+1
+///    - Merges and rewrites them into new SSTs in level L+1, bounded by size thresholds
+///    - Deletes the old SST files from both levels after the new files are safely written
+///
 /// This is currently the main way Tonbo does compaction
 pub(crate) struct LeveledCompactor<R>
 where
@@ -52,7 +50,7 @@ where
 impl<R> LeveledCompactor<R>
 where
     R: Record,
-{   
+{
     /// Create new instance of `LeveledCompactor`
     pub(crate) fn new(
         schema: Arc<RwLock<DbStorage<R>>>,
@@ -192,8 +190,8 @@ where
                 schema.arrow_schema().clone(),
                 Some(option.write_parquet_properties.clone()),
             )?;
-            
-            // Retrieve WAL ids so recovery is possible if the database crashes before 
+
+            // Retrieve WAL ids so recovery is possible if the database crashes before
             // the SST id is written to the `Version`
             if let Some(mut recover_wal_ids) = recover_wal_ids {
                 wal_ids.append(&mut recover_wal_ids);
@@ -223,8 +221,8 @@ where
         Ok(None)
     }
 
-    // Accumulate all SST files in a stream that fall within the min/max range in `level` and `level + 1`. Then 
-    // use those files to build the new SST files and delete the olds ones
+    // Accumulate all SST files in a stream that fall within the min/max range in `level` and `level
+    // + 1`. Then use those files to build the new SST files and delete the olds ones
     #[allow(clippy::too_many_arguments)]
     async fn major_compaction(
         version: &Version<R>,
@@ -295,7 +293,7 @@ where
 
             let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
             let level_l_fs = ctx.manager.get_fs(level_l_path);
-            
+
             // Pushes next level SSTs that fall in the range
             if !meet_scopes_ll.is_empty() {
                 let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_ll)?;
