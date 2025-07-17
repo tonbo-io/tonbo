@@ -1,4 +1,4 @@
-use std::{mem, string::ToString, sync::Arc};
+use std::{mem, sync::Arc};
 
 use arrow::{
     array::{
@@ -7,65 +7,38 @@ use arrow::{
     },
     datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type},
 };
-use once_cell::sync::Lazy;
-use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+use parquet::arrow::ProjectionMask;
 
-use super::{option::OptionRecordRef, Key, Record, RecordRef, Schema};
+use super::{option::OptionRecordRef, Record, RecordRef};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic,
     timestamp::Ts,
+    PrimaryKey, PrimaryKeyRef,
 };
 
 const PRIMARY_FIELD_NAME: &str = "vstring";
 
-#[derive(Debug)]
-pub struct StringSchema;
-
-impl Schema for StringSchema {
-    type Record = String;
-
-    type Columns = StringColumns;
-
-    type Key = String;
-
-    fn arrow_schema(&self) -> &Arc<ArrowSchema> {
-        static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
-            Arc::new(ArrowSchema::new(vec![
-                Field::new("_null", DataType::Boolean, false),
-                Field::new(magic::TS, DataType::UInt32, false),
-                Field::new(PRIMARY_FIELD_NAME, DataType::Utf8, false),
-            ]))
-        });
-
-        &SCHEMA
-    }
-
-    fn primary_key_index(&self) -> usize {
-        2
-    }
-
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
-        (
-            ColumnPath::new(vec![magic::TS.to_string(), PRIMARY_FIELD_NAME.to_string()]),
-            vec![
-                SortingColumn::new(1, true, true),
-                SortingColumn::new(2, false, true),
-            ],
-        )
-    }
+pub(crate) fn string_arrow_schema<'r>() -> ArrowSchema {
+    ArrowSchema::new(vec![
+        Field::new("_null", DataType::Boolean, false),
+        Field::new(magic::TS, DataType::UInt32, false),
+        Field::new(PRIMARY_FIELD_NAME, DataType::Utf8, false),
+    ])
 }
 
 impl Record for String {
-    type Schema = StringSchema;
+    // type Key = String;
+
+    type Columns = StringColumns;
 
     type Ref<'r>
         = &'r str
     where
         Self: 'r;
 
-    fn key(&self) -> &str {
-        self
+    fn key(&self) -> PrimaryKeyRef {
+        PrimaryKeyRef::new(vec![self])
     }
 
     fn as_record_ref(&self) -> Self::Ref<'_> {
@@ -80,8 +53,8 @@ impl Record for String {
 impl<'r> RecordRef<'r> for &'r str {
     type Record = String;
 
-    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
-        self
+    fn key(self) -> PrimaryKey {
+        PrimaryKey::new(vec![Arc::new(self.to_string())])
     }
 
     fn projection(&mut self, _: &ProjectionMask) {}
@@ -155,7 +128,7 @@ pub struct StringColumnsBuilder {
 }
 
 impl Builder<StringColumns> for StringColumnsBuilder {
-    fn push(&mut self, key: Ts<&str>, row: Option<&str>) {
+    fn push(&mut self, key: Ts<PrimaryKey>, row: Option<&str>) {
         self._null.append(row.is_none());
         self._ts.append_value(key.ts.into());
         if let Some(row) = row {
@@ -176,9 +149,10 @@ impl Builder<StringColumns> for StringColumnsBuilder {
         let _ts = Arc::new(self._ts.finish());
         let string = Arc::new(self.string.finish());
 
-        let schema = StringSchema;
+        let schema = string_arrow_schema();
+
         let record_batch = RecordBatch::try_new(
-            schema.arrow_schema().clone(),
+            Arc::new(schema),
             vec![
                 Arc::clone(&_null) as Arc<dyn Array>,
                 Arc::clone(&_ts) as Arc<dyn Array>,

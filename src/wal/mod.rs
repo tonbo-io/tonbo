@@ -4,7 +4,7 @@ use std::{pin::pin, sync::Arc};
 
 use async_stream::stream;
 use fusio::{disk::LocalFs, DynFs};
-use fusio_log::{error::LogError, Decode, FsOptions, Logger, Options, Path};
+use fusio_log::{error::LogError, FsOptions, Logger, Options, Path};
 use futures_core::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use thiserror::Error;
@@ -116,7 +116,7 @@ where
     pub(crate) async fn recover(
         fs_option: FsOptions,
         path: Path,
-    ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<<R as Decode>::Error>>> {
+    ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<fusio::Error>>> {
         stream! {
             let mut stream = Options::new(path)
                 .fs(fs_option)
@@ -149,8 +149,9 @@ pub enum RecoverError<E: std::error::Error> {
 
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
-    use std::pin::pin;
+    use std::{pin::pin, sync::Arc};
 
+    use common::PrimaryKey;
     use fusio_log::{FsOptions, Path};
     use futures_util::StreamExt;
     use tempfile::TempDir;
@@ -174,7 +175,10 @@ mod tests {
 
         {
             wal.write(&Log::new(
-                Ts::new("hello".into(), 0.into()),
+                Ts::new(
+                    PrimaryKey::new(vec![Arc::new("hello".to_string())]),
+                    0.into(),
+                ),
                 Some("hello".into()),
                 Some(LogType::Full),
             ))
@@ -193,7 +197,10 @@ mod tests {
             }
 
             wal.write(&Log::new(
-                Ts::new("world".into(), 1.into()),
+                Ts::new(
+                    PrimaryKey::new(vec![Arc::new("world".to_string())]),
+                    1.into(),
+                ),
                 Some("world".into()),
                 Some(LogType::Full),
             ))

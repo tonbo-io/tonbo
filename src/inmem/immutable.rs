@@ -1,16 +1,18 @@
 use std::{
     collections::{btree_map::Range, BTreeMap},
+    marker::PhantomData,
     mem::transmute,
     ops::Bound,
     sync::Arc,
 };
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use common::{Keys, PrimaryKey};
 use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{option::OptionRecordRef, Key, Record, RecordRef, Schema},
+    record::{option::OptionRecordRef, Record, RecordRef},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };
@@ -35,11 +37,7 @@ pub trait Builder<S>: Send
 where
     S: ArrowArrays,
 {
-    fn push(
-        &mut self,
-        key: Ts<<<<S::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
-        row: Option<<S::Record as Record>::Ref<'_>>,
-    );
+    fn push(&mut self, key: Ts<PrimaryKey>, row: Option<<S::Record as Record>::Ref<'_>>);
 
     fn written_size(&self) -> usize;
 
@@ -51,7 +49,7 @@ where
     A: ArrowArrays,
 {
     data: A,
-    index: BTreeMap<Ts<<<A::Record as Record>::Schema as Schema>::Key>, u32>,
+    index: BTreeMap<Ts<PrimaryKey>, u32>,
 }
 
 impl<A> Immutable<A>
@@ -60,7 +58,7 @@ where
     A::Record: Send,
 {
     pub(crate) fn new(
-        mutable: SkipMap<Ts<<<A::Record as Record>::Schema as Schema>::Key>, Option<A::Record>>,
+        mutable: SkipMap<Ts<PrimaryKey>, Option<A::Record>>,
         schema: Arc<ArrowSchema>,
     ) -> Self {
         let mut index = BTreeMap::new();
@@ -68,7 +66,7 @@ where
 
         for (offset, (key, value)) in mutable.into_iter().enumerate() {
             builder.push(
-                Ts::new(key.value.as_key_ref(), key.ts),
+                Ts::new(key.value.clone(), key.ts),
                 value.as_ref().map(Record::as_record_ref),
             );
             index.insert(key, offset as u32);
@@ -84,15 +82,14 @@ impl<A> Immutable<A>
 where
     A: ArrowArrays,
 {
-    pub(crate) fn scope(
-        &self,
-    ) -> (
-        Option<&<<A::Record as Record>::Schema as Schema>::Key>,
-        Option<&<<A::Record as Record>::Schema as Schema>::Key>,
-    ) {
+    pub(crate) fn scope(&self) -> (Option<&Keys>, Option<&Keys>) {
         (
-            self.index.first_key_value().map(|(key, _)| key.value()),
-            self.index.last_key_value().map(|(key, _)| key.value()),
+            self.index
+                .first_key_value()
+                .map(|(key, _)| key.value().keys()),
+            self.index
+                .last_key_value()
+                .map(|(key, _)| key.value().keys()),
         )
     }
 
@@ -102,10 +99,7 @@ where
 
     pub(crate) fn scan<'scan>(
         &'scan self,
-        range: (
-            Bound<&'scan <<A::Record as Record>::Schema as Schema>::Key>,
-            Bound<&'scan <<A::Record as Record>::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'scan PrimaryKey>, Bound<&'scan PrimaryKey>),
         ts: Timestamp,
         projection_mask: ProjectionMask,
     ) -> ImmutableScan<'scan, A::Record> {
@@ -120,16 +114,14 @@ where
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        let range = self
-            .index
-            .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((lower, upper));
+        let range = self.index.range::<TsRef<PrimaryKey>, _>((lower, upper));
 
         ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
     }
 
     pub(crate) fn get(
         &self,
-        key: &<<A::Record as Record>::Schema as Schema>::Key,
+        key: &PrimaryKey,
         ts: Timestamp,
         projection_mask: ProjectionMask,
     ) -> Option<RecordBatchEntry<A::Record>> {
@@ -141,13 +133,9 @@ where
         .next()
     }
 
-    pub(crate) fn check_conflict(
-        &self,
-        key: &<<A::Record as Record>::Schema as Schema>::Key,
-        ts: Timestamp,
-    ) -> bool {
+    pub(crate) fn check_conflict(&self, key: &PrimaryKey, ts: Timestamp) -> bool {
         self.index
-            .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((
+            .range::<TsRef<PrimaryKey>, _>((
                 Bound::Excluded(TsRef::new(key, u32::MAX.into())),
                 Bound::Excluded(TsRef::new(key, ts)),
             ))
@@ -160,9 +148,10 @@ pub(crate) struct ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
+    range: Range<'iter, Ts<PrimaryKey>, u32>,
     record_batch: &'iter RecordBatch,
     projection_mask: ProjectionMask,
+    _mark: PhantomData<R>,
 }
 
 impl<'iter, R> ImmutableScan<'iter, R>
@@ -170,7 +159,7 @@ where
     R: Record,
 {
     fn new(
-        range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
+        range: Range<'iter, Ts<PrimaryKey>, u32>,
         record_batch: &'iter RecordBatch,
         projection_mask: ProjectionMask,
     ) -> Self {
@@ -178,6 +167,7 @@ where
             range,
             record_batch,
             projection_mask,
+            _mark: PhantomData,
         }
     }
 }
@@ -212,69 +202,26 @@ where
 
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
-    use std::{mem, sync::Arc};
+    use std::{mem, ops::Bound, sync::Arc};
 
     use arrow::{
         array::{
             Array, BooleanArray, BooleanBufferBuilder, BooleanBuilder, PrimitiveBuilder,
             RecordBatch, StringArray, StringBuilder, UInt32Array, UInt32Builder,
         },
-        datatypes::{ArrowPrimitiveType, DataType, Field, Schema as ArrowSchema, UInt32Type},
+        datatypes::{ArrowPrimitiveType, Schema as ArrowSchema, UInt32Type},
     };
-    use once_cell::sync::Lazy;
-    use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+    use common::{AsValue, PrimaryKey};
+    use crossbeam_skiplist::SkipMap;
+    use parquet::arrow::ProjectionMask;
 
     use super::{ArrowArrays, Builder};
     use crate::{
-        magic,
-        record::{Record, Schema},
+        inmem::immutable::Immutable,
+        record::Record,
         tests::{Test, TestRef},
         timestamp::Ts,
     };
-
-    #[derive(Debug)]
-    pub struct TestSchema;
-
-    impl Schema for TestSchema {
-        type Record = Test;
-
-        type Columns = TestImmutableArrays;
-
-        type Key = String;
-
-        fn arrow_schema(&self) -> &Arc<ArrowSchema> {
-            static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
-                Arc::new(ArrowSchema::new(vec![
-                    Field::new("_null", DataType::Boolean, false),
-                    Field::new(magic::TS, DataType::UInt32, false),
-                    Field::new("vstring", DataType::Utf8, false),
-                    Field::new("vu32", DataType::UInt32, false),
-                    Field::new("vbool", DataType::Boolean, true),
-                ]))
-            });
-
-            &SCHEMA
-        }
-
-        fn primary_key_index(&self) -> usize {
-            2
-        }
-
-        fn primary_key_path(
-            &self,
-        ) -> (
-            parquet::schema::types::ColumnPath,
-            Vec<parquet::format::SortingColumn>,
-        ) {
-            (
-                ColumnPath::new(vec![magic::TS.to_string(), "vstring".to_string()]),
-                vec![
-                    SortingColumn::new(1, true, true),
-                    SortingColumn::new(2, false, true),
-                ],
-            )
-        }
-    }
 
     #[derive(Debug)]
     pub struct TestImmutableArrays {
@@ -344,8 +291,9 @@ pub(crate) mod tests {
     }
 
     impl Builder<TestImmutableArrays> for TestBuilder {
-        fn push(&mut self, key: Ts<&str>, row: Option<TestRef>) {
-            self.vstring.append_value(key.value);
+        fn push(&mut self, key: Ts<PrimaryKey>, row: Option<TestRef>) {
+            self.vstring
+                .append_value(key.value.get(0).unwrap().as_string());
             match row {
                 Some(row) => {
                     self.vu32.append_value(row.vu32.unwrap());
@@ -380,9 +328,9 @@ pub(crate) mod tests {
             let vbool = Arc::new(self.vobool.finish());
             let _null = Arc::new(BooleanArray::new(self._null.finish(), None));
             let _ts = Arc::new(self._ts.finish());
-            let schema = TestSchema;
+            let schema = Test::schema();
             let mut record_batch = RecordBatch::try_new(
-                Arc::clone(schema.arrow_schema()),
+                schema.arrow_schema().clone(),
                 vec![
                     Arc::clone(&_null) as Arc<dyn Array>,
                     Arc::clone(&_ts) as Arc<dyn Array>,
@@ -407,5 +355,43 @@ pub(crate) mod tests {
                 record_batch,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_scan() {
+        let mutable = SkipMap::new();
+        mutable.insert(
+            Ts::new(PrimaryKey::new(vec![Arc::new("1".to_string())]), 0.into()),
+            Some(Test {
+                vstring: "1".to_string(),
+                vu32: 1,
+                vbool: Some(true),
+            }),
+        );
+        mutable.insert(
+            Ts::new(PrimaryKey::new(vec![Arc::new("2".to_string())]), 1.into()),
+            Some(Test {
+                vstring: "2".to_string(),
+                vu32: 2,
+                vbool: None,
+            }),
+        );
+        mutable.insert(
+            Ts::new(PrimaryKey::new(vec![Arc::new("3".to_string())]), 2.into()),
+            None,
+        );
+        let immutable =
+            Immutable::<TestImmutableArrays>::new(mutable, Arc::new(Test::arrow_schema()));
+        let mut scan = immutable.scan(
+            (Bound::Unbounded, Bound::Unbounded),
+            0.into(),
+            ProjectionMask::all(),
+        );
+
+        assert_eq!(scan.next().unwrap().key(), "1".into());
+        dbg!(&scan.next().unwrap().get());
+        // assert_eq!(scan.next().unwrap().key(), "2".into());
+        assert_eq!(scan.next().unwrap().get(), None);
+        assert!(scan.next().is_none());
     }
 }

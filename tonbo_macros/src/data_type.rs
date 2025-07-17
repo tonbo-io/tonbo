@@ -86,10 +86,10 @@ impl DataType {
                 quote!(bytes::Bytes)
             }
             DataType::Float32 => {
-                quote!(::tonbo::record::F32)
+                quote!(::tonbo::F32)
             }
             DataType::Float64 => {
-                quote!(::tonbo::record::F64)
+                quote!(::tonbo::F64)
             }
         }
     }
@@ -478,11 +478,29 @@ impl DataType {
                 }
             }
             DataType::Float32 => {
-                quote! {std::mem::size_of::<::tonbo::record::F32>()}
+                quote! {std::mem::size_of::<::tonbo::F32>()}
             }
             DataType::Float64 => {
-                quote! {std::mem::size_of::<::tonbo::record::F64>()}
+                quote! {std::mem::size_of::<::tonbo::F64>()}
             }
+        }
+    }
+
+    pub(crate) fn to_as_value_fn(&self) -> proc_macro2::TokenStream {
+        match self {
+            DataType::UInt8 => quote!(as_u8()),
+            DataType::UInt16 => quote!(as_u16()),
+            DataType::UInt32 => quote!(as_u32()),
+            DataType::UInt64 => quote!(as_u64()),
+            DataType::Int8 => quote!(as_i8()),
+            DataType::Int16 => quote!(as_i16()),
+            DataType::Int32 => quote!(as_i32()),
+            DataType::Int64 => quote!(as_i64()),
+            DataType::String => quote!(as_string()),
+            DataType::Boolean => quote!(as_boolean()),
+            DataType::Bytes => quote!(as_bytes()),
+            DataType::Float32 => quote!(as_f32()),
+            DataType::Float64 => quote!(as_f64()),
         }
     }
 }

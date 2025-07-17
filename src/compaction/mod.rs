@@ -1,6 +1,7 @@
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
+use common::{Keys, Value};
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
@@ -12,7 +13,7 @@ use tokio::sync::oneshot;
 use crate::{
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
-    record::{KeyRef, Record, Schema as RecordSchema},
+    record::{Record, Schema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     transaction::CommitError,
@@ -40,7 +41,7 @@ where
     pub(crate) async fn check_then_compaction(
         &mut self,
         is_manual: bool,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         match self {
             Compactor::Leveled(leveled) => leveled.check_then_compaction(is_manual).await,
         }
@@ -48,17 +49,16 @@ where
 
     async fn build_tables<'scan>(
         option: &DbOption,
-        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
+        version_edits: &mut Vec<VersionEdit>,
         level: usize,
         streams: Vec<ScanStream<'scan, R>>,
-        schema: &R::Schema,
+        schema: &Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
-        let mut builder =
-            <R::Schema as RecordSchema>::Columns::builder(schema.arrow_schema().clone(), 8192);
+        let mut builder = R::Columns::builder(schema.arrow_schema().clone(), 8192);
         let mut min = None;
         let mut max = None;
 
@@ -67,9 +67,9 @@ where
             let key = entry.key();
 
             if min.is_none() {
-                min = Some(key.value.clone().to_key())
+                min = Some(key.value.keys.clone())
             }
-            max = Some(key.value.clone().to_key());
+            max = Some(key.value.keys.clone());
             builder.push(key, entry.value());
 
             if builder.written_size() >= option.max_sst_file_size {
@@ -102,31 +102,31 @@ where
         Ok(())
     }
 
-    fn full_scope<'a>(
-        meet_scopes: &[&'a Scope<<R::Schema as RecordSchema>::Key>],
-    ) -> Result<
-        (
-            &'a <R::Schema as RecordSchema>::Key,
-            &'a <R::Schema as RecordSchema>::Key,
-        ),
-        CompactionError<R>,
-    > {
-        let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
-        let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
+    fn full_scope<'a>(meet_scopes: &[&'a Scope]) -> Result<(&'a Keys, &'a Keys), CompactionError> {
+        let lower = meet_scopes
+            .first()
+            .ok_or(CompactionError::EmptyLevel)?
+            .min
+            .as_ref();
+        let upper = meet_scopes
+            .last()
+            .ok_or(CompactionError::EmptyLevel)?
+            .max
+            .as_ref();
         Ok((lower, upper))
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn build_table(
         option: &DbOption,
-        version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
+        version_edits: &mut Vec<VersionEdit>,
         level: usize,
-        builder: &mut <<R::Schema as RecordSchema>::Columns as ArrowArrays>::Builder,
-        min: &mut Option<<R::Schema as RecordSchema>::Key>,
-        max: &mut Option<<R::Schema as RecordSchema>::Key>,
-        schema: &R::Schema,
+        builder: &mut <R::Columns as ArrowArrays>::Builder,
+        min: &mut Option<Vec<Arc<dyn Value>>>,
+        max: &mut Option<Vec<Arc<dyn Value>>>,
+        schema: &Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
@@ -141,7 +141,7 @@ where
                 .await?,
             ),
             schema.arrow_schema().clone(),
-            Some(option.write_parquet_properties.clone()),
+            option.write_parquet_properties.clone(),
         )?;
         writer.write(columns.as_record_batch()).await?;
         writer.close().await?;
@@ -159,10 +159,7 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum CompactionError<R>
-where
-    R: Record,
-{
+pub enum CompactionError {
     #[error("compaction io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("compaction parquet error: {0}")]
@@ -170,13 +167,13 @@ where
     #[error("compaction fusio error: {0}")]
     Fusio(#[from] fusio::Error),
     #[error("compaction version error: {0}")]
-    Version(#[from] VersionError<R>),
+    Version(#[from] VersionError),
     #[error("compaction logger error: {0}")]
     Logger(#[from] fusio_log::error::LogError),
     #[error("compaction channel is closed")]
     ChannelClose,
     #[error("database error: {0}")]
-    Commit(#[from] CommitError<R>),
+    Commit(#[from] CommitError),
     #[error("the level being compacted does not have a table")]
     EmptyLevel,
 }
@@ -192,10 +189,7 @@ pub(crate) mod tests {
 
     use crate::{
         fs::{generate_file_id, manager::StoreManager, FileId, FileType},
-        inmem::{
-            immutable::{tests::TestSchema, Immutable},
-            mutable::MutableMemTable,
-        },
+        inmem::{immutable::Immutable, mutable::MutableMemTable},
         record::{Record, Schema},
         scope::Scope,
         tests::Test,
@@ -209,9 +203,9 @@ pub(crate) mod tests {
     async fn build_immutable<R>(
         option: &DbOption,
         records: Vec<(LogType, R, Timestamp)>,
-        schema: &Arc<R::Schema>,
+        schema: &Arc<Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
+    ) -> Result<Immutable<R::Columns>, DbError>
     where
         R: Record + Send,
     {
@@ -230,10 +224,10 @@ pub(crate) mod tests {
         option: &DbOption,
         gen: FileId,
         records: Vec<(LogType, R, Timestamp)>,
-        schema: &Arc<R::Schema>,
+        schema: &Arc<Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), DbError<R>>
+    ) -> Result<(), DbError>
     where
         R: Record + Send,
     {
@@ -249,7 +243,9 @@ pub(crate) mod tests {
             schema.arrow_schema().clone(),
             None,
         )?;
-        writer.write(immutable.as_record_batch()).await?;
+        let record_batch = immutable.as_record_batch();
+        writer.write(record_batch).await?;
+        // writer.write(immutable.as_record_batch()).await?;
         writer.close().await?;
 
         Ok(())
@@ -258,7 +254,7 @@ pub(crate) mod tests {
     pub(crate) async fn build_version(
         option: &Arc<DbOption>,
         manager: &StoreManager,
-        schema: &Arc<TestSchema>,
+        schema: &Arc<Schema>,
     ) -> ((FileId, FileId, FileId, FileId, FileId), Version<Test>) {
         let level_0_fs = option
             .level_fs_path(0)
@@ -472,32 +468,32 @@ pub(crate) mod tests {
         let mut version =
             Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
         version.level_slice[0].push(Scope {
-            min: 1.to_string(),
-            max: 3.to_string(),
+            min: vec![Arc::new(1.to_string())],
+            max: vec![Arc::new(3.to_string())],
             gen: table_gen_1,
             wal_ids: None,
         });
         version.level_slice[0].push(Scope {
-            min: 4.to_string(),
-            max: 6.to_string(),
+            min: vec![Arc::new(4.to_string())],
+            max: vec![Arc::new(6.to_string())],
             gen: table_gen_2,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: 1.to_string(),
-            max: 3.to_string(),
+            min: vec![Arc::new(1.to_string())],
+            max: vec![Arc::new(3.to_string())],
             gen: table_gen_3,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: 4.to_string(),
-            max: 6.to_string(),
+            min: vec![Arc::new(4.to_string())],
+            max: vec![Arc::new(6.to_string())],
             gen: table_gen_4,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: 7.to_string(),
-            max: 9.to_string(),
+            min: vec![Arc::new(7.to_string())],
+            max: vec![Arc::new(9.to_string())],
             gen: table_gen_5,
             wal_ids: None,
         });

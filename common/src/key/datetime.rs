@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -10,7 +11,11 @@ use arrow::array::{
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use fusio_log::{Decode, Encode};
 
-use crate::record::{Key, KeyRef, TimeUnit};
+use crate::{
+    datatype::DataType,
+    key::{Key, KeyRef, TimeUnit, Value},
+    PrimaryKey,
+};
 
 /// Number of seconds in a day
 pub const SECONDS_IN_DAY: i64 = 86_400;
@@ -50,10 +55,14 @@ macro_rules! make_time_type {
             }
         }
 
-        impl Decode for $struct_name {
-            type Error = fusio::Error;
+        impl From<$struct_name> for PrimaryKey {
+            fn from(value: $struct_name) -> Self {
+                PrimaryKey::new(vec![Arc::new(value)])
+            }
+        }
 
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+        impl Decode for $struct_name {
+            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
             where
                 R: fusio::SeqRead,
             {
@@ -70,9 +79,7 @@ macro_rules! make_time_type {
         }
 
         impl Encode for $struct_name {
-            type Error = fusio::Error;
-
-            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+            async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
             where
                 W: fusio::Write,
             {
@@ -145,8 +152,8 @@ macro_rules! make_date_type {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-                Arc::new(<$array_ty>::new_scalar(self.0))
+            fn as_value(&self) -> &dyn Value {
+                self
             }
         }
         impl<'r> KeyRef<'r> for $struct_name {
@@ -156,11 +163,66 @@ macro_rules! make_date_type {
                 self
             }
         }
+        impl Value for $struct_name {
+            fn data_type(&self) -> DataType {
+                DataType::$struct_name
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn to_arrow_datum(&self) -> Option<std::sync::Arc<dyn arrow::array::Datum>> {
+                Some(Arc::new(<$array_ty>::new_scalar(self.0)))
+            }
+
+            fn is_none(&self) -> bool {
+                false
+            }
+
+            fn is_some(&self) -> bool {
+                false
+            }
+
+            fn clone_arc(&self) -> super::ValueRef {
+                Arc::new(*self)
+            }
+        }
+
+        impl Value for Option<$struct_name> {
+            fn data_type(&self) -> DataType {
+                DataType::$struct_name
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn is_none(&self) -> bool {
+                self.is_none()
+            }
+
+            fn is_some(&self) -> bool {
+                self.is_some()
+            }
+
+            fn clone_arc(&self) -> super::ValueRef {
+                Arc::new(*self)
+            }
+
+            fn to_arrow_datum(&self) -> Option<std::sync::Arc<dyn arrow::array::Datum>> {
+                None
+            }
+        }
+
+        impl From<$struct_name> for PrimaryKey {
+            fn from(value: $struct_name) -> Self {
+                PrimaryKey::new(vec![Arc::new(value)])
+            }
+        }
 
         impl Decode for $struct_name {
-            type Error = fusio::Error;
-
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
             where
                 R: fusio::SeqRead,
             {
@@ -171,9 +233,7 @@ macro_rules! make_date_type {
         }
 
         impl Encode for $struct_name {
-            type Error = fusio::Error;
-
-            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+            async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
             where
                 W: fusio::Write,
             {
@@ -215,14 +275,8 @@ impl Key for Time32 {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Second => Arc::new(Time32SecondArray::new_scalar(self.time)),
-            TimeUnit::Millisecond => Arc::new(Time32MillisecondArray::new_scalar(self.time)),
-            TimeUnit::Microsecond | TimeUnit::Nanosecond => {
-                unreachable!("microsecond and nanosecond is not supported")
-            }
-        }
+    fn as_value(&self) -> &dyn Value {
+        self
     }
 }
 
@@ -233,14 +287,8 @@ impl Key for Time64 {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Microsecond => Arc::new(Time64MicrosecondArray::new_scalar(self.time)),
-            TimeUnit::Nanosecond => Arc::new(Time64NanosecondArray::new_scalar(self.time)),
-            TimeUnit::Second | TimeUnit::Millisecond => {
-                unreachable!("second and millisecond is not supported")
-            }
-        }
+    fn as_value(&self) -> &dyn Value {
+        self
     }
 }
 
@@ -291,6 +339,72 @@ impl Time32 {
             time,
             unit: TimeUnit::Second,
         }
+    }
+}
+
+impl Value for Time32 {
+    fn data_type(&self) -> DataType {
+        match &self.unit {
+            TimeUnit::Second => DataType::Time32(TimeUnit::Second),
+            TimeUnit::Millisecond => DataType::Time32(TimeUnit::Millisecond),
+            TimeUnit::Microsecond => unreachable!(),
+            TimeUnit::Nanosecond => unreachable!(),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_none(&self) -> bool {
+        false
+    }
+
+    fn is_some(&self) -> bool {
+        false
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<std::sync::Arc<dyn arrow::array::Datum>> {
+        match self.unit {
+            TimeUnit::Second => Some(Arc::new(<Time32SecondArray>::new_scalar(self.time))),
+            TimeUnit::Millisecond => {
+                Some(Arc::new(<Time32MillisecondArray>::new_scalar(self.time)))
+            }
+            TimeUnit::Microsecond | TimeUnit::Nanosecond => unreachable!(),
+        }
+    }
+}
+
+impl Value for Option<Time32> {
+    fn data_type(&self) -> DataType {
+        match &self {
+            Some(v) => v.data_type(),
+            None => DataType::Time32(TimeUnit::Second),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_none(&self) -> bool {
+        false
+    }
+
+    fn is_some(&self) -> bool {
+        false
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<std::sync::Arc<dyn arrow::array::Datum>> {
+        None
     }
 }
 
@@ -345,6 +459,72 @@ impl Time64 {
             time,
             unit: TimeUnit::Nanosecond,
         }
+    }
+}
+
+impl Value for Time64 {
+    fn data_type(&self) -> DataType {
+        match &self.unit {
+            TimeUnit::Second => unreachable!(),
+            TimeUnit::Millisecond => unreachable!(),
+            TimeUnit::Microsecond => DataType::Time64(TimeUnit::Microsecond),
+            TimeUnit::Nanosecond => DataType::Time64(TimeUnit::Nanosecond),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_none(&self) -> bool {
+        false
+    }
+
+    fn is_some(&self) -> bool {
+        false
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        match self.unit {
+            TimeUnit::Microsecond => Some(Arc::new(Time64MicrosecondArray::new_scalar(self.time))),
+            TimeUnit::Nanosecond => Some(Arc::new(Time64NanosecondArray::new_scalar(self.time))),
+            TimeUnit::Second | TimeUnit::Millisecond => {
+                unreachable!("second and millisecond is not supported")
+            }
+        }
+    }
+}
+
+impl Value for Option<Time64> {
+    fn data_type(&self) -> DataType {
+        match self {
+            Some(v) => v.data_type(),
+            None => DataType::Time64(TimeUnit::Second),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_none(&self) -> bool {
+        self.is_none()
+    }
+
+    fn is_some(&self) -> bool {
+        self.is_some()
+    }
+
+    fn clone_arc(&self) -> super::ValueRef {
+        Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        None
     }
 }
 

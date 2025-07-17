@@ -6,7 +6,7 @@ use pyo3::{
     types::{PyDict, PyMapping, PyString, PyTuple},
     Bound,
 };
-use tonbo::record::F64;
+use tonbo::F64;
 
 use crate::{column::Column, datatype::DataType};
 

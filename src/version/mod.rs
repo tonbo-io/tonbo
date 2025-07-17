@@ -3,6 +3,7 @@ pub(crate) mod edit;
 pub(crate) mod set;
 
 use std::{
+    marker::PhantomData,
     ops::Bound,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -10,9 +11,10 @@ use std::{
     },
 };
 
+use common::{util::compare, Keys, PrimaryKey};
 use flume::{SendError, Sender};
 use fusio::DynFs;
-use fusio_log::{error::LogError, Encode};
+use fusio_log::error::LogError;
 use parquet::arrow::ProjectionMask;
 use thiserror::Error;
 use tracing::error;
@@ -21,7 +23,7 @@ use crate::{
     context::Context,
     fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
-    record::{Record, Schema},
+    record::Record,
     scope::Scope,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     timestamp::{Timestamp, TsRef},
@@ -45,11 +47,12 @@ where
     R: Record,
 {
     ts: Timestamp,
-    pub(crate) level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
+    pub(crate) level_slice: [Vec<Scope>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
     timestamp: Arc<AtomicU32>,
     log_length: u32,
+    _mark: PhantomData<R>,
 }
 
 impl<R> Version<R>
@@ -70,6 +73,7 @@ where
             option: option.clone(),
             timestamp,
             log_length: 0,
+            _mark: PhantomData,
         }
     }
 
@@ -109,6 +113,7 @@ where
             option: self.option.clone(),
             timestamp: self.timestamp.clone(),
             log_length: self.log_length,
+            _mark: PhantomData,
         }
     }
 }
@@ -120,17 +125,17 @@ where
     pub(crate) async fn query(
         &self,
         manager: &StoreManager,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<PrimaryKey>,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
         let level_0_path = self
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
         let level_0_fs = manager.get_fs(level_0_path);
         for scope in self.level_slice[0].iter().rev() {
-            if !scope.contains(key.value()) {
+            if !scope.contains(key.value().keys()) {
                 continue;
             }
             if let Some(entry) = self
@@ -157,8 +162,8 @@ where
             if sort_runs.is_empty() {
                 continue;
             }
-            let index = Self::scope_search(key.value(), sort_runs);
-            if !sort_runs[index].contains(key.value()) {
+            let index = Self::scope_search(key.value().keys(), sort_runs);
+            if !sort_runs[index].contains(key.value().keys()) {
                 continue;
             }
             if let Some(entry) = self
@@ -182,12 +187,12 @@ where
     async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<PrimaryKey>,
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
-    ) -> Result<Option<RecordBatchEntry<R>>, VersionError<R>> {
+    ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
         let file = store
             .open_options(
                 &self.option.table_path(gen, level),
@@ -202,12 +207,9 @@ where
             .map_err(VersionError::Parquet)
     }
 
-    pub(crate) fn scope_search(
-        key: &<R::Schema as Schema>::Key,
-        level: &[Scope<<R::Schema as Schema>::Key>],
-    ) -> usize {
+    pub(crate) fn scope_search(key: &Keys, level: &[Scope]) -> usize {
         level
-            .binary_search_by(|scope| scope.min.cmp(key))
+            .binary_search_by(|scope| compare(&scope.min, key))
             .unwrap_or_else(|index| index.saturating_sub(1))
     }
 
@@ -220,14 +222,12 @@ where
         &self,
         ctx: &Context<R>,
         streams: &mut Vec<ScanStream<'streams, R>>,
-        range: (
-            Bound<&'streams <R::Schema as Schema>::Key>,
-            Bound<&'streams <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'streams PrimaryKey>, Bound<&'streams PrimaryKey>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
+        let range = (range.0.map(|v| v.keys()), range.1.map(|v| v.keys()));
         let level_0_path = self
             .option
             .level_fs_path(0)
@@ -297,7 +297,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn to_edits(&self) -> Vec<VersionEdit<<R::Schema as Schema>::Key>> {
+    pub(crate) fn to_edits(&self) -> Vec<VersionEdit> {
         let mut edits = Vec::new();
 
         for (level, scopes) in self.level_slice.iter().enumerate() {
@@ -326,12 +326,9 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum VersionError<R>
-where
-    R: Record,
-{
+pub enum VersionError {
     #[error("version encode error: {0}")]
-    Encode(#[source] <<R::Schema as Schema>::Key as Encode>::Error),
+    Encode(#[source] fusio::Error),
     #[error("version io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("version parquet error: {0}")]

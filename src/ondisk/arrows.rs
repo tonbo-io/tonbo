@@ -6,6 +6,7 @@ use arrow::{
     compute::kernels::cmp::{gt, gt_eq, lt_eq},
     error::ArrowError,
 };
+use common::Keys;
 use parquet::{
     arrow::{
         arrow_reader::{ArrowPredicate, ArrowPredicateFn, RowFilter},
@@ -14,20 +15,14 @@ use parquet::{
     schema::types::SchemaDescriptor,
 };
 
-use crate::{
-    record::{Key, Record, Schema},
-    timestamp::Timestamp,
-};
+use crate::timestamp::Timestamp;
 
-unsafe fn get_range_bound_fn<R>(
-    range: Bound<&<R::Schema as Schema>::Key>,
+unsafe fn get_range_bound_fn(
+    range: Bound<&Keys>,
 ) -> (
-    Option<&'static <R::Schema as Schema>::Key>,
+    Option<&'static Keys>,
     &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync),
-)
-where
-    R: Record,
-{
+) {
     let cmp: &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync);
     let key = match range {
         Bound::Included(key) => {
@@ -52,19 +47,13 @@ where
     (key, cmp)
 }
 
-pub(crate) unsafe fn get_range_filter<R>(
+pub(crate) unsafe fn get_range_filter(
     schema_descriptor: &SchemaDescriptor,
-    range: (
-        Bound<&<R::Schema as Schema>::Key>,
-        Bound<&<R::Schema as Schema>::Key>,
-    ),
+    range: (Bound<&Keys>, Bound<&Keys>),
     ts: Timestamp,
-) -> RowFilter
-where
-    R: Record,
-{
-    let (lower_key, lower_cmp) = get_range_bound_fn::<R>(range.0);
-    let (upper_key, upper_cmp) = get_range_bound_fn::<R>(range.1);
+) -> RowFilter {
+    let (lower_key, lower_cmp) = get_range_bound_fn(range.0);
+    let (upper_key, upper_cmp) = get_range_bound_fn(range.1);
 
     let mut predictions: Vec<Box<dyn ArrowPredicate>> = vec![Box::new(ArrowPredicateFn::new(
         ProjectionMask::roots(schema_descriptor, [1]),
@@ -74,7 +63,12 @@ where
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                lower_cmp(record_batch.column(0), lower_key.to_arrow_datum().as_ref())
+                let key = lower_key.first().unwrap();
+                // TODO: composite primary key
+                lower_cmp(
+                    record_batch.column(0),
+                    key.to_arrow_datum().unwrap().as_ref(),
+                )
             },
         )));
     }
@@ -82,7 +76,12 @@ where
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                upper_cmp(upper_key.to_arrow_datum().as_ref(), record_batch.column(0))
+                let key = upper_key.first().unwrap();
+                // TODO: composite primary key
+                upper_cmp(
+                    key.to_arrow_datum().unwrap().as_ref(),
+                    record_batch.column(0),
+                )
             },
         )));
     }

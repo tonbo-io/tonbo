@@ -1,4 +1,4 @@
-use std::{any::Any, mem, sync::Arc};
+use std::{mem, sync::Arc};
 
 use arrow::{
     array::{
@@ -13,28 +13,30 @@ use arrow::{
         TimestampSecondArray, TimestampSecondBuilder, UInt32Builder,
     },
     datatypes::{
-        Date32Type, Date64Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-        Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+        DataType as ArrowDataType, Date32Type, Date64Type, Float32Type, Float64Type, Int16Type,
+        Int32Type, Int64Type, Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type, UInt64Type,
+        UInt8Type,
     },
 };
+use common::{
+    datatype::DataType, Date32, Date64, LargeBinary, LargeString, PrimaryKey, Time32, Time64,
+    TimeUnit, Timestamp, F32, F64,
+};
 
-use super::{record::DynRecord, record_ref::DynRecordRef, value::Value, DataType};
+use super::{record::DynRecord, record_ref::DynRecordRef};
 use crate::{
-    cast_arc_value,
     inmem::immutable::{ArrowArrays, Builder},
     magic::USER_COLUMN_OFFSET,
-    record::{
-        Date32, Date64, Key, LargeBinary, LargeString, Record, Schema, Time32, Time64, TimeUnit,
-        Timestamp, F32, F64,
-    },
+    record::Record,
     timestamp::Ts,
+    Value,
 };
 
 #[allow(unused)]
 pub struct DynRecordImmutableArrays {
     _null: Arc<arrow::array::BooleanArray>,
     _ts: Arc<arrow::array::UInt32Array>,
-    columns: Vec<Value>,
+    columns: Vec<Arc<dyn Array>>,
     record_batch: arrow::record_batch::RecordBatch,
 }
 
@@ -47,11 +49,38 @@ pub struct DynRecordBuilder {
 }
 
 impl DynRecordImmutableArrays {
-    fn primitive_value<T>(col: &Value, offset: usize) -> T::Native
+    fn primitive_value<T>(arr: &ArrayRef, offset: usize) -> T::Native
     where
         T: ArrowPrimitiveType,
     {
-        cast_arc_value!(col.value, PrimitiveArray<T>).value(offset)
+        arr.as_any()
+            .downcast_ref::<PrimitiveArray<T>>()
+            .unwrap()
+            .value(offset)
+    }
+
+    fn null_value(&self, index: usize) -> Arc<dyn Value> {
+        match self.columns[index].data_type() {
+            ArrowDataType::Boolean => Arc::new(None::<bool>),
+            ArrowDataType::Int8 => Arc::new(None::<i8>),
+            ArrowDataType::Int16 => Arc::new(None::<i16>),
+            ArrowDataType::Int32 => Arc::new(None::<i32>),
+            ArrowDataType::Int64 => Arc::new(None::<i64>),
+            ArrowDataType::UInt8 => Arc::new(None::<u8>),
+            ArrowDataType::UInt16 => Arc::new(None::<u16>),
+            ArrowDataType::UInt32 => Arc::new(None::<u32>),
+            ArrowDataType::UInt64 => Arc::new(None::<u64>),
+            ArrowDataType::Float32 => Arc::new(None::<F32>),
+            ArrowDataType::Float64 => Arc::new(None::<F64>),
+            ArrowDataType::Timestamp(_, _) => Arc::new(None::<Timestamp>),
+            ArrowDataType::Date32 => Arc::new(None::<Date32>),
+            ArrowDataType::Date64 => Arc::new(None::<Date64>),
+            ArrowDataType::Time32(_) => Arc::new(None::<Time32>),
+            ArrowDataType::Time64(_) => Arc::new(None::<Time64>),
+            ArrowDataType::Binary | ArrowDataType::LargeBinary => Arc::new(None::<Vec<u8>>),
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Arc::new(None::<String>),
+            _ => todo!(),
+        }
     }
 }
 
@@ -143,15 +172,13 @@ macro_rules! implement_arrow_array {
                     .parse::<usize>()
                     .unwrap();
                 let mut columns = vec![];
-                for (idx, col) in self.columns.iter().enumerate() {
+                for (idx, arr) in self.columns.iter().enumerate() {
                     if projection_mask.leaf_included(idx + USER_COLUMN_OFFSET) {
-                        let datatype = col.datatype();
-                        let name = col.desc.name.to_string();
-                        let nullable = col.is_nullable();
-                        let value: Arc<dyn Any + Send + Sync> = match &datatype {
+                        let datatype = DataType::from(arr.data_type());
+                        let value: Arc<dyn Value> = match &datatype {
                             $(
                                 $primitive_pat => {
-                                    let v = Self::primitive_value::<$arrow_ty>(col, offset);
+                                    let v = Self::primitive_value::<$arrow_ty>(arr, offset);
                                     if primary_key_index == idx {
                                         Arc::new(<$primitive_tonbo_ty>::from(v))
                                     } else {
@@ -160,7 +187,7 @@ macro_rules! implement_arrow_array {
                                 }
                             )*
                             DataType::Boolean => {
-                                let v = cast_arc_value!(col.value, BooleanArray).value(offset);
+                                let v = arr.as_any().downcast_ref::<BooleanArray>().unwrap().value(offset);
                                 if primary_key_index == idx {
                                     Arc::new(v)
                                 } else {
@@ -169,7 +196,10 @@ macro_rules! implement_arrow_array {
                             }
                             $(
                                 $alt_variant => {
-                                let v = cast_arc_value!(col.value, $array_ty2)
+
+                                let v = arr.as_any()
+                                    .downcast_ref::<$array_ty2>()
+                                    .unwrap()
                                     .value(offset)
                                     .to_owned();
                                     if primary_key_index == idx {
@@ -181,7 +211,7 @@ macro_rules! implement_arrow_array {
                             )*
                             $(
                                 $alt_variant2 => {
-                                    let v = cast_arc_value!(col.value, $array_ty3).value(offset);
+                                    let v = arr.as_any().downcast_ref::<$array_ty3>().unwrap().value(offset);
                                     if primary_key_index == idx {
                                         Arc::new(v)
                                     } else {
@@ -192,9 +222,9 @@ macro_rules! implement_arrow_array {
                             DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                         };
 
-                        columns.push(Value::new(datatype, name, value, nullable));
+                        columns.push(value);
                     } else {
-                        columns.push(col.clone());
+                        columns.push(self.null_value(idx + 2));
                     }
                 }
                 Some(Some(DynRecordRef::new(columns, primary_key_index)))
@@ -216,17 +246,19 @@ macro_rules! implement_builder_array {
         impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             fn push(
                 &mut self,
-                key: Ts<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
+                key: Ts<PrimaryKey>,
                 row: Option<DynRecordRef>,
             ) {
                 self._null.append(row.is_none());
                 self._ts.append_value(key.ts.into());
-                let metadata = self.schema.metadata();
+                let schema = &self.schema;
+                let metadata = schema.metadata();
                 let primary_key_index = metadata
                     .get("primary_key_index")
                     .unwrap()
                     .parse::<usize>()
                     .unwrap();
+
                 self.push_primary_key(key, primary_key_index);
                 match row {
                     Some(record_ref) => {
@@ -239,34 +271,36 @@ macro_rules! implement_builder_array {
                             if idx == primary_key_index {
                                 continue;
                             }
-                            let datatype = col.datatype();
+
+                            let is_nullable = self.schema.field(idx + 2).is_nullable();
+                            let datatype = col.data_type();
                             match datatype {
                                 $(
                                     $primitive_pat => {
                                         let bd = Self::as_builder_mut::<PrimitiveBuilder<$arrow_ty>>(
                                             builder.as_mut(),
                                         );
-                                        match cast_arc_value!(col.value, Option<$primitive_ty>) {
+                                        match col.as_any().downcast_ref::<Option<$primitive_ty>>().unwrap() {
                                             Some(value) => bd.append_value(*value),
-                                            None if col.is_nullable() => bd.append_null(),
+                                            None if is_nullable => bd.append_null(),
                                             None => bd.append_value(Default::default()),
                                         }
                                     }
                                 )*
                                 DataType::Boolean => {
                                     let bd = Self::as_builder_mut::<BooleanBuilder>(builder.as_mut());
-                                    match cast_arc_value!(col.value, Option<bool>) {
+                                    match col.as_any().downcast_ref::<Option<bool>>().unwrap() {
                                         Some(value) => bd.append_value(*value),
-                                        None if col.is_nullable() => bd.append_null(),
+                                        None if is_nullable => bd.append_null(),
                                         None => bd.append_value(Default::default()),
                                     }
                                 }
                                 $(
                                     $alt_variant => {
                                         let bd = Self::as_builder_mut::<$builder_ty>(builder.as_mut());
-                                        match cast_arc_value!(col.value, Option<$alt_ty>) {
+                                        match col.as_any().downcast_ref::<Option<$alt_ty>>().unwrap() {
                                             Some(value) => bd.append_value(value),
-                                            None if col.is_nullable() => bd.append_null(),
+                                            None if is_nullable => bd.append_null(),
                                             None => bd.append_value(<$alt_ty>::default()),
                                         }
                                     }
@@ -274,9 +308,9 @@ macro_rules! implement_builder_array {
                                 $(
                                     $alt_variant2 => {
                                         let bd = Self::as_builder_mut::<$builder_ty2>(builder.as_mut());
-                                        match cast_arc_value!(col.value, Option<$alt_ty2>) {
+                                        match col.as_any().downcast_ref::<Option<$alt_ty2>>().unwrap() {
                                             Some(value) => bd.append_value((value.$value_fn())),
-                                            None if col.is_nullable() => bd.append_null(),
+                                            None if is_nullable => bd.append_null(),
                                             None => bd.append_value(Default::default()),
                                         }
                                     }
@@ -359,19 +393,15 @@ macro_rules! implement_builder_array {
             }
 
             fn finish(&mut self, indices: Option<&[usize]>) -> DynRecordImmutableArrays {
-                let mut columns = vec![];
                 let _null = Arc::new(BooleanArray::new(self._null.finish(), None));
                 let _ts = Arc::new(self._ts.finish());
 
                 let mut array_refs = vec![Arc::clone(&_null) as ArrayRef, Arc::clone(&_ts) as ArrayRef];
-                for (idx, (builder, datatype)) in self
+                for (builder, datatype) in self
                     .builders
                     .iter_mut()
                     .zip(self.datatypes.iter())
-                    .enumerate()
                 {
-                    let field = self.schema.field(idx + USER_COLUMN_OFFSET);
-                    let is_nullable = field.is_nullable();
                     match datatype {
                         $(
                             $primitive_pat => {
@@ -379,12 +409,6 @@ macro_rules! implement_builder_array {
                                     Self::as_builder_mut::<PrimitiveBuilder<$arrow_ty>>(builder.as_mut())
                                         .finish(),
                                 );
-                                columns.push(Value::new(
-                                    *datatype,
-                                    field.name().to_owned(),
-                                    value.clone(),
-                                    is_nullable,
-                                ));
                                 array_refs.push(value);
                             }
 
@@ -392,24 +416,12 @@ macro_rules! implement_builder_array {
                         DataType::Boolean => {
                             let value =
                                 Arc::new(Self::as_builder_mut::<BooleanBuilder>(builder.as_mut()).finish());
-                            columns.push(Value::new(
-                                DataType::Boolean,
-                                field.name().to_owned(),
-                                value.clone(),
-                                is_nullable,
-                            ));
                             array_refs.push(value);
                         }
                         $(
                             $alt_variant => {
                                 let value =
                                     Arc::new(Self::as_builder_mut::<$builder_ty>(builder.as_mut()).finish());
-                                columns.push(Value::new(
-                                    *datatype,
-                                    field.name().to_owned(),
-                                    value.clone(),
-                                    is_nullable,
-                                ));
                                 array_refs.push(value);
                             }
                         )*
@@ -420,20 +432,15 @@ macro_rules! implement_builder_array {
                                         .finish(),
                                 );
                                 array_refs.push(value.clone());
-                                columns.push(Value::new(
-                                    *datatype,
-                                    field.name().to_owned(),
-                                    value,
-                                    is_nullable,
-                                ));
                             }
                         )*
                         DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     };
                 }
 
+                let columns = array_refs[2..].to_vec();
                 let mut record_batch =
-                    arrow::record_batch::RecordBatch::try_new(self.schema.clone(), array_refs)
+                    arrow::record_batch::RecordBatch::try_new(self.schema.clone(), array_refs.clone())
                         .expect("create record batch must be successful");
                 if let Some(indices) = indices {
                     record_batch = record_batch
@@ -453,31 +460,33 @@ macro_rules! implement_builder_array {
         impl DynRecordBuilder {
             fn push_primary_key(
                 &mut self,
-                key: Ts<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
+                key: Ts<PrimaryKey>,
                 primary_key_index: usize,
             ) {
                 let builder = self.builders.get_mut(primary_key_index).unwrap();
                 let datatype = self.datatypes.get_mut(primary_key_index).unwrap();
                 let col = key.value;
+                let value = col.get(0).unwrap();
                 match datatype {
                     $(
                         $primitive_pat => {
+                            let value = col.get(0).unwrap().as_any().downcast_ref::<$primitive_ty>().unwrap();
                             Self::as_builder_mut::<PrimitiveBuilder<$arrow_ty>>(builder.as_mut())
-                                .append_value(*cast_arc_value!(col.value, $primitive_ty))
+                                .append_value(*value.as_any().downcast_ref::<$primitive_ty>().unwrap())
                         }
                     )*
                     DataType::Boolean => Self::as_builder_mut::<BooleanBuilder>(builder.as_mut())
-                        .append_value(*cast_arc_value!(col.value, bool)),
+                        .append_value(*value.as_any().downcast_ref::<bool>().unwrap()),
                     $(
                         $alt_variant => {
                             Self::as_builder_mut::<$builder_ty>(builder.as_mut())
-                                .append_value(cast_arc_value!(col.value, $alt_ty))
+                                .append_value(value.as_any().downcast_ref::<$alt_ty>().unwrap())
                         }
                     )*
                     $(
                         $alt_variant2 => {
                             Self::as_builder_mut::<$builder_ty2>(builder.as_mut())
-                                .append_value(cast_arc_value!(col.value, $alt_ty2).$value_fn())
+                                .append_value(value.as_any().downcast_ref::<$alt_ty2>().unwrap().$value_fn())
                         }
                     )*
                     DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
@@ -533,10 +542,7 @@ implement_builder_array!(
         { i16, DataType::Int16, Int16Type },
         { i32, DataType::Int32, Int32Type },
         { i64, DataType::Int64, Int64Type },
-        // { f32, DataType::Float32, PrimitiveBuilder<Float32Type> },
-        // { f64, DataType::Float64, PrimitiveBuilder<Float64Type> },
     },
-    // f32, f64, and bool are special cases, they are handled separately
     {
 
         { String, DataType::String, StringBuilder, StringArray },
@@ -563,23 +569,30 @@ implement_builder_array!(
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field};
+    use common::{F32, F64};
     use parquet::arrow::ProjectionMask;
 
     use crate::{
-        dyn_record, dyn_schema,
+        dyn_record,
         inmem::immutable::{ArrowArrays, Builder},
-        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema, F32, F64},
+        record::{DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema},
     };
 
     #[tokio::test]
     async fn test_build_primary_key() {
         {
-            let schema = dyn_schema!(("id", UInt64, false), 0);
-            let record = dyn_record!(("id", UInt64, false, 1_u64), 0);
+            let schema = Arc::new(Schema::new(
+                vec![Field::new("id", DataType::UInt64, false)],
+                0,
+            ));
+            let record = dyn_record!(("id", UInt64, false, Arc::new(1_u64)), 0);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::timestamp::Ts {
                 ts: 0.into(),
-                value: record.key(),
+                value: record.as_record_ref().key(),
             };
             builder.push(key.clone(), Some(record.as_record_ref()));
             builder.push(key.clone(), None);
@@ -593,12 +606,15 @@ mod tests {
             }
         }
         {
-            let schema = dyn_schema!(("id", String, false), 0);
-            let record = dyn_record!(("id", String, false, "abc".to_string()), 0);
+            let schema = Arc::new(Schema::new(
+                vec![Field::new("id", DataType::Utf8, false)],
+                0,
+            ));
+            let record = dyn_record!(("id", String, false, Arc::new("abc".to_string())), 0);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::timestamp::Ts {
                 ts: 0.into(),
-                value: record.key(),
+                value: record.as_record_ref().key(),
             };
             builder.push(key.clone(), Some(record.as_record_ref()));
             builder.push(key.clone(), None);
@@ -612,12 +628,15 @@ mod tests {
             }
         }
         {
-            let schema = dyn_schema!(("id", Float32, false), 0);
-            let record = dyn_record!(("id", Float32, false, F32::from(3.2324)), 0);
+            let schema = Arc::new(Schema::new(
+                vec![Field::new("id", DataType::Float32, false)],
+                0,
+            ));
+            let record = dyn_record!(("id", Float32, false, Arc::new(F32::from(3.2324))), 0);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::timestamp::Ts {
                 ts: 0.into(),
-                value: record.key(),
+                value: record.as_record_ref().key(),
             };
             builder.push(key.clone(), Some(record.as_record_ref()));
             builder.push(key.clone(), None);
@@ -634,32 +653,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_array() {
-        let schema = dyn_schema!(
-            ("id", UInt32, false),
-            ("bool", Boolean, true),
-            ("bytes", Bytes, true),
-            ("none", Int64, true),
-            ("str", String, false),
-            ("float32", Float32, false),
-            ("float64", Float64, true),
-            0
-        );
-
+        let schema = Arc::new(Schema::new(
+            vec![
+                Field::new("id", DataType::UInt32, false),
+                Field::new("bool", DataType::Boolean, true),
+                Field::new("bytes", DataType::Binary, true),
+                Field::new("none", DataType::Int64, true),
+                Field::new("str", DataType::Utf8, false),
+                Field::new("float32", DataType::Float32, false),
+                Field::new("float64", DataType::Float64, true),
+            ],
+            0,
+        ));
         let record = dyn_record!(
-            ("id", UInt32, false, 1_u32),
-            ("bool", Boolean, true, Some(true)),
-            ("bytes", Bytes, true, Some(vec![1_u8, 2, 3, 4])),
-            ("none", Int64, true, None::<i64>),
-            ("str", String, false, "tonbo".to_string()),
-            ("float32", Float32, false, F32::from(1.09_f32)),
-            ("float64", Float64, true, Some(F64::from(3.09_f64))),
+            ("id", UInt32, false, Arc::new(1_u32)),
+            ("bool", Boolean, true, Arc::new(Some(true))),
+            ("bytes", Bytes, true, Arc::new(Some(vec![1_u8, 2, 3, 4]))),
+            ("none", Int64, true, Arc::new(None::<i64>)),
+            ("str", String, false, Arc::new("tonbo".to_string())),
+            ("float32", Float32, false, Arc::new(F32::from(1.09_f32))),
+            (
+                "float64",
+                Float64,
+                true,
+                Arc::new(Some(F64::from(3.09_f64)))
+            ),
             0
         );
 
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
         let key = crate::timestamp::Ts {
             ts: 0.into(),
-            value: record.key(),
+            value: record.as_record_ref().key(),
         };
         builder.push(key.clone(), Some(record.as_record_ref()));
         builder.push(key.clone(), None);
@@ -669,9 +694,13 @@ mod tests {
         {
             let res = arrays.get(0, &ProjectionMask::all());
             let cols = res.unwrap().unwrap().columns;
-            for (actual, expected) in cols.iter().zip(record.as_record_ref().columns.iter()) {
+            for (i, (actual, expected)) in cols
+                .iter()
+                .zip(record.as_record_ref().columns.iter())
+                .enumerate()
+            {
                 // TODO: set value to None instead of default value when pushing
-                if actual.name() != "none" {
+                if i != 3 {
                     assert_eq!(actual, expected);
                 }
             }

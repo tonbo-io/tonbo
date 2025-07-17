@@ -163,27 +163,28 @@ mod tests {
 
     use super::MergeStream;
     use crate::{
-        inmem::mutable::MutableMemTable, record::test::StringSchema, stream::Entry,
-        trigger::TriggerFactory, wal::log::LogType, DbOption,
+        inmem::mutable::MutableMemTable,
+        record::{test::string_arrow_schema, Schema},
+        stream::Entry,
+        trigger::TriggerFactory,
+        wal::log::LogType,
+        DbOption,
     };
 
     #[tokio::test]
     async fn merge_mutable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
 
-        let m1 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema.clone())
+            .await
+            .unwrap();
 
         m1.remove(LogType::Full, "b".into(), 3.into())
             .await
@@ -197,10 +198,9 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m2 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let m2 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema.clone())
+            .await
+            .unwrap();
         m2.insert(LogType::Full, "a".into(), 1.into())
             .await
             .unwrap();
@@ -213,16 +213,15 @@ mod tests {
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m3 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let m3 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
+            .await
+            .unwrap();
         m3.insert(LogType::Full, "e".into(), 4.into())
             .await
             .unwrap();
 
-        let lower = "a".to_string();
-        let upper = "e".to_string();
+        let lower = "a".to_string().into();
+        let upper = "e".to_string().into();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge = MergeStream::<String>::from_vec(
             vec![
@@ -236,35 +235,35 @@ mod tests {
         .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "a");
+            assert_eq!(entry.key().value, "a".into());
             assert_eq!(entry.key().ts, 1.into());
             assert_eq!(entry.value().as_deref(), Some("a"));
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "b");
+            assert_eq!(entry.key().value, "b".into());
             assert_eq!(entry.key().ts, 3.into());
             assert!(entry.value().is_none());
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "c");
+            assert_eq!(entry.key().value, "c".into());
             assert_eq!(entry.key().ts, 4.into());
             assert_eq!(entry.value().as_deref(), Some("c"));
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "d");
+            assert_eq!(entry.key().value, "d".into());
             assert_eq!(entry.key().ts, 5.into());
             assert_eq!(entry.value().as_deref(), Some("d"));
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "e");
+            assert_eq!(entry.key().value, "e".into());
             assert_eq!(entry.key().ts, 4.into());
             assert_eq!(entry.value().as_deref(), Some("e"));
         } else {
@@ -277,19 +276,16 @@ mod tests {
     async fn merge_mutable_remove_duplicates() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
+        let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
+            .await
+            .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();
@@ -306,8 +302,8 @@ mod tests {
             .await
             .unwrap();
 
-        let lower = "1".to_string();
-        let upper = "4".to_string();
+        let lower = "1".to_string().into();
+        let upper = "4".to_string().into();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge =
             MergeStream::<String>::from_vec(vec![m1.scan(bound, 0.into()).into()], 0.into())
@@ -315,27 +311,27 @@ mod tests {
                 .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "1");
+            assert_eq!(entry.key().value, "1".into());
             assert_eq!(entry.key().ts, 0.into());
             assert_eq!(entry.value().as_deref(), Some("1"));
         };
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "2");
+            assert_eq!(entry.key().value, "2".into());
             assert_eq!(entry.key().ts, 0.into());
             assert_eq!(entry.value().as_deref(), Some("2"));
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "4");
+            assert_eq!(entry.key().value, "4".into());
             assert_eq!(entry.key().ts, 0.into());
             assert_eq!(entry.value().as_deref(), Some("4"));
         } else {
             unreachable!()
         }
 
-        let lower = "1".to_string();
-        let upper = "4".to_string();
+        let lower = "1".to_string().into();
+        let upper = "4".to_string().into();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge =
             MergeStream::<String>::from_vec(vec![m1.scan(bound, 1.into()).into()], 1.into())
@@ -343,21 +339,21 @@ mod tests {
                 .unwrap();
 
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "1");
+            assert_eq!(entry.key().value, "1".into());
             assert_eq!(entry.key().ts, 0.into());
             assert_eq!(entry.value().as_deref(), Some("1"));
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "2");
+            assert_eq!(entry.key().value, "2".into());
             assert_eq!(entry.key().ts, 1.into());
             assert_eq!(entry.value().as_deref(), Some("2"));
         } else {
             unreachable!()
         }
         if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-            assert_eq!(entry.key().value, "3");
+            assert_eq!(entry.key().value, "3".into());
             assert_eq!(entry.key().ts, 1.into());
             assert_eq!(entry.value().as_deref(), Some("3"));
         } else {
@@ -369,19 +365,16 @@ mod tests {
     async fn merge_mutable_limit() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 =
-            MutableMemTable::<String>::new(&option, trigger, fs.clone(), Arc::new(StringSchema))
-                .await
-                .unwrap();
+        let schema = Arc::new(Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap());
+        let m1 = MutableMemTable::<String>::new(&option, trigger, fs.clone(), schema)
+            .await
+            .unwrap();
         m1.insert(LogType::Full, "1".into(), 0_u32.into())
             .await
             .unwrap();
@@ -392,8 +385,8 @@ mod tests {
             .await
             .unwrap();
 
-        let lower = "1".to_string();
-        let upper = "3".to_string();
+        let lower = "1".to_string().into();
+        let upper = "3".to_string().into();
         {
             let mut merge = MergeStream::<String>::from_vec(
                 vec![m1
@@ -406,7 +399,7 @@ mod tests {
             .limit(2);
 
             if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-                assert_eq!(entry.key().value, "1");
+                assert_eq!(entry.key().value, "1".into());
                 assert_eq!(entry.key().ts, 0.into());
             } else {
                 unreachable!()
@@ -426,13 +419,13 @@ mod tests {
             .limit(2);
 
             if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-                assert_eq!(entry.key().value, "1");
+                assert_eq!(entry.key().value, "1".into());
                 assert_eq!(entry.key().ts, 0.into());
             } else {
                 unreachable!()
             };
             if let Some(Ok(Entry::Mutable(entry))) = merge.next().await {
-                assert_eq!(entry.key().value, "2");
+                assert_eq!(entry.key().value, "2".into());
                 assert_eq!(entry.key().ts, 1.into());
             } else {
                 unreachable!()

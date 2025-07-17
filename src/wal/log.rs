@@ -1,10 +1,8 @@
+use common::PrimaryKey;
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use crate::{
-    record::{Record, Schema},
-    timestamp::Ts,
-};
+use crate::{record::Record, timestamp::Ts};
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -31,7 +29,7 @@ pub(crate) struct Log<R>
 where
     R: Record,
 {
-    pub(crate) key: Ts<<R::Schema as Schema>::Key>,
+    pub(crate) key: Ts<PrimaryKey>,
     pub(crate) value: Option<R>,
     pub(crate) log_type: Option<LogType>,
 }
@@ -40,11 +38,7 @@ impl<R> Log<R>
 where
     R: Record,
 {
-    pub(crate) fn new(
-        ts: Ts<<R::Schema as Schema>::Key>,
-        value: Option<R>,
-        log_type: Option<LogType>,
-    ) -> Self {
+    pub(crate) fn new(ts: Ts<PrimaryKey>, value: Option<R>, log_type: Option<LogType>) -> Self {
         Self {
             key: ts,
             value,
@@ -57,9 +51,7 @@ impl<R> Encode for Log<R>
 where
     R: Record,
 {
-    type Error = fusio::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
@@ -87,16 +79,12 @@ impl<Re> Decode for Log<Re>
 where
     Re: Record,
 {
-    type Error = fusio::Error;
-
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
     where
         R: SeqRead,
     {
         let log_type = LogType::from(u8::decode(reader).await?);
-        let key = Ts::<<Re::Schema as Schema>::Key>::decode(reader)
-            .await
-            .unwrap();
+        let key = Ts::<PrimaryKey>::decode(reader).await.unwrap();
         let record = Option::<Re>::decode(reader).await.unwrap();
 
         Ok(Log::new(key, record, Some(log_type)))
@@ -105,8 +93,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{io::Cursor, sync::Arc};
 
+    use common::PrimaryKey;
     use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
 
@@ -118,7 +107,10 @@ mod tests {
     #[tokio::test]
     async fn encode_and_decode() {
         let entry: Log<String> = Log::new(
-            Ts::new("hello".into(), 1.into()),
+            Ts::new(
+                PrimaryKey::new(vec![Arc::new("hello".to_string())]),
+                1.into(),
+            ),
             Some("hello".into()),
             Some(LogType::Middle),
         );

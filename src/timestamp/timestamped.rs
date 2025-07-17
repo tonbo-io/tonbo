@@ -143,9 +143,7 @@ impl<V> Encode for Ts<V>
 where
     V: Encode + Sync,
 {
-    type Error = V::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
@@ -162,9 +160,7 @@ impl<V> Decode for Ts<V>
 where
     V: Decode,
 {
-    type Error = V::Error;
-
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
     where
         R: SeqRead,
     {
@@ -176,6 +172,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use common::PrimaryKey;
+
     use super::{Ts, TsRef};
 
     #[test]
@@ -209,6 +209,14 @@ mod tests {
         let value = Ts::new(1, 1_u32.into());
         let value_ref = TsRef::new(&value.value, value.ts);
         assert_eq!(value_ref.value(), &1);
+        assert_eq!(value_ref.ts(), 1_u32.into());
+    }
+
+    #[test]
+    fn test_pk_timestamped_ref() {
+        let value = Ts::new(PrimaryKey::new(vec![Arc::new(1)]), 1_u32.into());
+        let value_ref = TsRef::new(&value.value, value.ts);
+        assert_eq!(value_ref.value(), &1.into());
         assert_eq!(value_ref.ts(), 1_u32.into());
     }
 

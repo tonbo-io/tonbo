@@ -6,6 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use common::Keys;
 use fusio::{
     dynamic::{DynFile, MaybeSendFuture},
     path::Path,
@@ -19,7 +20,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
-    record::{Record, Schema},
+    record::Record,
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
     timestamp::Timestamp,
@@ -47,8 +48,8 @@ pub(crate) struct LevelStream<'level, R>
 where
     R: Record,
 {
-    lower: Bound<&'level <R::Schema as Schema>::Key>,
-    upper: Bound<&'level <R::Schema as Schema>::Key>,
+    lower: Bound<&'level Keys>,
+    upper: Bound<&'level Keys>,
     ts: Timestamp,
     level: usize,
     option: Arc<DbOption>,
@@ -72,10 +73,7 @@ where
         level: usize,
         start: usize,
         end: usize,
-        range: (
-            Bound<&'level <R::Schema as Schema>::Key>,
-            Bound<&'level <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'level Keys>, Bound<&'level Keys>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
@@ -229,8 +227,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tests::build_version, fs::manager::StoreManager,
-        inmem::immutable::tests::TestSchema, record::Schema, stream::level::LevelStream, DbOption,
+        compaction::tests::build_version, fs::manager::StoreManager, stream::level::LevelStream,
+        tests::Test, DbOption,
     };
 
     #[tokio::test(flavor = "multi_thread")]
@@ -239,7 +237,6 @@ mod tests {
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema {},
         ));
 
         manager
@@ -253,7 +250,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let schema = Arc::new(Test::schema());
+        let (_, version) = build_version(&option, &manager, &schema).await;
 
         {
             let mut level_stream_1 = LevelStream::new(
@@ -266,7 +264,7 @@ mod tests {
                 None,
                 ProjectionMask::roots(
                     &ArrowSchemaConverter::new()
-                        .convert(TestSchema {}.arrow_schema())
+                        .convert(schema.arrow_schema())
                         .unwrap(),
                     [0, 1, 2, 3],
                 ),
@@ -305,7 +303,7 @@ mod tests {
                 None,
                 ProjectionMask::roots(
                     &ArrowSchemaConverter::new()
-                        .convert(TestSchema {}.arrow_schema())
+                        .convert(schema.arrow_schema())
                         .unwrap(),
                     [0, 1, 2, 4],
                 ),
@@ -344,7 +342,7 @@ mod tests {
                 None,
                 ProjectionMask::roots(
                     &ArrowSchemaConverter::new()
-                        .convert(TestSchema {}.arrow_schema())
+                        .convert(schema.arrow_schema())
                         .unwrap(),
                     [0, 1, 2],
                 ),

@@ -30,7 +30,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
 use tonbo::{
-    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Schema, DbOption, DB,
+    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, DbOption, PrimaryKey, DB,
 };
 use tonbo_macros::Record;
 
@@ -51,10 +51,7 @@ struct MusicExec {
     db: Arc<DB<Music, TokioExecutor>>,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
-    range: (
-        Bound<<MusicSchema as Schema>::Key>,
-        Bound<<MusicSchema as Schema>::Key>,
-    ),
+    range: (Bound<PrimaryKey>, Bound<PrimaryKey>),
 }
 
 struct MusicStream {
@@ -76,7 +73,7 @@ impl TableProvider for MusicProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        MusicSchema {}.arrow_schema().clone()
+        Music::arrow_schema().clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -109,7 +106,7 @@ impl TableProvider for MusicProvider {
 
 impl MusicExec {
     fn new(db: Arc<DB<Music, TokioExecutor>>, projection: Option<&Vec<usize>>) -> Self {
-        let schema = MusicSchema {}.arrow_schema();
+        let schema = Music::arrow_schema();
         let schema = if let Some(projection) = &projection {
             Arc::new(schema.project(projection).unwrap())
         } else {
@@ -141,13 +138,13 @@ impl Stream for MusicStream {
 
 impl RecordBatchStream for MusicStream {
     fn schema(&self) -> SchemaRef {
-        MusicSchema {}.arrow_schema().clone()
+        Music::arrow_schema().clone()
     }
 }
 
 impl DisplayAs for MusicExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        let (lower, upper) = self.range;
+        let (lower, upper) = &self.range;
 
         write!(
             f,
@@ -198,7 +195,7 @@ impl ExecutionPlan for MusicExec {
 
     fn execute(&self, _: usize, _: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let db = self.db.clone();
-        let (lower, upper) = self.range;
+        let (lower, upper) = self.range.clone();
         let limit = self.limit;
         let projection = self.projection.clone();
 
@@ -229,12 +226,9 @@ async fn main() -> Result<()> {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/music").await;
 
-    let options = DbOption::new(
-        Path::from_filesystem_path("./db_path/music").unwrap(),
-        &MusicSchema,
-    );
+    let options = DbOption::new(Path::from_filesystem_path("./db_path/music").unwrap());
 
-    let db = DB::new(options, TokioExecutor::current(), MusicSchema)
+    let db = DB::new(options, TokioExecutor::current(), Music::schema())
         .await
         .unwrap();
     for (id, name, like) in [

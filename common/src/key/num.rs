@@ -1,4 +1,4 @@
-use std::{hash::Hash, ops::Deref, sync::Arc};
+use std::{any::Any, hash::Hash, ops::Deref, sync::Arc};
 
 use arrow::array::{
     Datum, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array,
@@ -7,11 +7,15 @@ use arrow::array::{
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use crate::record::{Key, KeyRef};
+use crate::{
+    datatype::DataType,
+    key::{Key, KeyRef},
+    PrimaryKey, Value, ValueRef,
+};
 
 #[macro_export]
 macro_rules! implement_key {
-    ($struct_name:ident, $array_name:ident) => {
+    ($struct_name:ident, $array_name:ident, $data_type:expr) => {
         impl Key for $struct_name {
             type Ref<'r> = $struct_name;
 
@@ -19,8 +23,8 @@ macro_rules! implement_key {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(*self))
+            fn as_value(&self) -> &dyn Value {
+                self
             }
         }
 
@@ -31,17 +35,75 @@ macro_rules! implement_key {
                 self
             }
         }
+
+        impl Value for $struct_name {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn is_none(&self) -> bool {
+                false
+            }
+
+            fn is_some(&self) -> bool {
+                false
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
+            }
+
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                Some(Arc::new($array_name::new_scalar(*self)))
+            }
+        }
+
+        impl Value for Option<$struct_name> {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn is_none(&self) -> bool {
+                self.is_none()
+            }
+
+            fn is_some(&self) -> bool {
+                self.is_some()
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
+            }
+
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                None
+            }
+        }
+
+        impl From<$struct_name> for PrimaryKey {
+            fn from(value: $struct_name) -> Self {
+                PrimaryKey::new(vec![Arc::new(value)])
+            }
+        }
     };
 }
 
-implement_key!(i8, Int8Array);
-implement_key!(i16, Int16Array);
-implement_key!(i32, Int32Array);
-implement_key!(i64, Int64Array);
-implement_key!(u8, UInt8Array);
-implement_key!(u16, UInt16Array);
-implement_key!(u32, UInt32Array);
-implement_key!(u64, UInt64Array);
+implement_key!(i8, Int8Array, DataType::Int8);
+implement_key!(i16, Int16Array, DataType::Int16);
+implement_key!(i32, Int32Array, DataType::Int32);
+implement_key!(i64, Int64Array, DataType::Int64);
+implement_key!(u8, UInt8Array, DataType::UInt8);
+implement_key!(u16, UInt16Array, DataType::UInt16);
+implement_key!(u32, UInt32Array, DataType::UInt32);
+implement_key!(u64, UInt64Array, DataType::UInt64);
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FloatType<T>(pub T);
@@ -53,9 +115,7 @@ pub type F64 = FloatType<f64>;
 macro_rules! implement_float_encode_decode {
     ($ty:ident) => {
         impl Encode for FloatType<$ty> {
-            type Error = fusio::Error;
-
-            async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
+            async fn encode<W: Write>(&self, writer: &mut W) -> Result<(), fusio::Error> {
                 let (result, _) = writer.write_all(&self.to_le_bytes()[..]).await;
                 result?;
 
@@ -68,9 +128,7 @@ macro_rules! implement_float_encode_decode {
         }
 
         impl Decode for FloatType<$ty> {
-            type Error = fusio::Error;
-
-            async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, Self::Error> {
+            async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
                 let mut bytes = [0u8; size_of::<Self>()];
                 let (result, _) = reader.read_exact(&mut bytes[..]).await;
                 result?;
@@ -83,7 +141,7 @@ macro_rules! implement_float_encode_decode {
 
 #[macro_export]
 macro_rules! implement_float_key {
-    ($ty:ty, $array_name:ident) => {
+    ($ty:ty, $array_name:ident, $data_type:expr) => {
         impl Ord for FloatType<$ty> {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
                 self.0.total_cmp(&other.0)
@@ -142,8 +200,8 @@ macro_rules! implement_float_key {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(self.0))
+            fn as_value(&self) -> &dyn Value {
+                self
             }
         }
 
@@ -160,14 +218,72 @@ macro_rules! implement_float_key {
                 self.0
             }
         }
+
+        impl Value for FloatType<$ty> {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                Some(Arc::new($array_name::new_scalar(self.0)))
+            }
+
+            fn is_none(&self) -> bool {
+                false
+            }
+
+            fn is_some(&self) -> bool {
+                false
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
+            }
+        }
+
+        impl Value for Option<FloatType<$ty>> {
+            fn data_type(&self) -> DataType {
+                $data_type
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn is_none(&self) -> bool {
+                self.is_none()
+            }
+
+            fn is_some(&self) -> bool {
+                self.is_some()
+            }
+
+            fn clone_arc(&self) -> ValueRef {
+                Arc::new(*self)
+            }
+
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                None
+            }
+        }
+
+        impl From<$ty> for PrimaryKey {
+            fn from(value: $ty) -> Self {
+                PrimaryKey::new(vec![Arc::new(FloatType::<$ty>(value))])
+            }
+        }
     };
 }
 
 implement_float_encode_decode!(f32);
 implement_float_encode_decode!(f64);
 
-implement_float_key!(f32, Float32Array);
-implement_float_key!(f64, Float64Array);
+implement_float_key!(f32, Float32Array, DataType::Float32);
+implement_float_key!(f64, Float64Array, DataType::Float64);
 
 #[cfg(test)]
 mod tests {
@@ -175,7 +291,7 @@ mod tests {
 
     use arrow::array::ArrowNativeTypeOp;
 
-    use crate::record::key::num::F32;
+    use crate::key::num::F32;
 
     #[tokio::test]
     async fn test_zero() {

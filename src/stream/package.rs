@@ -10,7 +10,7 @@ use pin_project_lite::pin_project;
 
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
-    record::{Record, Schema},
+    record::Record,
     stream::merge::MergeStream,
 };
 
@@ -22,7 +22,7 @@ pin_project! {
         row_count: usize,
         batch_size: usize,
         inner: MergeStream<'package, R>,
-        builder: <<R::Schema as Schema>::Columns as ArrowArrays>::Builder,
+        builder: <R::Columns as ArrowArrays>::Builder,
         projection_indices: Option<Vec<usize>>,
     }
 }
@@ -41,7 +41,7 @@ where
             row_count: 0,
             batch_size,
             inner: merge,
-            builder: <R::Schema as Schema>::Columns::builder(schema, batch_size),
+            builder: R::Columns::builder(schema, batch_size),
             projection_indices,
         }
     }
@@ -51,7 +51,7 @@ impl<'package, R> Stream for PackageStream<'package, R>
 where
     R: Record,
 {
-    type Item = Result<<R::Schema as Schema>::Columns, parquet::errors::ParquetError>;
+    type Item = Result<R::Columns, parquet::errors::ParquetError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut project = self.project();
@@ -90,13 +90,9 @@ mod tests {
 
     use crate::{
         inmem::{
-            immutable::{
-                tests::{TestImmutableArrays, TestSchema},
-                ArrowArrays,
-            },
+            immutable::{tests::TestImmutableArrays, ArrowArrays},
             mutable::MutableMemTable,
         },
-        record::Schema,
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
         trigger::TriggerFactory,
@@ -108,16 +104,15 @@ mod tests {
     async fn iter() {
         let temp_dir = TempDir::new().unwrap();
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
         fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
 
+        let schema = Arc::new(Test::schema());
+
         let trigger = TriggerFactory::create(option.trigger_type);
 
-        let m1 = MutableMemTable::<Test>::new(&option, trigger, fs, Arc::new(TestSchema {}))
+        let m1 = MutableMemTable::<Test>::new(&option, trigger, fs, schema.clone())
             .await
             .unwrap();
         m1.insert(
@@ -201,7 +196,7 @@ mod tests {
             row_count: 0,
             batch_size: 8192,
             inner: merge,
-            builder: TestImmutableArrays::builder(TestSchema {}.arrow_schema().clone(), 8192),
+            builder: TestImmutableArrays::builder(schema.arrow_schema().clone(), 8192),
             projection_indices: Some(projection_indices.clone()),
         };
 
@@ -209,12 +204,7 @@ mod tests {
         assert_eq!(
             arrays.as_record_batch(),
             &RecordBatch::try_new(
-                Arc::new(
-                    TestSchema {}
-                        .arrow_schema()
-                        .project(&projection_indices)
-                        .unwrap(),
-                ),
+                Arc::new(schema.arrow_schema().project(&projection_indices).unwrap(),),
                 vec![
                     Arc::new(BooleanArray::from(vec![
                         false, false, false, false, false, false

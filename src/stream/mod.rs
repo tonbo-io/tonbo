@@ -12,6 +12,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use common::{KeyRef, PrimaryKey, PrimaryKeyRef};
 use futures_core::Stream;
 use futures_util::{ready, stream};
 use parquet::arrow::ProjectionMask;
@@ -21,7 +22,7 @@ use record_batch::RecordBatchEntry;
 use crate::{
     inmem::{immutable::ImmutableScan, mutable::MutableScan},
     ondisk::scan::SsTableScan,
-    record::{Key, Record, RecordRef, Schema},
+    record::{Record, RecordRef},
     stream::{level::LevelStream, mem_projection::MemProjectionStream},
     timestamp::Ts,
     transaction::TransactionScan,
@@ -31,13 +32,8 @@ pub enum Entry<'entry, R>
 where
     R: Record,
 {
-    Transaction(
-        (
-            Ts<<<R::Schema as Schema>::Key as Key>::Ref<'entry>>,
-            &'entry Option<R>,
-        ),
-    ),
-    Mutable(crossbeam_skiplist::map::Entry<'entry, Ts<<R::Schema as Schema>::Key>, Option<R>>),
+    Transaction((Ts<PrimaryKeyRef<'entry>>, &'entry Option<R>)),
+    Mutable(crossbeam_skiplist::map::Entry<'entry, Ts<PrimaryKey>, Option<R>>),
     Projection((Box<Entry<'entry, R>>, Arc<ProjectionMask>)),
     RecordBatch(RecordBatchEntry<R>),
 }
@@ -46,20 +42,15 @@ impl<R> Entry<'_, R>
 where
     R: Record,
 {
-    pub(crate) fn key(&self) -> Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>> {
+    pub(crate) fn key(&self) -> Ts<PrimaryKey> {
         match self {
             Entry::Transaction((key, _)) => {
                 // Safety: shorter lifetime must be safe
-                unsafe {
-                    transmute::<
-                        Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
-                        Ts<<<R::Schema as Schema>::Key as Key>::Ref<'_>>,
-                    >(key.clone())
-                }
+                Ts::new(key.value().clone().to_key(), key.ts())
             }
             Entry::Mutable(entry) => entry.key().map(|key| {
                 // Safety: shorter lifetime must be safe
-                unsafe { transmute(key.as_key_ref()) }
+                unsafe { transmute(key.clone()) }
             }),
             Entry::RecordBatch(entry) => entry.internal_key(),
             Entry::Projection((entry, _)) => entry.key(),
@@ -82,7 +73,7 @@ where
 impl<R> fmt::Debug for Entry<'_, R>
 where
     R: Record + Debug,
-    <R::Schema as Schema>::Key: Debug,
+    // R::Key: Debug,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {

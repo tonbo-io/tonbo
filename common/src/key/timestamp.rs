@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     fmt::Debug,
     hash::{Hash, Hasher},
     sync::Arc,
@@ -11,8 +12,11 @@ use arrow::array::{
 use chrono::{DateTime, NaiveDateTime};
 use fusio_log::{Decode, Encode};
 
-use super::{Date32, Date64, Key, KeyRef, Time32, Time64};
-use crate::record::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY};
+use super::{Date32, Date64, Key, KeyRef, PrimaryKey, Time32, Time64, Value, ValueRef};
+use crate::{
+    datatype::DataType,
+    key::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY},
+};
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeUnit {
@@ -90,13 +94,8 @@ impl Key for Timestamp {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(self.ts)),
-            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(self.ts)),
-            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(self.ts)),
-            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(self.ts)),
-        }
+    fn as_value(&self) -> &dyn Value {
+        self
     }
 }
 
@@ -108,10 +107,79 @@ impl<'r> KeyRef<'r> for Timestamp {
     }
 }
 
-impl Decode for Timestamp {
-    type Error = fusio::Error;
+impl Value for Timestamp {
+    fn data_type(&self) -> DataType {
+        match &self.unit {
+            TimeUnit::Second => DataType::Timestamp(TimeUnit::Second),
+            TimeUnit::Millisecond => DataType::Timestamp(TimeUnit::Millisecond),
+            TimeUnit::Microsecond => DataType::Timestamp(TimeUnit::Microsecond),
+            TimeUnit::Nanosecond => DataType::Timestamp(TimeUnit::Nanosecond),
+        }
+    }
 
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_none(&self) -> bool {
+        false
+    }
+
+    fn is_some(&self) -> bool {
+        false
+    }
+
+    fn clone_arc(&self) -> ValueRef {
+        Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        match self.unit {
+            TimeUnit::Second => Some(Arc::new(TimestampSecondArray::new_scalar(self.ts))),
+            TimeUnit::Millisecond => Some(Arc::new(TimestampMillisecondArray::new_scalar(self.ts))),
+            TimeUnit::Microsecond => Some(Arc::new(TimestampMicrosecondArray::new_scalar(self.ts))),
+            TimeUnit::Nanosecond => Some(Arc::new(TimestampNanosecondArray::new_scalar(self.ts))),
+        }
+    }
+}
+
+impl Value for Option<Timestamp> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn data_type(&self) -> DataType {
+        match self {
+            Some(ts) => ts.data_type(),
+            None => DataType::Timestamp(TimeUnit::Second),
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        self.is_none()
+    }
+
+    fn is_some(&self) -> bool {
+        self.is_some()
+    }
+
+    fn clone_arc(&self) -> ValueRef {
+        Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        None
+    }
+}
+
+impl From<Timestamp> for PrimaryKey {
+    fn from(value: Timestamp) -> Self {
+        PrimaryKey::new(vec![Arc::new(value)])
+    }
+}
+
+impl Decode for Timestamp {
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
     where
         R: fusio::SeqRead,
     {
@@ -128,9 +196,7 @@ impl Decode for Timestamp {
 }
 
 impl Encode for Timestamp {
-    type Error = fusio::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: fusio::Write,
     {
@@ -338,6 +404,19 @@ mod tests {
     use tokio::io::AsyncSeekExt;
 
     use super::*;
+
+    #[test]
+    fn test_timestamp_eq() {
+        let val = Timestamp::new_millis(123);
+        let val2 = Timestamp::new_millis(123);
+        let val3 = Timestamp::new_seconds(123);
+        let val4 = Timestamp::new_micros(123000);
+        let val5 = Timestamp::new_micros(123001);
+        assert_eq!(val, val2);
+        assert_ne!(val, val3);
+        assert_eq!(val, val4);
+        assert_ne!(val, val5);
+    }
 
     #[tokio::test]
     async fn test_timestamp_encode_decode() {

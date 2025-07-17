@@ -7,6 +7,7 @@ use std::{
     mem::transmute,
 };
 
+use common::{Key, KeyRef, PrimaryKey, PrimaryKeyRef};
 use flume::SendError;
 use lockable::AsyncLimit;
 use parquet::{
@@ -17,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
-    record::{Key, KeyRef, RecordRef, Schema as RecordSchema},
+    record::RecordRef,
     snapshot::Snapshot,
     stream::{self, mem_projection::MemProjectionStream},
     timestamp::{Timestamp, Ts},
@@ -26,7 +27,7 @@ use crate::{
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
-    inner: Range<'scan, <R::Schema as RecordSchema>::Key, Option<R>>,
+    inner: Range<'scan, PrimaryKey, Option<R>>,
     ts: Timestamp,
 }
 
@@ -34,10 +35,7 @@ impl<'scan, R> Iterator for TransactionScan<'scan, R>
 where
     R: Record,
 {
-    type Item = (
-        Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'scan>>,
-        &'scan Option<R>,
-    );
+    type Item = (Ts<PrimaryKeyRef<'scan>>, &'scan Option<R>);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner
@@ -54,19 +52,16 @@ pub struct Transaction<'txn, R>
 where
     R: Record,
 {
-    local: BTreeMap<<R::Schema as RecordSchema>::Key, Option<R>>,
+    local: BTreeMap<PrimaryKey, Option<R>>,
     snapshot: Snapshot<'txn, R>,
-    lock_map: LockMap<<R::Schema as RecordSchema>::Key>,
+    lock_map: LockMap<PrimaryKey>,
 }
 
 impl<'txn, R> Transaction<'txn, R>
 where
     R: Record + Send,
 {
-    pub(crate) fn new(
-        snapshot: Snapshot<'txn, R>,
-        lock_map: LockMap<<R::Schema as RecordSchema>::Key>,
-    ) -> Self {
+    pub(crate) fn new(snapshot: Snapshot<'txn, R>, lock_map: LockMap<PrimaryKey>) -> Self {
         Self {
             local: BTreeMap::new(),
             snapshot,
@@ -78,9 +73,9 @@ where
     /// [`Projection`]
     pub async fn get<'get>(
         &'get self,
-        key: &'get <R::Schema as RecordSchema>::Key,
+        key: &'get PrimaryKey,
         projection: Projection<'get>,
-    ) -> Result<Option<TransactionEntry<'get, R>>, DbError<R>> {
+    ) -> Result<Option<TransactionEntry<'get, R>>, DbError> {
         Ok(match self.local.get(key) {
             Some(v) => v.as_ref().map(|v| {
                 let mut record_ref = v.as_record_ref();
@@ -141,10 +136,7 @@ where
     /// ```
     pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (
-            Bound<&'range <R::Schema as RecordSchema>::Key>,
-            Bound<&'range <R::Schema as RecordSchema>::Key>,
-        ),
+        range: (Bound<&'range PrimaryKey>, Bound<&'range PrimaryKey>),
     ) -> Scan<'scan, 'range, R> {
         let ts = self.snapshot.ts();
         let inner = self.local.range(range);
@@ -162,15 +154,18 @@ where
 
     /// insert a sequence of data as a single batch on this transaction
     pub fn insert(&mut self, value: R) {
-        self.entry(value.key().to_key(), Some(value))
+        // Convert R::Key to PrimaryKey for storage
+        // let key = PrimaryKey::new(vec![Arc::new(value.key().to_key())]);
+        let key = value.key().to_key();
+        self.entry(key, Some(value))
     }
 
     /// delete the record with the primary key as the `key` on this transaction
-    pub fn remove(&mut self, key: <R::Schema as RecordSchema>::Key) {
+    pub fn remove(&mut self, key: PrimaryKey) {
         self.entry(key, None)
     }
 
-    fn entry(&mut self, key: <R::Schema as RecordSchema>::Key, value: Option<R>) {
+    fn entry(&mut self, key: PrimaryKey, value: Option<R>) {
         match self.local.entry(key) {
             Entry::Vacant(v) => {
                 v.insert(value);
@@ -185,7 +180,7 @@ where
     /// # Error
     /// This function will return an error if the mutation in the transaction conflict with
     /// other committed transaction
-    pub async fn commit(mut self) -> Result<(), CommitError<R>> {
+    pub async fn commit(mut self) -> Result<(), CommitError> {
         let mut _key_guards = Vec::new();
 
         for (key, _) in self.local.iter() {
@@ -244,10 +239,10 @@ where
     async fn append(
         schema: &DbStorage<R>,
         log_ty: LogType,
-        key: <R::Schema as RecordSchema>::Key,
+        key: PrimaryKey,
         record: Option<R>,
         new_ts: Timestamp,
-    ) -> Result<bool, CommitError<R>> {
+    ) -> Result<bool, CommitError> {
         Ok(match record {
             Some(record) => schema.write(log_ty, record, new_ts).await?,
             None => schema.remove(log_ty, key, new_ts).await?,
@@ -280,18 +275,15 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum CommitError<R>
-where
-    R: Record,
-{
+pub enum CommitError {
     #[error("transaction io error {:?}", .0)]
     Io(#[from] io::Error),
     #[error("transaction parquet error {:?}", .0)]
     Parquet(#[from] ParquetError),
     #[error("transaction database error {:?}", .0)]
-    Database(#[from] DbError<R>),
+    Database(#[from] DbError),
     #[error("transaction write conflict: {:?}", .0)]
-    WriteConflict(<R::Schema as RecordSchema>::Key),
+    WriteConflict(PrimaryKey),
     #[error("Failed to send compact task")]
     SendCompactTaskError(#[from] SendError<CompactTask>),
     #[error("Channel is closed")]
@@ -302,6 +294,7 @@ where
 mod tests {
     use std::{collections::Bound, sync::Arc};
 
+    use common::{datatype::DataType, AsValue, PrimaryKey};
     use fusio::path::Path;
     use fusio_dispatch::FsOptions;
     use futures_util::StreamExt;
@@ -311,10 +304,12 @@ mod tests {
         compaction::tests::build_version,
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
-        inmem::immutable::tests::TestSchema,
         record::{
-            runtime::{test::test_dyn_item_schema, DataType, DynRecord, Value},
-            test::StringSchema,
+            // runtime::{test::test_dyn_item_schema, DynRecord},
+            runtime::test::test_dyn_item_schema,
+            test::string_arrow_schema,
+            DynRecord,
+            Schema,
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
@@ -325,13 +320,11 @@ mod tests {
     async fn transaction_read_write() {
         let temp_dir = TempDir::new().unwrap();
 
+        let schema = Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap();
         let db = DB::<String, TokioExecutor>::new(
-            DbOption::new(
-                Path::from_filesystem_path(temp_dir.path()).unwrap(),
-                &StringSchema,
-            ),
+            DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
-            StringSchema,
+            schema,
         )
         .await
         .unwrap();
@@ -340,11 +333,8 @@ mod tests {
             txn1.insert("foo".to_string());
 
             let txn2 = db.transaction().await;
-            assert!(txn2
-                .get(&"foo".to_string(), Projection::All)
-                .await
-                .unwrap()
-                .is_none());
+            let key = PrimaryKey::new(vec![Arc::new("foo".to_string())]);
+            assert!(txn2.get(&key, Projection::All).await.unwrap().is_none());
 
             txn1.commit().await.unwrap();
             txn2.commit().await.unwrap();
@@ -352,11 +342,8 @@ mod tests {
 
         {
             let txn3 = db.transaction().await;
-            assert!(txn3
-                .get(&"foo".to_string(), Projection::All)
-                .await
-                .unwrap()
-                .is_some());
+            let key = PrimaryKey::new(vec![Arc::new("foo".to_string())]);
+            assert!(txn3.get(&key, Projection::All).await.unwrap().is_some());
             txn3.commit().await.unwrap();
         }
     }
@@ -367,7 +354,6 @@ mod tests {
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
         ));
 
         manager
@@ -381,7 +367,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let record_schema = Arc::new(Test::schema());
+        let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -390,7 +377,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
-            Arc::new(TestSchema),
+            record_schema.clone(),
             version,
             manager,
         )
@@ -400,15 +387,17 @@ mod tests {
         {
             let _ = db.ctx.increase_ts();
         }
-        let name = "erika".to_string();
+        let name = PrimaryKey::new(vec![Arc::new("erika".to_string())]);
+        // let name = "erika".to_string();
         {
             let mut txn = db.transaction().await;
             {
                 let entry = txn.get(&name, Projection::All).await.unwrap();
+
                 assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), 5);
             }
             txn.insert(Test {
-                vstring: name.clone(),
+                vstring: name.get(0).unwrap().as_string().clone(),
                 vu32: 50,
                 vbool: Some(false),
             });
@@ -431,7 +420,8 @@ mod tests {
                 assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), 50);
 
                 for i in 1..6 {
-                    let key = i.to_string();
+                    // let key = i.to_string();
+                    let key = PrimaryKey::new(vec![Arc::new(i.to_string())]);
                     let entry = txn.get(&key, Projection::All).await.unwrap();
                     assert!(entry.is_some());
                     if i % 2 == 1 {
@@ -445,11 +435,8 @@ mod tests {
                     }
                 }
                 // seek miss
-                assert!(txn
-                    .get(&"benn".to_owned(), Projection::All)
-                    .await
-                    .unwrap()
-                    .is_none())
+                let key = PrimaryKey::new(vec![Arc::new("benn".to_owned())]);
+                assert!(txn.get(&key, Projection::All).await.unwrap().is_none())
             }
         }
     }
@@ -459,13 +446,11 @@ mod tests {
     async fn transaction_remove() {
         let temp_dir = TempDir::new().unwrap();
 
+        let schema = Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap();
         let db = DB::<String, TokioExecutor>::new(
-            DbOption::new(
-                Path::from_filesystem_path(temp_dir.path()).unwrap(),
-                &StringSchema,
-            ),
+            DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
-            StringSchema,
+            schema,
         )
         .await
         .unwrap();
@@ -479,7 +464,8 @@ mod tests {
         // In a new transaction, remove the record and check visibility
         {
             let mut txn = db.transaction().await;
-            let key = "foo".to_string();
+            // let key = "foo".to_string();
+            let key = PrimaryKey::new(vec![Arc::new("foo".to_string())]);
 
             // Verify the record exists before removal
             assert!(txn.get(&key, Projection::All).await.unwrap().is_some());
@@ -500,12 +486,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn write_conflicts() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current(), StringSchema)
+        let schema = Schema::from_arrow_schema(string_arrow_schema(), 0).unwrap();
+        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
 
@@ -525,8 +509,11 @@ mod tests {
 
         txn_0.commit().await.unwrap();
 
+        let key = PrimaryKey::new(vec![Arc::new(1.to_string())]);
+
         if let Err(CommitError::WriteConflict(conflict_key)) = txn_1.commit().await {
-            assert_eq!(conflict_key, 1.to_string());
+            // assert_eq!(conflict_key, 1.to_string());
+            assert_eq!(&conflict_key, &key);
             txn_2.commit().await.unwrap();
             return;
         }
@@ -536,12 +523,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn transaction_projection() {
         let temp_dir = TempDir::new().unwrap();
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
+        let schema = Test::schema();
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
 
@@ -552,7 +537,9 @@ mod tests {
             vbool: Some(true),
         });
 
-        let key = 0.to_string();
+        // let key = 0.to_string();
+        let key = PrimaryKey::new(vec![Arc::new(0.to_string())]);
+
         let entry = txn1.get(&key, Projection::All).await.unwrap().unwrap();
 
         assert_eq!(entry.get().vstring, 0.to_string());
@@ -590,7 +577,6 @@ mod tests {
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
         ));
 
         manager
@@ -604,16 +590,18 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let record_schema = Arc::new(Test::schema());
+        let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
+
         let db = build_db(
             option,
             compaction_rx,
             TokioExecutor::current(),
             schema,
-            Arc::new(TestSchema),
+            record_schema.clone(),
             version,
             manager,
         )
@@ -639,46 +627,46 @@ mod tests {
             .unwrap();
 
         let entry_0 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_0.key().value, "1");
+        assert_eq!(entry_0.key().value, "1".into());
         assert!(entry_0.value().unwrap().vbool.is_none());
         let entry_1 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_1.key().value, "2");
+        assert_eq!(entry_1.key().value, "2".into());
         assert!(entry_1.value().unwrap().vbool.is_none());
         let entry_2 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_2.key().value, "3");
+        assert_eq!(entry_2.key().value, "3".into());
         assert!(entry_2.value().unwrap().vbool.is_none());
         let entry_3 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_3.key().value, "4");
+        assert_eq!(entry_3.key().value, "4".into());
         assert!(entry_3.value().unwrap().vbool.is_none());
         let entry_4 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_4.key().value, "5");
+        assert_eq!(entry_4.key().value, "5".into());
         assert!(entry_4.value().unwrap().vbool.is_none());
         let entry_5 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_5.key().value, "6");
+        assert_eq!(entry_5.key().value, "6".into());
         assert!(entry_5.value().unwrap().vbool.is_none());
         let entry_6 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_6.key().value, "7");
+        assert_eq!(entry_6.key().value, "7".into());
         assert!(entry_6.value().unwrap().vbool.is_none());
         let entry_7 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_7.key().value, "8");
+        assert_eq!(entry_7.key().value, "8".into());
         assert!(entry_7.value().unwrap().vbool.is_none());
         let entry_8 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_8.key().value, "9");
+        assert_eq!(entry_8.key().value, "9".into());
         assert!(entry_8.value().unwrap().vbool.is_none());
         let entry_9 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_9.key().value, "alice");
+        assert_eq!(entry_9.key().value, "alice".into());
         let entry_10 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_10.key().value, "ben");
+        assert_eq!(entry_10.key().value, "ben".into());
         let entry_11 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_11.key().value, "carl");
+        assert_eq!(entry_11.key().value, "carl".into());
         let entry_12 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_12.key().value, "dice");
+        assert_eq!(entry_12.key().value, "dice".into());
         let entry_13 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_13.key().value, "erika");
+        assert_eq!(entry_13.key().value, "erika".into());
         let entry_14 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_14.key().value, "funk");
+        assert_eq!(entry_14.key().value, "funk".into());
         let entry_15 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_15.key().value, "king");
+        assert_eq!(entry_15.key().value, "king".into());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -687,7 +675,6 @@ mod tests {
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
         ));
 
         manager
@@ -701,7 +688,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let record_schema = Arc::new(Test::schema());
+        let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -710,7 +698,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
-            Arc::new(TestSchema),
+            record_schema.clone(),
             version,
             manager,
         )
@@ -739,11 +727,11 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "ben");
+                assert_eq!(entry_0.key().value, "ben".into());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "carl");
+                assert_eq!(entry_1.key().value, "carl".into());
                 let entry_2 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_2.key().value, "dice");
+                assert_eq!(entry_2.key().value, "dice".into());
                 assert!(stream.next().await.is_none());
             }
 
@@ -755,9 +743,9 @@ mod tests {
                     .await
                     .unwrap();
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "ben");
+                assert_eq!(entry_0.key().value, "ben".into());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "carl");
+                assert_eq!(entry_1.key().value, "carl".into());
                 assert!(stream.next().await.is_none());
             }
 
@@ -769,9 +757,9 @@ mod tests {
                     .await
                     .unwrap();
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "carl");
+                assert_eq!(entry_0.key().value, "carl".into());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "dice");
+                assert_eq!(entry_1.key().value, "dice".into());
                 assert!(stream.next().await.is_none());
             }
             {
@@ -782,7 +770,7 @@ mod tests {
                     .await
                     .unwrap();
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "carl");
+                assert_eq!(entry_0.key().value, "carl".into());
                 assert!(stream.next().await.is_none());
             }
         }
@@ -800,10 +788,10 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "1");
+                assert_eq!(entry_0.key().value, "1".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "2");
+                assert_eq!(entry_1.key().value, "2".into());
                 assert!(entry_1.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }
@@ -816,7 +804,7 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "1");
+                assert_eq!(entry_0.key().value, "1".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }
@@ -829,7 +817,7 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "2");
+                assert_eq!(entry_0.key().value, "2".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }
@@ -852,7 +840,7 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "1");
+                assert_eq!(entry_0.key().value, "1".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }
@@ -865,7 +853,6 @@ mod tests {
         let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
         ));
 
         manager
@@ -879,7 +866,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let record_schema = Arc::new(Test::schema());
+        let (_, version) = build_version(&option, &manager, &record_schema).await;
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
@@ -888,7 +876,7 @@ mod tests {
             compaction_rx,
             TokioExecutor::current(),
             schema,
-            Arc::new(TestSchema),
+            record_schema.clone(),
             version,
             manager,
         )
@@ -928,30 +916,14 @@ mod tests {
     async fn test_dyn_record() {
         let temp_dir = TempDir::new().unwrap();
         let schema = test_dyn_item_schema();
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &schema,
-        );
+        let option = DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap());
+
         let db = DB::new(option, TokioExecutor::current(), schema)
             .await
             .unwrap();
 
         db.insert(DynRecord::new(
-            vec![
-                Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                Value::new(
-                    DataType::Int16,
-                    "height".to_string(),
-                    Arc::new(Some(180_i16)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int32,
-                    "weight".to_string(),
-                    Arc::new(56_i32),
-                    false,
-                ),
-            ],
+            vec![Arc::new(1_i8), Arc::new(Some(180_i16)), Arc::new(56_i32)],
             0,
         ))
         .await
@@ -959,7 +931,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false);
+            let key = PrimaryKey::new(vec![Arc::new(1_i8)]);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());
@@ -968,20 +940,18 @@ mod tests {
 
             assert_eq!(record_ref.columns.len(), 3);
             let col = record_ref.columns.first().unwrap();
-            assert_eq!(col.datatype(), DataType::Int8);
-            let name = col.value.as_ref().downcast_ref::<i8>();
-            assert!(name.is_some());
-            assert_eq!(*name.unwrap(), 1);
+            assert_eq!(col.data_type(), DataType::Int8);
+            let name = col.as_i8();
+            assert_eq!(*name, 1);
 
             let col = record_ref.columns.get(1).unwrap();
-            let height = col.value.as_ref().downcast_ref::<Option<i16>>();
-            assert!(height.is_some());
-            assert_eq!(*height.unwrap(), Some(180_i16));
+            let height = col.as_i16_opt();
+            assert_eq!(*height, Some(180_i16));
 
             let col = record_ref.columns.get(2).unwrap();
-            let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
+            let weight = col.as_i32_opt();
             assert!(weight.is_some());
-            assert_eq!(*weight.unwrap(), Some(56_i32));
+            assert_eq!(*weight, Some(56_i32));
         }
         {
             let mut scan = txn
@@ -994,27 +964,19 @@ mod tests {
                 assert_eq!(entry.value().unwrap().primary_index, 0);
                 assert_eq!(entry.value().unwrap().columns.len(), 3);
                 let columns = entry.value().unwrap().columns;
-                dbg!(columns.clone());
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int8);
-                assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
-                    1
-                );
+                assert_eq!(primary_key_col.data_type(), DataType::Int8);
+                assert_eq!(*primary_key_col.as_i8(), 1);
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype(), DataType::Int16);
-                assert_eq!(
-                    *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
-                    Some(180)
-                );
+                assert_eq!(col.data_type(), DataType::Int16);
+                assert_eq!(*col.as_i16_opt(), Some(180));
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::Int32);
-                let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
-                assert!(weight.is_some());
-                assert_eq!(*weight.unwrap(), Some(56_i32));
+                assert_eq!(col.data_type(), DataType::Int32);
+                let weight = col.as_i32_opt();
+                assert_eq!(*weight, Some(56_i32));
             }
         }
     }

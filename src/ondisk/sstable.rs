@@ -1,5 +1,6 @@
 use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
+use common::{Keys, PrimaryKey};
 use fusio::{dynamic::DynFile, DynRead};
 use fusio_parquet::reader::AsyncReader;
 use futures_util::StreamExt;
@@ -16,7 +17,7 @@ use ulid::Ulid;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
-    record::{Record, Schema},
+    record::Record,
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TsRef},
 };
@@ -70,11 +71,14 @@ where
 
     pub(crate) async fn get(
         self,
-        key: &TsRef<<R::Schema as Schema>::Key>,
+        key: &TsRef<PrimaryKey>,
         projection_mask: ProjectionMask,
     ) -> ParquetResult<Option<RecordBatchEntry<R>>> {
         self.scan(
-            (Bound::Included(key.value()), Bound::Included(key.value())),
+            (
+                Bound::Included(key.value().keys()),
+                Bound::Included(key.value().keys()),
+            ),
             key.ts(),
             Some(1),
             projection_mask,
@@ -87,10 +91,7 @@ where
 
     pub(crate) async fn scan<'scan>(
         self,
-        range: (
-            Bound<&'scan <R::Schema as Schema>::Key>,
-            Bound<&'scan <R::Schema as Schema>::Key>,
-        ),
+        range: (Bound<&'scan Keys>, Bound<&'scan Keys>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
@@ -104,7 +105,7 @@ where
 
         // Safety: filter's lifetime relies on range's lifetime, sstable must not live longer than
         // it
-        let filter = unsafe { get_range_filter::<R>(schema_descriptor, range, ts) };
+        let filter = unsafe { get_range_filter(schema_descriptor, range, ts) };
 
         Ok(SsTableScan::new(
             builder.with_row_filter(filter).build()?,
@@ -116,9 +117,10 @@ where
 
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
-    use std::{borrow::Borrow, fs::File, ops::Bound, sync::Arc};
+    use std::{fs::File, ops::Bound, sync::Arc};
 
     use arrow::array::RecordBatch;
+    use common::PrimaryKey;
     use fusio::{dynamic::DynFile, path::Path, DynFs};
     use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
@@ -133,14 +135,12 @@ pub(crate) mod tests {
     };
     use parquet_lru::NoCache;
 
-    use super::SsTable;
+    use super::{SsTable, TsRef};
     use crate::{
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileType},
-        inmem::immutable::tests::TestSchema,
-        record::{Record, Schema},
+        record::Record,
         tests::{get_test_record_batch, Test},
-        timestamp::Ts,
         DbOption,
     };
 
@@ -155,9 +155,11 @@ pub(crate) mod tests {
                 .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
                 .build(),
         );
+        let schema = Test::schema();
+
         let mut writer = AsyncArrowWriter::try_new_with_options(
             AsyncWriter::new(file),
-            TestSchema {}.arrow_schema().clone(),
+            schema.arrow_schema().clone(),
             options,
         )
         .expect("Failed to create writer");
@@ -192,11 +194,9 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
+        let schema = Test::schema();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::new(
-                Path::from_filesystem_path(temp_dir.path()).unwrap(),
-                &TestSchema,
-            ),
+            DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
         )
         .await;
@@ -210,16 +210,17 @@ pub(crate) mod tests {
             .unwrap();
         write_record_batch(file, &record_batch).await.unwrap();
 
-        let key = Ts::new("hello".to_owned(), 1.into());
+        let pk: PrimaryKey = "hello".into();
+        let key = TsRef::new(&pk, 1.into());
 
         {
             let test_ref_1 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .get(
-                    key.borrow(),
+                    key,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 3],
                     ),
@@ -235,10 +236,10 @@ pub(crate) mod tests {
             let test_ref_2 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .get(
-                    key.borrow(),
+                    key,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 4],
                     ),
@@ -254,10 +255,10 @@ pub(crate) mod tests {
             let test_ref_3 = open_sstable::<Test>(base_fs, &table_path)
                 .await
                 .get(
-                    key.borrow(),
+                    key,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2],
                     ),
@@ -276,11 +277,9 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let base_fs = manager.base_fs();
+        let schema = Test::schema();
         let record_batch = get_test_record_batch::<TokioExecutor>(
-            DbOption::new(
-                Path::from_filesystem_path(temp_dir.path()).unwrap(),
-                &TestSchema,
-            ),
+            DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
             TokioExecutor::current(),
         )
         .await;
@@ -303,7 +302,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 3],
                     ),
@@ -330,7 +329,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2, 4],
                     ),
@@ -357,7 +356,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::roots(
                         &ArrowSchemaConverter::new()
-                            .convert(TestSchema {}.arrow_schema())
+                            .convert(schema.arrow_schema())
                             .unwrap(),
                         [0, 1, 2],
                     ),
