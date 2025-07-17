@@ -18,6 +18,27 @@ use crate::{
     DbOption, DbStorage,
 };
 
+/// A compactor that enforces a leveled compaction strategy over all SST levels.
+///
+/// The `LeveledCompactor` drives both minor flush‐to‐level‐0 compactions and
+/// multi‐level major compactions, combining SST files up through the levels.
+/// It combines immutable memtables into sorted SSTs (minor compaction), then 
+/// repeatedly merges overlapping SSTs across adjacent levels (major compaction):
+///
+/// 1. Minor compaction (level 0): 
+///    - Converts the current in‑memory memtable into one or more SST files  
+///    - Ensures L0 does not grow unbounded by merging small SSTs once their
+///      count exceeds a configured chunk size  
+///
+/// 2. Major compaction (levels ≥ 1):  
+///    - Scans all SSTs in level L that overlap a given key range, plus any
+///      overlapping SSTs in level L+1  
+///    - Merges and rewrites them into new SSTs in level L+1, bounded by size
+///      thresholds  
+///    - Deletes the old SST files from both levels after the new files are
+///      safely written  
+/// 
+/// This is currently the main way Tonbo does compaction
 pub(crate) struct LeveledCompactor<R>
 where
     R: Record,
@@ -31,7 +52,8 @@ where
 impl<R> LeveledCompactor<R>
 where
     R: Record,
-{
+{   
+    /// Create new instance of `LeveledCompactor`
     pub(crate) fn new(
         schema: Arc<RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
@@ -46,6 +68,7 @@ where
         }
     }
 
+    /// Flushes the current memtable into an immutable SST and triggers compaction as needed.
     pub(crate) async fn check_then_compaction(
         &mut self,
         is_manual: bool,
@@ -54,9 +77,11 @@ where
 
         guard.trigger.reset();
 
+        // Add the mutable memtable into the immutable memtable
         if !guard.mutable.is_empty() {
             let trigger_clone = guard.trigger.clone();
 
+            // Replace mutable memtable with new memtable
             let mutable = mem::replace(
                 &mut guard.mutable,
                 MutableMemTable::new(
@@ -133,6 +158,7 @@ where
         Ok(())
     }
 
+    // Combine immutable memtables into SST file
     async fn minor_compaction(
         option: &DbOption,
         recover_wal_ids: Option<Vec<FileId>>,
@@ -153,6 +179,7 @@ where
             let gen = generate_file_id();
             let mut wal_ids = Vec::with_capacity(batches.len());
 
+            // Creates writer to write Arrow record batches into parquet
             let mut writer = AsyncArrowWriter::try_new(
                 AsyncWriter::new(
                     level_0_fs
@@ -165,7 +192,9 @@ where
                 schema.arrow_schema().clone(),
                 Some(option.write_parquet_properties.clone()),
             )?;
-
+            
+            // Retrieve WAL ids so recovery is possible if the database crashes before 
+            // the SST id is written to the `Version`
             if let Some(mut recover_wal_ids) = recover_wal_ids {
                 wal_ids.append(&mut recover_wal_ids);
             }
@@ -194,6 +223,8 @@ where
         Ok(None)
     }
 
+    // Accumulate all SST files in a stream that fall within the min/max range in `level` and `level + 1`. Then 
+    // use those files to build the new SST files and delete the olds ones
     #[allow(clippy::too_many_arguments)]
     async fn major_compaction(
         version: &Version<R>,
@@ -218,7 +249,8 @@ where
             let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
             let level_fs = ctx.manager.get_fs(level_path);
             let mut streams = Vec::with_capacity(meet_scopes_l.len() + meet_scopes_ll.len());
-            // This Level
+
+            // Behaviour for level 0 is different as it is unsorted + has overlapping keys
             if level == 0 {
                 for scope in meet_scopes_l.iter() {
                     let file = level_fs
@@ -263,8 +295,9 @@ where
 
             let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
             let level_l_fs = ctx.manager.get_fs(level_l_path);
+            
+            // Pushes next level SSTs that fall in the range
             if !meet_scopes_ll.is_empty() {
-                // Next Level
                 let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_ll)?;
                 let level_scan_ll = LevelStream::new(
                     version,
@@ -285,6 +318,7 @@ where
                 });
             }
 
+            // Build the new SSTs
             Compactor::<R>::build_tables(
                 option,
                 version_edits,
@@ -295,6 +329,7 @@ where
             )
             .await?;
 
+            // Delete old files on both levels
             for scope in meet_scopes_l {
                 version_edits.push(VersionEdit::Remove {
                     level: level as u8,
@@ -315,6 +350,7 @@ where
         Ok(())
     }
 
+    // Finds all SST files in the next level that overlap the range of the current level
     fn next_level_scopes<'a>(
         version: &'a Version<R>,
         min: &mut &'a <R::Schema as RecordSchema>::Key,
@@ -362,6 +398,7 @@ where
         Ok((meet_scopes_ll, start_ll, end_ll))
     }
 
+    // Finds SST files in the specified level that overlap with the key ranges
     fn this_level_scopes<'a>(
         version: &'a Version<R>,
         min: &<R::Schema as RecordSchema>::Key,
