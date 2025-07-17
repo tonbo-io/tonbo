@@ -181,7 +181,6 @@ where
 
         if edits.is_empty() {
             set.rewrite().await?;
-            set.clean().await?;
         } else {
             set.apply_edits(edits, None, true).await?;
         }
