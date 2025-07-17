@@ -100,7 +100,7 @@ where
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
-                if Self::is_threshold_exceeded_major(&self.option, &version_ref, 0) {
+                if Self::is_threshold_exceeded_major(&self.option, &version_ref, 0) || is_manual {
                     Self::major_compaction(
                         &version_ref,
                         &self.option,
@@ -110,6 +110,7 @@ where
                         &mut delete_gens,
                         &guard.record_schema,
                         &self.ctx,
+                        is_manual,
                     )
                     .await?;
                 }
@@ -123,6 +124,7 @@ where
                     .apply_edits(version_edits, Some(delete_gens), false)
                     .await?;
             }
+
             let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
@@ -204,11 +206,13 @@ where
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &R::Schema,
         ctx: &Context<R>,
+        is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
         while level < MAX_LEVEL - 2 {
-            if !Self::is_threshold_exceeded_major(option, version, level) {
+            // Proceed with manual compaction even if threshold isn't exceeded
+            if !Self::is_threshold_exceeded_major(option, version, level) && !is_manual {
                 break;
             }
             let (meet_scopes_l, start_l, end_l) = Self::this_level_scopes(version, min, max, level);
@@ -721,6 +725,7 @@ pub(crate) mod tests {
             &mut vec![],
             &TestSchema,
             &ctx,
+            false,
         )
         .await
         .unwrap();
@@ -869,6 +874,7 @@ pub(crate) mod tests {
             &mut vec![],
             &TestSchema,
             &ctx,
+            false,
         )
         .await
         .unwrap();
