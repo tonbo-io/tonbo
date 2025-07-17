@@ -23,7 +23,7 @@ where
     R: Record,
 {
     option: Arc<DbOption>,
-    schema: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     record_schema: Arc<R::Schema>,
 }
@@ -33,14 +33,14 @@ where
     R: Record,
 {
     pub(crate) fn new(
-        schema: Arc<RwLock<DbStorage<R>>>,
+        mem_storage: Arc<RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
         option: Arc<DbOption>,
         ctx: Arc<Context<R>>,
     ) -> Self {
         LeveledCompactor::<R> {
             option,
-            schema,
+            mem_storage,
             ctx,
             record_schema,
         }
@@ -50,7 +50,7 @@ where
         &mut self,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
-        let mut guard = self.schema.write().await;
+        let mut guard = self.mem_storage.write().await;
 
         guard.trigger.reset();
 
@@ -79,7 +79,7 @@ where
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
-            let guard = self.schema.upgradable_read().await;
+            let guard = self.mem_storage.upgradable_read().await;
             let chunk_num = if is_manual {
                 guard.immutables.len()
             } else {
@@ -96,7 +96,7 @@ where
             )
             .await?
             {
-                let version_ref = self.ctx.version_set.current().await;
+                let version_ref = self.ctx.manifest().current().await;
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
@@ -119,8 +119,8 @@ where
                 });
 
                 self.ctx
-                    .version_set
-                    .apply_edits(version_edits, Some(delete_gens), false)
+                    .manifest()
+                    .update(version_edits, Some(delete_gens))
                     .await?;
             }
             let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
@@ -128,7 +128,7 @@ where
             let _ = mem::replace(&mut guard.immutables, sources);
         }
         if is_manual {
-            self.ctx.version_set.rewrite().await.unwrap();
+            self.ctx.manifest().rewrite().await.unwrap();
         }
         Ok(())
     }
@@ -702,13 +702,15 @@ pub(crate) mod tests {
         let mut version_edits = Vec::new();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
-            .await
-            .unwrap();
+        let manifest = Box::new(
+            VersionSet::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
+        );
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),
-            version_set,
+            manifest,
             TestSchema.arrow_schema().clone(),
         );
 
@@ -851,13 +853,15 @@ pub(crate) mod tests {
         let max = 9.to_string();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
-            .await
-            .unwrap();
+        let manifest = Box::new(
+            VersionSet::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
+        );
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),
-            version_set,
+            manifest,
             TestSchema.arrow_schema().clone(),
         );
         LeveledCompactor::<Test>::major_compaction(
@@ -964,7 +968,7 @@ pub(crate) mod tests {
         .unwrap();
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest().current().await;
 
         for level in 0..MAX_LEVEL {
             let sort_runs = &version.level_slice[level];

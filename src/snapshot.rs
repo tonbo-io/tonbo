@@ -82,7 +82,7 @@ where
         self.version.increase_ts()
     }
 
-    pub(crate) fn schema(&self) -> &DbStorage<R> {
+    pub(crate) fn mem_storage(&self) -> &DbStorage<R> {
         &self.share
     }
 

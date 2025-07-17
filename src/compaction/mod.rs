@@ -12,11 +12,12 @@ use tokio::sync::oneshot;
 use crate::{
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
+    manifest::ManifestStorageError,
     record::{KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     transaction::CommitError,
-    version::{edit::VersionEdit, VersionError},
+    version::edit::VersionEdit,
     DbOption,
 };
 
@@ -169,8 +170,8 @@ where
     Parquet(#[from] parquet::errors::ParquetError),
     #[error("compaction fusio error: {0}")]
     Fusio(#[from] fusio::Error),
-    #[error("compaction version error: {0}")]
-    Version(#[from] VersionError<R>),
+    #[error("compaction manifest storage error: {0}")]
+    Manifest(#[from] ManifestStorageError<R>),
     #[error("compaction logger error: {0}")]
     Logger(#[from] fusio_log::error::LogError),
     #[error("compaction channel is closed")]
