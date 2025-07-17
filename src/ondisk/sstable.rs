@@ -16,10 +16,33 @@ use ulid::Ulid;
 
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
+    fs::FileId,
     record::{Record, Schema},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TsRef},
 };
+
+#[derive(Clone)]
+pub struct SsTableID {
+    // File id for the SStable
+    file_id: FileId,
+    // The level where the SSTable is located
+    level: usize,
+}
+
+impl SsTableID {
+    pub fn new(file_id: FileId, level: usize) -> Self {
+        Self { file_id, level }
+    }
+
+    pub fn file_id(&self) -> FileId {
+        self.file_id
+    }
+
+    pub fn level(&self) -> usize {
+        self.level
+    }
+}
 
 pub(crate) struct SsTable<R>
 where
