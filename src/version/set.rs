@@ -179,6 +179,7 @@ where
             manager,
         };
 
+        // Only generate a new manifest if there is no rewrites
         if edits.is_empty() {
             set.rewrite().await?;
         } else {
