@@ -1,6 +1,7 @@
 use std::{collections::Bound, sync::Arc};
 
 use async_lock::RwLockReadGuard;
+use common::PrimaryKey;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
@@ -28,7 +29,7 @@ where
 {
     pub async fn get<'get>(
         &'get self,
-        key: &'get R::Key,
+        key: &'get PrimaryKey,
         projection: Projection<'get>,
     ) -> Result<Option<stream::Entry<'get, R>>, DbError> {
         Ok(self
@@ -46,7 +47,7 @@ where
 
     pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+        range: (Bound<&'range PrimaryKey>, Bound<&'range PrimaryKey>),
     ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
@@ -85,7 +86,7 @@ where
 
     pub(crate) fn _scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+        range: (Bound<&'range PrimaryKey>, Bound<&'range PrimaryKey>),
         fn_pre_stream: Box<
             dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
@@ -169,43 +170,43 @@ mod tests {
             .unwrap();
 
         let entry_0 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_0.key().value, "1");
+        assert_eq!(entry_0.key().value, "1".into());
         assert!(entry_0.value().unwrap().vbool.is_none());
         let entry_1 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_1.key().value, "2");
+        assert_eq!(entry_1.key().value, "2".into());
         assert!(entry_1.value().unwrap().vbool.is_none());
         let entry_2 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_2.key().value, "3");
+        assert_eq!(entry_2.key().value, "3".into());
         assert!(entry_2.value().unwrap().vbool.is_none());
         let entry_3 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_3.key().value, "4");
+        assert_eq!(entry_3.key().value, "4".into());
         assert!(entry_3.value().unwrap().vbool.is_none());
         let entry_4 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_4.key().value, "5");
+        assert_eq!(entry_4.key().value, "5".into());
         assert!(entry_4.value().unwrap().vbool.is_none());
         let entry_5 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_5.key().value, "6");
+        assert_eq!(entry_5.key().value, "6".into());
         assert!(entry_5.value().unwrap().vbool.is_none());
         let entry_6 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_6.key().value, "7");
+        assert_eq!(entry_6.key().value, "7".into());
         assert!(entry_6.value().unwrap().vbool.is_none());
         let entry_7 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_7.key().value, "8");
+        assert_eq!(entry_7.key().value, "8".into());
         assert!(entry_7.value().unwrap().vbool.is_none());
         let entry_8 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_8.key().value, "9");
+        assert_eq!(entry_8.key().value, "9".into());
         assert!(entry_8.value().unwrap().vbool.is_none());
         let entry_9 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_9.key().value, "alice");
+        assert_eq!(entry_9.key().value, "alice".into());
         let entry_10 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_10.key().value, "ben");
+        assert_eq!(entry_10.key().value, "ben".into());
         let entry_11 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_11.key().value, "carl");
+        assert_eq!(entry_11.key().value, "carl".into());
         let entry_12 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_12.key().value, "dice");
+        assert_eq!(entry_12.key().value, "dice".into());
         let entry_13 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_13.key().value, "erika");
+        assert_eq!(entry_13.key().value, "erika".into());
         let entry_14 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_14.key().value, "funk");
+        assert_eq!(entry_14.key().value, "funk".into());
     }
 }

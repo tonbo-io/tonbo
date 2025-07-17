@@ -80,7 +80,7 @@ macro_rules! implement_record_ref {
         impl<'r> RecordRef<'r> for DynRecordRef<'r> {
             type Record = DynRecord;
 
-            fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
+            fn key(self) -> PrimaryKey {
                 PrimaryKey::new(
                     vec![
                         self.columns

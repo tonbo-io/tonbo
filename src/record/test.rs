@@ -14,6 +14,7 @@ use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic,
     timestamp::Ts,
+    PrimaryKey, PrimaryKeyRef,
 };
 
 const PRIMARY_FIELD_NAME: &str = "vstring";
@@ -27,7 +28,7 @@ pub(crate) fn string_arrow_schema<'r>() -> ArrowSchema {
 }
 
 impl Record for String {
-    type Key = String;
+    // type Key = String;
 
     type Columns = StringColumns;
 
@@ -36,8 +37,8 @@ impl Record for String {
     where
         Self: 'r;
 
-    fn key(&self) -> &str {
-        self
+    fn key(&self) -> PrimaryKeyRef {
+        PrimaryKeyRef::new(vec![self])
     }
 
     fn as_record_ref(&self) -> Self::Ref<'_> {
@@ -52,8 +53,8 @@ impl Record for String {
 impl<'r> RecordRef<'r> for &'r str {
     type Record = String;
 
-    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
-        self
+    fn key(self) -> PrimaryKey {
+        PrimaryKey::new(vec![Arc::new(self.to_string())])
     }
 
     fn projection(&mut self, _: &ProjectionMask) {}
@@ -127,7 +128,7 @@ pub struct StringColumnsBuilder {
 }
 
 impl Builder<StringColumns> for StringColumnsBuilder {
-    fn push(&mut self, key: Ts<&str>, row: Option<&str>) {
+    fn push(&mut self, key: Ts<PrimaryKey>, row: Option<&str>) {
         self._null.append(row.is_none());
         self._ts.append_value(key.ts.into());
         if let Some(row) = row {

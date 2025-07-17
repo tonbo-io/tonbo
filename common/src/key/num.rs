@@ -1,12 +1,16 @@
 use std::{any::Any, hash::Hash, ops::Deref, sync::Arc};
 
+use arrow::array::{
+    Datum, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array,
+    UInt32Array, UInt64Array, UInt8Array,
+};
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
 use crate::{
     datatype::DataType,
     key::{Key, KeyRef},
-    Value, ValueRef,
+    PrimaryKey, Value, ValueRef,
 };
 
 #[macro_export]
@@ -41,10 +45,6 @@ macro_rules! implement_key {
                 self
             }
 
-            fn size_of(&self) -> usize {
-                std::mem::size_of::<$struct_name>()
-            }
-
             fn is_none(&self) -> bool {
                 false
             }
@@ -55,6 +55,10 @@ macro_rules! implement_key {
 
             fn clone_arc(&self) -> ValueRef {
                 Arc::new(*self)
+            }
+
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                Some(Arc::new($array_name::new_scalar(*self)))
             }
         }
 
@@ -67,10 +71,6 @@ macro_rules! implement_key {
                 self
             }
 
-            fn size_of(&self) -> usize {
-                std::mem::size_of::<$struct_name>()
-            }
-
             fn is_none(&self) -> bool {
                 self.is_none()
             }
@@ -81,6 +81,16 @@ macro_rules! implement_key {
 
             fn clone_arc(&self) -> ValueRef {
                 Arc::new(*self)
+            }
+
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                None
+            }
+        }
+
+        impl From<$struct_name> for PrimaryKey {
+            fn from(value: $struct_name) -> Self {
+                PrimaryKey::new(vec![Arc::new(value)])
             }
         }
     };
@@ -218,13 +228,9 @@ macro_rules! implement_float_key {
                 self
             }
 
-            fn size_of(&self) -> usize {
-                std::mem::size_of::<$ty>()
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                Some(Arc::new($array_name::new_scalar(self.0)))
             }
-
-            // fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-            //     Arc::new($array_name::new_scalar(self.0))
-            // }
 
             fn is_none(&self) -> bool {
                 false
@@ -248,13 +254,6 @@ macro_rules! implement_float_key {
                 self
             }
 
-            fn size_of(&self) -> usize {
-                match self {
-                    Some(v) => v.size_of(),
-                    None => 1,
-                }
-            }
-
             fn is_none(&self) -> bool {
                 self.is_none()
             }
@@ -265,6 +264,16 @@ macro_rules! implement_float_key {
 
             fn clone_arc(&self) -> ValueRef {
                 Arc::new(*self)
+            }
+
+            fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+                None
+            }
+        }
+
+        impl From<$ty> for PrimaryKey {
+            fn from(value: $ty) -> Self {
+                PrimaryKey::new(vec![Arc::new(FloatType::<$ty>(value))])
             }
         }
     };

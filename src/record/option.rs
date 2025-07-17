@@ -1,6 +1,8 @@
 use std::{marker::PhantomData, mem::transmute};
 
-use super::{Key, Record, RecordRef};
+use common::PrimaryKey;
+
+use super::RecordRef;
 use crate::timestamp::{Timestamp, Ts};
 
 #[derive(Debug)]
@@ -30,9 +32,11 @@ impl<'r, R> OptionRecordRef<'r, R>
 where
     R: RecordRef<'r>,
 {
-    pub fn key(&self) -> Ts<<<R::Record as Record>::Key as Key>::Ref<'_>> {
+    pub fn key(&self) -> Ts<PrimaryKey> {
         // Safety: shorter lifetime of the value must be safe
-        unsafe { transmute(Ts::new(self.record.value().clone().key(), self.record.ts())) }
+        // unsafe { transmute(Ts::new(self.record.value().clone().key(), self.record.ts())) }
+        // let value = self.record.value().key();
+        Ts::new(self.record.value().clone().key(), self.record.ts())
     }
 
     pub fn get(&self) -> Option<R> {

@@ -125,8 +125,8 @@ mod tests {
             VersionEdit::Add {
                 level: 0,
                 scope: Scope {
-                    min: Arc::new("Min".to_string()),
-                    max: Arc::new("Max".to_string()),
+                    min: vec![Arc::new("Min".to_string())],
+                    max: vec![Arc::new("Max".to_string())],
                     gen: Default::default(),
                     wal_ids: Some(vec![generate_file_id(), generate_file_id()]),
                 },

@@ -1,6 +1,8 @@
 use std::{any::Any, sync::Arc};
 
-use super::{Key, KeyRef, Value};
+use arrow::array::BooleanArray;
+
+use super::{Key, KeyRef, PrimaryKey, Value};
 use crate::datatype::DataType;
 
 impl Key for bool {
@@ -32,10 +34,6 @@ impl Value for bool {
         self
     }
 
-    fn size_of(&self) -> usize {
-        1
-    }
-
     fn is_none(&self) -> bool {
         false
     }
@@ -46,6 +44,10 @@ impl Value for bool {
 
     fn clone_arc(&self) -> super::ValueRef {
         Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        Some(Arc::new(BooleanArray::new_scalar(*self)))
     }
 }
 
@@ -58,10 +60,6 @@ impl Value for Option<bool> {
         self
     }
 
-    fn size_of(&self) -> usize {
-        2
-    }
-
     fn is_none(&self) -> bool {
         self.is_none()
     }
@@ -72,5 +70,15 @@ impl Value for Option<bool> {
 
     fn clone_arc(&self) -> super::ValueRef {
         Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        None
+    }
+}
+
+impl From<bool> for PrimaryKey {
+    fn from(value: bool) -> Self {
+        PrimaryKey::new(vec![Arc::new(value)])
     }
 }

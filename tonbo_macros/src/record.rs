@@ -227,7 +227,6 @@ fn trait_record_codegen(
 
     quote! {
         impl ::tonbo::record::Record for #struct_name {
-            type Key = #primary_key_ty;
 
             type Ref<'r> = #struct_ref_type
             where
@@ -235,8 +234,10 @@ fn trait_record_codegen(
 
             type Columns = #struct_arrays_name;
 
-            fn key(&self) -> <Self::Key as ::tonbo::Key>::Ref<'_> {
-                #fn_primary_key
+            fn key(&self) -> ::tonbo::PrimaryKeyRef {
+                ::tonbo::PrimaryKeyRef {
+                    keys: vec![#fn_primary_key],
+                }
             }
 
             fn as_record_ref(&self) -> Self::Ref<'_> {
@@ -492,8 +493,8 @@ fn trait_decode_ref_codegen(
         impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_type {
             type Record = #struct_name;
 
-            fn key(self) -> <<<#struct_ref_type as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Key as ::tonbo::Key>::Ref<'r> {
-                self.#primary_key_name
+            fn key(self) -> ::tonbo::PrimaryKey {
+                ::tonbo::PrimaryKey::new(vec![self.#primary_key_name])
             }
 
             fn projection(&mut self, projection_mask: &::tonbo::parquet::arrow::ProjectionMask) {
@@ -807,7 +808,7 @@ fn struct_builder_codegen(
         }
 
         impl ::tonbo::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
-            fn push(&mut self, key: ::tonbo::timestamp::Ts<<<#struct_name as ::tonbo::record::Record>::Key as ::tonbo::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
+            fn push(&mut self, key: ::tonbo::timestamp::Ts<::tonbo::PrimaryKey>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {
                     Some(row) => {

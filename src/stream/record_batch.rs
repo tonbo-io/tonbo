@@ -6,7 +6,7 @@ use std::{
 };
 
 use arrow::{array::RecordBatch, datatypes::Schema};
-use common::Key;
+use common::{Key, PrimaryKey, PrimaryKeyRef};
 use parquet::arrow::ProjectionMask;
 
 use crate::{
@@ -36,11 +36,14 @@ where
         }
     }
 
-    pub(crate) fn internal_key(&self) -> Ts<<R::Key as Key>::Ref<'_>> {
+    pub(crate) fn internal_key(&self) -> Ts<PrimaryKey> {
         self.record_ref.key()
     }
 
-    pub fn key(&self) -> <R::Key as Key>::Ref<'_> {
+    // pub fn key(&self) -> <R::Key as Key>::Ref<'_> {
+    //     self.internal_key().value().clone()
+    // }
+    pub fn key(&self) -> PrimaryKey {
         self.internal_key().value().clone()
     }
 

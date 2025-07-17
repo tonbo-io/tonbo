@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, hash::Hash, sync::Arc};
+use std::{borrow::Borrow, cmp::Ordering, hash::Hash, sync::Arc};
 
 use arrow::array::{
     BinaryArray, BooleanArray, Date32Array, Date64Array, Datum, Float32Array, Float64Array,
@@ -14,6 +14,8 @@ use crate::{
     datatype::DataType, key::cast::AsValue, util::decode_value, Date32, Date64, Time32, Time64,
     Timestamp,
 };
+pub type Keys = Vec<Arc<dyn Value>>;
+pub type KeysRef<'r> = Vec<&'r dyn Value>;
 
 #[derive(Debug, Clone)]
 pub struct PrimaryKey {
@@ -25,6 +27,22 @@ pub struct PrimaryKey {
 pub struct PrimaryKeyRef<'r> {
     // TODO: Composite primary key
     pub keys: Vec<&'r dyn Value>,
+}
+
+impl<'r> PrimaryKeyRef<'r> {
+    pub fn new(keys: Vec<&'r dyn Value>) -> Self {
+        Self { keys }
+    }
+}
+
+impl<'r> KeyRef<'r> for PrimaryKeyRef<'r> {
+    type Key = PrimaryKey;
+
+    fn to_key(self) -> Self::Key {
+        PrimaryKey {
+            keys: self.keys.iter().map(|key| key.clone_arc()).collect(),
+        }
+    }
 }
 
 impl PrimaryKey {
@@ -101,13 +119,22 @@ impl PrimaryKey {
         };
         Some(datum)
     }
+
+    pub fn keys(&self) -> &Keys {
+        &self.keys
+    }
 }
 
 impl Key for PrimaryKey {
-    type Ref<'r> = PrimaryKey;
+    type Ref<'r> = PrimaryKeyRef<'r>;
 
     fn as_key_ref(&self) -> Self::Ref<'_> {
-        self.clone()
+        dbg!(&self);
+        let res = PrimaryKeyRef {
+            keys: self.keys.iter().map(|v| v.as_ref()).collect(),
+        };
+        dbg!(&res);
+        res
     }
 
     fn as_value(&self) -> &dyn Value {
@@ -115,13 +142,13 @@ impl Key for PrimaryKey {
     }
 }
 
-impl<'r> KeyRef<'r> for PrimaryKey {
-    type Key = PrimaryKey;
+// impl<'r> KeyRef<'r> for PrimaryKey {
+//     type Key = PrimaryKey;
 
-    fn to_key(self) -> Self::Key {
-        self
-    }
-}
+//     fn to_key(self) -> Self::Key {
+//         self
+//     }
+// }
 
 impl Value for PrimaryKey {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -130,10 +157,6 @@ impl Value for PrimaryKey {
 
     fn data_type(&self) -> crate::datatype::DataType {
         panic!("can not get data type from composite keys")
-    }
-
-    fn size_of(&self) -> usize {
-        self.keys.iter().fold(4, |acc, v| acc + v.size_of() + 1)
     }
 
     fn is_none(&self) -> bool {
@@ -146,6 +169,10 @@ impl Value for PrimaryKey {
 
     fn clone_arc(&self) -> ValueRef {
         Arc::new(self.clone())
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>> {
+        todo!()
     }
 }
 
@@ -195,7 +222,7 @@ impl Ord for PrimaryKey {
         debug_assert_eq!(self.keys.len(), other.keys.len());
 
         for (lkey, rkey) in self.keys.iter().zip(&other.keys) {
-            let res = lkey.cmp(rkey);
+            let res = lkey.as_ref().cmp(rkey.as_ref());
             if res != Ordering::Equal {
                 return res;
             }
@@ -209,6 +236,9 @@ impl Eq for PrimaryKey {}
 
 impl PartialEq for PrimaryKey {
     fn eq(&self, other: &Self) -> bool {
+        if self.keys.len() != other.keys.len() {
+            return false;
+        }
         for (lkey, rkey) in self.keys.iter().zip(&other.keys) {
             if !lkey.eq(rkey) {
                 return false;
@@ -244,6 +274,68 @@ impl Hash for PrimaryKey {
                 DataType::Date64 => key.as_date64().hash(state),
             }
         }
+    }
+}
+
+impl<'r> Encode for PrimaryKeyRef<'r> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
+    where
+        W: fusio::Write,
+    {
+        let len = self.keys.len();
+        (len as u32).encode(writer).await?;
+        for key in self.keys.iter() {
+            key.data_type().encode(writer).await?;
+            key.encode(writer).await?;
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        self.keys.iter().fold(4, |acc, v| acc + v.size() + 1)
+    }
+}
+
+impl<'r> Eq for PrimaryKeyRef<'r> {}
+
+impl<'r> PartialEq for PrimaryKeyRef<'r> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.keys.len() != other.keys.len() {
+            return false;
+        }
+        for (lkey, rkey) in self.keys.iter().zip(&other.keys) {
+            if !lkey.eq(rkey) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'r> PartialOrd for PrimaryKeyRef<'r> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'r> Ord for PrimaryKeyRef<'r> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        debug_assert_eq!(self.keys.len(), other.keys.len());
+
+        for (lkey, rkey) in self.keys.iter().zip(&other.keys) {
+            let res = lkey.cmp(rkey);
+            if res != Ordering::Equal {
+                return res;
+            }
+        }
+
+        Ordering::Equal
+    }
+}
+
+impl From<Vec<Arc<dyn Value>>> for PrimaryKey {
+    fn from(keys: Vec<Arc<dyn Value>>) -> Self {
+        Self { keys }
     }
 }
 

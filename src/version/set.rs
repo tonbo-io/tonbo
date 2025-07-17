@@ -508,8 +508,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: Arc::new("0".to_string()),
-                        max: Arc::new("1".to_string()),
+                        min: vec![Arc::new("0".to_string())],
+                        max: vec![Arc::new("1".to_string())],
                         gen: gen_0,
                         wal_ids: None,
                     },
@@ -525,8 +525,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: Arc::new("2".to_string()),
-                        max: Arc::new("3".to_string()),
+                        min: vec![Arc::new("2".to_string())],
+                        max: vec![Arc::new("3".to_string())],
                         gen: gen_1,
                         wal_ids: None,
                     },
@@ -541,8 +541,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: Arc::new("4".to_string()),
-                        max: Arc::new("5".to_string()),
+                        min: vec![Arc::new("4".to_string())],
+                        max: vec![Arc::new("5".to_string())],
                         gen: gen_2,
                         wal_ids: None,
                     },
@@ -568,8 +568,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: Arc::new("0".to_string()),
-                            max: Arc::new("1".to_string()),
+                            min: vec![Arc::new("0".to_string())],
+                            max: vec![Arc::new("1".to_string())],
                             gen: gen_0,
                             wal_ids: None,
                         },
@@ -578,8 +578,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: Arc::new("2".to_string()),
-                            max: Arc::new("3".to_string()),
+                            min: vec![Arc::new("2".to_string())],
+                            max: vec![Arc::new("3".to_string())],
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -588,8 +588,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: Arc::new("4".to_string()),
-                            max: Arc::new("5".to_string()),
+                            min: vec![Arc::new("4".to_string())],
+                            max: vec![Arc::new("5".to_string())],
                             gen: gen_2,
                             wal_ids: None,
                         },
@@ -628,8 +628,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: Arc::new("2".to_string()),
-                            max: Arc::new("3".to_string()),
+                            min: vec![Arc::new("2".to_string())],
+                            max: vec![Arc::new("3".to_string())],
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -675,8 +675,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: Arc::new("0".to_string()),
-                            max: Arc::new("1".to_string()),
+                            min: vec![Arc::new("0".to_string())],
+                            max: vec![Arc::new("1".to_string())],
                             gen: gen_0,
                             wal_ids: None,
                         },
@@ -684,8 +684,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: Arc::new("2".to_string()),
-                            max: Arc::new("3".to_string()),
+                            min: vec![Arc::new("2".to_string())],
+                            max: vec![Arc::new("3".to_string())],
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -693,8 +693,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 0,
                         scope: Scope {
-                            min: Arc::new("4".to_string()),
-                            max: Arc::new("5".to_string()),
+                            min: vec![Arc::new("4".to_string())],
+                            max: vec![Arc::new("5".to_string())],
                             gen: gen_2,
                             wal_ids: None,
                         },
@@ -729,8 +729,8 @@ pub(crate) mod tests {
                 VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: Arc::new("2".to_string()),
-                        max: Arc::new("3".to_string()),
+                        min: vec![Arc::new("2".to_string())],
+                        max: vec![Arc::new("3".to_string())],
                         gen: gen_1,
                         wal_ids: None,
                     },
@@ -760,8 +760,8 @@ pub(crate) mod tests {
                 VersionEdit::Add {
                     level: 0,
                     scope: Scope {
-                        min: Arc::new("2".to_string()),
-                        max: Arc::new("3".to_string()),
+                        min: vec![Arc::new("2".to_string())],
+                        max: vec![Arc::new("3".to_string())],
                         gen: gen_1,
                         wal_ids: None,
                     },
@@ -851,8 +851,8 @@ pub(crate) mod tests {
                 vec![VersionEdit::Add {
                     level: 1,
                     scope: Scope {
-                        min: Arc::new("4".to_string()),
-                        max: Arc::new("6".to_string()),
+                        min: vec![Arc::new("4".to_string())],
+                        max: vec![Arc::new("6".to_string())],
                         gen: gen_0,
                         wal_ids: None,
                     },
@@ -868,8 +868,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 1,
                         scope: Scope {
-                            min: Arc::new("1".to_string()),
-                            max: Arc::new("3".to_string()),
+                            min: vec![Arc::new("1".to_string())],
+                            max: vec![Arc::new("3".to_string())],
                             gen: gen_1,
                             wal_ids: None,
                         },
@@ -877,8 +877,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 1,
                         scope: Scope {
-                            min: Arc::new("7".to_string()),
-                            max: Arc::new("9".to_string()),
+                            min: vec![Arc::new("7".to_string())],
+                            max: vec![Arc::new("9".to_string())],
                             gen: gen_2,
                             wal_ids: None,
                         },
@@ -886,8 +886,8 @@ pub(crate) mod tests {
                     VersionEdit::Add {
                         level: 1,
                         scope: Scope {
-                            min: Arc::new("0".to_string()),
-                            max: Arc::new("0".to_string()),
+                            min: vec![Arc::new("0".to_string())],
+                            max: vec![Arc::new("0".to_string())],
                             gen: gen_3,
                             wal_ids: None,
                         },
@@ -903,8 +903,7 @@ pub(crate) mod tests {
         let slice: Vec<String> = guard.current.level_slice[1]
             .iter()
             .map(|scope| {
-                scope
-                    .min
+                scope.min[0]
                     .as_any()
                     .downcast_ref::<String>()
                     .unwrap()

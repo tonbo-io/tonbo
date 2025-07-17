@@ -9,6 +9,7 @@ mod timestamp;
 
 use std::{any::Any, fmt::Debug, hash::Hash, sync::Arc};
 
+use arrow::array::Datum;
 pub use cast::*;
 pub use datetime::*;
 use fusio_log::{Decode, Encode};
@@ -23,17 +24,29 @@ use crate::datatype::DataType;
 pub type ValueRef = Arc<dyn Value>;
 
 pub trait Value: 'static + Send + Sync + Debug {
+    /// Get the value as any.
     fn as_any(&self) -> &dyn Any;
 
+    /// Get the data type of the value.
+    ///
+    /// If the value is `None`, the data type will be the default data type of the value. For
+    /// example, `None::<i32>` will have data type `Int32` and `None::<Timestamp>` will have
+    /// data type `Timestamp(TimeUnit::Second)`.
     fn data_type(&self) -> DataType;
 
-    fn size_of(&self) -> usize;
-
+    /// Check if the value is none.
     fn is_none(&self) -> bool;
 
+    /// Check if the value is some.
     fn is_some(&self) -> bool;
 
+    /// Clone the value as an `Arc<dyn Value>`.
     fn clone_arc(&self) -> ValueRef;
+
+    /// Convert the value to an arrow datum.
+    ///
+    /// If the value is of type `Option<T>`, the arrow datum will be `None`
+    fn to_arrow_datum(&self) -> Option<Arc<dyn Datum>>;
 }
 
 pub trait Key:
@@ -120,7 +133,8 @@ impl Encode for dyn Value {
     }
 
     fn size(&self) -> usize {
-        self.size_of()
+        // TODO: implement size
+        2
     }
 }
 
@@ -354,6 +368,26 @@ mod tests {
             assert_eq!(val.as_value().cmp(val2.as_value()), Ordering::Equal);
             assert_eq!(val.as_value().cmp(val3.as_value()), Ordering::Less);
             assert_eq!(val.as_value().cmp(val4.as_value()), Ordering::Greater);
+        }
+        {
+            let val = Arc::new(Timestamp::new_millis(123));
+            let val2 = Arc::new(Timestamp::new_millis(123));
+            let val3 = Arc::new(Timestamp::new_seconds(123));
+            let val4 = Arc::new(Timestamp::new_micros(122999));
+            assert_eq!(val.cmp(&val2), Ordering::Equal);
+            assert_eq!(val.cmp(&val3), Ordering::Less);
+            assert_eq!(val.cmp(&val4), Ordering::Greater);
+        }
+        {
+            let val = Arc::new(Some(Timestamp::new_millis(123)));
+            let val2 = Arc::new(Some(Timestamp::new_millis(123)));
+            let val3 = Arc::new(Some(Timestamp::new_seconds(123)));
+            let val4 = Arc::new(Some(Timestamp::new_micros(122999)));
+            let val5 = Arc::new(None::<Timestamp>);
+            assert_eq!(val.cmp(&val2), Ordering::Equal);
+            assert_eq!(val.cmp(&val3), Ordering::Less);
+            assert_eq!(val.cmp(&val4), Ordering::Greater);
+            assert_eq!(val.cmp(&val5), Ordering::Greater);
         }
     }
 

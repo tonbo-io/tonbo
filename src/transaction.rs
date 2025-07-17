@@ -5,9 +5,10 @@ use std::{
     },
     io,
     mem::transmute,
+    sync::Arc,
 };
 
-use common::{Key, KeyRef};
+use common::{Key, KeyRef, PrimaryKey, PrimaryKeyRef};
 use flume::SendError;
 use lockable::AsyncLimit;
 use parquet::{
@@ -27,7 +28,7 @@ use crate::{
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
-    inner: Range<'scan, R::Key, Option<R>>,
+    inner: Range<'scan, PrimaryKey, Option<R>>,
     ts: Timestamp,
 }
 
@@ -35,7 +36,7 @@ impl<'scan, R> Iterator for TransactionScan<'scan, R>
 where
     R: Record,
 {
-    type Item = (Ts<<R::Key as Key>::Ref<'scan>>, &'scan Option<R>);
+    type Item = (Ts<PrimaryKeyRef<'scan>>, &'scan Option<R>);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner
@@ -52,16 +53,16 @@ pub struct Transaction<'txn, R>
 where
     R: Record,
 {
-    local: BTreeMap<R::Key, Option<R>>,
+    local: BTreeMap<PrimaryKey, Option<R>>,
     snapshot: Snapshot<'txn, R>,
-    lock_map: LockMap<R::Key>,
+    lock_map: LockMap<PrimaryKey>,
 }
 
 impl<'txn, R> Transaction<'txn, R>
 where
     R: Record + Send,
 {
-    pub(crate) fn new(snapshot: Snapshot<'txn, R>, lock_map: LockMap<R::Key>) -> Self {
+    pub(crate) fn new(snapshot: Snapshot<'txn, R>, lock_map: LockMap<PrimaryKey>) -> Self {
         Self {
             local: BTreeMap::new(),
             snapshot,
@@ -73,7 +74,7 @@ where
     /// [`Projection`]
     pub async fn get<'get>(
         &'get self,
-        key: &'get R::Key,
+        key: &'get PrimaryKey,
         projection: Projection<'get>,
     ) -> Result<Option<TransactionEntry<'get, R>>, DbError> {
         Ok(match self.local.get(key) {
@@ -136,7 +137,7 @@ where
     /// ```
     pub fn scan<'scan, 'range>(
         &'scan self,
-        range: (Bound<&'range R::Key>, Bound<&'range R::Key>),
+        range: (Bound<&'range PrimaryKey>, Bound<&'range PrimaryKey>),
     ) -> Scan<'scan, 'range, R> {
         let ts = self.snapshot.ts();
         let inner = self.local.range(range);
@@ -154,15 +155,18 @@ where
 
     /// insert a sequence of data as a single batch on this transaction
     pub fn insert(&mut self, value: R) {
-        self.entry(value.key().to_key(), Some(value))
+        // Convert R::Key to PrimaryKey for storage
+        // let key = PrimaryKey::new(vec![Arc::new(value.key().to_key())]);
+        let key = value.key().to_key();
+        self.entry(key, Some(value))
     }
 
     /// delete the record with the primary key as the `key` on this transaction
-    pub fn remove(&mut self, key: R::Key) {
+    pub fn remove(&mut self, key: PrimaryKey) {
         self.entry(key, None)
     }
 
-    fn entry(&mut self, key: R::Key, value: Option<R>) {
+    fn entry(&mut self, key: PrimaryKey, value: Option<R>) {
         match self.local.entry(key) {
             Entry::Vacant(v) => {
                 v.insert(value);
@@ -177,7 +181,7 @@ where
     /// # Error
     /// This function will return an error if the mutation in the transaction conflict with
     /// other committed transaction
-    pub async fn commit(mut self) -> Result<(), CommitError<R>> {
+    pub async fn commit(mut self) -> Result<(), CommitError> {
         let mut _key_guards = Vec::new();
 
         for (key, _) in self.local.iter() {
@@ -236,10 +240,10 @@ where
     async fn append(
         schema: &DbStorage<R>,
         log_ty: LogType,
-        key: R::Key,
+        key: PrimaryKey,
         record: Option<R>,
         new_ts: Timestamp,
-    ) -> Result<bool, CommitError<R>> {
+    ) -> Result<bool, CommitError> {
         Ok(match record {
             Some(record) => schema.write(log_ty, record, new_ts).await?,
             None => schema.remove(log_ty, key, new_ts).await?,
@@ -272,10 +276,7 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum CommitError<R>
-where
-    R: Record,
-{
+pub enum CommitError {
     #[error("transaction io error {:?}", .0)]
     Io(#[from] io::Error),
     #[error("transaction parquet error {:?}", .0)]
@@ -283,7 +284,7 @@ where
     #[error("transaction database error {:?}", .0)]
     Database(#[from] DbError),
     #[error("transaction write conflict: {:?}", .0)]
-    WriteConflict(R::Key),
+    WriteConflict(PrimaryKey),
     #[error("Failed to send compact task")]
     SendCompactTaskError(#[from] SendError<CompactTask>),
     #[error("Channel is closed")]
@@ -305,8 +306,10 @@ mod tests {
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
         record::{
-            runtime::{test::test_dyn_item_schema, DynRecord},
+            // runtime::{test::test_dyn_item_schema, DynRecord},
+            runtime::test::test_dyn_item_schema,
             test::string_arrow_schema,
+            DynRecord,
             Schema,
         },
         tests::{build_db, build_schema, Test},
@@ -331,11 +334,8 @@ mod tests {
             txn1.insert("foo".to_string());
 
             let txn2 = db.transaction().await;
-            assert!(txn2
-                .get(&"foo".to_string(), Projection::All)
-                .await
-                .unwrap()
-                .is_none());
+            let key = PrimaryKey::new(vec![Arc::new("foo".to_string())]);
+            assert!(txn2.get(&key, Projection::All).await.unwrap().is_none());
 
             txn1.commit().await.unwrap();
             txn2.commit().await.unwrap();
@@ -343,11 +343,8 @@ mod tests {
 
         {
             let txn3 = db.transaction().await;
-            assert!(txn3
-                .get(&"foo".to_string(), Projection::All)
-                .await
-                .unwrap()
-                .is_some());
+            let key = PrimaryKey::new(vec![Arc::new("foo".to_string())]);
+            assert!(txn3.get(&key, Projection::All).await.unwrap().is_some());
             txn3.commit().await.unwrap();
         }
     }
@@ -391,15 +388,17 @@ mod tests {
         {
             let _ = db.ctx.increase_ts();
         }
-        let name = "erika".to_string();
+        let name = PrimaryKey::new(vec![Arc::new("erika".to_string())]);
+        // let name = "erika".to_string();
         {
             let mut txn = db.transaction().await;
             {
                 let entry = txn.get(&name, Projection::All).await.unwrap();
+
                 assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), 5);
             }
             txn.insert(Test {
-                vstring: name.clone(),
+                vstring: name.get(0).unwrap().as_string().clone(),
                 vu32: 50,
                 vbool: Some(false),
             });
@@ -422,7 +421,8 @@ mod tests {
                 assert_eq!(entry.as_ref().unwrap().get().vu32.unwrap(), 50);
 
                 for i in 1..6 {
-                    let key = i.to_string();
+                    // let key = i.to_string();
+                    let key = PrimaryKey::new(vec![Arc::new(i.to_string())]);
                     let entry = txn.get(&key, Projection::All).await.unwrap();
                     assert!(entry.is_some());
                     if i % 2 == 1 {
@@ -436,11 +436,8 @@ mod tests {
                     }
                 }
                 // seek miss
-                assert!(txn
-                    .get(&"benn".to_owned(), Projection::All)
-                    .await
-                    .unwrap()
-                    .is_none())
+                let key = PrimaryKey::new(vec![Arc::new("benn".to_owned())]);
+                assert!(txn.get(&key, Projection::All).await.unwrap().is_none())
             }
         }
     }
@@ -468,7 +465,8 @@ mod tests {
         // In a new transaction, remove the record and check visibility
         {
             let mut txn = db.transaction().await;
-            let key = "foo".to_string();
+            // let key = "foo".to_string();
+            let key = PrimaryKey::new(vec![Arc::new("foo".to_string())]);
 
             // Verify the record exists before removal
             assert!(txn.get(&key, Projection::All).await.unwrap().is_some());
@@ -512,8 +510,11 @@ mod tests {
 
         txn_0.commit().await.unwrap();
 
+        let key = PrimaryKey::new(vec![Arc::new(1.to_string())]);
+
         if let Err(CommitError::WriteConflict(conflict_key)) = txn_1.commit().await {
-            assert_eq!(conflict_key, 1.to_string());
+            // assert_eq!(conflict_key, 1.to_string());
+            assert_eq!(&conflict_key, &key);
             txn_2.commit().await.unwrap();
             return;
         }
@@ -537,7 +538,9 @@ mod tests {
             vbool: Some(true),
         });
 
-        let key = 0.to_string();
+        // let key = 0.to_string();
+        let key = PrimaryKey::new(vec![Arc::new(0.to_string())]);
+
         let entry = txn1.get(&key, Projection::All).await.unwrap().unwrap();
 
         assert_eq!(entry.get().vstring, 0.to_string());
@@ -625,46 +628,46 @@ mod tests {
             .unwrap();
 
         let entry_0 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_0.key().value, "1");
+        assert_eq!(entry_0.key().value, "1".into());
         assert!(entry_0.value().unwrap().vbool.is_none());
         let entry_1 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_1.key().value, "2");
+        assert_eq!(entry_1.key().value, "2".into());
         assert!(entry_1.value().unwrap().vbool.is_none());
         let entry_2 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_2.key().value, "3");
+        assert_eq!(entry_2.key().value, "3".into());
         assert!(entry_2.value().unwrap().vbool.is_none());
         let entry_3 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_3.key().value, "4");
+        assert_eq!(entry_3.key().value, "4".into());
         assert!(entry_3.value().unwrap().vbool.is_none());
         let entry_4 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_4.key().value, "5");
+        assert_eq!(entry_4.key().value, "5".into());
         assert!(entry_4.value().unwrap().vbool.is_none());
         let entry_5 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_5.key().value, "6");
+        assert_eq!(entry_5.key().value, "6".into());
         assert!(entry_5.value().unwrap().vbool.is_none());
         let entry_6 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_6.key().value, "7");
+        assert_eq!(entry_6.key().value, "7".into());
         assert!(entry_6.value().unwrap().vbool.is_none());
         let entry_7 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_7.key().value, "8");
+        assert_eq!(entry_7.key().value, "8".into());
         assert!(entry_7.value().unwrap().vbool.is_none());
         let entry_8 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_8.key().value, "9");
+        assert_eq!(entry_8.key().value, "9".into());
         assert!(entry_8.value().unwrap().vbool.is_none());
         let entry_9 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_9.key().value, "alice");
+        assert_eq!(entry_9.key().value, "alice".into());
         let entry_10 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_10.key().value, "ben");
+        assert_eq!(entry_10.key().value, "ben".into());
         let entry_11 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_11.key().value, "carl");
+        assert_eq!(entry_11.key().value, "carl".into());
         let entry_12 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_12.key().value, "dice");
+        assert_eq!(entry_12.key().value, "dice".into());
         let entry_13 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_13.key().value, "erika");
+        assert_eq!(entry_13.key().value, "erika".into());
         let entry_14 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_14.key().value, "funk");
+        assert_eq!(entry_14.key().value, "funk".into());
         let entry_15 = stream.next().await.unwrap().unwrap();
-        assert_eq!(entry_15.key().value, "king");
+        assert_eq!(entry_15.key().value, "king".into());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -725,11 +728,11 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "ben");
+                assert_eq!(entry_0.key().value, "ben".into());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "carl");
+                assert_eq!(entry_1.key().value, "carl".into());
                 let entry_2 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_2.key().value, "dice");
+                assert_eq!(entry_2.key().value, "dice".into());
                 assert!(stream.next().await.is_none());
             }
 
@@ -741,9 +744,9 @@ mod tests {
                     .await
                     .unwrap();
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "ben");
+                assert_eq!(entry_0.key().value, "ben".into());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "carl");
+                assert_eq!(entry_1.key().value, "carl".into());
                 assert!(stream.next().await.is_none());
             }
 
@@ -755,9 +758,9 @@ mod tests {
                     .await
                     .unwrap();
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "carl");
+                assert_eq!(entry_0.key().value, "carl".into());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "dice");
+                assert_eq!(entry_1.key().value, "dice".into());
                 assert!(stream.next().await.is_none());
             }
             {
@@ -768,7 +771,7 @@ mod tests {
                     .await
                     .unwrap();
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "carl");
+                assert_eq!(entry_0.key().value, "carl".into());
                 assert!(stream.next().await.is_none());
             }
         }
@@ -786,10 +789,10 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "1");
+                assert_eq!(entry_0.key().value, "1".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 let entry_1 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_1.key().value, "2");
+                assert_eq!(entry_1.key().value, "2".into());
                 assert!(entry_1.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }
@@ -802,7 +805,7 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "1");
+                assert_eq!(entry_0.key().value, "1".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }
@@ -815,7 +818,7 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "2");
+                assert_eq!(entry_0.key().value, "2".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }
@@ -838,7 +841,7 @@ mod tests {
                     .unwrap();
 
                 let entry_0 = stream.next().await.unwrap().unwrap();
-                assert_eq!(entry_0.key().value, "1");
+                assert_eq!(entry_0.key().value, "1".into());
                 assert!(entry_0.value().unwrap().vbool.is_none());
                 assert!(stream.next().await.is_none());
             }

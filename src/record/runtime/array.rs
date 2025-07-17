@@ -19,8 +19,8 @@ use arrow::{
     },
 };
 use common::{
-    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, Time32, Time64, TimeUnit,
-    Timestamp, F32, F64,
+    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, PrimaryKey, Time32, Time64,
+    TimeUnit, Timestamp, F32, F64,
 };
 
 use super::{record::DynRecord, record_ref::DynRecordRef};
@@ -246,7 +246,7 @@ macro_rules! implement_builder_array {
         impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
             fn push(
                 &mut self,
-                key: Ts<<<DynRecord as Record>::Key as Key>::Ref<'_>>,
+                key: Ts<PrimaryKey>,
                 row: Option<DynRecordRef>,
             ) {
                 self._null.append(row.is_none());
@@ -460,7 +460,7 @@ macro_rules! implement_builder_array {
         impl DynRecordBuilder {
             fn push_primary_key(
                 &mut self,
-                key: Ts<<<DynRecord as Record>::Key as Key>::Ref<'_>>,
+                key: Ts<PrimaryKey>,
                 primary_key_index: usize,
             ) {
                 let builder = self.builders.get_mut(primary_key_index).unwrap();
@@ -592,7 +592,7 @@ mod tests {
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::timestamp::Ts {
                 ts: 0.into(),
-                value: record.key(),
+                value: record.as_record_ref().key(),
             };
             builder.push(key.clone(), Some(record.as_record_ref()));
             builder.push(key.clone(), None);
@@ -614,7 +614,7 @@ mod tests {
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::timestamp::Ts {
                 ts: 0.into(),
-                value: record.key(),
+                value: record.as_record_ref().key(),
             };
             builder.push(key.clone(), Some(record.as_record_ref()));
             builder.push(key.clone(), None);
@@ -636,7 +636,7 @@ mod tests {
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::timestamp::Ts {
                 ts: 0.into(),
-                value: record.key(),
+                value: record.as_record_ref().key(),
             };
             builder.push(key.clone(), Some(record.as_record_ref()));
             builder.push(key.clone(), None);
@@ -684,7 +684,7 @@ mod tests {
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
         let key = crate::timestamp::Ts {
             ts: 0.into(),
-            value: record.key(),
+            value: record.as_record_ref().key(),
         };
         builder.push(key.clone(), Some(record.as_record_ref()));
         builder.push(key.clone(), None);

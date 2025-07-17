@@ -147,3 +147,45 @@ impl Decode for DataType {
         Ok(data_type)
     }
 }
+
+#[cfg(all(test, feature = "tokio"))]
+mod tests {
+    use std::io::{Cursor, SeekFrom};
+
+    use fusio_log::{Decode, Encode};
+    use tokio::io::AsyncSeekExt;
+
+    use crate::{datatype::DataType, TimeUnit};
+
+    #[tokio::test]
+    async fn test_datatype_encode_decode() {
+        let data_type = DataType::UInt8;
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        data_type.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+        let decoded = DataType::decode(&mut cursor).await.unwrap();
+        assert_eq!(data_type, decoded);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "invalid datatype tag")]
+    async fn test_datatype_encode_panic() {
+        let data_type = DataType::Time32(TimeUnit::Nanosecond);
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        data_type.encode(&mut cursor).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "invalid datatype tag")]
+    async fn test_datatype_decode_panic() {
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        u8::encode(&100, &mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+        DataType::decode(&mut cursor).await.unwrap();
+    }
+}

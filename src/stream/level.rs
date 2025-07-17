@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use common::Value;
+use common::{Keys, Value};
 use fusio::{
     dynamic::{DynFile, MaybeSendFuture},
     path::Path,
@@ -48,8 +48,8 @@ pub(crate) struct LevelStream<'level, R>
 where
     R: Record,
 {
-    lower: Bound<&'level dyn Value>,
-    upper: Bound<&'level dyn Value>,
+    lower: Bound<&'level Keys>,
+    upper: Bound<&'level Keys>,
     ts: Timestamp,
     level: usize,
     option: Arc<DbOption>,
@@ -73,7 +73,7 @@ where
         level: usize,
         start: usize,
         end: usize,
-        range: (Bound<&'level dyn Value>, Bound<&'level dyn Value>),
+        range: (Bound<&'level Keys>, Bound<&'level Keys>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,

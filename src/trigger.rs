@@ -110,7 +110,7 @@ mod tests {
         let record_size = record.size();
         assert_eq!(record_size, 8);
         let record_size = record.key().size();
-        assert_eq!(record_size, 6);
+        assert_eq!(record_size, 9);
 
         assert!(
             !trigger.check_if_exceed(&record),

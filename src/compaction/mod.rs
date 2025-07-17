@@ -1,7 +1,7 @@
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
-use common::{KeyRef, Value};
+use common::{KeyRef, Keys, Value};
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
@@ -41,7 +41,7 @@ where
     pub(crate) async fn check_then_compaction(
         &mut self,
         is_manual: bool,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         match self {
             Compactor::Leveled(leveled) => leveled.check_then_compaction(is_manual).await,
         }
@@ -54,7 +54,7 @@ where
         streams: Vec<ScanStream<'scan, R>>,
         schema: &Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
 
         // Kould: is the capacity parameter necessary?
@@ -67,9 +67,9 @@ where
             let key = entry.key();
 
             if min.is_none() {
-                min = Some(key.value.clone().to_key())
+                min = Some(key.value.keys.clone())
             }
-            max = Some(key.value.clone().to_key());
+            max = Some(key.value.keys.clone());
             builder.push(key, entry.value());
 
             if builder.written_size() >= option.max_sst_file_size {
@@ -102,9 +102,7 @@ where
         Ok(())
     }
 
-    fn full_scope<'a>(
-        meet_scopes: &[&'a Scope],
-    ) -> Result<(&'a dyn Value, &'a dyn Value), CompactionError<R>> {
+    fn full_scope<'a>(meet_scopes: &[&'a Scope]) -> Result<(&'a Keys, &'a Keys), CompactionError> {
         let lower = meet_scopes
             .first()
             .ok_or(CompactionError::EmptyLevel)?
@@ -124,11 +122,11 @@ where
         version_edits: &mut Vec<VersionEdit>,
         level: usize,
         builder: &mut <R::Columns as ArrowArrays>::Builder,
-        min: &mut Option<R::Key>,
-        max: &mut Option<R::Key>,
+        min: &mut Option<Vec<Arc<dyn Value>>>,
+        max: &mut Option<Vec<Arc<dyn Value>>>,
         schema: &Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
@@ -150,14 +148,8 @@ where
         version_edits.push(VersionEdit::Add {
             level: level as u8,
             scope: Scope {
-                min: min
-                    .take()
-                    .map(|v| Arc::new(v))
-                    .ok_or(CompactionError::EmptyLevel)?,
-                max: max
-                    .take()
-                    .map(|v| Arc::new(v))
-                    .ok_or(CompactionError::EmptyLevel)?,
+                min: min.take().ok_or(CompactionError::EmptyLevel)?,
+                max: max.take().ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: None,
             },
@@ -167,10 +159,7 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum CompactionError<R>
-where
-    R: Record,
-{
+pub enum CompactionError {
     #[error("compaction io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("compaction parquet error: {0}")]
@@ -184,7 +173,7 @@ where
     #[error("compaction channel is closed")]
     ChannelClose,
     #[error("database error: {0}")]
-    Commit(#[from] CommitError<R>),
+    Commit(#[from] CommitError),
     #[error("the level being compacted does not have a table")]
     EmptyLevel,
 }
@@ -479,32 +468,32 @@ pub(crate) mod tests {
         let mut version =
             Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
         version.level_slice[0].push(Scope {
-            min: Arc::new(1.to_string()),
-            max: Arc::new(3.to_string()),
+            min: vec![Arc::new(1.to_string())],
+            max: vec![Arc::new(3.to_string())],
             gen: table_gen_1,
             wal_ids: None,
         });
         version.level_slice[0].push(Scope {
-            min: Arc::new(4.to_string()),
-            max: Arc::new(6.to_string()),
+            min: vec![Arc::new(4.to_string())],
+            max: vec![Arc::new(6.to_string())],
             gen: table_gen_2,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: Arc::new(1.to_string()),
-            max: Arc::new(3.to_string()),
+            min: vec![Arc::new(1.to_string())],
+            max: vec![Arc::new(3.to_string())],
             gen: table_gen_3,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: Arc::new(4.to_string()),
-            max: Arc::new(6.to_string()),
+            min: vec![Arc::new(4.to_string())],
+            max: vec![Arc::new(6.to_string())],
             gen: table_gen_4,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: Arc::new(7.to_string()),
-            max: Arc::new(9.to_string()),
+            min: vec![Arc::new(7.to_string())],
+            max: vec![Arc::new(9.to_string())],
             gen: table_gen_5,
             wal_ids: None,
         });

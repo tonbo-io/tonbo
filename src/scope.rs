@@ -1,22 +1,33 @@
-use std::{ops::Bound, sync::Arc};
+use std::ops::Bound;
 
-use common::util::decode_value;
+use common::{
+    util::{decode_value, value_le, value_lt},
+    Keys,
+};
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 use ulid::Ulid;
-
-use crate::{datatype::DataType, Value};
 
 pub type FileId = Ulid;
 
 #[derive(Debug, Eq)]
 pub(crate) struct Scope {
-    pub(crate) min: Arc<dyn Value>,
-    pub(crate) max: Arc<dyn Value>,
+    pub(crate) min: Keys,
+    pub(crate) max: Keys,
     pub(crate) gen: FileId,
     pub(crate) wal_ids: Option<Vec<FileId>>,
 }
 
+impl Scope {
+    pub fn new(min: Keys, max: Keys, gen: FileId, wal_ids: Option<Vec<FileId>>) -> Self {
+        Scope {
+            min,
+            max,
+            gen,
+            wal_ids,
+        }
+    }
+}
 impl PartialEq for Scope {
     fn eq(&self, other: &Self) -> bool {
         self.gen.eq(&other.gen())
@@ -38,8 +49,8 @@ impl Clone for Scope {
 }
 
 impl Scope {
-    pub(crate) fn contains(&self, key: &dyn Value) -> bool {
-        self.min.as_ref() <= key && key <= self.max.as_ref()
+    pub(crate) fn contains(&self, key: &Keys) -> bool {
+        value_le(&self.min, key) && value_le(key, &self.max)
     }
 
     #[allow(unused)]
@@ -47,11 +58,11 @@ impl Scope {
         self.contains(target.min.as_ref()) || self.contains(target.max.as_ref())
     }
 
-    pub(crate) fn meets_range(&self, range: (Bound<&dyn Value>, Bound<&dyn Value>)) -> bool {
+    pub(crate) fn meets_range(&self, range: (Bound<&Keys>, Bound<&Keys>)) -> bool {
         let excluded_contains =
-            |key| -> bool { self.min.as_ref() < key && key < self.max.as_ref() };
+            |key| -> bool { value_lt(&self.min, key) && value_lt(&key, &self.max) };
         let included_by =
-            |min, max| -> bool { min <= self.min.as_ref() && self.max.as_ref() <= max };
+            |min, max| -> bool { value_le(min, &self.min) && value_le(&self.max, max) };
 
         match (range.0, range.1) {
             (Bound::Included(start), Bound::Included(end)) => {
@@ -89,10 +100,14 @@ impl Encode for Scope {
     where
         W: Write,
     {
-        let data_type = self.min.data_type();
-        data_type.encode(writer).await?;
-        self.min.encode(writer).await?;
-        self.max.encode(writer).await?;
+        let len = self.min.len();
+        (len as u32).encode(writer).await?;
+        for min in self.min.iter() {
+            min.encode(writer).await?;
+        }
+        for max in self.max.iter() {
+            max.encode(writer).await?;
+        }
 
         let (result, _) = writer.write_all(&self.gen.to_bytes()[..]).await;
         result?;
@@ -115,7 +130,8 @@ impl Encode for Scope {
 
     fn size(&self) -> usize {
         // ProcessUniqueId: usize + u64
-        self.min.size() + self.max.size() + 16
+        self.min.iter().fold(16, |acc, min| acc + min.size())
+            + self.min.iter().fold(16, |acc, min| acc + min.size())
     }
 }
 
@@ -123,9 +139,15 @@ impl Decode for Scope {
     async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let mut buf = [0u8; 16];
 
-        let _data_type = DataType::decode(reader).await?;
-        let min = decode_value(reader).await?;
-        let max = decode_value(reader).await?;
+        let len = u32::decode(reader).await? as usize;
+        let mut min = Vec::with_capacity(len);
+        let mut max = Vec::with_capacity(len);
+        for _ in 0..len {
+            min.push(decode_value(reader).await?);
+        }
+        for _ in 0..len {
+            max.push(decode_value(reader).await?);
+        }
 
         let gen = {
             let (result, _) = reader.read_exact(buf.as_mut_slice()).await;
@@ -174,8 +196,8 @@ mod test {
     #[tokio::test]
     async fn test_encode_decode_scope() {
         let scope = Scope {
-            min: Arc::new(100),
-            max: Arc::new(200),
+            min: vec![Arc::new(100)],
+            max: vec![Arc::new(200)],
             gen: generate_file_id(),
             wal_ids: None,
         };
@@ -192,62 +214,131 @@ mod test {
     async fn test_meets_range() {
         let gen = ulid::Ulid::new();
         let scope = Scope {
-            min: Arc::new(100),
-            max: Arc::new(200),
+            min: vec![Arc::new(100)],
+            max: vec![Arc::new(200)],
             gen,
             wal_ids: None,
         };
 
         // test out of range
         {
-            assert!(!scope.meets_range((Bound::Unbounded, Bound::Excluded(&100))));
-            assert!(!scope.meets_range((Bound::Unbounded, Bound::Included(&99))));
-            assert!(!scope.meets_range((Bound::Unbounded, Bound::Excluded(&99))));
+            assert!(!scope.meets_range((Bound::Unbounded, Bound::Excluded(&vec![Arc::new(100)]))));
+            assert!(!scope.meets_range((Bound::Unbounded, Bound::Included(&vec![Arc::new(99)]))));
+            assert!(!scope.meets_range((Bound::Unbounded, Bound::Excluded(&vec![Arc::new(99)]))));
 
-            assert!(!scope.meets_range((Bound::Included(&100), Bound::Excluded(&100))));
-            assert!(!scope.meets_range((Bound::Excluded(&100), Bound::Included(&100))));
-            assert!(!scope.meets_range((Bound::Excluded(&100), Bound::Excluded(&100))));
+            assert!(!scope.meets_range((
+                Bound::Included(&vec![Arc::new(100)]),
+                Bound::Excluded(&vec![Arc::new(100)])
+            )));
+            assert!(!scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(100)]),
+                Bound::Included(&vec![Arc::new(100)])
+            )));
+            assert!(!scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(100)]),
+                Bound::Excluded(&vec![Arc::new(100)])
+            )));
 
-            assert!(!scope.meets_range((Bound::Excluded(&150), Bound::Excluded(&150))));
-            assert!(!scope.meets_range((Bound::Included(&150), Bound::Excluded(&150))));
-            assert!(!scope.meets_range((Bound::Excluded(&150), Bound::Included(&150))));
+            assert!(!scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(150)]),
+                Bound::Excluded(&vec![Arc::new(150)])
+            )));
+            assert!(!scope.meets_range((
+                Bound::Included(&vec![Arc::new(150)]),
+                Bound::Excluded(&vec![Arc::new(150)])
+            )));
+            assert!(!scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(150)]),
+                Bound::Included(&vec![Arc::new(150)])
+            )));
 
-            assert!(!scope.meets_range((Bound::Excluded(&200), Bound::Excluded(&200))));
-            assert!(!scope.meets_range((Bound::Included(&200), Bound::Excluded(&200))));
-            assert!(!scope.meets_range((Bound::Excluded(&200), Bound::Included(&200))));
+            assert!(!scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(200)]),
+                Bound::Excluded(&vec![Arc::new(200)])
+            )));
+            assert!(!scope.meets_range((
+                Bound::Included(&vec![Arc::new(200)]),
+                Bound::Excluded(&vec![Arc::new(200)])
+            )));
+            assert!(!scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(200)]),
+                Bound::Included(&vec![Arc::new(200)])
+            )));
 
-            assert!(!scope.meets_range((Bound::Excluded(&200), Bound::Unbounded)));
-            assert!(!scope.meets_range((Bound::Included(&201), Bound::Unbounded)));
-            assert!(!scope.meets_range((Bound::Excluded(&201), Bound::Unbounded)));
+            assert!(!scope.meets_range((Bound::Excluded(&vec![Arc::new(200)]), Bound::Unbounded)));
+            assert!(!scope.meets_range((Bound::Included(&vec![Arc::new(201)]), Bound::Unbounded)));
+            assert!(!scope.meets_range((Bound::Excluded(&vec![Arc::new(201)]), Bound::Unbounded)));
 
-            assert!(!scope.meets_range((Bound::Included(&99), Bound::Excluded(&100))));
-            assert!(!scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&100))));
+            assert!(!scope.meets_range((
+                Bound::Included(&vec![Arc::new(99)]),
+                Bound::Excluded(&vec![Arc::new(100)])
+            )));
+            assert!(!scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(99)]),
+                Bound::Excluded(&vec![Arc::new(100)])
+            )));
         }
         // test in range
         {
             assert!(scope.meets_range((Bound::Unbounded, Bound::Unbounded)));
-            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&100))));
-            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&200))));
-            assert!(scope.meets_range((Bound::Unbounded, Bound::Excluded(&200))));
-            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&201))));
-            assert!(scope.meets_range((Bound::Included(&200), Bound::Unbounded)));
-            assert!(scope.meets_range((Bound::Included(&100), Bound::Unbounded)));
-            assert!(scope.meets_range((Bound::Excluded(&100), Bound::Unbounded)));
-            assert!(scope.meets_range((Bound::Included(&99), Bound::Unbounded)));
-            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&vec![Arc::new(100)]))));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&vec![Arc::new(200)]))));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Excluded(&vec![Arc::new(200)]))));
+            assert!(scope.meets_range((Bound::Unbounded, Bound::Included(&vec![Arc::new(201)]))));
+            assert!(scope.meets_range((Bound::Included(&vec![Arc::new(200)]), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Included(&vec![Arc::new(100)]), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Excluded(&vec![Arc::new(100)]), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Included(&vec![Arc::new(99)]), Bound::Unbounded)));
+            assert!(scope.meets_range((Bound::Excluded(&vec![Arc::new(99)]), Bound::Unbounded)));
 
-            assert!(scope.meets_range((Bound::Included(&100), Bound::Included(&100))));
-            assert!(scope.meets_range((Bound::Included(&200), Bound::Included(&200))));
-            assert!(scope.meets_range((Bound::Included(&99), Bound::Included(&100))));
-            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Included(&100))));
-            assert!(scope.meets_range((Bound::Included(&150), Bound::Included(&150))));
-            assert!(scope.meets_range((Bound::Included(&100), Bound::Included(&200))));
-            assert!(scope.meets_range((Bound::Included(&99), Bound::Included(&150))));
-            assert!(scope.meets_range((Bound::Included(&99), Bound::Included(&201))));
-            assert!(scope.meets_range((Bound::Included(&99), Bound::Excluded(&201))));
-            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Included(&201))));
-            assert!(scope.meets_range((Bound::Excluded(&99), Bound::Excluded(&201))));
-            assert!(scope.meets_range((Bound::Excluded(&100), Bound::Excluded(&200))));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(100)]),
+                Bound::Included(&vec![Arc::new(100)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(200)]),
+                Bound::Included(&vec![Arc::new(200)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(99)]),
+                Bound::Included(&vec![Arc::new(100)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(99)]),
+                Bound::Included(&vec![Arc::new(100)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(150)]),
+                Bound::Included(&vec![Arc::new(150)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(100)]),
+                Bound::Included(&vec![Arc::new(200)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(99)]),
+                Bound::Included(&vec![Arc::new(150)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(99)]),
+                Bound::Included(&vec![Arc::new(201)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Included(&vec![Arc::new(99)]),
+                Bound::Excluded(&vec![Arc::new(201)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(99)]),
+                Bound::Included(&vec![Arc::new(201)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(99)]),
+                Bound::Excluded(&vec![Arc::new(201)])
+            )));
+            assert!(scope.meets_range((
+                Bound::Excluded(&vec![Arc::new(100)]),
+                Bound::Excluded(&vec![Arc::new(200)])
+            )));
         }
     }
 }

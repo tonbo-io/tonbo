@@ -8,7 +8,7 @@ use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
 use super::{DynRecordImmutableArrays, DynRecordRef};
-use crate::record::Record;
+use crate::record::{PrimaryKeyRef, Record};
 
 #[derive(Debug)]
 pub struct DynRecord {
@@ -72,11 +72,18 @@ macro_rules! implement_record {
         }
 
         impl Record for DynRecord {
-            type Key = PrimaryKey;
+            // type Key = PrimaryKey;
 
             type Ref<'r> = DynRecordRef<'r>;
 
             type Columns = DynRecordImmutableArrays;
+
+            fn key(&self) -> PrimaryKeyRef<'_> {
+                let idx = self.primary_index;
+                PrimaryKeyRef {
+                    keys: vec![self.values[idx].as_ref()],
+                }
+            }
 
             fn as_record_ref(&self) -> Self::Ref<'_> {
                 let mut columns = vec![];

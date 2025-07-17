@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use common::{Key, Value};
+use common::{util::compare, Key, Keys, PrimaryKey, Value};
 use flume::{SendError, Sender};
 use fusio::DynFs;
 use fusio_log::error::LogError;
@@ -125,7 +125,7 @@ where
     pub(crate) async fn query(
         &self,
         manager: &StoreManager,
-        key: &TsRef<R::Key>,
+        key: &TsRef<PrimaryKey>,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
@@ -135,7 +135,7 @@ where
             .unwrap_or(&self.option.base_path);
         let level_0_fs = manager.get_fs(level_0_path);
         for scope in self.level_slice[0].iter().rev() {
-            if !scope.contains(key.value()) {
+            if !scope.contains(key.value().keys()) {
                 continue;
             }
             if let Some(entry) = self
@@ -162,8 +162,8 @@ where
             if sort_runs.is_empty() {
                 continue;
             }
-            let index = Self::scope_search(key.value(), sort_runs);
-            if !sort_runs[index].contains(key.value()) {
+            let index = Self::scope_search(key.value().keys(), sort_runs);
+            if !sort_runs[index].contains(key.value().keys()) {
                 continue;
             }
             if let Some(entry) = self
@@ -187,7 +187,7 @@ where
     async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
-        key: &TsRef<R::Key>,
+        key: &TsRef<PrimaryKey>,
         level: usize,
         gen: FileId,
         projection_mask: ProjectionMask,
@@ -207,9 +207,9 @@ where
             .map_err(VersionError::Parquet)
     }
 
-    pub(crate) fn scope_search(key: &dyn Value, level: &[Scope]) -> usize {
+    pub(crate) fn scope_search(key: &Keys, level: &[Scope]) -> usize {
         level
-            .binary_search_by(|scope| scope.min.as_ref().cmp(key))
+            .binary_search_by(|scope| compare(&scope.min, key))
             .unwrap_or_else(|index| index.saturating_sub(1))
     }
 
@@ -222,12 +222,12 @@ where
         &self,
         ctx: &Context<R>,
         streams: &mut Vec<ScanStream<'streams, R>>,
-        range: (Bound<&'streams R::Key>, Bound<&'streams R::Key>),
+        range: (Bound<&'streams PrimaryKey>, Bound<&'streams PrimaryKey>),
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
     ) -> Result<(), VersionError> {
-        let range = (range.0.map(|v| v.as_value()), range.1.map(|v| v.as_value()));
+        let range = (range.0.map(|v| v.keys()), range.1.map(|v| v.keys()));
         let level_0_path = self
             .option
             .level_fs_path(0)

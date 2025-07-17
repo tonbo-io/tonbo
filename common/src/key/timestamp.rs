@@ -5,10 +5,14 @@ use std::{
     sync::Arc,
 };
 
+use arrow::array::{
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
 use chrono::{DateTime, NaiveDateTime};
 use fusio_log::{Decode, Encode};
 
-use super::{Date32, Date64, Key, KeyRef, Time32, Time64, Value, ValueRef};
+use super::{Date32, Date64, Key, KeyRef, PrimaryKey, Time32, Time64, Value, ValueRef};
 use crate::{
     datatype::DataType,
     key::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY},
@@ -117,10 +121,6 @@ impl Value for Timestamp {
         self
     }
 
-    fn size_of(&self) -> usize {
-        8
-    }
-
     fn is_none(&self) -> bool {
         false
     }
@@ -131,6 +131,15 @@ impl Value for Timestamp {
 
     fn clone_arc(&self) -> ValueRef {
         Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        match self.unit {
+            TimeUnit::Second => Some(Arc::new(TimestampSecondArray::new_scalar(self.ts))),
+            TimeUnit::Millisecond => Some(Arc::new(TimestampMillisecondArray::new_scalar(self.ts))),
+            TimeUnit::Microsecond => Some(Arc::new(TimestampMicrosecondArray::new_scalar(self.ts))),
+            TimeUnit::Nanosecond => Some(Arc::new(TimestampNanosecondArray::new_scalar(self.ts))),
+        }
     }
 }
 
@@ -146,10 +155,6 @@ impl Value for Option<Timestamp> {
         }
     }
 
-    fn size_of(&self) -> usize {
-        8
-    }
-
     fn is_none(&self) -> bool {
         self.is_none()
     }
@@ -160,6 +165,16 @@ impl Value for Option<Timestamp> {
 
     fn clone_arc(&self) -> ValueRef {
         Arc::new(*self)
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        None
+    }
+}
+
+impl From<Timestamp> for PrimaryKey {
+    fn from(value: Timestamp) -> Self {
+        PrimaryKey::new(vec![Arc::new(value)])
     }
 }
 

@@ -182,7 +182,7 @@ where
 {
     schema: Arc<RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
-    lock_map: LockMap<R::Key>,
+    lock_map: LockMap<PrimaryKey>,
     _p: PhantomData<E>,
 }
 
@@ -368,7 +368,7 @@ where
     }
 
     /// insert a single tonbo record
-    pub async fn insert(&self, record: R) -> Result<(), CommitError<R>> {
+    pub async fn insert(&self, record: R) -> Result<(), CommitError> {
         Ok(self.write(record, self.ctx.increase_ts()).await?)
     }
 
@@ -376,12 +376,12 @@ where
     pub async fn insert_batch(
         &self,
         records: impl ExactSizeIterator<Item = R>,
-    ) -> Result<(), CommitError<R>> {
+    ) -> Result<(), CommitError> {
         Ok(self.write_batch(records, self.ctx.increase_ts()).await?)
     }
 
     /// delete the record with the primary key as the `key`
-    pub async fn remove(&self, key: R::Key) -> Result<bool, CommitError<R>> {
+    pub async fn remove(&self, key: PrimaryKey) -> Result<bool, CommitError> {
         Ok(self
             .schema
             .read()
@@ -391,7 +391,7 @@ where
     }
 
     /// trigger compaction manually. This will flush the WAL and trigger compaction
-    pub async fn flush(&self) -> Result<(), CommitError<R>> {
+    pub async fn flush(&self) -> Result<(), CommitError> {
         let (tx, rx) = oneshot::channel();
         let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
         compaction_tx
@@ -406,9 +406,9 @@ where
     /// get the record with `key` as the primary key and process it using closure `f`
     pub async fn get<T>(
         &self,
-        key: &R::Key,
+        key: &PrimaryKey,
         mut f: impl FnMut(TransactionEntry<'_, R>) -> Option<T>,
-    ) -> Result<Option<T>, CommitError<R>> {
+    ) -> Result<Option<T>, CommitError> {
         Ok(self
             .schema
             .read()
@@ -433,9 +433,9 @@ where
     /// scan records with primary keys in the `range` and process them using closure `f`
     pub async fn scan<'scan, T: 'scan>(
         &'scan self,
-        range: (Bound<&'scan R::Key>, Bound<&'scan R::Key>),
+        range: (Bound<&'scan PrimaryKey>, Bound<&'scan PrimaryKey>),
         mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
-    ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
+    ) -> impl Stream<Item = Result<T, CommitError>> + 'scan {
         stream! {
             let schema = self.schema.read().await;
             let current = self.ctx.version_set.current().await;
@@ -647,7 +647,7 @@ where
     async fn remove(
         &self,
         log_ty: LogType,
-        key: R::Key,
+        key: PrimaryKey,
         ts: timestamp::Timestamp,
     ) -> Result<bool, DbError> {
         self.mutable.remove(log_ty, key, ts).await
@@ -655,7 +655,7 @@ where
 
     async fn recover_append(
         &self,
-        key: R::Key,
+        key: PrimaryKey,
         ts: timestamp::Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError> {
@@ -666,7 +666,7 @@ where
         &'get self,
         ctx: &Context<R>,
         version: &'get Version<R>,
-        key: &'get R::Key,
+        key: &'get PrimaryKey,
         ts: timestamp::Timestamp,
         projection: Projection<'get>,
     ) -> Result<Option<Entry<'get, R>>, DbError> {
@@ -717,7 +717,7 @@ where
             .map(|entry| Entry::RecordBatch(entry)))
     }
 
-    fn check_conflict(&self, key: &R::Key, ts: timestamp::Timestamp) -> bool {
+    fn check_conflict(&self, key: &PrimaryKey, ts: timestamp::Timestamp) -> bool {
         self.mutable.check_conflict(key, ts)
             || self
                 .immutables
@@ -753,8 +753,8 @@ where
     'range: 'scan,
 {
     schema: &'scan DbStorage<R>,
-    lower: Bound<&'range R::Key>,
-    upper: Bound<&'range R::Key>,
+    lower: Bound<&'range PrimaryKey>,
+    upper: Bound<&'range PrimaryKey>,
     ts: timestamp::Timestamp,
 
     version: &'scan Version<R>,
@@ -773,7 +773,7 @@ where
 {
     fn new(
         schema: &'scan DbStorage<R>,
-        (lower, upper): (Bound<&'range R::Key>, Bound<&'range R::Key>),
+        (lower, upper): (Bound<&'range PrimaryKey>, Bound<&'range PrimaryKey>),
         ts: timestamp::Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
@@ -1008,7 +1008,9 @@ pub(crate) mod tests {
         datatypes::{Field, Schema, UInt32Type},
     };
     use async_lock::RwLock;
-    use common::{datatype::DataType, AsValue, Key, PrimaryKey, F32, F64};
+    use common::{
+        datatype::DataType, AsValue, Key, KeyRef, PrimaryKey, PrimaryKeyRef, Value, F32, F64,
+    };
     use flume::{bounded, Receiver};
     use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
     use fusio_dispatch::FsOptions;
@@ -1028,7 +1030,9 @@ pub(crate) mod tests {
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
-            DynRecord, RecordRef, Schema as RecordSchema,
+            DynRecord,
+            RecordRef,
+            Schema as RecordSchema, // DynRecord,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
@@ -1085,7 +1089,7 @@ pub(crate) mod tests {
     }
 
     impl Record for Test {
-        type Key = String;
+        // type Key = String;
         type Columns = TestImmutableArrays;
 
         type Ref<'r>
@@ -1093,8 +1097,8 @@ pub(crate) mod tests {
         where
             Self: 'r;
 
-        fn key(&self) -> &str {
-            &self.vstring
+        fn key(&self) -> PrimaryKeyRef {
+            PrimaryKeyRef::new(vec![self.vstring.as_value()])
         }
 
         fn as_record_ref(&self) -> Self::Ref<'_> {
@@ -1140,8 +1144,8 @@ pub(crate) mod tests {
     impl<'r> RecordRef<'r> for TestRef<'r> {
         type Record = Test;
 
-        fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r> {
-            self.vstring
+        fn key(self) -> PrimaryKey {
+            PrimaryKey::new(vec![Arc::new(self.vstring.to_string()) as Arc<dyn Value>])
         }
 
         fn projection(&mut self, projection_mask: &ProjectionMask) {
@@ -1486,7 +1490,7 @@ pub(crate) mod tests {
         }
 
         let tx = db.transaction().await;
-        let key = 20.to_string();
+        let key = PrimaryKey::new(vec![Arc::new(20.to_string())]);
         let option1 = tx.get(&key, Projection::All).await.unwrap().unwrap();
 
         dbg!(db.ctx.version_set.current().await);
@@ -1602,7 +1606,10 @@ pub(crate) mod tests {
                     .unwrap();
             let mut sort_items = BTreeMap::new();
             for item in test_items()[0..10].iter() {
-                sort_items.insert(item.vstring.clone(), item.clone());
+                sort_items.insert(
+                    PrimaryKey::new(vec![Arc::new(item.vstring.clone())]),
+                    item.clone(),
+                );
             }
             let tx = db.transaction().await;
             let mut scan = tx
@@ -1680,7 +1687,7 @@ pub(crate) mod tests {
             while let Some(entry) = scan.next().await.transpose().unwrap() {
                 let (_, test) = sort_items.pop_first().unwrap();
 
-                assert_eq!(entry.key().value, test.key());
+                assert_eq!(entry.key().value, test.key().to_key());
                 assert_eq!(entry.value().as_ref().unwrap().vstring, test.vstring);
                 assert_eq!(entry.value().as_ref().unwrap().vu32, Some(test.vu32));
                 assert_eq!(entry.value().as_ref().unwrap().vbool, test.vbool);
@@ -1741,7 +1748,7 @@ pub(crate) mod tests {
 
         let mut sort_items = BTreeMap::new();
         for item in test_dyn_items() {
-            sort_items.insert(item.key(), item);
+            sort_items.insert(item.as_record_ref().key(), item);
         }
 
         {
@@ -1782,13 +1789,15 @@ pub(crate) mod tests {
             if idx % 2 == 0 {
                 db.write(item, 0.into()).await.unwrap();
             } else {
-                db.remove(item.vstring).await.unwrap();
+                let key = PrimaryKey::new(vec![Arc::new(item.vstring.to_string())]);
+                db.remove(key).await.unwrap();
             }
         }
 
         for i in 0..32 {
+            let key = PrimaryKey::new(vec![Arc::new(i.to_string())]);
             let vstring = db
-                .get(&i.to_string(), |e| Some(e.get().vstring.to_string()))
+                .get(&key, |e| Some(e.get().vstring.to_string()))
                 .await
                 .unwrap();
             if i % 2 == 0 {
@@ -1821,7 +1830,7 @@ pub(crate) mod tests {
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i == 28 {
-                db.remove(item.key()).await.unwrap();
+                db.remove(item.as_record_ref().key()).await.unwrap();
             } else {
                 db.write(item, 0.into()).await.unwrap();
             }

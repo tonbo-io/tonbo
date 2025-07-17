@@ -1,7 +1,10 @@
 use std::{cmp, collections::Bound, mem, sync::Arc};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
-use common::Value;
+use common::{
+    util::{value_gt, value_lt},
+    Keys, Value,
+};
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 
@@ -50,7 +53,7 @@ where
     pub(crate) async fn check_then_compaction(
         &mut self,
         is_manual: bool,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         let mut guard = self.schema.write().await;
 
         guard.trigger.reset();
@@ -140,7 +143,7 @@ where
         batches: &[(Option<FileId>, Immutable<R::Columns>)],
         schema: &Schema,
         manager: &StoreManager,
-    ) -> Result<Option<Scope>, CompactionError<R>> {
+    ) -> Result<Option<Scope>, CompactionError> {
         if !batches.is_empty() {
             let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
             let level_0_fs = manager.get_fs(level_0_path);
@@ -169,10 +172,16 @@ where
             }
             for (file_id, batch) in batches {
                 if let (Some(batch_min), Some(batch_max)) = batch.scope() {
-                    if matches!(min.as_ref().map(|min| min > batch_min), Some(true) | None) {
+                    if matches!(
+                        min.as_ref().map(|min| value_gt(min, &batch_min)),
+                        Some(true) | None
+                    ) {
                         min = Some(batch_min.clone())
                     }
-                    if matches!(max.as_ref().map(|max| max < batch_max), Some(true) | None) {
+                    if matches!(
+                        max.as_ref().map(|max| value_lt(max, &batch_max)),
+                        Some(true) | None
+                    ) {
                         max = Some(batch_max.clone())
                     }
                 }
@@ -183,8 +192,8 @@ where
             }
             writer.close().await?;
             return Ok(Some(Scope {
-                min: min.map(Arc::new).ok_or(CompactionError::EmptyLevel)?,
-                max: max.map(Arc::new).ok_or(CompactionError::EmptyLevel)?,
+                min: min.ok_or(CompactionError::EmptyLevel)?,
+                max: max.ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: Some(wal_ids),
             }));
@@ -196,13 +205,13 @@ where
     async fn major_compaction(
         version: &Version<R>,
         option: &DbOption,
-        mut min: &dyn Value,
-        mut max: &dyn Value,
+        mut min: &Keys,
+        mut max: &Keys,
         version_edits: &mut Vec<VersionEdit>,
         delete_gens: &mut Vec<(FileId, usize)>,
         instance: &Schema,
         ctx: &Context<R>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError> {
         let mut level = 0;
 
         while level < MAX_LEVEL - 2 {
@@ -315,11 +324,11 @@ where
 
     fn next_level_scopes<'a>(
         version: &'a Version<R>,
-        min: &mut &'a dyn Value,
-        max: &mut &'a dyn Value,
+        min: &mut &'a Keys,
+        max: &mut &'a Keys,
         level: usize,
         meet_scopes_l: &[&'a Scope],
-    ) -> Result<(Vec<&'a Scope>, usize, usize), CompactionError<R>> {
+    ) -> Result<(Vec<&'a Scope>, usize, usize), CompactionError> {
         let mut meet_scopes_ll = Vec::new();
         let mut start_ll = 0;
         let mut end_ll = 0;
@@ -355,8 +364,8 @@ where
 
     fn this_level_scopes<'a>(
         version: &'a Version<R>,
-        min: &dyn Value,
-        max: &dyn Value,
+        min: &Keys,
+        max: &Keys,
         level: usize,
     ) -> (Vec<&'a Scope>, usize, usize) {
         let mut meet_scopes_l = Vec::new();
@@ -413,7 +422,7 @@ pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
     use arrow::datatypes::{DataType as ArrowDataType, Field};
-    use common::{datatype::DataType, AsValue, Key, PrimaryKey};
+    use common::{datatype::DataType, util::value_eq, AsValue, Key, Keys, PrimaryKey, Value};
     use flume::bounded;
     use fusio::{path::Path, DynFs};
     use fusio_dispatch::FsOptions;
@@ -429,7 +438,12 @@ pub(crate) mod tests {
         executor::tokio::TokioExecutor,
         fs::{generate_file_id, manager::StoreManager},
         inmem::{immutable::Immutable, mutable::MutableMemTable},
-        record::{DynRecord, Record, Schema, ValueDesc},
+        record::{
+            // DynRecord,
+            DynRecord,
+            Record,
+            Schema, // ValueDesc
+        },
         scope::Scope,
         tests::Test,
         timestamp::Timestamp,
@@ -567,8 +581,8 @@ pub(crate) mod tests {
         .unwrap();
         dbg!(&scope);
 
-        assert_eq!(scope.min.as_ref(), 1.to_string().as_value());
-        assert_eq!(scope.max.as_ref(), 6.to_string().as_value());
+        assert!(value_eq(scope.min.as_ref(), &vec![Arc::new(1.to_string())]));
+        assert!(value_eq(scope.max.as_ref(), &vec![Arc::new(6.to_string())]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -610,7 +624,6 @@ pub(crate) mod tests {
             build_immutable::<DynRecord>(&option, batch2_data, &instance, manager.base_fs())
                 .await
                 .unwrap();
-
         let scope = LeveledCompactor::<DynRecord>::minor_compaction(
             &option,
             None,
@@ -624,28 +637,8 @@ pub(crate) mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(
-            scope
-                .min
-                .as_any()
-                .downcast_ref::<PrimaryKey>()
-                .unwrap()
-                .get(0)
-                .unwrap()
-                .as_i32(),
-            &2
-        );
-        assert_eq!(
-            scope
-                .max
-                .as_any()
-                .downcast_ref::<PrimaryKey>()
-                .unwrap()
-                .get(0)
-                .unwrap()
-                .as_i32(),
-            &39
-        );
+        assert_eq!(&scope.min, &vec![Arc::new(2) as Arc<dyn Value>]);
+        assert_eq!(&scope.max, &vec![Arc::new(39) as Arc<dyn Value>]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -687,8 +680,8 @@ pub(crate) mod tests {
         let ((table_gen_1, table_gen_2, table_gen_3, table_gen_4, _), version) =
             build_version(&option, &manager, &Arc::new(Test::schema())).await;
 
-        let min = 2.to_string();
-        let max = 5.to_string();
+        let min: Keys = vec![Arc::new(2.to_string())];
+        let max: Keys = vec![Arc::new(5.to_string())];
         let mut version_edits = Vec::new();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
@@ -717,8 +710,8 @@ pub(crate) mod tests {
 
         if let VersionEdit::Add { level, scope } = &version_edits[0] {
             assert_eq!(*level, 1);
-            assert_eq!(scope.min.as_ref(), 1.to_string().as_value());
-            assert_eq!(scope.max.as_ref(), 6.to_string().as_value());
+            assert_eq!(scope.min, vec![Arc::new(1.to_string()) as Arc<dyn Value>]);
+            assert_eq!(scope.max, vec![Arc::new(6.to_string()) as Arc<dyn Value>]);
         }
         assert_eq!(
             version_edits[1..5].to_vec(),
@@ -821,21 +814,21 @@ pub(crate) mod tests {
         let mut version =
             Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
         version.level_slice[0].push(Scope {
-            min: Arc::new(0.to_string()),
-            max: Arc::new(4.to_string()),
+            min: vec![Arc::new(0.to_string())],
+            max: vec![Arc::new(4.to_string())],
             gen: table_gen0,
             wal_ids: None,
         });
         version.level_slice[1].push(Scope {
-            min: Arc::new(5.to_string()),
-            max: Arc::new(9.to_string()),
+            min: vec![Arc::new(5.to_string())],
+            max: vec![Arc::new(9.to_string())],
             gen: table_gen1,
             wal_ids: None,
         });
 
         let mut version_edits = Vec::new();
-        let min = 6.to_string();
-        let max = 9.to_string();
+        let min: Keys = vec![Arc::new(6.to_string())];
+        let max: Keys = vec![Arc::new(9.to_string())];
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
@@ -960,13 +953,13 @@ pub(crate) mod tests {
                 let current = &sort_runs[pos];
                 let next = &sort_runs[pos + 1];
 
-                assert!(current.min.as_ref() < current.max.as_ref());
-                assert!(next.min.as_ref() < next.max.as_ref());
+                assert!(current.min < current.max);
+                assert!(next.min < next.max);
 
                 if level == 0 {
                     continue;
                 }
-                assert!(current.max.as_ref() < next.min.as_ref());
+                assert!(current.max < next.min);
             }
         }
         dbg!(version);

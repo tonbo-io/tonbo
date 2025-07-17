@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use super::{Key, KeyRef, Value};
+use arrow::array::BinaryArray;
+
+use super::{Key, KeyRef, PrimaryKey, Value};
 use crate::datatype::DataType;
 
 pub type LargeBinary = Vec<u8>;
@@ -34,10 +36,6 @@ impl Value for Vec<u8> {
         DataType::Bytes
     }
 
-    fn size_of(&self) -> usize {
-        self.len()
-    }
-
     fn is_none(&self) -> bool {
         false
     }
@@ -48,6 +46,10 @@ impl Value for Vec<u8> {
 
     fn clone_arc(&self) -> super::ValueRef {
         Arc::new(self.clone())
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        Some(Arc::new(BinaryArray::new_scalar(self.clone())))
     }
 }
 
@@ -60,13 +62,6 @@ impl Value for Option<Vec<u8>> {
         DataType::Bytes
     }
 
-    fn size_of(&self) -> usize {
-        match self {
-            Some(v) => 1 + v.len(),
-            None => 1,
-        }
-    }
-
     fn is_none(&self) -> bool {
         self.is_none()
     }
@@ -77,6 +72,16 @@ impl Value for Option<Vec<u8>> {
 
     fn clone_arc(&self) -> super::ValueRef {
         Arc::new(self.clone())
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        None
+    }
+}
+
+impl From<Vec<u8>> for PrimaryKey {
+    fn from(value: Vec<u8>) -> Self {
+        PrimaryKey::new(vec![Arc::new(value)])
     }
 }
 

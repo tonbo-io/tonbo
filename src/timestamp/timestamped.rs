@@ -63,7 +63,10 @@ where
     V: Ord,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        TsRef::new(&self.value, self.ts).cmp(TsRef::new(&other.value, other.ts))
+        self.value()
+            .cmp(other.value())
+            .then_with(|| other.ts().cmp(&self.ts()))
+        // TsRef::new(&self.value, self.ts).cmp(TsRef::new(&other.value, other.ts))
     }
 }
 
@@ -172,6 +175,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use common::PrimaryKey;
+
     use super::{Ts, TsRef};
 
     #[test]
@@ -205,6 +212,14 @@ mod tests {
         let value = Ts::new(1, 1_u32.into());
         let value_ref = TsRef::new(&value.value, value.ts);
         assert_eq!(value_ref.value(), &1);
+        assert_eq!(value_ref.ts(), 1_u32.into());
+    }
+
+    #[test]
+    fn test_pk_timestamped_ref() {
+        let value = Ts::new(PrimaryKey::new(vec![Arc::new(1)]), 1_u32.into());
+        let value_ref = TsRef::new(&value.value, value.ts);
+        assert_eq!(value_ref.value(), &1.into());
         assert_eq!(value_ref.ts(), 1_u32.into());
     }
 

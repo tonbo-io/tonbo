@@ -1,6 +1,8 @@
 use std::{any::Any, sync::Arc};
 
-use super::{Key, KeyRef, Value, ValueRef};
+use arrow::array::StringArray;
+
+use super::{Key, KeyRef, PrimaryKey, Value, ValueRef};
 use crate::datatype::DataType;
 
 pub type LargeString = String;
@@ -34,10 +36,6 @@ impl Value for String {
         self
     }
 
-    fn size_of(&self) -> usize {
-        self.len()
-    }
-
     fn is_none(&self) -> bool {
         false
     }
@@ -48,6 +46,10 @@ impl Value for String {
 
     fn clone_arc(&self) -> ValueRef {
         Arc::new(self.clone())
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        Some(Arc::new(StringArray::new_scalar(self.clone())))
     }
 }
 
@@ -60,13 +62,6 @@ impl Value for Option<String> {
         self
     }
 
-    fn size_of(&self) -> usize {
-        match self {
-            Some(v) => v.size_of() + 1,
-            None => 1,
-        }
-    }
-
     fn is_none(&self) -> bool {
         self.is_none()
     }
@@ -77,5 +72,21 @@ impl Value for Option<String> {
 
     fn clone_arc(&self) -> ValueRef {
         Arc::new(self.clone())
+    }
+
+    fn to_arrow_datum(&self) -> Option<Arc<dyn arrow::array::Datum>> {
+        None
+    }
+}
+
+impl From<String> for PrimaryKey {
+    fn from(value: String) -> Self {
+        PrimaryKey::new(vec![Arc::new(value)])
+    }
+}
+
+impl From<&str> for PrimaryKey {
+    fn from(value: &str) -> Self {
+        PrimaryKey::new(vec![Arc::new(value.to_string())])
     }
 }

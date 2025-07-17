@@ -10,7 +10,7 @@ use arrow::{
     datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema},
     error::ArrowError,
 };
-use common::Key;
+use common::{Key, PrimaryKey, PrimaryKeyRef};
 use fusio_log::{Decode, Encode};
 use option::OptionRecordRef;
 use parquet::arrow::ProjectionMask;
@@ -20,7 +20,7 @@ use thiserror::Error;
 use crate::{inmem::immutable::ArrowArrays, magic};
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
-    type Key: Key;
+    // type Key: Key;
 
     type Columns: ArrowArrays<Record = Self>;
 
@@ -30,9 +30,7 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
 
     /// Returns the primary key of the record. This should be the type defined in the
     /// [`Schema`].
-    fn key(&self) -> <Self::Key as Key>::Ref<'_> {
-        self.as_record_ref().key()
-    }
+    fn key(&self) -> PrimaryKeyRef<'_>;
 
     /// Returns a reference to the record.
     fn as_record_ref(&self) -> Self::Ref<'_>;
@@ -46,7 +44,7 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
 
     /// Returns the primary key of the record. This should be the type that defined in the
     /// [`Schema`].
-    fn key(self) -> <<Self::Record as Record>::Key as Key>::Ref<'r>;
+    fn key(self) -> PrimaryKey;
 
     /// Do projection on the record. Only keep the columns specified in the projection mask.
     ///

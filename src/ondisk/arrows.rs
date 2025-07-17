@@ -6,7 +6,7 @@ use arrow::{
     compute::kernels::cmp::{gt, gt_eq, lt_eq},
     error::ArrowError,
 };
-use common::{PrimaryKey, Value};
+use common::{Keys, PrimaryKey, Value};
 use parquet::{
     arrow::{
         arrow_reader::{ArrowPredicate, ArrowPredicateFn, RowFilter},
@@ -18,9 +18,9 @@ use parquet::{
 use crate::timestamp::Timestamp;
 
 unsafe fn get_range_bound_fn(
-    range: Bound<&dyn Value>,
+    range: Bound<&Keys>,
 ) -> (
-    Option<&'static dyn Value>,
+    Option<&'static Keys>,
     &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync),
 ) {
     let cmp: &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync);
@@ -49,7 +49,7 @@ unsafe fn get_range_bound_fn(
 
 pub(crate) unsafe fn get_range_filter(
     schema_descriptor: &SchemaDescriptor,
-    range: (Bound<&dyn Value>, Bound<&dyn Value>),
+    range: (Bound<&Keys>, Bound<&Keys>),
     ts: Timestamp,
 ) -> RowFilter {
     let (lower_key, lower_cmp) = get_range_bound_fn(range.0);
@@ -63,8 +63,12 @@ pub(crate) unsafe fn get_range_filter(
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                let pk = PrimaryKey::new(vec![lower_key.clone_arc()]);
-                lower_cmp(record_batch.column(0), pk.arrow_datum(0).unwrap().as_ref())
+                let key = lower_key.get(0).unwrap();
+                // TODO: composite primary key
+                lower_cmp(
+                    record_batch.column(0),
+                    key.to_arrow_datum().unwrap().as_ref(),
+                )
             },
         )));
     }
@@ -72,8 +76,12 @@ pub(crate) unsafe fn get_range_filter(
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                let pk = PrimaryKey::new(vec![upper_key.clone_arc()]);
-                upper_cmp(pk.arrow_datum(0).unwrap().as_ref(), record_batch.column(0))
+                let key = upper_key.get(0).unwrap();
+                // TODO: composite primary key
+                upper_cmp(
+                    key.to_arrow_datum().unwrap().as_ref(),
+                    record_batch.column(0),
+                )
             },
         )));
     }
