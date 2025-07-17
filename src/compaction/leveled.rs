@@ -100,7 +100,7 @@ where
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
-                if Self::is_threshold_exceeded_major(&self.option, &version_ref, 0) {
+                if Self::is_threshold_exceeded_major(&self.option, &version_ref, 0) || is_manual {
                     Self::major_compaction(
                         &version_ref,
                         &self.option,
