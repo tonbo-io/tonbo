@@ -210,19 +210,18 @@ where
         let mut level = 0;
 
         while level < MAX_LEVEL - 2 {
-
             let threshold_exceeded = Self::is_threshold_exceeded_major(option, version, level);
 
             // Continue if it is manual compaction and there is still files on the next level
             // Check if the version slice is empty because we skip the threshold check for manual
             // compaction.
             if (!threshold_exceeded && !is_manual) || version.level_slice[level].is_empty() {
-
                 break;
             }
 
-            // If threshold is not exceeded during a manual compaction with the next level being empty
-            // we will either self compact on Level 0 or stop compaction on another level.
+            // If threshold is not exceeded during a manual compaction with the next level being
+            // empty we will either self compact on Level 0 or stop compaction on
+            // another level.
             if !threshold_exceeded && is_manual && version.level_slice[level + 1].is_empty() {
                 // Perform self compaction for level 0 if `is_manual`
                 if level == 0 {
