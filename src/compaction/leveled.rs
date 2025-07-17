@@ -183,12 +183,14 @@ where
                     wal_ids.push(*file_id);
                 }
             }
+            let file_size = writer.bytes_written() as u64;
             writer.close().await?;
             return Ok(Some(Scope {
                 min: min.ok_or(CompactionError::EmptyLevel)?,
                 max: max.ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: Some(wal_ids),
+                file_size,
             }));
         }
         Ok(None)
@@ -838,12 +840,14 @@ pub(crate) mod tests {
             max: 4.to_string(),
             gen: table_gen0,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 5.to_string(),
             max: 9.to_string(),
             gen: table_gen1,
             wal_ids: None,
+            file_size: 13,
         });
 
         let mut version_edits = Vec::new();
