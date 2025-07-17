@@ -98,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_size_of_mem_trigger() {
-        let threshold = 16;
+        let threshold = 21;
         let trigger = SizeOfMemTrigger::new(threshold);
 
         let record = Test {
@@ -110,7 +110,7 @@ mod tests {
         let record_size = record.size();
         assert_eq!(record_size, 8);
         let record_size = record.key().size();
-        assert_eq!(record_size, 9);
+        assert_eq!(record_size, 12);
 
         assert!(
             !trigger.check_if_exceed(&record),
@@ -160,7 +160,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_trigger_factory() {
-        let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(16));
+        let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(21));
         let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
 
         assert!(!size_of_mem_trigger.check_if_exceed(&Test {

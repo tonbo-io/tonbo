@@ -12,7 +12,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use common::{Key, KeyRef, PrimaryKey, PrimaryKeyRef};
+use common::{KeyRef, PrimaryKey, PrimaryKeyRef};
 use futures_core::Stream;
 use futures_util::{ready, stream};
 use parquet::arrow::ProjectionMask;
@@ -46,12 +46,6 @@ where
         match self {
             Entry::Transaction((key, _)) => {
                 // Safety: shorter lifetime must be safe
-                // unsafe {
-                //     transmute::<Ts<<R::Key as Key>::Ref<'_>>, Ts<<R::Key as Key>::Ref<'_>>>(
-                //         key.clone(),
-                //     )
-                // }
-                // key.clone()
                 Ts::new(key.value().clone().to_key(), key.ts())
             }
             Entry::Mutable(entry) => entry.key().map(|key| {

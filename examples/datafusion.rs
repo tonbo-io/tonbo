@@ -30,7 +30,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
 use tonbo::{
-    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Record, DbOption, DB,
+    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, DbOption, PrimaryKey, DB,
 };
 use tonbo_macros::Record;
 
@@ -51,7 +51,7 @@ struct MusicExec {
     db: Arc<DB<Music, TokioExecutor>>,
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
-    range: (Bound<<Music as Record>::Key>, Bound<<Music as Record>::Key>),
+    range: (Bound<PrimaryKey>, Bound<PrimaryKey>),
 }
 
 struct MusicStream {
@@ -144,7 +144,7 @@ impl RecordBatchStream for MusicStream {
 
 impl DisplayAs for MusicExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        let (lower, upper) = self.range;
+        let (lower, upper) = &self.range;
 
         write!(
             f,
@@ -195,7 +195,7 @@ impl ExecutionPlan for MusicExec {
 
     fn execute(&self, _: usize, _: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let db = self.db.clone();
-        let (lower, upper) = self.range;
+        let (lower, upper) = self.range.clone();
         let limit = self.limit;
         let projection = self.projection.clone();
 

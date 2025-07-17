@@ -3,7 +3,7 @@ use std::{cmp, collections::Bound, mem, sync::Arc};
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use common::{
     util::{value_gt, value_lt},
-    Keys, Value,
+    Keys,
 };
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
@@ -422,7 +422,7 @@ pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
     use arrow::datatypes::{DataType as ArrowDataType, Field};
-    use common::{datatype::DataType, util::value_eq, AsValue, Key, Keys, PrimaryKey, Value};
+    use common::{util::value_eq, Keys, Value};
     use flume::bounded;
     use fusio::{path::Path, DynFs};
     use fusio_dispatch::FsOptions;

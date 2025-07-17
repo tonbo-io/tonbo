@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, cmp::Ordering, hash::Hash, sync::Arc};
+use std::{cmp::Ordering, hash::Hash, sync::Arc};
 
 use arrow::array::{
     BinaryArray, BooleanArray, Date32Array, Date64Array, Datum, Float32Array, Float64Array,
@@ -9,11 +9,8 @@ use arrow::array::{
 };
 use fusio_log::{Decode, Encode};
 
-use super::{Key, KeyRef, TimeUnit, Value, ValueRef, F32, F64};
-use crate::{
-    datatype::DataType, key::cast::AsValue, util::decode_value, Date32, Date64, Time32, Time64,
-    Timestamp,
-};
+use super::{Key, KeyRef, TimeUnit, Value, ValueRef};
+use crate::{datatype::DataType, key::cast::AsValue, util::decode_value};
 pub type Keys = Vec<Arc<dyn Value>>;
 pub type KeysRef<'r> = Vec<&'r dyn Value>;
 
@@ -129,12 +126,9 @@ impl Key for PrimaryKey {
     type Ref<'r> = PrimaryKeyRef<'r>;
 
     fn as_key_ref(&self) -> Self::Ref<'_> {
-        dbg!(&self);
-        let res = PrimaryKeyRef {
+        PrimaryKeyRef {
             keys: self.keys.iter().map(|v| v.as_ref()).collect(),
-        };
-        dbg!(&res);
-        res
+        }
     }
 
     fn as_value(&self) -> &dyn Value {
@@ -285,14 +279,13 @@ impl<'r> Encode for PrimaryKeyRef<'r> {
         let len = self.keys.len();
         (len as u32).encode(writer).await?;
         for key in self.keys.iter() {
-            key.data_type().encode(writer).await?;
             key.encode(writer).await?;
         }
         Ok(())
     }
 
     fn size(&self) -> usize {
-        self.keys.iter().fold(4, |acc, v| acc + v.size() + 1)
+        self.keys.iter().fold(4, |acc, v| acc + v.size())
     }
 }
 
@@ -366,6 +359,8 @@ mod tests {
 
         use fusio_log::{Decode, Encode};
         use tokio::io::AsyncSeekExt;
+
+        use crate::Timestamp;
 
         let pk = PrimaryKey::new(vec![
             Arc::new(Timestamp::new_millis(1234567890)),

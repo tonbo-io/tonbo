@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use common::{Keys, Value};
+use common::Keys;
 use fusio::{
     dynamic::{DynFile, MaybeSendFuture},
     path::Path,

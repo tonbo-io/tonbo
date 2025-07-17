@@ -10,7 +10,7 @@ use arrow::{
     datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema},
     error::ArrowError,
 };
-use common::{Key, PrimaryKey, PrimaryKeyRef};
+use common::{PrimaryKey, PrimaryKeyRef};
 use fusio_log::{Decode, Encode};
 use option::OptionRecordRef;
 use parquet::arrow::ProjectionMask;
@@ -20,8 +20,6 @@ use thiserror::Error;
 use crate::{inmem::immutable::ArrowArrays, magic};
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
-    // type Key: Key;
-
     type Columns: ArrowArrays<Record = Self>;
 
     type Ref<'r>: RecordRef<'r, Record = Self>

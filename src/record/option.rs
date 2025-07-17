@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem::transmute};
+use std::marker::PhantomData;
 
 use common::PrimaryKey;
 
@@ -34,8 +34,6 @@ where
 {
     pub fn key(&self) -> Ts<PrimaryKey> {
         // Safety: shorter lifetime of the value must be safe
-        // unsafe { transmute(Ts::new(self.record.value().clone().key(), self.record.ts())) }
-        // let value = self.record.value().key();
         Ts::new(self.record.value().clone().key(), self.record.ts())
     }
 

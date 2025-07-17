@@ -6,7 +6,7 @@ use arrow::{
     compute::kernels::cmp::{gt, gt_eq, lt_eq},
     error::ArrowError,
 };
-use common::{Keys, PrimaryKey, Value};
+use common::Keys;
 use parquet::{
     arrow::{
         arrow_reader::{ArrowPredicate, ArrowPredicateFn, RowFilter},
@@ -63,7 +63,7 @@ pub(crate) unsafe fn get_range_filter(
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                let key = lower_key.get(0).unwrap();
+                let key = lower_key.first().unwrap();
                 // TODO: composite primary key
                 lower_cmp(
                     record_batch.column(0),
@@ -76,7 +76,7 @@ pub(crate) unsafe fn get_range_filter(
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                let key = upper_key.get(0).unwrap();
+                let key = upper_key.first().unwrap();
                 // TODO: composite primary key
                 upper_cmp(
                     key.to_arrow_datum().unwrap().as_ref(),

@@ -219,7 +219,6 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
-    use common::PrimaryKey;
     use fusio::{disk::TokioFs, path::Path, DynFs};
 
     use super::MutableMemTable;

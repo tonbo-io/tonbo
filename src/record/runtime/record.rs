@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use common::{
-    datatype::DataType, util::decode_value, Date32, Date64, LargeBinary, LargeString, PrimaryKey,
-    Time32, Time64, Timestamp, Value, F32, F64,
+    datatype::DataType, util::decode_value, Date32, Date64, LargeBinary, LargeString, Time32,
+    Time64, Timestamp, Value, F32, F64,
 };
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
@@ -206,7 +206,7 @@ pub(crate) mod test {
     };
 
     use arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
-    use common::{datatype::DataType, TimeUnit, Timestamp, F32, F64};
+    use common::{Timestamp, F32, F64};
     use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
 

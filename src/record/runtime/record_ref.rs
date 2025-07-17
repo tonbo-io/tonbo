@@ -11,7 +11,7 @@ use arrow::{
     },
 };
 use common::{
-    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, PrimaryKey, Time32, Time64,
+    datatype::DataType, Date32, Date64, LargeBinary, LargeString, PrimaryKey, Time32, Time64,
     TimeUnit, Timestamp, Value, F32, F64,
 };
 use fusio::Write;
@@ -20,7 +20,7 @@ use fusio_log::Encode;
 use super::{null_value, DynRecord};
 use crate::{
     magic::USER_COLUMN_OFFSET,
-    record::{option::OptionRecordRef, Record, RecordRef},
+    record::{option::OptionRecordRef, RecordRef},
 };
 
 #[derive(Clone)]

@@ -63,10 +63,7 @@ where
     V: Ord,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.value()
-            .cmp(other.value())
-            .then_with(|| other.ts().cmp(&self.ts()))
-        // TsRef::new(&self.value, self.ts).cmp(TsRef::new(&other.value, other.ts))
+        TsRef::new(&self.value, self.ts).cmp(TsRef::new(&other.value, other.ts))
     }
 }
 

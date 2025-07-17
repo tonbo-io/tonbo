@@ -9,7 +9,7 @@ use arrow::{
 };
 use parquet::arrow::ProjectionMask;
 
-use super::{option::OptionRecordRef, Key, Record, RecordRef};
+use super::{option::OptionRecordRef, Record, RecordRef};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic,

@@ -9,7 +9,7 @@ mod tests {
         arrow::datatypes::{DataType as ArrowDataType, Field},
         datatype::DataType,
         executor::opfs::OpfsExecutor,
-        record::{DynRecord, Record, RecordRef, Schema, ValueDesc},
+        record::{DynRecord, Record, RecordRef, Schema},
         AsValue, DbOption, PrimaryKey, Projection, Value, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;
@@ -190,7 +190,7 @@ mod tests {
 
         let mut sort_items = BTreeMap::new();
         for item in test_dyn_items() {
-            sort_items.insert(item.key(), item);
+            sort_items.insert(item.as_record_ref().key(), item);
         }
 
         {
@@ -218,7 +218,7 @@ mod tests {
 
             let mut sort_items = BTreeMap::new();
             for item in test_dyn_items() {
-                sort_items.insert(item.key(), item);
+                sort_items.insert(item.as_record_ref().key(), item);
             }
 
             let tx = db.transaction().await;

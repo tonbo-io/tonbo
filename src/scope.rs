@@ -19,6 +19,7 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
+    #[allow(unused)]
     pub fn new(min: Keys, max: Keys, gen: FileId, wal_ids: Option<Vec<FileId>>) -> Self {
         Scope {
             min,

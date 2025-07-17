@@ -5,7 +5,6 @@ use std::{
     },
     io,
     mem::transmute,
-    sync::Arc,
 };
 
 use common::{Key, KeyRef, PrimaryKey, PrimaryKeyRef};

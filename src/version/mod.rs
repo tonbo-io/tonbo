@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use common::{util::compare, Key, Keys, PrimaryKey, Value};
+use common::{util::compare, Keys, PrimaryKey};
 use flume::{SendError, Sender};
 use fusio::DynFs;
 use fusio_log::error::LogError;

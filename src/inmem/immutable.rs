@@ -7,7 +7,7 @@ use std::{
 };
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
-use common::{Key, Keys, PrimaryKey, PrimaryKeyRef, Value};
+use common::{Keys, PrimaryKey};
 use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
@@ -211,7 +211,7 @@ pub(crate) mod tests {
         },
         datatypes::{ArrowPrimitiveType, Schema as ArrowSchema, UInt32Type},
     };
-    use common::{AsValue, PrimaryKey, PrimaryKeyRef};
+    use common::{AsValue, PrimaryKey};
     use crossbeam_skiplist::SkipMap;
     use parquet::arrow::ProjectionMask;
 

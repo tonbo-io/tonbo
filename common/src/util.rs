@@ -150,16 +150,16 @@ mod tests {
             let key1: Keys = vec![Arc::new(1_i8)];
             let key2: Keys = vec![Arc::new(2_i8)];
             let key3: Keys = vec![Arc::new(2_i8)];
-            assert_eq!(value_eq(&key1, &key2), false);
+            assert!(!value_eq(&key1, &key2));
             assert!(value_eq(&key2, &key3));
             // test value lt and le
-            assert_eq!(value_lt(&key1, &key2), true);
-            assert_eq!(value_le(&key1, &key2), true);
-            assert_eq!(value_le(&key2, &key3), true);
+            assert!(value_lt(&key1, &key2));
+            assert!(value_le(&key1, &key2));
+            assert!(value_le(&key2, &key3));
             // test value gt and ge
-            assert_eq!(value_gt(&key2, &key1), true);
-            assert_eq!(value_ge(&key2, &key1), true);
-            assert_eq!(value_ge(&key2, &key3), true);
+            assert!(value_gt(&key2, &key1));
+            assert!(value_ge(&key2, &key1));
+            assert!(value_ge(&key2, &key3));
         }
         {
             let key1: Keys = vec![Arc::new(2_i8), Arc::new("ab".to_string())];
@@ -167,23 +167,23 @@ mod tests {
             let key3: Keys = vec![Arc::new(2_i8), Arc::new("abc".to_string())];
             let key4: Keys = vec![Arc::new(2_i8), Arc::new("ac".to_string())];
             // test value eq
-            assert_eq!(value_eq(&key1, &key2), false);
-            assert_eq!(value_eq(&key2, &key3), true);
+            assert!(!value_eq(&key1, &key2));
+            assert!(value_eq(&key2, &key3));
             // test value lt
-            assert_eq!(value_lt(&key1, &key2), true);
-            assert_eq!(value_lt(&key2, &key3), false);
-            assert_eq!(value_lt(&key3, &key4), true);
+            assert!(value_lt(&key1, &key2));
+            assert!(!value_lt(&key2, &key3));
+            assert!(value_lt(&key3, &key4));
             // test value le
-            assert_eq!(value_le(&key1, &key2), true);
-            assert_eq!(value_le(&key2, &key3), true);
+            assert!(value_le(&key1, &key2));
+            assert!(value_le(&key2, &key3));
             // test value gt
-            assert_eq!(value_gt(&key2, &key1), true);
-            assert_eq!(value_gt(&key3, &key2), false);
-            assert_eq!(value_gt(&key4, &key3), true);
+            assert!(value_gt(&key2, &key1));
+            assert!(!value_gt(&key3, &key2));
+            assert!(value_gt(&key4, &key3));
             // test value ge
-            assert_eq!(value_ge(&key2, &key1), true);
-            assert_eq!(value_ge(&key3, &key2), true);
-            assert_eq!(value_ge(&key3, &key4), false);
+            assert!(value_ge(&key2, &key1));
+            assert!(value_ge(&key3, &key2));
+            assert!(!value_ge(&key3, &key4));
         }
     }
 }

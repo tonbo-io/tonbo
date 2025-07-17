@@ -91,9 +91,16 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         .ident
         .as_ref()
         .expect("cannot find primary key ident");
+    let as_pk_value_fn = primary_key_data_type.0.to_as_value_fn();
     let primary_key_value = match primary_key_data_type.0 {
-        DataType::Float32 | DataType::Float64 => quote!(key.value.into()),
-        _ => quote!(key.value),
+        DataType::Float32 | DataType::Float64 => quote!(key
+            .value
+            .get(0)
+            .unwrap()
+            .#as_pk_value_fn
+            .into()),
+        DataType::String | DataType::Bytes => quote!(key.value.get(0).unwrap().#as_pk_value_fn),
+        _ => quote!(*key.value.get(0).unwrap().#as_pk_value_fn),
     };
     let primary_key_definitions = PrimaryKey {
         name: primary_key_ident.clone(),
@@ -102,11 +109,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         },
         base_ty: primary_key_field.ty.clone(),
         index: primary_key_field_index,
-        fn_key: if matches!(primary_key_data_type.0, DataType::String) {
-            quote!(&self.#primary_key_ident)
-        } else {
-            quote!(self.#primary_key_ident)
-        },
+        fn_key: quote!(self.#primary_key_ident),
     };
 
     let builder_append_primary_key = &primary_key_definitions.builder_append_value;
@@ -221,7 +224,7 @@ fn trait_record_codegen(
 
     let PrimaryKey {
         fn_key: fn_primary_key,
-        base_ty: primary_key_ty,
+        base_ty: _primary_key_ty,
         ..
     } = primary_key;
 
@@ -235,8 +238,9 @@ fn trait_record_codegen(
             type Columns = #struct_arrays_name;
 
             fn key(&self) -> ::tonbo::PrimaryKeyRef {
+                use ::tonbo::Key;
                 ::tonbo::PrimaryKeyRef {
-                    keys: vec![#fn_primary_key],
+                    keys: vec![#fn_primary_key.as_value()],
                 }
             }
 
@@ -494,7 +498,8 @@ fn trait_decode_ref_codegen(
             type Record = #struct_name;
 
             fn key(self) -> ::tonbo::PrimaryKey {
-                ::tonbo::PrimaryKey::new(vec![self.#primary_key_name])
+                self.#primary_key_name.into()
+                // ::tonbo::PrimaryKey::new(vec![::std::sync::Arc::new(self.#primary_key_name)])
             }
 
             fn projection(&mut self, projection_mask: &::tonbo::parquet::arrow::ProjectionMask) {
@@ -809,6 +814,8 @@ fn struct_builder_codegen(
 
         impl ::tonbo::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
             fn push(&mut self, key: ::tonbo::timestamp::Ts<::tonbo::PrimaryKey>, row: Option<#struct_ref_name>) {
+                use ::tonbo::AsValue;
+
                 #builder_append_primary_key
                 match row {
                     Some(row) => {

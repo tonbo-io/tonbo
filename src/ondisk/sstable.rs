@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, ops::Bound, sync::Arc};
 
-use common::{Keys, PrimaryKey, Value};
+use common::{Keys, PrimaryKey};
 use fusio::{dynamic::DynFile, DynRead};
 use fusio_parquet::reader::AsyncReader;
 use futures_util::StreamExt;
@@ -117,9 +117,10 @@ where
 
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
-    use std::{borrow::Borrow, fs::File, ops::Bound, sync::Arc};
+    use std::{fs::File, ops::Bound, sync::Arc};
 
     use arrow::array::RecordBatch;
+    use common::PrimaryKey;
     use fusio::{dynamic::DynFile, path::Path, DynFs};
     use fusio_dispatch::FsOptions;
     use fusio_parquet::writer::AsyncWriter;
@@ -134,13 +135,12 @@ pub(crate) mod tests {
     };
     use parquet_lru::NoCache;
 
-    use super::SsTable;
+    use super::{SsTable, TsRef};
     use crate::{
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileType},
         record::Record,
         tests::{get_test_record_batch, Test},
-        timestamp::Ts,
         DbOption,
     };
 
@@ -189,87 +189,88 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    // #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    // async fn projection_query() {
-    //     let temp_dir = tempfile::tempdir().unwrap();
-    //     let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-    //     let base_fs = manager.base_fs();
-    //     let schema = Test::schema();
-    //     let record_batch = get_test_record_batch::<TokioExecutor>(
-    //         DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
-    //         TokioExecutor::current(),
-    //     )
-    //     .await;
-    //     let table_path = temp_dir.path().join("projection_query_test.parquet");
-    //     let _ = File::create(&table_path).unwrap();
-    //     let table_path = Path::from_filesystem_path(table_path).unwrap();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn projection_query() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let base_fs = manager.base_fs();
+        let schema = Test::schema();
+        let record_batch = get_test_record_batch::<TokioExecutor>(
+            DbOption::new(Path::from_filesystem_path(temp_dir.path()).unwrap()),
+            TokioExecutor::current(),
+        )
+        .await;
+        let table_path = temp_dir.path().join("projection_query_test.parquet");
+        let _ = File::create(&table_path).unwrap();
+        let table_path = Path::from_filesystem_path(table_path).unwrap();
 
-    //     let file = base_fs
-    //         .open_options(&table_path, FileType::Parquet.open_options(false))
-    //         .await
-    //         .unwrap();
-    //     write_record_batch(file, &record_batch).await.unwrap();
+        let file = base_fs
+            .open_options(&table_path, FileType::Parquet.open_options(false))
+            .await
+            .unwrap();
+        write_record_batch(file, &record_batch).await.unwrap();
 
-    //     let key = Ts::new("hello".to_owned(), 1.into());
+        let pk: PrimaryKey = "hello".into();
+        let key = TsRef::new(&pk, 1.into());
 
-    //     {
-    //         let test_ref_1 = open_sstable::<Test>(base_fs, &table_path)
-    //             .await
-    //             .get(
-    //                 key.borrow(),
-    //                 ProjectionMask::roots(
-    //                     &ArrowSchemaConverter::new()
-    //                         .convert(schema.arrow_schema())
-    //                         .unwrap(),
-    //                     [0, 1, 2, 3],
-    //                 ),
-    //             )
-    //             .await
-    //             .unwrap()
-    //             .unwrap();
-    //         assert_eq!(test_ref_1.get().unwrap().vstring, "hello");
-    //         assert_eq!(test_ref_1.get().unwrap().vu32, Some(12));
-    //         assert_eq!(test_ref_1.get().unwrap().vbool, None);
-    //     }
-    //     {
-    //         let test_ref_2 = open_sstable::<Test>(base_fs, &table_path)
-    //             .await
-    //             .get(
-    //                 key.borrow(),
-    //                 ProjectionMask::roots(
-    //                     &ArrowSchemaConverter::new()
-    //                         .convert(schema.arrow_schema())
-    //                         .unwrap(),
-    //                     [0, 1, 2, 4],
-    //                 ),
-    //             )
-    //             .await
-    //             .unwrap()
-    //             .unwrap();
-    //         assert_eq!(test_ref_2.get().unwrap().vstring, "hello");
-    //         assert_eq!(test_ref_2.get().unwrap().vu32, None);
-    //         assert_eq!(test_ref_2.get().unwrap().vbool, Some(true));
-    //     }
-    //     {
-    //         let test_ref_3 = open_sstable::<Test>(base_fs, &table_path)
-    //             .await
-    //             .get(
-    //                 key.borrow(),
-    //                 ProjectionMask::roots(
-    //                     &ArrowSchemaConverter::new()
-    //                         .convert(schema.arrow_schema())
-    //                         .unwrap(),
-    //                     [0, 1, 2],
-    //                 ),
-    //             )
-    //             .await
-    //             .unwrap()
-    //             .unwrap();
-    //         assert_eq!(test_ref_3.get().unwrap().vstring, "hello");
-    //         assert_eq!(test_ref_3.get().unwrap().vu32, None);
-    //         assert_eq!(test_ref_3.get().unwrap().vbool, None);
-    //     }
-    // }
+        {
+            let test_ref_1 = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .get(
+                    key,
+                    ProjectionMask::roots(
+                        &ArrowSchemaConverter::new()
+                            .convert(schema.arrow_schema())
+                            .unwrap(),
+                        [0, 1, 2, 3],
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(test_ref_1.get().unwrap().vstring, "hello");
+            assert_eq!(test_ref_1.get().unwrap().vu32, Some(12));
+            assert_eq!(test_ref_1.get().unwrap().vbool, None);
+        }
+        {
+            let test_ref_2 = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .get(
+                    key,
+                    ProjectionMask::roots(
+                        &ArrowSchemaConverter::new()
+                            .convert(schema.arrow_schema())
+                            .unwrap(),
+                        [0, 1, 2, 4],
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(test_ref_2.get().unwrap().vstring, "hello");
+            assert_eq!(test_ref_2.get().unwrap().vu32, None);
+            assert_eq!(test_ref_2.get().unwrap().vbool, Some(true));
+        }
+        {
+            let test_ref_3 = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .get(
+                    key,
+                    ProjectionMask::roots(
+                        &ArrowSchemaConverter::new()
+                            .convert(schema.arrow_schema())
+                            .unwrap(),
+                        [0, 1, 2],
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(test_ref_3.get().unwrap().vstring, "hello");
+            assert_eq!(test_ref_3.get().unwrap().vu32, None);
+            assert_eq!(test_ref_3.get().unwrap().vbool, None);
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn projection_scan() {

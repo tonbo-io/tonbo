@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "invalid datatype tag")]
+    #[should_panic(expected = "unreachable")]
     async fn test_datatype_encode_panic() {
         let data_type = DataType::Time32(TimeUnit::Nanosecond);
         let mut buf = Vec::new();

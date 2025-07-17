@@ -6,7 +6,7 @@ use std::{
 };
 
 use arrow::{array::RecordBatch, datatypes::Schema};
-use common::{Key, PrimaryKey, PrimaryKeyRef};
+use common::PrimaryKey;
 use parquet::arrow::ProjectionMask;
 
 use crate::{

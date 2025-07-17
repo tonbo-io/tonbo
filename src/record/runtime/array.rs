@@ -19,7 +19,7 @@ use arrow::{
     },
 };
 use common::{
-    datatype::DataType, Date32, Date64, Key, LargeBinary, LargeString, PrimaryKey, Time32, Time64,
+    datatype::DataType, Date32, Date64, LargeBinary, LargeString, PrimaryKey, Time32, Time64,
     TimeUnit, Timestamp, F32, F64,
 };
 

@@ -133,8 +133,50 @@ impl Encode for dyn Value {
     }
 
     fn size(&self) -> usize {
-        // TODO: implement size
-        2
+        let data_type = self.data_type();
+        2 + if self.is_none() || self.is_some() {
+            match &data_type {
+                DataType::UInt8 => self.as_u8_opt().size(),
+                DataType::UInt16 => self.as_u16_opt().size(),
+                DataType::UInt32 => self.as_u32_opt().size(),
+                DataType::UInt64 => self.as_u64_opt().size(),
+                DataType::Int8 => self.as_i8_opt().size(),
+                DataType::Int16 => self.as_i16_opt().size(),
+                DataType::Int32 => self.as_i32_opt().size(),
+                DataType::Int64 => self.as_i64_opt().size(),
+                DataType::String | DataType::LargeString => self.as_string_opt().size(),
+                DataType::Boolean => self.as_boolean_opt().size(),
+                DataType::Bytes | DataType::LargeBinary => self.as_bytes_opt().size(),
+                DataType::Float32 => self.as_f32_opt().size(),
+                DataType::Float64 => self.as_f64_opt().size(),
+                DataType::Timestamp(_) => self.as_timestamp_opt().size(),
+                DataType::Time32(_) => self.as_time32_opt().size(),
+                DataType::Time64(_) => self.as_time64_opt().size(),
+                DataType::Date32 => self.as_date32_opt().size(),
+                DataType::Date64 => self.as_date64_opt().size(),
+            }
+        } else {
+            match &data_type {
+                DataType::UInt8 => self.as_u8().size(),
+                DataType::UInt16 => self.as_u16().size(),
+                DataType::UInt32 => self.as_u32().size(),
+                DataType::UInt64 => self.as_u64().size(),
+                DataType::Int8 => self.as_i8().size(),
+                DataType::Int16 => self.as_i16().size(),
+                DataType::Int32 => self.as_i32().size(),
+                DataType::Int64 => self.as_i64().size(),
+                DataType::String | DataType::LargeString => self.as_string().size(),
+                DataType::Boolean => self.as_boolean().size(),
+                DataType::Bytes | DataType::LargeBinary => self.as_bytes().size(),
+                DataType::Float32 => self.as_f32().size(),
+                DataType::Float64 => self.as_f64().size(),
+                DataType::Timestamp(_) => self.as_timestamp().size(),
+                DataType::Time32(_) => self.as_time32().size(),
+                DataType::Time64(_) => self.as_time64().size(),
+                DataType::Date32 => self.as_date32().size(),
+                DataType::Date64 => self.as_date64().size(),
+            }
+        }
     }
 }
 

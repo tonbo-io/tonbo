@@ -1,7 +1,7 @@
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
-use common::{KeyRef, Keys, Value};
+use common::{Keys, Value};
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
