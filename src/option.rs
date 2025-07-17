@@ -24,25 +24,58 @@ pub enum CompactionOption {
     Leveled,
 }
 
-/// configure the operating parameters of each component in the [`DB`](crate::DB)
+/// Configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Clone)]
 pub struct DbOption {
+    /// Number of entries to buffer before cleaning operations
     pub(crate) clean_channel_buffer: usize,
+
+    /// Base directory for database files
     pub(crate) base_path: Path,
+
+    /// Filesystem options for the base path
     pub(crate) base_fs: FsOptions,
+
+    /// Optional custom paths and filesystem options for each level
     pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
+
+    /// Number of immutable chunks to accumulate before triggering a flush
     pub(crate) immutable_chunk_num: usize,
+
+    /// Maximum allowed number of immutable chunks in memory
     pub(crate) immutable_chunk_max_num: usize,
+
+    /// Magnification factor controlling SST file count per level
     pub(crate) level_sst_magnification: usize,
+
+    /// Default number of oldest tables to include in a major compaction
     pub(crate) major_default_oldest_table_num: usize,
+
+    /// Maximum number of tables to select for major compaction at level L
     pub(crate) major_l_selection_table_max_num: usize,
+
+    /// Size threshold (in bytes) to trigger major compaction relative to SST size
     pub(crate) major_threshold_with_sst_size: usize,
+
+    /// Maximum allowed size (in bytes) for a single SST file
     pub(crate) max_sst_file_size: usize,
+
+    /// Version count after which a snapshot is taken of the version log
     pub(crate) version_log_snapshot_threshold: u32,
+
+    /// Trigger type used to start compactions
     pub(crate) trigger_type: TriggerType,
+
+    /// Flag for deciding wehther to use a write-ahead log for durability
     pub(crate) use_wal: bool,
+
+    /// Buffer size (in bytes) for the write-ahead log
     pub(crate) wal_buffer_size: usize,
+
+    /// Parquet writer properties for on-disk SST files
     pub(crate) write_parquet_properties: WriterProperties,
+
+    /// Detailed options governing compaction behavior
     pub(crate) compaction_option: CompactionOption,
 }
 
