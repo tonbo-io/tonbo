@@ -27,9 +27,9 @@ async def test_s3_read_write():
     fs_option = FsOptions.S3("wasm-data", credential,"ap-southeast-2",None, None, None)
 
     option = DbOption(temp_dir.name)
-    option.level_path(0, from_url_path("l0"), fs_option)
-    option.level_path(1, from_url_path("l1"), fs_option)
-    option.level_path(2, from_url_path("l2"), fs_option)
+    option.level_path(0, from_url_path("l0"), fs_option, False)
+    option.level_path(1, from_url_path("l1"), fs_option, False)
+    option.level_path(2, from_url_path("l2"), fs_option, False)
 
     option.immutable_chunk_num = 1
     option.major_threshold_with_sst_size = 3

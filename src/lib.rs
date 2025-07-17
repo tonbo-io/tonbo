@@ -187,7 +187,7 @@ where
 impl<R, E> DB<R, E>
 where
     R: Record + Send + Sync,
-    <R::Schema as Schema>::Columns: Send + Sync,
+    <R::Schema as Schema>::Columns: Send + Sync + 'static,
     E: Executor + Send + Sync + 'static,
 {
     /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
@@ -267,7 +267,7 @@ where
             record_schema.arrow_schema().clone(),
         ));
         let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
                 schema.clone(),
                 record_schema,
                 option.clone(),
@@ -275,18 +275,26 @@ where
             )),
         };
 
-        executor.spawn(async move {
+        let executor_arc = Arc::new(executor);
+        executor_arc.spawn(async move {
             if let Err(err) = cleaner.listen().await {
                 error!("[Cleaner Error]: {}", err)
             }
         });
 
-        executor.spawn(async move {
+        let executor_arc_clone = Arc::clone(&executor_arc);
+        executor_arc.spawn(async move {
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
+                    CompactTask::Freeze => {
+                        compactor
+                            .check_then_compaction(false, Arc::clone(&executor_arc_clone))
+                            .await
+                    }
                     CompactTask::Flush(option_tx) => {
-                        let mut result = compactor.check_then_compaction(true).await;
+                        let mut result = compactor
+                            .check_then_compaction(true, Arc::clone(&executor_arc_clone))
+                            .await;
                         if let Some(tx) = option_tx {
                             if result.is_ok() {
                                 result = tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -372,6 +380,7 @@ where
 
     /// trigger compaction manually. This will flush the WAL and trigger compaction
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
+        println!("fffflush");
         let (tx, rx) = oneshot::channel();
         let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
         compaction_tx
@@ -1407,7 +1416,7 @@ pub(crate) mod tests {
             TestSchema.arrow_schema().clone(),
         ));
         let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
                 schema.clone(),
                 record_schema,
                 option.clone(),
@@ -1415,17 +1424,26 @@ pub(crate) mod tests {
             )),
         };
 
-        executor.spawn(async move {
+        let executor_arc = Arc::new(executor);
+        executor_arc.spawn(async move {
             if let Err(err) = cleaner.listen().await {
                 error!("[Cleaner Error]: {}", err)
             }
         });
-        executor.spawn(async move {
+
+        let executor_arc_clone = Arc::clone(&executor_arc);
+        executor_arc.spawn(async move {
             while let Ok(task) = compaction_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
+                    CompactTask::Freeze => {
+                        compactor
+                            .check_then_compaction(false, Arc::clone(&executor_arc_clone))
+                            .await
+                    }
                     CompactTask::Flush(option_tx) => {
-                        let mut result = compactor.check_then_compaction(true).await;
+                        let mut result = compactor
+                            .check_then_compaction(true, Arc::clone(&executor_arc_clone))
+                            .await;
                         if let Some(tx) = option_tx {
                             let channel_result =
                                 tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -1451,7 +1469,7 @@ pub(crate) mod tests {
 
     fn test_items() -> Vec<Test> {
         let mut items = Vec::new();
-        for i in 0..32 {
+        for i in 0..100 {
             items.push(Test {
                 vstring: i.to_string(),
                 vu32: i,
@@ -1470,7 +1488,7 @@ pub(crate) mod tests {
         let path_l0 = Path::from_filesystem_path(temp_dir_l0.path()).unwrap();
 
         let mut option = DbOption::new(path, &TestSchema)
-            .level_path(0, path_l0, FsOptions::Local)
+            .level_path(0, path_l0, FsOptions::Local, false)
             .unwrap();
         option.immutable_chunk_num = 1;
         option.immutable_chunk_max_num = 1;
@@ -1559,7 +1577,7 @@ pub(crate) mod tests {
             .to_string();
         let bucket = std::env::var("BUCKET_NAME").expect("expected s3 bucket not to be empty");
         let region = Some(std::env::var("AWS_REGION").expect("expected s3 region not to be empty"));
-        let token = Some(std::option_env!("AWS_SESSION_TOKEN").unwrap().to_string());
+        let token = std::option_env!("AWS_SESSION_TOKEN").map(|v| v.to_string());
 
         let s3_option = FsOptions::S3 {
             bucket,
