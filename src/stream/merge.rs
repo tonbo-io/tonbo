@@ -22,6 +22,7 @@ pin_project! {
         buf: Option<Entry<'merge, R>>,
         ts: Timestamp,
         limit: Option<usize>,
+        reverse: bool,
     }
 }
 
@@ -32,12 +33,13 @@ where
     pub(crate) async fn from_vec(
         mut streams: Vec<ScanStream<'merge, R>>,
         ts: Timestamp,
+        reverse: bool,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
 
         for (offset, stream) in streams.iter_mut().enumerate() {
             if let Some(entry) = stream.next().await {
-                peeked.push(CmpEntry::new(offset, entry?));
+                peeked.push(CmpEntry::new(offset, entry?, reverse));
             }
         }
 
@@ -47,6 +49,7 @@ where
             buf: None,
             ts,
             limit: None,
+            reverse,
         };
         merge_stream.next().await;
 
@@ -83,7 +86,7 @@ where
                 None => return Poll::Ready(None),
             };
             if let Some(next) = next {
-                this.peeked.push(CmpEntry::new(offset, next));
+                this.peeked.push(CmpEntry::new(offset, next, *this.reverse));
             }
             if peeked.entry.key().ts > *ts {
                 continue;
@@ -110,14 +113,15 @@ where
 {
     offset: usize,
     entry: Entry<'stream, R>,
+    reverse: bool,
 }
 
 impl<'stream, R> CmpEntry<'stream, R>
 where
     R: Record,
 {
-    fn new(offset: usize, entry: Entry<'stream, R>) -> Self {
-        Self { offset, entry }
+    fn new(offset: usize, entry: Entry<'stream, R>, reverse: bool) -> Self {
+        Self { offset, entry, reverse}
     }
 }
 
@@ -146,11 +150,16 @@ where
     R: Record,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.entry
+        let ordering = self.entry
             .key()
             .cmp(&other.entry.key())
-            .then(self.offset.cmp(&other.offset))
-            .reverse()
+            .then(self.offset.cmp(&other.offset));
+
+        if self.reverse {
+            ordering           // Reverse scan: natural order, heap gives largest first
+        } else {
+            ordering.reverse() // Forward scan: invert for smallest first from max-heap
+        }
     }
 }
 
@@ -226,11 +235,12 @@ mod tests {
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge = MergeStream::<String>::from_vec(
             vec![
-                m1.scan(bound, 6.into()).into(),
-                m2.scan(bound, 6.into()).into(),
-                m3.scan(bound, 6.into()).into(),
+                m1.scan(bound, 6.into(), false).into(),
+                m2.scan(bound, 6.into(), false).into(),
+                m3.scan(bound, 6.into(), false).into(),
             ],
             6.into(),
+            false
         )
         .await
         .unwrap();
@@ -310,7 +320,7 @@ mod tests {
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge =
-            MergeStream::<String>::from_vec(vec![m1.scan(bound, 0.into()).into()], 0.into())
+            MergeStream::<String>::from_vec(vec![m1.scan(bound, 0.into(), false).into()], 0.into(), false)
                 .await
                 .unwrap();
 
@@ -338,7 +348,7 @@ mod tests {
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge =
-            MergeStream::<String>::from_vec(vec![m1.scan(bound, 1.into()).into()], 1.into())
+            MergeStream::<String>::from_vec(vec![m1.scan(bound, 1.into(), false).into()], 1.into(), false)
                 .await
                 .unwrap();
 
@@ -397,9 +407,10 @@ mod tests {
         {
             let mut merge = MergeStream::<String>::from_vec(
                 vec![m1
-                    .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into(), false)
                     .into()],
                 0.into(),
+                false
             )
             .await
             .unwrap()
@@ -417,9 +428,10 @@ mod tests {
         {
             let mut merge = MergeStream::<String>::from_vec(
                 vec![m1
-                    .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
+                    .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into(), false)
                     .into()],
                 1.into(),
+                false
             )
             .await
             .unwrap()

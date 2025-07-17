@@ -427,8 +427,9 @@ where
                 range,
                 self.ctx.load_ts(),
                 &*current,
-                Box::new(|_| None),
+                Box::new(|_, _| None),
                 self.ctx.clone(),
+                false, // Default to forward iteration
             ).take().await?;
 
             while let Some(record) = scan.next().await {
@@ -737,12 +738,13 @@ where
 
     version: &'scan Version<R>,
     fn_pre_stream:
-        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
+        Box<dyn FnOnce(Option<ProjectionMask>, bool) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
 
     limit: Option<usize>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
     ctx: Arc<Context<R>>,
+    reverse: bool,
 }
 
 impl<'scan, 'range, R> Scan<'scan, 'range, R>
@@ -758,9 +760,10 @@ where
         ts: Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>, bool) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
         ctx: Arc<Context<R>>,
+        reverse: bool,
     ) -> Self {
         Self {
             schema,
@@ -773,6 +776,7 @@ where
             projection_indices: None,
             projection: ProjectionMask::all(),
             ctx,
+            reverse,
         }
     }
 
@@ -845,7 +849,7 @@ where
         let is_projection = self.projection_indices.is_some();
 
         if let Some(pre_stream) =
-            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()), self.reverse)
         {
             streams.push(pre_stream);
         }
@@ -855,7 +859,7 @@ where
             let mut mutable_scan = self
                 .schema
                 .mutable
-                .scan((self.lower, self.upper), self.ts)
+                .scan((self.lower, self.upper), self.ts, self.reverse)
                 .into();
             if is_projection {
                 mutable_scan =
@@ -866,7 +870,7 @@ where
         for (_, immutable) in self.schema.immutables.iter().rev() {
             streams.push(
                 immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .scan((self.lower, self.upper), self.ts, self.projection.clone(), self.reverse)
                     .into(),
             );
         }
@@ -878,10 +882,11 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.reverse,
             )
             .await?;
 
-        let mut merge_stream = MergeStream::from_vec(streams, self.ts).await?;
+        let mut merge_stream = MergeStream::from_vec(streams, self.ts, self.reverse).await?;
         if let Some(limit) = self.limit {
             merge_stream = merge_stream.limit(limit);
         }
@@ -900,7 +905,7 @@ where
         let is_projection = self.projection_indices.is_some();
 
         if let Some(pre_stream) =
-            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()), self.reverse)
         {
             streams.push(pre_stream);
         }
@@ -910,7 +915,7 @@ where
             let mut mutable_scan = self
                 .schema
                 .mutable
-                .scan((self.lower, self.upper), self.ts)
+                .scan((self.lower, self.upper), self.ts, self.reverse)
                 .into();
             if is_projection {
                 mutable_scan =
@@ -921,7 +926,7 @@ where
         for (_, immutable) in self.schema.immutables.iter().rev() {
             streams.push(
                 immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .scan((self.lower, self.upper), self.ts, self.projection.clone(), self.reverse)
                     .into(),
             );
         }
@@ -933,9 +938,10 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.reverse,
             )
             .await?;
-        let merge_stream = MergeStream::from_vec(streams, self.ts).await?;
+        let merge_stream = MergeStream::from_vec(streams, self.ts, self.reverse).await?;
 
         Ok(PackageStream::new(
             batch_size,
@@ -943,6 +949,14 @@ where
             self.projection_indices,
             self.ctx.arrow_schema().clone(),
         ))
+    }
+
+    /// Enables reverse iteration order for this scan
+    pub fn reverse(self) -> Self {
+        Self {
+            reverse: true,
+            ..self
+        }
     }
 }
 

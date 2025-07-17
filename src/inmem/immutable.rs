@@ -108,6 +108,7 @@ where
         ),
         ts: Timestamp,
         projection_mask: ProjectionMask,
+        reverse: bool,
     ) -> ImmutableScan<'scan, A::Record> {
         let lower = match range.0 {
             Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
@@ -124,7 +125,7 @@ where
             .index
             .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((lower, upper));
 
-        ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
+        ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask, reverse)
     }
 
     pub(crate) fn get(
@@ -137,6 +138,7 @@ where
             (Bound::Included(key), Bound::Included(key)),
             ts,
             projection_mask,
+            false,
         )
         .next()
     }
@@ -160,9 +162,10 @@ pub(crate) struct ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
+    range: Option<Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>>,
     record_batch: &'iter RecordBatch,
     projection_mask: ProjectionMask,
+    reverse: bool,
 }
 
 impl<'iter, R> ImmutableScan<'iter, R>
@@ -173,11 +176,13 @@ where
         range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
         record_batch: &'iter RecordBatch,
         projection_mask: ProjectionMask,
+        reverse: bool,
     ) -> Self {
         Self {
-            range,
+            range: Some(range),
             record_batch,
             projection_mask,
+            reverse,
         }
     }
 }
@@ -189,24 +194,47 @@ where
     type Item = RecordBatchEntry<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|(_, &offset)| {
-            let schema = self.record_batch.schema();
-            let record_ref = R::Ref::from_record_batch(
-                self.record_batch,
-                offset as usize,
-                &self.projection_mask,
-                &schema,
-            );
-            // TODO: remove cloning record batch
-            RecordBatchEntry::new(self.record_batch.clone(), {
-                // Safety: record_ref self-references the record batch
-                unsafe {
-                    transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
-                        record_ref,
-                    )
-                }
+        if self.reverse {
+            // Initialize items collection on first call
+            self.range.as_mut()?.next_back().map(|(_, &offset)| {
+                let schema = self.record_batch.schema();
+                let record_ref = R::Ref::from_record_batch(
+                    self.record_batch,
+                    offset as usize,
+                    &self.projection_mask,
+                    &schema,
+                );
+                // TODO: remove cloning record batch
+                RecordBatchEntry::new(self.record_batch.clone(), {
+                    // Safety: record_ref self-references the record batch
+                    unsafe {
+                        transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
+                            record_ref,
+                        )
+                    }
+                })
             })
-        })
+        } else {
+            // Forward iteration (existing logic)
+            self.range.as_mut()?.next().map(|(_, &offset)| {
+                let schema = self.record_batch.schema();
+                let record_ref = R::Ref::from_record_batch(
+                    self.record_batch,
+                    offset as usize,
+                    &self.projection_mask,
+                    &schema,
+                );
+                // TODO: remove cloning record batch
+                RecordBatchEntry::new(self.record_batch.clone(), {
+                    // Safety: record_ref self-references the record batch
+                    unsafe {
+                        transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
+                            record_ref,
+                        )
+                    }
+                })
+            })
+        }
     }
 }
 

@@ -136,7 +136,7 @@ mod tests {
 
         let mut stream = MemProjectionStream::<Test>::new(
             mutable
-                .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
+                .scan((Bound::Unbounded, Bound::Unbounded), 6.into(), false)
                 .into(),
             mask,
         );
