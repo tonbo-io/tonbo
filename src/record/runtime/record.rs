@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
+use common::{
+    datatype::DataType, Date32, Date64, LargeBinary, LargeString, Time32, Time64, Timestamp, F32,
+    F64,
+};
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
-use super::{schema::DynSchema, DataType, DynRecordRef, Value};
+use super::{schema::DynSchema, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
-    record::{
-        Date32, Date64, LargeBinary, LargeString, Record, RecordDecodeError, Time32, Time64,
-        Timestamp, F32, F64,
-    },
+    record::{Record, RecordDecodeError},
 };
 
 #[derive(Debug)]
@@ -172,7 +173,7 @@ macro_rules! dyn_record {
                 vec![
                     $(
                         $crate::record::Value::new(
-                            $crate::record::DataType::$type,
+                            $crate::datatype::DataType::$type,
                             $name.into(),
                             std::sync::Arc::new($value),
                             $nullable,
@@ -213,13 +214,14 @@ pub(crate) mod test {
         sync::Arc,
     };
 
+    use common::{datatype::DataType, TimeUnit, Timestamp, F32, F64};
     use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
 
     use super::{DynRecord, DynSchema, Record};
     use crate::{
         make_dyn_schema,
-        record::{DataType, DynRecordRef, TimeUnit, Timestamp, Value, F32, F64},
+        record::{DynRecordRef, Value},
     };
 
     #[allow(unused)]

@@ -1,6 +1,7 @@
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
+use common::KeyRef;
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
@@ -12,7 +13,7 @@ use tokio::sync::oneshot;
 use crate::{
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
-    record::{KeyRef, Record, Schema as RecordSchema},
+    record::{Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     transaction::CommitError,

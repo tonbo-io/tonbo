@@ -1,0 +1,25 @@
+[package]
+edition = "2021"
+license = "Apache-2.0"
+name = "common"
+version = "0.3.2"
+
+[features]
+aws = ["fusio-log/aws"]
+default = []
+tokio = [
+    "fusio-log/tokio",
+]
+web = ["fusio-log/web"]
+
+
+[dependencies]
+arrow = { workspace = true }
+bytes = { version = "1.8.0", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["wasmbind"] }
+fusio = { workspace = true }
+fusio-log = { workspace = true }
+ulid = { version = "1", features = ["serde"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["full"] }

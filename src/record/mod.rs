@@ -1,4 +1,3 @@
-pub mod key;
 pub mod option;
 pub mod runtime;
 #[cfg(test)]
@@ -7,8 +6,8 @@ pub(crate) mod test;
 use std::{error::Error, fmt::Debug, io, sync::Arc};
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use common::Key;
 use fusio_log::{Decode, Encode};
-pub use key::*;
 use option::OptionRecordRef;
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 pub use runtime::*;

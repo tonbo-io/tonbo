@@ -5,7 +5,10 @@ use std::{
 };
 
 use pyo3::{pyclass, pymethods};
-use tonbo::record::{DataType as TonboDataType, Value, ValueDesc};
+use tonbo::{
+    datatype::DataType as TonboDataType,
+    record::{Value, ValueDesc},
+};
 
 use crate::datatype::DataType;
 

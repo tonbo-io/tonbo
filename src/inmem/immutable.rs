@@ -6,11 +6,12 @@ use std::{
 };
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
+use common::Key;
 use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{option::OptionRecordRef, Key, Record, RecordRef, Schema},
+    record::{option::OptionRecordRef, Record, RecordRef, Schema},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };

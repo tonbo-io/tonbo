@@ -1,10 +1,11 @@
 use std::ops::Bound;
 
 use bytes::Bytes;
+use common::F32;
 use fusio::path::Path;
 use futures_util::stream::StreamExt;
 use tokio::fs;
-use tonbo::{executor::tokio::TokioExecutor, record::F32, DbOption, Projection, Record, DB};
+use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API

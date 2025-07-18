@@ -6,6 +6,7 @@ use arrow::{
     compute::kernels::cmp::{gt, gt_eq, lt_eq},
     error::ArrowError,
 };
+use common::Key;
 use parquet::{
     arrow::{
         arrow_reader::{ArrowPredicate, ArrowPredicateFn, RowFilter},
@@ -15,7 +16,7 @@ use parquet::{
 };
 
 use crate::{
-    record::{Key, Record, Schema},
+    record::{Record, Schema},
     timestamp::Timestamp,
 };
 

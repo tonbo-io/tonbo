@@ -12,7 +12,7 @@ use chrono::{DateTime, NaiveDateTime};
 use fusio_log::{Decode, Encode};
 
 use super::{Date32, Date64, Key, KeyRef, Time32, Time64};
-use crate::record::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY};
+use crate::key::{MICROSECONDS, MILLISECONDS, NANOSECONDS, SECONDS_IN_DAY};
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeUnit {

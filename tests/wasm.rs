@@ -6,8 +6,9 @@ mod tests {
     use fusio::{path::Path, DynFs};
     use futures::StreamExt;
     use tonbo::{
+        datatype::DataType,
         executor::opfs::OpfsExecutor,
-        record::{DataType, DynRecord, DynSchema, Record, RecordRef, Schema, Value, ValueDesc},
+        record::{DynRecord, DynSchema, Record, RecordRef, Schema, Value, ValueDesc},
         DbOption, Projection, DB,
     };
     use wasm_bindgen_test::wasm_bindgen_test;

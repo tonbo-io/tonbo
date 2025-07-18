@@ -1,12 +1,8 @@
 use std::{fs, sync::Arc};
 
+use common::datatype::DataType;
 use fusio::path::Path;
-use tonbo::{
-    dyn_record, dyn_schema,
-    executor::tokio::TokioExecutor,
-    record::{DataType, Value},
-    DbOption, DB,
-};
+use tonbo::{dyn_record, dyn_schema, executor::tokio::TokioExecutor, record::Value, DbOption, DB};
 
 #[tokio::main]
 async fn main() {
