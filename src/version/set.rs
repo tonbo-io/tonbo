@@ -661,7 +661,7 @@ pub(crate) mod tests {
         drop(version_set);
     }
 
-   #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_apply_edits_batch_add_out_of_index() {
         let temp_dir = TempDir::new().unwrap();
         let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
