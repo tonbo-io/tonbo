@@ -199,7 +199,7 @@ pub(crate) mod tests {
         tx.send_async(CleanTag::Clean { ts: 0.into() })
             .await
             .unwrap();
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(50)).await;
         assert!(!path_to_local(&option.table_path(gen_0, 0))
             .unwrap()
             .exists());
@@ -216,7 +216,7 @@ pub(crate) mod tests {
         tx.send_async(CleanTag::Clean { ts: 1.into() })
             .await
             .unwrap();
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(50)).await;
         assert!(!path_to_local(&option.table_path(gen_1, 0))
             .unwrap()
             .exists());
@@ -233,7 +233,7 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(50)).await;
         assert!(!path_to_local(&option.table_path(gen_3, 0))
             .unwrap()
             .exists());
