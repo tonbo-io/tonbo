@@ -60,7 +60,7 @@ After defining your schema, you can create a `DB` instance using a customized `D
 
 ```rust
 use std::fs;
-use fusio::path::Path;
+use tonbo::Path;
 use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
 
 #[tokio::main]
