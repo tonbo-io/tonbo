@@ -56,8 +56,9 @@ where
             range,
             self.ts,
             &self.version,
-            Box::new(move |_: Option<ProjectionMask>| None),
+            Box::new(move |_: Option<ProjectionMask>, _: bool| None),
             self.ctx.clone(),
+            false // Not reversed by default
         )
     }
 
@@ -93,8 +94,9 @@ where
             Bound<&'range <R::Schema as RecordSchema>::Key>,
         ),
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>, bool) -> Option<ScanStream<'scan, R>> + Send + 'scan,
         >,
+        reverse: bool,
     ) -> Scan<'scan, 'range, R> {
         Scan::new(
             &self.share,
@@ -103,6 +105,7 @@ where
             &self.version,
             fn_pre_stream,
             self.ctx.clone(),
+            reverse
         )
     }
 }

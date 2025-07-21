@@ -20,16 +20,35 @@ use crate::{
     DbError, DbOption,
 };
 
-pub(crate) type MutableScan<'scan, R> = Range<
-    'scan,
-    TsRef<<<R as Record>::Schema as Schema>::Key>,
-    (
-        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
-        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
-    ),
-    Ts<<<R as Record>::Schema as Schema>::Key>,
-    Option<R>,
->;
+pub(crate) struct MutableScan<'scan, R: Record> {
+    inner: Option<Range<
+        'scan,
+        TsRef<<<R as Record>::Schema as Schema>::Key>,
+        (
+            Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
+            Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
+        ),
+        Ts<<<R as Record>::Schema as Schema>::Key>,
+        Option<R>,
+    >>,
+    reverse: bool,
+}
+
+impl<'scan, R> Iterator for MutableScan<'scan, R>
+where
+    R: Record,
+{
+    type Item = crossbeam_skiplist::map::Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.reverse {
+            self.inner.as_mut()?.next_back()
+        } else {
+            // Forward iteration (existing logic)
+            self.inner.as_mut()?.next()
+        }
+    }
+}
 
 pub(crate) struct MutableMemTable<R>
 where
@@ -152,6 +171,7 @@ where
             Bound<&'scan <R::Schema as Schema>::Key>,
         ),
         ts: Timestamp,
+        reverse: bool,
     ) -> MutableScan<'scan, R> {
         let lower = match range.0 {
             Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
@@ -164,7 +184,10 @@ where
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        self.data.range((lower, upper))
+        MutableScan {
+            inner: Some(self.data.range((lower, upper))),
+            reverse,
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -332,7 +355,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into(), false);
 
         assert_eq!(
             scan.next().unwrap().key(),
@@ -360,6 +383,7 @@ mod tests {
         let mut scan = mutable.scan(
             (Bound::Included(&lower), Bound::Included(&upper)),
             1_u32.into(),
+            false,
         );
 
         assert_eq!(
@@ -430,7 +454,7 @@ mod tests {
             .unwrap();
 
         {
-            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into(), false);
             let entry = scan.next().unwrap();
             assert_eq!(
                 entry.key(),

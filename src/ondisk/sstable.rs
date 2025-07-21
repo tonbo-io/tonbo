@@ -101,6 +101,7 @@ where
             key.ts(),
             Some(1),
             projection_mask,
+            false,
         )
         .await?
         .next()
@@ -117,6 +118,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        reverse: bool,
     ) -> Result<SsTableScan<'scan, R>, parquet::errors::ParquetError> {
         let builder = self
             .into_parquet_builder(limit, projection_mask.clone())
@@ -133,6 +135,7 @@ where
             builder.with_row_filter(filter).build()?,
             projection_mask,
             full_schema,
+            reverse,
         ))
     }
 }
@@ -330,6 +333,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2, 3],
                     ),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -357,6 +361,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2, 4],
                     ),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -384,6 +389,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2],
                     ),
+                    false,
                 )
                 .await
                 .unwrap();
