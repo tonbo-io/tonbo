@@ -179,6 +179,7 @@ use crate::{
 };
 pub use crate::{option::*, stream::Entry};
 
+/// Wrapper of [`DbStorage`] for handling concurrent operations
 pub struct DB<R, E>
 where
     R: Record,
@@ -230,6 +231,8 @@ where
             option.level_paths.clone(),
         )?);
         {
+            // Ensure both the WAL and version-log paths exist on the local file system
+            // and base (default) file system
             manager
                 .local_fs()
                 .create_dir_all(&option.wal_dir_path())
@@ -251,8 +254,8 @@ where
                 .await
                 .map_err(DbError::Fusio)?;
         }
-        let (task_tx, task_rx) = bounded(1);
 
+        let (task_tx, task_rx) = bounded(1);
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
         let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone()).await?;
@@ -266,12 +269,14 @@ where
             )
             .await?,
         ));
+
         let ctx = Arc::new(Context::new(
             manager,
             lru_cache.clone(),
             version_set,
             record_schema.arrow_schema().clone(),
         ));
+
         let mut compactor = match option.compaction_option {
             CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
                 schema.clone(),
@@ -288,6 +293,8 @@ where
         });
 
         executor.spawn(async move {
+            // Waits to receive compaction task. `CompactTask::Freeze` will perform automatic
+            // compaction and `Compact::Flush` will perform manual compaction
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
                     CompactTask::Freeze => compactor.check_then_compaction(false).await,
@@ -314,7 +321,7 @@ where
         })
     }
 
-    /// open an optimistic ACID transaction
+    /// Open an optimistic ACID transaction
     ///
     /// ## Examples
     /// ```ignore
@@ -345,6 +352,7 @@ where
         Transaction::new(self.snapshot().await, self.lock_map.clone())
     }
 
+    /// Returns a snapshot of the database
     pub async fn snapshot(&self) -> Snapshot<'_, R> {
         Snapshot::new(
             self.schema.read().await,
@@ -353,12 +361,12 @@ where
         )
     }
 
-    /// insert a single tonbo record
+    /// Insert a single tonbo record
     pub async fn insert(&self, record: R) -> Result<(), CommitError<R>> {
         Ok(self.write(record, self.ctx.increase_ts()).await?)
     }
 
-    /// insert a sequence of data as a single batch
+    /// Insert a sequence of data as a single batch
     pub async fn insert_batch(
         &self,
         records: impl ExactSizeIterator<Item = R>,
@@ -366,7 +374,7 @@ where
         Ok(self.write_batch(records, self.ctx.increase_ts()).await?)
     }
 
-    /// delete the record with the primary key as the `key`
+    /// Delete the record with the primary key as the `key`
     pub async fn remove(&self, key: <R::Schema as Schema>::Key) -> Result<bool, CommitError<R>> {
         Ok(self
             .schema
@@ -376,7 +384,7 @@ where
             .await?)
     }
 
-    /// trigger compaction manually. This will flush the WAL and trigger compaction
+    /// Trigger compaction manually. This will flush the WAL and trigger compaction
     pub async fn flush(&self) -> Result<(), CommitError<R>> {
         let (tx, rx) = oneshot::channel();
         let compaction_tx = { self.schema.read().await.compaction_tx.clone() };
@@ -389,7 +397,7 @@ where
         Ok(())
     }
 
-    /// get the record with `key` as the primary key and process it using closure `f`
+    /// Get the record with `key` as the primary key and process it using closure `f`
     pub async fn get<T>(
         &self,
         key: &<R::Schema as Schema>::Key,
@@ -416,7 +424,7 @@ where
             }))
     }
 
-    /// scan records with primary keys in the `range` and process them using closure `f`
+    /// Scan records with primary keys in the `range` and process them using closure `f`
     pub async fn scan<'scan, T: 'scan>(
         &'scan self,
         range: (
@@ -453,6 +461,7 @@ where
         Ok(())
     }
 
+    // Write a batch of records
     pub(crate) async fn write_batch(
         &self,
         mut records: impl ExactSizeIterator<Item = R>,
@@ -483,7 +492,7 @@ where
         Ok(())
     }
 
-    /// flush WAL to the stable storage. If WAL is disabled, this method will do nothing.
+    /// Flush WAL to the stable storage. If WAL is disabled, this method will do nothing.
     ///
     /// There is no guarantee that the data will be flushed to WAL because of the buffer. So it is
     /// necessary to call this method before exiting if data loss is not acceptable. See also
@@ -493,7 +502,7 @@ where
         Ok(())
     }
 
-    /// destroy [`DB`].
+    /// Destroy [`DB`].
     ///
     /// **Note:** This will remove all wal and manifest file in the directory.
     pub async fn destroy(self) -> Result<(), DbError<R>> {
@@ -506,6 +515,7 @@ where
     }
 }
 
+/// DbStorage state for coordinating in-memory + on-disk operations
 pub(crate) struct DbStorage<R>
 where
     R: Record,
@@ -523,6 +533,8 @@ impl<R> DbStorage<R>
 where
     R: Record + Send,
 {
+    /// Creates a new instane of 'DbStorage'. If there are write ahead logs in the directory this
+    /// function will reconstruct the record batches and recovery the version before crash.
     async fn new(
         option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
@@ -533,8 +545,8 @@ where
         let base_fs = manager.base_fs();
         let wal_dir_path = option.wal_dir_path();
         let mut transaction_map = HashMap::new();
-        let mut wal_ids = Vec::new();
 
+        // Collect all write ahead logs in the WAL directory
         let wal_metas = {
             let mut wal_metas = Vec::new();
             let mut wal_stream = base_fs.list(&wal_dir_path).await?;
@@ -566,6 +578,9 @@ where
             option: option.clone(),
         };
 
+        let mut wal_ids = Vec::new();
+
+        // Iterates through all the write ahead logs and reconstructs each record for every batch.
         for wal_meta in wal_metas {
             let wal_path = wal_meta.path;
 
@@ -606,6 +621,7 @@ where
                             let mut records = transaction_map.remove(&ts).unwrap();
                             records.push((key, value));
 
+                            // Increase timestamp for each multipart record.
                             let ts = version_set.increase_ts();
                             for (key, value_option) in records {
                                 is_excess = schema.recover_append(key, ts, value_option).await?;
@@ -613,6 +629,8 @@ where
                             is_excess
                         }
                     };
+
+                    // Compact during recovery if exceeded memory threshold
                     if is_excess {
                         let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
                     }
@@ -624,10 +642,12 @@ where
         Ok(schema)
     }
 
+    // Write individual record to mutable memtable
     async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
         self.mutable.insert(log_ty, record, ts).await
     }
 
+    // Remove individual record from mutable memtable
     async fn remove(
         &self,
         log_ty: LogType,
@@ -637,15 +657,18 @@ where
         self.mutable.remove(log_ty, key, ts).await
     }
 
+    // Make a recovery append
     async fn recover_append(
         &self,
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
         value: Option<R>,
     ) -> Result<bool, DbError<R>> {
+        // Passes in None as we do not need it to be durably logged
         self.mutable.append(None, key, ts, value).await
     }
 
+    // Retrieve record using primary key
     async fn get<'get>(
         &'get self,
         ctx: &Context<R>,
@@ -690,6 +713,7 @@ where
             }
         }
 
+        // Returns a table query with a projection
         Ok(version
             .query(
                 ctx.storage_manager(),
@@ -701,6 +725,8 @@ where
             .map(|entry| Entry::RecordBatch(entry)))
     }
 
+    // Performs a concurrency check to make sure a write hasn't already happend before the current
+    // one
     fn check_conflict(&self, key: &<R::Schema as Schema>::Key, ts: Timestamp) -> bool {
         self.mutable.check_conflict(key, ts)
             || self
@@ -710,11 +736,13 @@ where
                 .any(|(_, immutable)| immutable.check_conflict(key, ts))
     }
 
+    // Flush the write ahead log to disk
     async fn flush_wal(&self) -> Result<(), DbError<R>> {
         self.mutable.flush_wal().await?;
         Ok(())
     }
 
+    // Remove all WALs from the filesystem
     async fn destroy(&mut self, manager: &StoreManager) -> Result<(), DbError<R>> {
         self.mutable.destroy().await?;
 
@@ -730,7 +758,7 @@ where
     }
 }
 
-/// scan configuration intermediate structure
+/// Scan configuration intermediate structure
 pub struct Scan<'scan, 'range, R>
 where
     R: Record,
@@ -843,7 +871,7 @@ where
         }
     }
 
-    /// get a Stream that returns single row of Record
+    /// Get a Stream that returns single row of Record
     pub async fn take(
         self,
     ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
