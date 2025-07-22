@@ -23,7 +23,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) struct SsTableID {
+pub struct SsTableID {
     // File id for the SStable
     file_id: FileId,
     // The level where the SSTable is located
