@@ -184,7 +184,7 @@ where
 
         // Only generate a new manifest if there is no rewrites
         if edits.is_empty() {
-            set.rewrite().await?;
+            set.compact_log().await?;
         } else {
             set.apply_edits(edits, None, true).await?;
         }
@@ -409,7 +409,7 @@ where
     async fn recover(
         &self,
         version_edits: Vec<VersionEdit<<<R as Record>::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
     ) -> Result<(), ManifestStorageError<R>> {
         Ok(self.apply_edits(version_edits, delete_gens, true).await?)
     }
@@ -417,7 +417,7 @@ where
     async fn update(
         &self,
         version_edits: Vec<VersionEdit<<<R as Record>::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
     ) -> Result<(), ManifestStorageError<R>> {
         Ok(self.apply_edits(version_edits, delete_gens, false).await?)
     }

@@ -9,7 +9,7 @@ use fusio::{MaybeSend, MaybeSync};
 use thiserror::Error;
 
 use crate::{
-    fs::FileId,
+    ondisk::sstable::SsTableID,
     record::{Record, Schema},
     version::{edit::VersionEdit, TransactionTs, VersionError, VersionRef},
 };
@@ -41,14 +41,14 @@ pub(crate) trait ManifestStorage<R: Record>: MaybeSend + MaybeSync + Transaction
     async fn recover(
         &self,
         version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
     ) -> Result<(), ManifestStorageError<R>>;
 
     /// Apply version edits and update the manifest.
     async fn update(
         &self,
         version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
     ) -> Result<(), ManifestStorageError<R>>;
 
     /// Perform a rewrite of manifest log. Can be used to perform log

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{record::Record, version::VersionError, CommitError};
+use crate::{manifest::ManifestStorageError, record::Record, CommitError};
 
 #[derive(Debug, Error)]
 pub enum CompactionError<R>
@@ -13,8 +13,8 @@ where
     Parquet(#[from] parquet::errors::ParquetError),
     #[error("compaction fusio error: {0}")]
     Fusio(#[from] fusio::Error),
-    #[error("compaction version error: {0}")]
-    Version(#[from] VersionError<R>),
+    #[error("compaction manifest storage error: {0}")]
+    Manifest(#[from] ManifestStorageError<R>),
     #[error("compaction logger error: {0}")]
     Logger(#[from] fusio_log::error::LogError),
     #[error("compaction channel is closed")]

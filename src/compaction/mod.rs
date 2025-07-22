@@ -7,18 +7,15 @@ use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
 use leveled::LeveledCompactor;
 use parquet::arrow::AsyncArrowWriter;
-use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
     compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
-    manifest::ManifestStorageError,
     record::{KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
-    transaction::CommitError,
     version::edit::VersionEdit,
     DbOption,
 };
@@ -159,29 +156,6 @@ where
         });
         Ok(())
     }
-}
-
-#[derive(Debug, Error)]
-pub enum CompactionError<R>
-where
-    R: Record,
-{
-    #[error("compaction io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("compaction parquet error: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
-    #[error("compaction fusio error: {0}")]
-    Fusio(#[from] fusio::Error),
-    #[error("compaction manifest storage error: {0}")]
-    Manifest(#[from] ManifestStorageError<R>),
-    #[error("compaction logger error: {0}")]
-    Logger(#[from] fusio_log::error::LogError),
-    #[error("compaction channel is closed")]
-    ChannelClose,
-    #[error("database error: {0}")]
-    Commit(#[from] CommitError<R>),
-    #[error("the level being compacted does not have a table")]
-    EmptyLevel,
 }
 
 #[cfg(all(test, feature = "tokio"))]
