@@ -746,6 +746,7 @@ where
         Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
 
     limit: Option<usize>,
+    asc: Option<bool>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
     ctx: Arc<Context<R>>,
@@ -776,6 +777,7 @@ where
             version,
             fn_pre_stream,
             limit: None,
+            asc: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
             ctx,
@@ -786,6 +788,13 @@ where
     pub fn limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
+            ..self
+        }
+    }
+
+    pub fn reverse(self) -> Self {
+        Self {
+            asc: Some(false),
             ..self
         }
     }
@@ -887,7 +896,7 @@ where
             )
             .await?;
 
-        let mut merge_stream = MergeStream::from_vec(streams, self.ts).await?;
+        let mut merge_stream = MergeStream::from_vec(streams, self.ts, self.asc).await?;
         if let Some(limit) = self.limit {
             merge_stream = merge_stream.limit(limit);
         }
@@ -941,7 +950,7 @@ where
                 self.projection,
             )
             .await?;
-        let merge_stream = MergeStream::from_vec(streams, self.ts).await?;
+        let merge_stream = MergeStream::from_vec(streams, self.ts, self.asc).await?;
 
         Ok(PackageStream::new(
             batch_size,

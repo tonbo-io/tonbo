@@ -22,6 +22,7 @@ pin_project! {
         buf: Option<Entry<'merge, R>>,
         ts: Timestamp,
         limit: Option<usize>,
+        asc: Option<bool>,
     }
 }
 
@@ -32,12 +33,13 @@ where
     pub(crate) async fn from_vec(
         mut streams: Vec<ScanStream<'merge, R>>,
         ts: Timestamp,
+        asc: Option<bool>,
     ) -> Result<Self, parquet::errors::ParquetError> {
         let mut peeked = BinaryHeap::with_capacity(streams.len());
 
         for (offset, stream) in streams.iter_mut().enumerate() {
             if let Some(entry) = stream.next().await {
-                peeked.push(CmpEntry::new(offset, entry?));
+                peeked.push(CmpEntry::new(offset, entry?, asc));
             }
         }
 
@@ -47,6 +49,7 @@ where
             buf: None,
             ts,
             limit: None,
+            asc
         };
         merge_stream.next().await;
 
@@ -83,7 +86,7 @@ where
                 None => return Poll::Ready(None),
             };
             if let Some(next) = next {
-                this.peeked.push(CmpEntry::new(offset, next));
+                this.peeked.push(CmpEntry::new(offset, next, *this.asc));
             }
             if peeked.entry.key().ts > *ts {
                 continue;
@@ -110,14 +113,15 @@ where
 {
     offset: usize,
     entry: Entry<'stream, R>,
+    asc: Option<bool>,
 }
 
 impl<'stream, R> CmpEntry<'stream, R>
 where
     R: Record,
 {
-    fn new(offset: usize, entry: Entry<'stream, R>) -> Self {
-        Self { offset, entry }
+    fn new(offset: usize, entry: Entry<'stream, R>, asc: Option<bool>) -> Self {
+        Self { offset, entry, asc }
     }
 }
 
@@ -146,11 +150,18 @@ where
     R: Record,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.entry
-            .key()
-            .cmp(&other.entry.key())
-            .then(self.offset.cmp(&other.offset))
-            .reverse()
+        if self.asc == Some(false) {
+            self.entry
+                .key()
+                .cmp(&other.entry.key())
+                .then(self.offset.cmp(&other.offset))
+        } else {
+            self.entry
+                .key()
+                .cmp(&other.entry.key())
+                .then(self.offset.cmp(&other.offset))
+                .reverse()
+        }
     }
 }
 
@@ -231,6 +242,7 @@ mod tests {
                 m3.scan(bound, 6.into()).into(),
             ],
             6.into(),
+            None,
         )
         .await
         .unwrap();
@@ -310,7 +322,11 @@ mod tests {
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge =
-            MergeStream::<String>::from_vec(vec![m1.scan(bound, 0.into()).into()], 0.into())
+            MergeStream::<String>::from_vec(
+                vec![m1.scan(bound, 0.into()).into()],
+                0.into(),
+                None
+            )
                 .await
                 .unwrap();
 
@@ -338,7 +354,11 @@ mod tests {
         let upper = "4".to_string();
         let bound = (Bound::Included(&lower), Bound::Included(&upper));
         let mut merge =
-            MergeStream::<String>::from_vec(vec![m1.scan(bound, 1.into()).into()], 1.into())
+            MergeStream::<String>::from_vec(
+                vec![m1.scan(bound, 1.into()).into()],
+                1.into(),
+                None
+            )
                 .await
                 .unwrap();
 
@@ -400,6 +420,7 @@ mod tests {
                     .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
                     .into()],
                 0.into(),
+                None,
             )
             .await
             .unwrap()
@@ -420,6 +441,7 @@ mod tests {
                     .scan((Bound::Included(&lower), Bound::Included(&upper)), 0.into())
                     .into()],
                 1.into(),
+                None
             )
             .await
             .unwrap()

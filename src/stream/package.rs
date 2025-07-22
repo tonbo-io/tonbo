@@ -192,6 +192,7 @@ mod tests {
                 .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
                 .into()],
             6.into(),
+            None,
         )
         .await
         .unwrap();
