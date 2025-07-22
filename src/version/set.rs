@@ -520,6 +520,7 @@ pub(crate) mod tests {
                         max: "1".to_string(),
                         gen: gen_0,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -537,6 +538,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -553,6 +555,7 @@ pub(crate) mod tests {
                         max: "5".to_string(),
                         gen: gen_2,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -580,6 +583,7 @@ pub(crate) mod tests {
                             max: "1".to_string(),
                             gen: gen_0,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 1 },
@@ -590,6 +594,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 2 },
@@ -600,6 +605,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 3 },
@@ -640,6 +646,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -687,6 +694,7 @@ pub(crate) mod tests {
                             max: "1".to_string(),
                             gen: gen_0,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -696,6 +704,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -705,6 +714,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Remove {
@@ -741,6 +751,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7
                     },
                 },
                 VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -773,6 +784,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7
                     },
                 },
                 VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -865,6 +877,7 @@ pub(crate) mod tests {
                         max: "6".to_string(),
                         gen: gen_0,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -882,6 +895,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -891,6 +905,7 @@ pub(crate) mod tests {
                             max: "9".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -900,6 +915,7 @@ pub(crate) mod tests {
                             max: "0".to_string(),
                             gen: gen_3,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                 ],

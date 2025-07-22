@@ -138,6 +138,7 @@ mod tests {
                     max: "Max".to_string(),
                     gen: Default::default(),
                     wal_ids: Some(vec![generate_file_id(), generate_file_id()]),
+                    file_size: 13,
                 },
             },
             VersionEdit::Remove {
