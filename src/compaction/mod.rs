@@ -16,8 +16,7 @@ use crate::{
     record::{KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
-    transaction::CommitError,
-    version::{edit::VersionEdit, VersionError},
+    version::edit::VersionEdit,
     DbOption,
 };
 
@@ -145,6 +144,8 @@ where
             Some(option.write_parquet_properties.clone()),
         )?;
         writer.write(columns.as_record_batch()).await?;
+
+        let file_size = writer.bytes_written() as u64;
         writer.close().await?;
         version_edits.push(VersionEdit::Add {
             level: level as u8,
@@ -153,6 +154,7 @@ where
                 max: max.take().ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: None,
+                file_size,
             },
         });
         Ok(())
@@ -189,7 +191,7 @@ pub(crate) mod tests {
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
+    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
     where
         R: Record + Send,
     {
@@ -211,7 +213,7 @@ pub(crate) mod tests {
         schema: &Arc<R::Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), DbError<R>>
+    ) -> Result<(), DbError>
     where
         R: Record + Send,
     {
@@ -454,30 +456,35 @@ pub(crate) mod tests {
             max: 3.to_string(),
             gen: table_gen_1,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[0].push(Scope {
             min: 4.to_string(),
             max: 6.to_string(),
             gen: table_gen_2,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 1.to_string(),
             max: 3.to_string(),
             gen: table_gen_3,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 4.to_string(),
             max: 6.to_string(),
             gen: table_gen_4,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 7.to_string(),
             max: 9.to_string(),
             gen: table_gen_5,
             wal_ids: None,
+            file_size: 13,
         });
         (
             (

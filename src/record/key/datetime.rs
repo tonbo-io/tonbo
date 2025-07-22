@@ -51,9 +51,7 @@ macro_rules! make_time_type {
         }
 
         impl Decode for $struct_name {
-            type Error = fusio::Error;
-
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
             where
                 R: fusio::SeqRead,
             {
@@ -70,9 +68,7 @@ macro_rules! make_time_type {
         }
 
         impl Encode for $struct_name {
-            type Error = fusio::Error;
-
-            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+            async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
             where
                 W: fusio::Write,
             {
@@ -158,9 +154,7 @@ macro_rules! make_date_type {
         }
 
         impl Decode for $struct_name {
-            type Error = fusio::Error;
-
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
             where
                 R: fusio::SeqRead,
             {
@@ -171,9 +165,7 @@ macro_rules! make_date_type {
         }
 
         impl Encode for $struct_name {
-            type Error = fusio::Error;
-
-            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+            async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
             where
                 W: fusio::Write,
             {
