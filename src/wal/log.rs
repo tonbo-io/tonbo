@@ -57,9 +57,7 @@ impl<R> Encode for Log<R>
 where
     R: Record,
 {
-    type Error = fusio::Error;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
@@ -87,9 +85,7 @@ impl<Re> Decode for Log<Re>
 where
     Re: Record,
 {
-    type Error = fusio::Error;
-
-    async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
     where
         R: SeqRead,
     {

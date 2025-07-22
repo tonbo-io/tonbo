@@ -202,7 +202,7 @@ where
     /// according to the configuration of [`DbOption`].
     ///
     /// For more configurable options, please refer to [`DbOption`].
-    pub async fn new(option: DbOption, executor: E, schema: R::Schema) -> Result<Self, DbError<R>> {
+    pub async fn new(option: DbOption, executor: E, schema: R::Schema) -> Result<Self, DbError> {
         Self::build(
             Arc::new(option),
             executor,
@@ -224,7 +224,7 @@ where
         executor: E,
         schema: R::Schema,
         lru_cache: ParquetLru,
-    ) -> Result<Self, DbError<R>> {
+    ) -> Result<Self, DbError> {
         let record_schema = Arc::new(schema);
         let manager = Arc::new(StoreManager::new(
             option.base_fs.clone(),
@@ -451,7 +451,7 @@ where
         }
     }
 
-    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), DbError<R>> {
+    pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), DbError> {
         let schema = self.schema.read().await;
 
         if schema.write(LogType::Full, record, ts).await? {
@@ -466,7 +466,7 @@ where
         &self,
         mut records: impl ExactSizeIterator<Item = R>,
         ts: Timestamp,
-    ) -> Result<(), DbError<R>> {
+    ) -> Result<(), DbError> {
         let schema = self.schema.read().await;
 
         if let Some(first) = records.next() {
@@ -497,15 +497,15 @@ where
     /// There is no guarantee that the data will be flushed to WAL because of the buffer. So it is
     /// necessary to call this method before exiting if data loss is not acceptable. See also
     /// [`DbOption::disable_wal`] and [`DbOption::wal_buffer_size`].
-    pub async fn flush_wal(&self) -> Result<(), DbError<R>> {
-        self.schema.write().await.flush_wal().await?;
+    pub async fn flush_wal(&self) -> Result<(), DbError> {
+        self.schema.read().await.flush_wal().await?;
         Ok(())
     }
 
     /// Destroy [`DB`].
     ///
     /// **Note:** This will remove all wal and manifest file in the directory.
-    pub async fn destroy(self) -> Result<(), DbError<R>> {
+    pub async fn destroy(self) -> Result<(), DbError> {
         self.schema.write().await.destroy(&self.ctx.manager).await?;
         if let Some(ctx) = Arc::into_inner(self.ctx) {
             ctx.version_set.destroy().await?;
@@ -541,7 +541,7 @@ where
         version_set: &VersionSet<R>,
         record_schema: Arc<R::Schema>,
         manager: &StoreManager,
-    ) -> Result<Self, DbError<R>> {
+    ) -> Result<Self, DbError> {
         let base_fs = manager.base_fs();
         let wal_dir_path = option.wal_dir_path();
         let mut transaction_map = HashMap::new();
@@ -643,7 +643,7 @@ where
     }
 
     // Write individual record to mutable memtable
-    async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError<R>> {
+    async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError> {
         self.mutable.insert(log_ty, record, ts).await
     }
 
@@ -653,7 +653,7 @@ where
         log_ty: LogType,
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
-    ) -> Result<bool, DbError<R>> {
+    ) -> Result<bool, DbError> {
         self.mutable.remove(log_ty, key, ts).await
     }
 
@@ -663,7 +663,7 @@ where
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<bool, DbError<R>> {
+    ) -> Result<bool, DbError> {
         // Passes in None as we do not need it to be durably logged
         self.mutable.append(None, key, ts, value).await
     }
@@ -676,7 +676,7 @@ where
         key: &'get <R::Schema as Schema>::Key,
         ts: Timestamp,
         projection: Projection<'get>,
-    ) -> Result<Option<Entry<'get, R>>, DbError<R>> {
+    ) -> Result<Option<Entry<'get, R>>, DbError> {
         let primary_key_index = self.record_schema.primary_key_index();
         let schema = ctx.arrow_schema();
 
@@ -737,13 +737,13 @@ where
     }
 
     // Flush the write ahead log to disk
-    async fn flush_wal(&self) -> Result<(), DbError<R>> {
+    async fn flush_wal(&self) -> Result<(), DbError> {
         self.mutable.flush_wal().await?;
         Ok(())
     }
 
     // Remove all WALs from the filesystem
-    async fn destroy(&mut self, manager: &StoreManager) -> Result<(), DbError<R>> {
+    async fn destroy(&mut self, manager: &StoreManager) -> Result<(), DbError> {
         self.mutable.destroy().await?;
 
         let base_fs = manager.base_fs();
@@ -874,7 +874,7 @@ where
     /// Get a Stream that returns single row of Record
     pub async fn take(
         self,
-    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError<R>> {
+    ) -> Result<impl Stream<Item = Result<Entry<'scan, R>, ParquetError>>, DbError> {
         let mut streams = Vec::new();
         let is_projection = self.projection_indices.is_some();
 
@@ -928,7 +928,7 @@ where
         batch_size: usize,
     ) -> Result<
         impl Stream<Item = Result<<R::Schema as Schema>::Columns, ParquetError>> + 'scan,
-        DbError<R>,
+        DbError,
     > {
         let mut streams = Vec::new();
         let is_projection = self.projection_indices.is_some();
@@ -981,14 +981,11 @@ where
 }
 
 #[derive(Debug, Error)]
-pub enum DbError<R>
-where
-    R: Record,
-{
+pub enum DbError {
     #[error("write io error: {0}")]
     Io(#[from] io::Error),
     #[error("write version error: {0}")]
-    Version(#[from] VersionError<R>),
+    Version(#[from] VersionError),
     #[error("write parquet error: {0}")]
     Parquet(#[from] ParquetError),
     #[error("write ulid decode error: {0}")]
@@ -998,7 +995,7 @@ where
     // #[error("write encode error: {0}")]
     // Encode(<<R as Record>::Ref as Encode>::Error),
     #[error("write recover error: {0}")]
-    Recover(#[from] RecoverError<<R as Decode>::Error>),
+    Recover(#[from] RecoverError<fusio::Error>),
     #[error("wal write error: {0}")]
     WalWrite(Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("exceeds the maximum level(0-6)")]
@@ -1049,8 +1046,7 @@ pub(crate) mod tests {
         record::{
             option::OptionRecordRef,
             runtime::test::{test_dyn_item_schema, test_dyn_items},
-            DataType, DynRecord, Key, RecordDecodeError, RecordEncodeError, RecordRef,
-            Schema as RecordSchema, Value, F32, F64,
+            DataType, DynRecord, Key, RecordRef, Schema as RecordSchema, Value, F32, F64,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
@@ -1066,33 +1062,13 @@ pub(crate) mod tests {
     }
 
     impl Decode for Test {
-        type Error = RecordDecodeError;
-
-        async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+        async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
         where
             R: SeqRead,
         {
-            let vstring =
-                String::decode(reader)
-                    .await
-                    .map_err(|err| RecordDecodeError::Decode {
-                        field_name: "vstring".to_string(),
-                        error: Box::new(err),
-                    })?;
-            let vu32 = Option::<u32>::decode(reader)
-                .await
-                .map_err(|err| RecordDecodeError::Decode {
-                    field_name: "vu32".to_string(),
-                    error: Box::new(err),
-                })?
-                .unwrap();
-            let vbool =
-                Option::<bool>::decode(reader)
-                    .await
-                    .map_err(|err| RecordDecodeError::Decode {
-                        field_name: "vbool".to_string(),
-                        error: Box::new(err),
-                    })?;
+            let vstring = String::decode(reader).await?;
+            let vu32 = Option::<u32>::decode(reader).await?.unwrap();
+            let vbool = Option::<bool>::decode(reader).await?;
 
             Ok(Self {
                 vstring,
@@ -1138,33 +1114,13 @@ pub(crate) mod tests {
     }
 
     impl<'r> Encode for TestRef<'r> {
-        type Error = RecordEncodeError;
-
-        async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+        async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
         where
             W: Write,
         {
-            self.vstring
-                .encode(writer)
-                .await
-                .map_err(|err| RecordEncodeError::Encode {
-                    field_name: "vstring".to_string(),
-                    error: Box::new(err),
-                })?;
-            self.vu32
-                .encode(writer)
-                .await
-                .map_err(|err| RecordEncodeError::Encode {
-                    field_name: "vu32".to_string(),
-                    error: Box::new(err),
-                })?;
-            self.vbool
-                .encode(writer)
-                .await
-                .map_err(|err| RecordEncodeError::Encode {
-                    field_name: "vbool".to_string(),
-                    error: Box::new(err),
-                })?;
+            self.vstring.encode(writer).await?;
+            self.vu32.encode(writer).await?;
+            self.vbool.encode(writer).await?;
 
             Ok(())
         }
@@ -1416,7 +1372,7 @@ pub(crate) mod tests {
         record_schema: Arc<R::Schema>,
         version: Version<R>,
         manager: Arc<StoreManager>,
-    ) -> Result<DB<R, E>, DbError<R>>
+    ) -> Result<DB<R, E>, DbError>
     where
         R: Record + Send + Sync,
         <R::Schema as RecordSchema>::Columns: Send + Sync,
