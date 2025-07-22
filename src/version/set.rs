@@ -752,6 +752,7 @@ pub(crate) mod tests {
                 max: "4".to_string(),
                 gen: gen_d,
                 wal_ids: None,
+                file_size: 0,
             });
             guard.current = Arc::new(v);
         }
@@ -769,6 +770,7 @@ pub(crate) mod tests {
                             max: "2".to_string(),
                             gen: gen_b,
                             wal_ids: None,
+                            file_size: 0,
                         },
                     },
                     VersionEdit::Add {
@@ -778,6 +780,7 @@ pub(crate) mod tests {
                             max: "1".to_string(),
                             gen: gen_a,
                             wal_ids: None,
+                            file_size: 0,
                         },
                     },
                     VersionEdit::Add {
@@ -787,6 +790,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_c,
                             wal_ids: None,
+                            file_size: 0,
                         },
                     },
                 ],
@@ -841,12 +845,14 @@ pub(crate) mod tests {
                 max: "4".to_string(),
                 gen: gen_d,
                 wal_ids: None,
+                file_size: 0,
             });
             v.level_slice[1].push(Scope {
                 min: "8".to_string(),
                 max: "8".to_string(),
                 gen: gen_d,
                 wal_ids: None,
+                file_size: 0,
             });
             guard.current = Arc::new(v);
         }
@@ -864,6 +870,7 @@ pub(crate) mod tests {
                             max: "2".to_string(),
                             gen: gen_b,
                             wal_ids: None,
+                            file_size: 0,
                         },
                     },
                     VersionEdit::Add {
@@ -873,6 +880,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_a,
                             wal_ids: None,
+                            file_size: 0,
                         },
                     },
                     VersionEdit::Add {
@@ -882,6 +890,7 @@ pub(crate) mod tests {
                             max: "7".to_string(),
                             gen: gen_c,
                             wal_ids: None,
+                            file_size: 0,
                         },
                     },
                 ],
