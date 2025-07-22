@@ -96,6 +96,7 @@ fusio-log = { git = "https://github.com/tonbo-io/fusio", rev = "8851f95e6078e75e
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio", rev = "8851f95e6078e75e20cb019139febd884a995140", version = "0.3.8", package = "fusio-parquet" }
 futures-core = "0.3"
 futures-util = "0.3"
+itertools = { version = "0.14.0" }
 lockable = "0.1.1"
 once_cell = "1"
 parquet = { version = "55", default-features = false, features = [
