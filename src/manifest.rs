@@ -5,6 +5,7 @@
 //! information.
 
 use async_trait::async_trait;
+use fusio::{MaybeSend, MaybeSync};
 use thiserror::Error;
 
 use crate::{
@@ -28,9 +29,10 @@ where
 /// including version sets, SSTable structures, and MVCC information. Different
 /// implementations may choose to store and access manifest using different
 /// backends (local, remote database, distributed consensus, etc.)
-#[async_trait]
 #[allow(unused)]
-pub(crate) trait ManifestStorage<R: Record>: Send + Sync + TransactionTs {
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub(crate) trait ManifestStorage<R: Record>: MaybeSend + MaybeSync + TransactionTs {
     /// Return reference to the current version of the LSM-tree.
     async fn current(&self) -> VersionRef<R>;
 

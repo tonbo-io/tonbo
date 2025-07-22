@@ -42,7 +42,7 @@ tokio = [
     "tokio/rt-multi-thread",
 ]
 tokio-http = ["fusio/tokio-http", "fusio-log/tokio-http"]
-wasm = ["aws", "bytes", "opfs", "wasm-http"]
+wasm = ["aws", "bytes", "opfs", "wasm-http", "dep:async-trait"]
 wasm-http = ["fusio/wasm-http", "fusio-log/web-http"]
 
 [[example]]
