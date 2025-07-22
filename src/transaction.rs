@@ -80,7 +80,7 @@ where
         &'get self,
         key: &'get <R::Schema as RecordSchema>::Key,
         projection: Projection<'get>,
-    ) -> Result<Option<TransactionEntry<'get, R>>, DbError<R>> {
+    ) -> Result<Option<TransactionEntry<'get, R>>, DbError> {
         Ok(match self.local.get(key) {
             Some(v) => v.as_ref().map(|v| {
                 let mut record_ref = v.as_record_ref();
@@ -319,7 +319,7 @@ where
     #[error("transaction parquet error {:?}", .0)]
     Parquet(#[from] ParquetError),
     #[error("transaction database error {:?}", .0)]
-    Database(#[from] DbError<R>),
+    Database(#[from] DbError),
     #[error("transaction write conflict: {:?}", .0)]
     WriteConflict(<R::Schema as RecordSchema>::Key),
     #[error("Failed to send compact task")]

@@ -14,7 +14,7 @@ where
     #[error("compaction fusio error: {0}")]
     Fusio(#[from] fusio::Error),
     #[error("compaction manifest storage error: {0}")]
-    Manifest(#[from] ManifestStorageError<R>),
+    Manifest(#[from] ManifestStorageError),
     #[error("compaction logger error: {0}")]
     Logger(#[from] fusio_log::error::LogError),
     #[error("compaction channel is closed")]

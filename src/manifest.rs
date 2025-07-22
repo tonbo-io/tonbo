@@ -15,12 +15,9 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-pub enum ManifestStorageError<R>
-where
-    R: Record,
-{
+pub enum ManifestStorageError {
     #[error("manifest version error")]
-    Version(#[from] VersionError<R>),
+    Version(#[from] VersionError),
 }
 
 /// Trait for storing and managing LSM-tree manifest
@@ -42,19 +39,19 @@ pub(crate) trait ManifestStorage<R: Record>: MaybeSend + MaybeSync + Transaction
         &self,
         version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<SsTableID>>,
-    ) -> Result<(), ManifestStorageError<R>>;
+    ) -> Result<(), ManifestStorageError>;
 
     /// Apply version edits and update the manifest.
     async fn update(
         &self,
         version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<SsTableID>>,
-    ) -> Result<(), ManifestStorageError<R>>;
+    ) -> Result<(), ManifestStorageError>;
 
     /// Perform a rewrite of manifest log. Can be used to perform log
     /// compaction.
-    async fn rewrite(&self) -> Result<(), ManifestStorageError<R>>;
+    async fn rewrite(&self) -> Result<(), ManifestStorageError>;
 
     /// Completely destroy all manifest data.
-    async fn destroy(&mut self) -> Result<(), ManifestStorageError<R>>;
+    async fn destroy(&mut self) -> Result<(), ManifestStorageError>;
 }
