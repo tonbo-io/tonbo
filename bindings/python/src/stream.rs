@@ -7,19 +7,19 @@ use pyo3::{
 };
 use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::Mutex;
-use tonbo::{parquet::errors::ParquetError, record::DynRecord, stream};
+use tonbo::{parquet::errors::ParquetError, record::DynRecord, Entry};
 
 use crate::utils::to_dict;
 
 type AsyncStream =
-    Pin<Box<dyn Stream<Item = Result<stream::Entry<'static, DynRecord>, ParquetError>> + Send>>;
+    Pin<Box<dyn Stream<Item = Result<Entry<'static, DynRecord>, ParquetError>> + Send>>;
 
 #[pyclass]
 pub struct ScanStream(Arc<Mutex<AsyncStream>>);
 
 impl ScanStream {
     pub fn new(
-        stream: impl Stream<Item = Result<stream::Entry<'static, DynRecord>, ParquetError>>
+        stream: impl Stream<Item = Result<Entry<'static, DynRecord>, ParquetError>>
             + 'static
             + Sized
             + Send,

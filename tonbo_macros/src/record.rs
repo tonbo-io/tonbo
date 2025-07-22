@@ -390,7 +390,7 @@ fn struct_schema_codegen(
 
             fn primary_key_path(&self) -> (::tonbo::parquet::schema::types::ColumnPath, Vec<::tonbo::parquet::format::SortingColumn>) {
                 (
-                    ::tonbo::parquet::schema::types::ColumnPath::new(vec![::tonbo::magic::TS.to_string(), stringify!(#primary_key_name).to_string()]),
+                    ::tonbo::parquet::schema::types::ColumnPath::new(vec![::tonbo::TS.to_string(), stringify!(#primary_key_name).to_string()]),
                     vec![::tonbo::parquet::format::SortingColumn::new(1_i32, true, true), ::tonbo::parquet::format::SortingColumn::new(#primary_key_index as i32, false, true)]
                 )
             }
@@ -399,7 +399,7 @@ fn struct_schema_codegen(
                 static SCHEMA: ::tonbo::once_cell::sync::Lazy<::std::sync::Arc<::tonbo::arrow::datatypes::Schema>> = ::tonbo::once_cell::sync::Lazy::new(|| {
                     ::std::sync::Arc::new(::tonbo::arrow::datatypes::Schema::new(vec![
                         ::tonbo::arrow::datatypes::Field::new("_null", ::tonbo::arrow::datatypes::DataType::Boolean, false),
-                        ::tonbo::arrow::datatypes::Field::new(::tonbo::magic::TS, ::tonbo::arrow::datatypes::DataType::UInt32, false),
+                        ::tonbo::arrow::datatypes::Field::new(::tonbo::TS, ::tonbo::arrow::datatypes::DataType::UInt32, false),
                         #(#schema_fields)*
                     ]))
                 });
@@ -682,7 +682,7 @@ fn trait_arrow_array_codegen(
     let struct_arrays_name = struct_name.to_immutable_array_ident();
 
     quote! {
-        impl ::tonbo::inmem::immutable::ArrowArrays for #struct_arrays_name {
+        impl ::tonbo::ArrowArrays for #struct_arrays_name {
             type Record = #struct_name;
 
             type Builder = #struct_builder_name;
@@ -818,8 +818,8 @@ fn struct_builder_codegen(
             _ts: ::tonbo::arrow::array::UInt32Builder,
         }
 
-        impl ::tonbo::inmem::immutable::Builder<#struct_arrays_name> for #struct_builder_name {
-            fn push(&mut self, key: ::tonbo::timestamp::Ts<<<<#struct_name as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
+        impl ::tonbo::Builder<#struct_arrays_name> for #struct_builder_name {
+            fn push(&mut self, key: ::tonbo::Ts<<<<#struct_name as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {
                     Some(row) => {
