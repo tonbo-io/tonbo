@@ -18,6 +18,7 @@ use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
     manifest::{ManifestStorage, ManifestStorageError},
+    ondisk::sstable::SsTableID,
     record::{Record, Schema},
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
@@ -53,7 +54,7 @@ where
     current: VersionRef<R>,
     log_id: FileId,
     deleted_wal: Vec<FileId>,
-    deleted_sst: Vec<(FileId, usize)>,
+    deleted_sst: Vec<SsTableID>,
 }
 
 pub(crate) struct VersionSet<R>
@@ -180,7 +181,13 @@ where
             option,
             manager,
         };
-        set.apply_edits(edits, None, true).await?;
+
+        // Only generate a new manifest if there is no rewrites
+        if edits.is_empty() {
+            set.rewrite().await?;
+        } else {
+            set.apply_edits(edits, None, true).await?;
+        }
 
         Ok(set)
     }
@@ -188,7 +195,7 @@ where
     async fn apply_edits(
         &self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
         is_recover: bool,
     ) -> Result<(), VersionError<R>> {
         let timestamp = &self.timestamp;
@@ -235,7 +242,7 @@ where
                     }
                     if is_recover {
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
-                        guard.deleted_sst.push((gen, level as usize));
+                        guard.deleted_sst.push(SsTableID::new(gen, level as usize));
                     }
                 }
                 VersionEdit::LatestTimeStamp { ts } => {

@@ -29,9 +29,7 @@ use fusio::path::Path;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
-use tonbo::{
-    executor::tokio::TokioExecutor, inmem::immutable::ArrowArrays, record::Schema, DbOption, DB,
-};
+use tonbo::{executor::tokio::TokioExecutor, record::Schema, ArrowArrays, DbOption, DB};
 use tonbo_macros::Record;
 
 #[derive(Record, Debug)]

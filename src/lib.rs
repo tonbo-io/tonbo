@@ -109,17 +109,17 @@
 mod compaction;
 mod context;
 pub mod executor;
-pub mod fs;
-pub mod inmem;
-pub mod magic;
 mod manifest;
+pub(crate) mod fs;
+pub(crate) mod inmem;
+pub(crate) mod magic;
 mod ondisk;
 pub mod option;
 pub mod record;
 mod scope;
-pub mod snapshot;
-pub mod stream;
-pub mod timestamp;
+pub(crate) mod snapshot;
+pub(crate) mod stream;
+pub(crate) mod timestamp;
 pub mod transaction;
 mod trigger;
 mod version;
@@ -159,21 +159,27 @@ use transaction::{CommitError, Transaction, TransactionEntry};
 use trigger::FreezeTrigger;
 use wal::log::Log;
 
-pub use crate::option::*;
+// Re-export items needed by macros and tests
+#[doc(hidden)]
+pub use crate::inmem::immutable::{ArrowArrays, Builder};
+#[doc(hidden)]
+pub use crate::magic::TS;
+#[doc(hidden)]
+pub use crate::timestamp::Ts;
 use crate::{
-    compaction::{CompactTask, CompactionError, Compactor},
+    compaction::{error::CompactionError, CompactTask, Compactor},
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileType},
     record::Schema,
     snapshot::Snapshot,
     stream::{
-        mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, Entry,
-        ScanStream,
+        mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, ScanStream,
     },
     trigger::TriggerFactory,
     version::{cleaner::Cleaner, set::VersionSet, TransactionTs, Version, VersionError},
     wal::{log::LogType, RecoverError, WalFile},
 };
+pub use crate::{option::*, stream::Entry};
 
 pub struct DB<R, E>
 where
@@ -1020,7 +1026,7 @@ pub(crate) mod tests {
 
     use crate::{
         cast_arc_value,
-        compaction::{leveled::LeveledCompactor, CompactTask, CompactionError, Compactor},
+        compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},

@@ -1,3 +1,4 @@
+pub(crate) mod error;
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
@@ -10,6 +11,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
     manifest::ManifestStorageError,
