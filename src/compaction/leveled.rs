@@ -10,7 +10,7 @@ use crate::{
     context::Context,
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
     inmem::{immutable::Immutable, mutable::MutableMemTable},
-    ondisk::sstable::SsTable,
+    ondisk::sstable::{SsTable, SsTableID},
     record::{Record, Schema as RecordSchema},
     scope::Scope,
     stream::{level::LevelStream, ScanStream},
@@ -183,12 +183,14 @@ where
                     wal_ids.push(*file_id);
                 }
             }
+            let file_size = writer.bytes_written() as u64;
             writer.close().await?;
             return Ok(Some(Scope {
                 min: min.ok_or(CompactionError::EmptyLevel)?,
                 max: max.ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: Some(wal_ids),
+                file_size,
             }));
         }
         Ok(None)
@@ -201,7 +203,7 @@ where
         mut min: &<R::Schema as RecordSchema>::Key,
         mut max: &<R::Schema as RecordSchema>::Key,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
-        delete_gens: &mut Vec<(FileId, usize)>,
+        delete_gens: &mut Vec<SsTableID>,
         instance: &R::Schema,
         ctx: &Context<R>,
     ) -> Result<(), CompactionError<R>> {
@@ -300,14 +302,14 @@ where
                     level: level as u8,
                     gen: scope.gen,
                 });
-                delete_gens.push((scope.gen, level));
+                delete_gens.push(SsTableID::new(scope.gen, level));
             }
             for scope in meet_scopes_ll {
                 version_edits.push(VersionEdit::Remove {
                     level: (level + 1) as u8,
                     gen: scope.gen,
                 });
-                delete_gens.push((scope.gen, level + 1));
+                delete_gens.push(SsTableID::new(scope.gen, level + 1));
             }
             level += 1;
         }
@@ -458,7 +460,7 @@ pub(crate) mod tests {
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
+    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
     where
         R: Record + Send,
     {
@@ -838,12 +840,14 @@ pub(crate) mod tests {
             max: 4.to_string(),
             gen: table_gen0,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 5.to_string(),
             max: 9.to_string(),
             gen: table_gen1,
             wal_ids: None,
+            file_size: 13,
         });
 
         let mut version_edits = Vec::new();

@@ -16,6 +16,7 @@ use futures_util::StreamExt;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
+    ondisk::sstable::SsTableID,
     record::{Record, Schema},
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
@@ -57,7 +58,7 @@ where
     // List of WAL file ids that can be deleted
     deleted_wal: Vec<FileId>,
     // List of SST file ids that can be deleted
-    deleted_sst: Vec<(FileId, usize)>,
+    deleted_sst: Vec<SsTableID>,
 }
 
 /// Coordinator for tracking and managing versions of on-disk state
@@ -118,7 +119,7 @@ where
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<Self, VersionError<R>> {
+    ) -> Result<Self, VersionError> {
         let fs = manager.base_fs();
         let version_dir = option.version_log_dir_path();
         let mut log_stream = fs.list(&version_dir).await?;
@@ -224,9 +225,9 @@ where
     pub(crate) async fn apply_edits(
         &self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
         is_recover: bool,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         let timestamp = &self.timestamp;
         let option = &self.option;
         let mut guard = self.inner.write().await;
@@ -276,7 +277,7 @@ where
                     }
                     if is_recover {
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
-                        guard.deleted_sst.push((gen, level as usize));
+                        guard.deleted_sst.push(SsTableID::new(gen, level as usize));
                     }
                 }
                 // [`VersionEdit::LatestTimestamp`]: update the latest timestamp
@@ -311,7 +312,7 @@ where
     }
 
     /// Creates a new manifest file and deletes the old one
-    pub(crate) async fn rewrite(&self) -> Result<(), VersionError<R>> {
+    pub(crate) async fn rewrite(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
         let fs = self.manager.local_fs();
@@ -335,7 +336,7 @@ where
     }
 
     // Delete the remaining WAL and SST files
-    async fn clean(&self) -> Result<(), VersionError<R>> {
+    async fn clean(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let version = Version::clone(&guard.current);
         if !guard.deleted_wal.is_empty() {
@@ -370,7 +371,7 @@ where
         log_id: FileId,
         old_log_id: FileId,
         edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
             // push local manifest to base file system
             let base_fs = self.manager.base_fs();
@@ -391,7 +392,7 @@ where
         option: &DbOption,
         fs: Arc<dyn DynFs>,
         gen: FileId,
-    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
+    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError> {
         Options::new(option.version_log_path(gen))
             .build_with_fs(fs)
             .await
@@ -399,7 +400,7 @@ where
     }
 
     /// Deletes all on-disk data for this store version
-    pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
+    pub(crate) async fn destroy(self) -> Result<(), VersionError> {
         let log_dir_path = self.option.version_log_dir_path();
         let log_fs = self.manager.base_fs();
         let mut log_stream = log_fs.list(&log_dir_path).await?;
@@ -463,7 +464,7 @@ pub(crate) mod tests {
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<VersionSet<R>, VersionError<R>>
+    ) -> Result<VersionSet<R>, VersionError>
     where
         R: Record,
     {
@@ -561,6 +562,7 @@ pub(crate) mod tests {
                         max: "1".to_string(),
                         gen: gen_0,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -578,6 +580,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -594,6 +597,7 @@ pub(crate) mod tests {
                         max: "5".to_string(),
                         gen: gen_2,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -621,6 +625,7 @@ pub(crate) mod tests {
                             max: "1".to_string(),
                             gen: gen_0,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 1 },
@@ -631,6 +636,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 2 },
@@ -641,6 +647,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 3 },
@@ -681,6 +688,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -728,6 +736,7 @@ pub(crate) mod tests {
                             max: "1".to_string(),
                             gen: gen_0,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -737,6 +746,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -746,6 +756,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Remove {
@@ -782,6 +793,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7
                     },
                 },
                 VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -814,6 +826,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7
                     },
                 },
                 VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -906,6 +919,7 @@ pub(crate) mod tests {
                         max: "6".to_string(),
                         gen: gen_0,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -923,6 +937,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -932,6 +947,7 @@ pub(crate) mod tests {
                             max: "9".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -941,6 +957,7 @@ pub(crate) mod tests {
                             max: "0".to_string(),
                             gen: gen_3,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                 ],
