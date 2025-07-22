@@ -1,3 +1,4 @@
+pub(crate) mod error;
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
@@ -6,10 +7,10 @@ use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
 use leveled::LeveledCompactor;
 use parquet::arrow::AsyncArrowWriter;
-use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
     record::{KeyRef, Record, Schema as RecordSchema},
@@ -158,29 +159,6 @@ where
     }
 }
 
-#[derive(Debug, Error)]
-pub enum CompactionError<R>
-where
-    R: Record,
-{
-    #[error("compaction io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("compaction parquet error: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
-    #[error("compaction fusio error: {0}")]
-    Fusio(#[from] fusio::Error),
-    #[error("compaction version error: {0}")]
-    Version(#[from] VersionError<R>),
-    #[error("compaction logger error: {0}")]
-    Logger(#[from] fusio_log::error::LogError),
-    #[error("compaction channel is closed")]
-    ChannelClose,
-    #[error("database error: {0}")]
-    Commit(#[from] CommitError<R>),
-    #[error("the level being compacted does not have a table")]
-    EmptyLevel,
-}
-
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
@@ -211,7 +189,7 @@ pub(crate) mod tests {
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
+    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
     where
         R: Record + Send,
     {
@@ -233,7 +211,7 @@ pub(crate) mod tests {
         schema: &Arc<R::Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), DbError<R>>
+    ) -> Result<(), DbError>
     where
         R: Record + Send,
     {

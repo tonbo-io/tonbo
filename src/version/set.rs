@@ -16,6 +16,7 @@ use futures_util::StreamExt;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
+    ondisk::sstable::SsTableID,
     record::{Record, Schema},
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
@@ -51,7 +52,7 @@ where
     current: VersionRef<R>,
     log_id: FileId,
     deleted_wal: Vec<FileId>,
-    deleted_sst: Vec<(FileId, usize)>,
+    deleted_sst: Vec<SsTableID>,
 }
 
 pub(crate) struct VersionSet<R>
@@ -101,7 +102,7 @@ where
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<Self, VersionError<R>> {
+    ) -> Result<Self, VersionError> {
         let fs = manager.base_fs();
         let version_dir = option.version_log_dir_path();
         let mut log_stream = fs.list(&version_dir).await?;
@@ -178,7 +179,13 @@ where
             option,
             manager,
         };
-        set.apply_edits(edits, None, true).await?;
+
+        // Only generate a new manifest if there is no rewrites
+        if edits.is_empty() {
+            set.rewrite().await?;
+        } else {
+            set.apply_edits(edits, None, true).await?;
+        }
 
         Ok(set)
     }
@@ -190,9 +197,9 @@ where
     pub(crate) async fn apply_edits(
         &self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
         is_recover: bool,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         let timestamp = &self.timestamp;
         let option = &self.option;
         let mut guard = self.inner.write().await;
@@ -237,7 +244,7 @@ where
                     }
                     if is_recover {
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
-                        guard.deleted_sst.push((gen, level as usize));
+                        guard.deleted_sst.push(SsTableID::new(gen, level as usize));
                     }
                 }
                 VersionEdit::LatestTimeStamp { ts } => {
@@ -266,7 +273,7 @@ where
         Ok(())
     }
 
-    pub(crate) async fn rewrite(&self) -> Result<(), VersionError<R>> {
+    pub(crate) async fn rewrite(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
         let fs = self.manager.local_fs();
@@ -289,7 +296,7 @@ where
         Ok(())
     }
 
-    async fn clean(&self) -> Result<(), VersionError<R>> {
+    async fn clean(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let version = Version::clone(&guard.current);
         if !guard.deleted_wal.is_empty() {
@@ -324,7 +331,7 @@ where
         log_id: FileId,
         old_log_id: FileId,
         edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
             // push local manifest to base file system
             let base_fs = self.manager.base_fs();
@@ -344,14 +351,14 @@ where
         option: &DbOption,
         fs: Arc<dyn DynFs>,
         gen: FileId,
-    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
+    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError> {
         Options::new(option.version_log_path(gen))
             .build_with_fs(fs)
             .await
             .map_err(VersionError::Logger)
     }
 
-    pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
+    pub(crate) async fn destroy(self) -> Result<(), VersionError> {
         let log_dir_path = self.option.version_log_dir_path();
         let log_fs = self.manager.base_fs();
         let mut log_stream = log_fs.list(&log_dir_path).await?;
@@ -415,7 +422,7 @@ pub(crate) mod tests {
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<VersionSet<R>, VersionError<R>>
+    ) -> Result<VersionSet<R>, VersionError>
     where
         R: Record,
     {

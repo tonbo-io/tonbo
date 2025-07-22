@@ -12,3 +12,7 @@ This is a pure rust project, so only `cargo` is needed.
 - `cargo clippy` to catch common mistakes and improve code.
 - `cargo test` to run unit tests.
 - `cargo bench` to run benchmark tests.
+
+## Learn the internals of Tonbo
+
+If you would like to get more familiar with the architecture you can refer to the deep-wiki page [here](https://deepwiki.com/tonbo-io/tonbo/1-overview)!
