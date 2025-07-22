@@ -189,7 +189,7 @@ pub(crate) mod tests {
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
+    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
     where
         R: Record + Send,
     {
@@ -211,7 +211,7 @@ pub(crate) mod tests {
         schema: &Arc<R::Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), DbError<R>>
+    ) -> Result<(), DbError>
     where
         R: Record + Send,
     {
