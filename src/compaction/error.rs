@@ -14,7 +14,7 @@ where
     #[error("compaction fusio error: {0}")]
     Fusio(#[from] fusio::Error),
     #[error("compaction version error: {0}")]
-    Version(#[from] VersionError<R>),
+    Version(#[from] VersionError),
     #[error("compaction logger error: {0}")]
     Logger(#[from] fusio_log::error::LogError),
     #[error("compaction channel is closed")]

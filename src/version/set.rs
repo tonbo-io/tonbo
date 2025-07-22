@@ -102,7 +102,7 @@ where
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<Self, VersionError<R>> {
+    ) -> Result<Self, VersionError> {
         let fs = manager.base_fs();
         let version_dir = option.version_log_dir_path();
         let mut log_stream = fs.list(&version_dir).await?;
@@ -199,7 +199,7 @@ where
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<SsTableID>>,
         is_recover: bool,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         let timestamp = &self.timestamp;
         let option = &self.option;
         let mut guard = self.inner.write().await;
@@ -273,7 +273,7 @@ where
         Ok(())
     }
 
-    pub(crate) async fn rewrite(&self) -> Result<(), VersionError<R>> {
+    pub(crate) async fn rewrite(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
         let fs = self.manager.local_fs();
@@ -296,7 +296,7 @@ where
         Ok(())
     }
 
-    async fn clean(&self) -> Result<(), VersionError<R>> {
+    async fn clean(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let version = Version::clone(&guard.current);
         if !guard.deleted_wal.is_empty() {
@@ -331,7 +331,7 @@ where
         log_id: FileId,
         old_log_id: FileId,
         edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
             // push local manifest to base file system
             let base_fs = self.manager.base_fs();
@@ -351,14 +351,14 @@ where
         option: &DbOption,
         fs: Arc<dyn DynFs>,
         gen: FileId,
-    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
+    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError> {
         Options::new(option.version_log_path(gen))
             .build_with_fs(fs)
             .await
             .map_err(VersionError::Logger)
     }
 
-    pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
+    pub(crate) async fn destroy(self) -> Result<(), VersionError> {
         let log_dir_path = self.option.version_log_dir_path();
         let log_fs = self.manager.base_fs();
         let mut log_stream = log_fs.list(&log_dir_path).await?;
@@ -422,7 +422,7 @@ pub(crate) mod tests {
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<VersionSet<R>, VersionError<R>>
+    ) -> Result<VersionSet<R>, VersionError>
     where
         R: Record,
     {

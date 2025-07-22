@@ -7,8 +7,7 @@ use super::{schema::DynSchema, DataType, DynRecordRef, Value};
 use crate::{
     cast_arc_value,
     record::{
-        Date32, Date64, LargeBinary, LargeString, Record, RecordDecodeError, Time32, Time64,
-        Timestamp, F32, F64,
+        Date32, Date64, LargeBinary, LargeString, Record, Time32, Time64, Timestamp, F32, F64,
     },
 };
 
@@ -34,9 +33,8 @@ macro_rules! implement_record {
         { $( { $clone_ty:ty, $clone_pat:pat}), * $(,)? },
     ) => {
         impl Decode for DynRecord {
-            type Error = RecordDecodeError;
 
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
             where
                 R: SeqRead,
             {

@@ -4,7 +4,7 @@ use std::{pin::pin, sync::Arc};
 
 use async_stream::stream;
 use fusio::{disk::LocalFs, DynFs};
-use fusio_log::{error::LogError, Decode, FsOptions, Logger, Options, Path};
+use fusio_log::{error::LogError, FsOptions, Logger, Options, Path};
 use futures_core::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use thiserror::Error;
@@ -116,7 +116,7 @@ where
     pub(crate) async fn recover(
         fs_option: FsOptions,
         path: Path,
-    ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<<R as Decode>::Error>>> {
+    ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<fusio::Error>>> {
         stream! {
             let mut stream = Options::new(path)
                 .fs(fs_option)
