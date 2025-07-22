@@ -16,8 +16,7 @@ use crate::{
     record::{KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
-    transaction::CommitError,
-    version::{edit::VersionEdit, VersionError},
+    version::edit::VersionEdit,
     DbOption,
 };
 
