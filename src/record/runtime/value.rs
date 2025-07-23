@@ -12,7 +12,7 @@ use arrow::{
     datatypes::{DataType as ArrowDataType, Field},
 };
 use fusio::{SeqRead, Write};
-use fusio_log::{Decode, DecodeError, Encode};
+use fusio_log::{Decode, Encode};
 
 use super::DataType;
 use crate::record::{
@@ -265,7 +265,7 @@ macro_rules! implement_key_col {
     }
 }
 
-impl<'r> KeyRef<'r> for Value {
+impl KeyRef<'_> for Value {
     type Key = Value;
 
     fn to_key(self) -> Self::Key {
@@ -276,9 +276,8 @@ impl<'r> KeyRef<'r> for Value {
 macro_rules! implement_decode_col {
     ([], $({$Type:ty, $DataType:pat}), *) => {
         impl Decode for Value {
-            type Error = fusio::Error;
 
-            async fn decode<R>(reader: &mut R) -> Result<Self, Self::Error>
+            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
             where
                 R: SeqRead,
             {
@@ -290,13 +289,7 @@ macro_rules! implement_decode_col {
                     match datatype {
                         $(
                             $DataType => match is_some {
-                                true => Arc::new(Option::<$Type>::decode(reader).await.map_err(
-                                    |err| match err {
-                                        DecodeError::Io(error) => fusio::Error::Io(error),
-                                        DecodeError::Fusio(error) => error,
-                                        DecodeError::Inner(error) => fusio::Error::Other(Box::new(error)),
-                                    },
-                                )?) as Arc<dyn Any + Send + Sync>,
+                                true => Arc::new(Option::<$Type>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
                                 false => Arc::new(<$Type>::decode(reader).await?) as Arc<dyn Any + Send + Sync>,
                             },
                         )*
@@ -317,9 +310,8 @@ macro_rules! implement_decode_col {
 macro_rules! implement_encode_col {
     ([], $({$Type:ty, $DataType:pat}), *) => {
         impl Encode for Value {
-            type Error = fusio::Error;
 
-            async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+            async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
             where
                 W: Write,
             {

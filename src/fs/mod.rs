@@ -1,4 +1,4 @@
-pub mod manager;
+pub(crate) mod manager;
 
 use std::{
     fmt::{Display, Formatter},

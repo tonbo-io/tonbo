@@ -1,3 +1,4 @@
+pub(crate) mod error;
 pub(crate) mod leveled;
 use std::{pin::Pin, sync::Arc};
 
@@ -6,17 +7,16 @@ use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
 use leveled::LeveledCompactor;
 use parquet::arrow::AsyncArrowWriter;
-use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
     inmem::immutable::{ArrowArrays, Builder},
     record::{KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
-    transaction::CommitError,
-    version::{edit::VersionEdit, VersionError},
+    version::edit::VersionEdit,
     DbOption,
 };
 
@@ -46,11 +46,11 @@ where
         }
     }
 
-    async fn build_tables<'scan>(
+    async fn build_tables(
         option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
-        streams: Vec<ScanStream<'scan, R>>,
+        streams: Vec<ScanStream<'_, R>>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
@@ -144,6 +144,8 @@ where
             Some(option.write_parquet_properties.clone()),
         )?;
         writer.write(columns.as_record_batch()).await?;
+
+        let file_size = writer.bytes_written() as u64;
         writer.close().await?;
         version_edits.push(VersionEdit::Add {
             level: level as u8,
@@ -152,33 +154,11 @@ where
                 max: max.take().ok_or(CompactionError::EmptyLevel)?,
                 gen,
                 wal_ids: None,
+                file_size,
             },
         });
         Ok(())
     }
-}
-
-#[derive(Debug, Error)]
-pub enum CompactionError<R>
-where
-    R: Record,
-{
-    #[error("compaction io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("compaction parquet error: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
-    #[error("compaction fusio error: {0}")]
-    Fusio(#[from] fusio::Error),
-    #[error("compaction version error: {0}")]
-    Version(#[from] VersionError<R>),
-    #[error("compaction logger error: {0}")]
-    Logger(#[from] fusio_log::error::LogError),
-    #[error("compaction channel is closed")]
-    ChannelClose,
-    #[error("database error: {0}")]
-    Commit(#[from] CommitError<R>),
-    #[error("the level being compacted does not have a table")]
-    EmptyLevel,
 }
 
 #[cfg(all(test, feature = "tokio"))]
@@ -211,7 +191,7 @@ pub(crate) mod tests {
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError<R>>
+    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
     where
         R: Record + Send,
     {
@@ -233,7 +213,7 @@ pub(crate) mod tests {
         schema: &Arc<R::Schema>,
         level: usize,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), DbError<R>>
+    ) -> Result<(), DbError>
     where
         R: Record + Send,
     {
@@ -476,30 +456,35 @@ pub(crate) mod tests {
             max: 3.to_string(),
             gen: table_gen_1,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[0].push(Scope {
             min: 4.to_string(),
             max: 6.to_string(),
             gen: table_gen_2,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 1.to_string(),
             max: 3.to_string(),
             gen: table_gen_3,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 4.to_string(),
             max: 6.to_string(),
             gen: table_gen_4,
             wal_ids: None,
+            file_size: 13,
         });
         version.level_slice[1].push(Scope {
             min: 7.to_string(),
             max: 9.to_string(),
             gen: table_gen_5,
             wal_ids: None,
+            file_size: 13,
         });
         (
             (

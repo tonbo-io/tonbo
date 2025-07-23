@@ -1,5 +1,5 @@
 use std::{
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashMap},
     mem,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -12,16 +12,20 @@ use flume::Sender;
 use fusio::{fs::FileMeta, DynFs};
 use fusio_log::{Logger, Options};
 use futures_util::StreamExt;
+use itertools::Itertools;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
+    ondisk::sstable::SsTableID,
     record::{Record, Schema},
+    scope::Scope,
     timestamp::Timestamp,
     version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
     DbOption,
 };
 
+// Need to implement `PartialOrd` and `Ord` for heap insertion
 struct CmpMeta(FileMeta);
 
 impl Eq for CmpMeta {}
@@ -44,22 +48,36 @@ impl Ord for CmpMeta {
     }
 }
 
+/// Mutable state for version tracking in the engine
 pub(crate) struct VersionSetInner<R>
 where
     R: Record,
 {
+    // Current version of the DB
     current: VersionRef<R>,
+    // Active WAL file id
     log_id: FileId,
+    // List of WAL file ids that can be deleted
     deleted_wal: Vec<FileId>,
-    deleted_sst: Vec<(FileId, usize)>,
+    // List of SST file ids that can be deleted
+    deleted_sst: Vec<SsTableID>,
 }
 
+/// Coordinator for tracking and managing versions of on-disk state
+///
+/// `VersionSet` keeps track of the `VersionRef` which specifies which WALs
+/// and SST files currently make up the database. When a reader does a scan
+/// it will use the `VersionRef` to return the `Version` which contains the
+/// frozen view of its own timestamp and file lists.
 pub(crate) struct VersionSet<R>
 where
     R: Record,
 {
+    // Current snapshot version
     inner: Arc<RwLock<VersionSetInner<R>>>,
+    // Channel sender for deleting WAL/SST
     clean_sender: Sender<CleanTag>,
+    // Counter for version change
     timestamp: Arc<AtomicU32>,
     option: Arc<DbOption>,
     manager: Arc<StoreManager>,
@@ -97,26 +115,28 @@ impl<R> VersionSet<R>
 where
     R: Record,
 {
+    /// Creates a new `VersionSet` by checking the previous version log and applies previous edits
+    /// to the new log if they exist.
     pub(crate) async fn new(
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<Self, VersionError<R>> {
+    ) -> Result<Self, VersionError> {
         let fs = manager.base_fs();
         let version_dir = option.version_log_dir_path();
         let mut log_stream = fs.list(&version_dir).await?;
         let mut log_binary_heap = BinaryHeap::with_capacity(3);
 
-        // when there are multiple logs, this means that a downtime occurred during the
-        // `version_log_snap_shot` process, the second newest file has the highest data
-        // integrity, so it is used as the version log, and the older log is deleted first
-        // to avoid midway downtime, which will cause the second newest file to become the
-        // first newest after restart.
+        // Only keep the two most recent version-logs. If a crash happened while
+        // writing the newest snapshot, it may corrupt. Therefore the second newest
+        // file is guaranteed to be a complete + correct version. Delete any older
+        // logs that are older than the second newest.
         while let Some(result) = log_stream.next().await {
             let file_meta = result?;
 
             log_binary_heap.push(CmpMeta(file_meta));
 
+            // Keep only two logs, pop and remove the path of all the other logs
             if log_binary_heap.len() > 2 {
                 if let Some(old_meta) = log_binary_heap.pop() {
                     fs.remove(&old_meta.0.path).await?;
@@ -127,6 +147,8 @@ where
         let second_log_id = log_binary_heap.pop();
         let latest_log_id = log_binary_heap.pop();
 
+        // If both ids are valid we want to use the second log id instead because it
+        // is guaranteed to be safe.
         if let (Some(log_id), Some(_)) = (&latest_log_id, &second_log_id) {
             fs.remove(&log_id.0.path).await?;
         }
@@ -139,6 +161,7 @@ where
             .transpose()?
             .flatten()
         {
+            // If the log id exists we retrieve `VersionEdit`s from the version log
             Some(log_id) => {
                 let recover_edits = VersionEdit::<<R::Schema as Schema>::Key>::recover(
                     option.version_log_path(log_id),
@@ -148,6 +171,8 @@ where
                 edits = recover_edits;
                 log_id
             }
+            // If the log id does not already exist, we generate a new one and create version log
+            // path for it
             None => {
                 let log_id = generate_file_id();
                 let base_fs = manager.base_fs();
@@ -156,9 +181,9 @@ where
                 log_id
             }
         };
+        drop(log_stream);
 
         let timestamp = Arc::new(AtomicU32::default());
-        drop(log_stream);
         let set = VersionSet::<R> {
             inner: Arc::new(RwLock::new(VersionSetInner {
                 current: Arc::new(Version::<R> {
@@ -178,21 +203,33 @@ where
             option,
             manager,
         };
-        set.apply_edits(edits, None, true).await?;
+
+        // Only generate a new manifest if there is no rewrites
+        if edits.is_empty() {
+            set.rewrite().await?;
+        } else {
+            // Apply any existing edits from the previous version logs
+            set.apply_edits(edits, None, true).await?;
+        }
 
         Ok(set)
     }
 
+    /// Return current version timestamp
     pub(crate) async fn current(&self) -> VersionRef<R> {
         self.inner.read().await.current.clone()
     }
 
+    /// Applies a sequence of `VersionEdit`s to the `VersionSet`, updating both
+    /// the persistent manifest and the in‑memory snapshot. During normal operation
+    /// (when `is_recover` is false), edits are appended to the version log; during
+    /// recovery, existing edits are replayed without writing back to disk.
     pub(crate) async fn apply_edits(
         &self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
-        delete_gens: Option<Vec<(FileId, usize)>>,
+        delete_gens: Option<Vec<SsTableID>>,
         is_recover: bool,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         let timestamp = &self.timestamp;
         let option = &self.option;
         let mut guard = self.inner.write().await;
@@ -203,6 +240,8 @@ where
         let mut log =
             Self::open_version_log(&self.option, self.manager.local_fs().clone(), *log_id).await?;
 
+        // Update the log length during non recovery operations. Recovery operations are
+        // only for recovering the operations in the WAL.
         if !is_recover {
             version_edits.push(VersionEdit::NewLogLength { len: edit_len });
             log.write_batch(version_edits.iter())
@@ -210,24 +249,25 @@ where
                 .map_err(VersionError::Logger)?;
         }
 
+        // Batch `add SST` operations because adds can be consecutive
+        let mut batch_add: HashMap<u8, Vec<Scope<<R::Schema as Schema>::Key>>> = HashMap::new();
         for version_edit in version_edits {
             match version_edit {
+                // [`VersionEdit::Add`]: the WAL is garbage collected and we push the new
+                // SST into the specified level
                 VersionEdit::Add { mut scope, level } => {
                     // TODO: remove after apply
                     if let Some(wal_ids) = scope.wal_ids.take() {
                         guard.deleted_wal.extend(wal_ids);
                     }
+
                     if level == 0 {
-                        new_version.level_slice[level as usize].push(scope);
+                        new_version.level_slice[0].push(scope);
                     } else {
-                        // TODO: Add is often consecutive, so repeated queries can be avoided
-                        let sort_runs = &mut new_version.level_slice[level as usize];
-                        let pos = sort_runs
-                            .binary_search_by(|s| s.min.cmp(&scope.min))
-                            .unwrap_or_else(|index| index);
-                        sort_runs.insert(pos, scope);
+                        batch_add.entry(level).or_default().push(scope);
                     }
                 }
+                // [`VersionEdit::Remove`]: the specified SST is removed in `level_slice`
                 VersionEdit::Remove { gen, level } => {
                     if let Some(i) = new_version.level_slice[level as usize]
                         .iter()
@@ -237,20 +277,40 @@ where
                     }
                     if is_recover {
                         // issue: https://github.com/tonbo-io/tonbo/issues/123
-                        guard.deleted_sst.push((gen, level as usize));
+                        guard.deleted_sst.push(SsTableID::new(gen, level as usize));
                     }
                 }
+                // [`VersionEdit::LatestTimestamp`]: update the latest timestamp
                 VersionEdit::LatestTimeStamp { ts } => {
                     if is_recover {
+                        // Start from last persisted timestamp
                         timestamp.store(u32::from(ts), Ordering::Release);
                     }
                     new_version.ts = ts;
                 }
+                // [`VersionEdit::NewLogLength`]: the version log is updated
                 VersionEdit::NewLogLength { len } => {
                     new_version.log_length = len;
                 }
             }
         }
+
+        // Due to many compaction add operations being consecutive, this checks if the
+        // SSTs can be splice inserted instead of inserting each one individually
+        if !batch_add.is_empty() {
+            for (level, mut scopes) in batch_add.into_iter() {
+                scopes.sort_unstable_by_key(|scope| scope.min.clone());
+                let sort_runs = &mut new_version.level_slice[level as usize];
+
+                let merged: Vec<_> = scopes
+                    .iter()
+                    .cloned()
+                    .merge_by(sort_runs.iter().cloned(), |a, b| a.min <= b.min)
+                    .collect();
+                *sort_runs = merged;
+            }
+        }
+
         if let Some(delete_gens) = delete_gens {
             guard.deleted_sst.extend(delete_gens);
         }
@@ -259,6 +319,8 @@ where
         guard.current = Arc::new(new_version);
 
         drop(guard);
+
+        // Rewrite + clean if edit is not empty or during recovery
         if edit_len >= option.version_log_snapshot_threshold || is_recover {
             self.rewrite().await?;
             self.clean().await?;
@@ -266,7 +328,8 @@ where
         Ok(())
     }
 
-    pub(crate) async fn rewrite(&self) -> Result<(), VersionError<R>> {
+    /// Creates a new manifest file and deletes the old one
+    pub(crate) async fn rewrite(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
         let fs = self.manager.local_fs();
@@ -289,7 +352,8 @@ where
         Ok(())
     }
 
-    async fn clean(&self) -> Result<(), VersionError<R>> {
+    // Delete the remaining WAL and SST files
+    async fn clean(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let version = Version::clone(&guard.current);
         if !guard.deleted_wal.is_empty() {
@@ -324,7 +388,7 @@ where
         log_id: FileId,
         old_log_id: FileId,
         edits: impl ExactSizeIterator<Item = &'r VersionEdit<<R::Schema as Schema>::Key>>,
-    ) -> Result<(), VersionError<R>> {
+    ) -> Result<(), VersionError> {
         if self.manager.base_fs().file_system() != self.manager.local_fs().file_system() {
             // push local manifest to base file system
             let base_fs = self.manager.base_fs();
@@ -340,18 +404,20 @@ where
         Ok(())
     }
 
+    // Opens or creates the version log file that holds `VersionEdit` records
     async fn open_version_log(
         option: &DbOption,
         fs: Arc<dyn DynFs>,
         gen: FileId,
-    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError<R>> {
+    ) -> Result<Logger<VersionEdit<<R::Schema as Schema>::Key>>, VersionError> {
         Options::new(option.version_log_path(gen))
             .build_with_fs(fs)
             .await
             .map_err(VersionError::Logger)
     }
 
-    pub(crate) async fn destroy(self) -> Result<(), VersionError<R>> {
+    /// Deletes all on-disk data for this store version
+    pub(crate) async fn destroy(self) -> Result<(), VersionError> {
         let log_dir_path = self.option.version_log_dir_path();
         let log_fs = self.manager.base_fs();
         let mut log_stream = log_fs.list(&log_dir_path).await?;
@@ -415,7 +481,7 @@ pub(crate) mod tests {
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<VersionSet<R>, VersionError<R>>
+    ) -> Result<VersionSet<R>, VersionError>
     where
         R: Record,
     {
@@ -513,6 +579,7 @@ pub(crate) mod tests {
                         max: "1".to_string(),
                         gen: gen_0,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -530,6 +597,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -546,6 +614,7 @@ pub(crate) mod tests {
                         max: "5".to_string(),
                         gen: gen_2,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -573,6 +642,7 @@ pub(crate) mod tests {
                             max: "1".to_string(),
                             gen: gen_0,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 1 },
@@ -583,6 +653,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 2 },
@@ -593,6 +664,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::NewLogLength { len: 3 },
@@ -633,6 +705,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7
                         },
                     },
                     VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -642,6 +715,199 @@ pub(crate) mod tests {
         }
 
         drop(version_set);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_apply_edits_batch_add_out_of_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+        let (sender, _) = bounded(1);
+        let mut option = DbOption::new(path, &StringSchema);
+        option.version_log_snapshot_threshold = u32::MAX;
+        let option = Arc::new(option);
+
+        manager
+            .local_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager.clone())
+                .await
+                .unwrap();
+
+        let gen_d = generate_file_id();
+        {
+            let mut guard = version_set.inner.write().await;
+            let mut v = Version::clone(&guard.current);
+            v.level_slice[1].push(Scope {
+                min: "4".to_string(),
+                max: "4".to_string(),
+                gen: gen_d,
+                wal_ids: None,
+                file_size: 0,
+            });
+            guard.current = Arc::new(v);
+        }
+
+        let gen_a = generate_file_id();
+        let gen_b = generate_file_id();
+        let gen_c = generate_file_id();
+        version_set
+            .apply_edits(
+                vec![
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "2".to_string(),
+                            max: "2".to_string(),
+                            gen: gen_b,
+                            wal_ids: None,
+                            file_size: 0,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "1".to_string(),
+                            max: "1".to_string(),
+                            gen: gen_a,
+                            wal_ids: None,
+                            file_size: 0,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "5".to_string(),
+                            max: "5".to_string(),
+                            gen: gen_c,
+                            wal_ids: None,
+                            file_size: 0,
+                        },
+                    },
+                ],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        {
+            let guard = version_set.inner.read().await;
+            let keys: Vec<_> = guard.current.level_slice[1]
+                .iter()
+                .map(|scope| scope.min.clone())
+                .collect();
+            assert_eq!(keys, vec!["1", "2", "4", "5"]);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_apply_edits_batch_add() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = Path::from_filesystem_path(temp_dir.path()).unwrap();
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+        let (sender, _) = bounded(1);
+        let mut option = DbOption::new(path, &StringSchema);
+        option.version_log_snapshot_threshold = u32::MAX;
+        let option = Arc::new(option);
+
+        manager
+            .local_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+
+        let version_set: VersionSet<String> =
+            VersionSet::new(sender.clone(), option.clone(), manager.clone())
+                .await
+                .unwrap();
+
+        let gen_d = generate_file_id();
+        {
+            let mut guard = version_set.inner.write().await;
+            let mut v = Version::clone(&guard.current);
+            v.level_slice[1].push(Scope {
+                min: "4".to_string(),
+                max: "4".to_string(),
+                gen: gen_d,
+                wal_ids: None,
+                file_size: 0,
+            });
+            v.level_slice[1].push(Scope {
+                min: "8".to_string(),
+                max: "8".to_string(),
+                gen: gen_d,
+                wal_ids: None,
+                file_size: 0,
+            });
+            guard.current = Arc::new(v);
+        }
+
+        let gen_a = generate_file_id();
+        let gen_b = generate_file_id();
+        let gen_c = generate_file_id();
+        version_set
+            .apply_edits(
+                vec![
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "2".to_string(),
+                            max: "2".to_string(),
+                            gen: gen_b,
+                            wal_ids: None,
+                            file_size: 0,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "5".to_string(),
+                            max: "5".to_string(),
+                            gen: gen_a,
+                            wal_ids: None,
+                            file_size: 0,
+                        },
+                    },
+                    VersionEdit::Add {
+                        level: 1,
+                        scope: Scope {
+                            min: "7".to_string(),
+                            max: "7".to_string(),
+                            gen: gen_c,
+                            wal_ids: None,
+                            file_size: 0,
+                        },
+                    },
+                ],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        {
+            let guard = version_set.inner.read().await;
+            let keys: Vec<_> = guard.current.level_slice[1]
+                .iter()
+                .map(|scope| scope.min.clone())
+                .collect();
+            assert_eq!(keys, vec!["2", "4", "5", "7", "8"]);
+        }
     }
 
     async fn version_log_snap_shot(base_option: FsOptions, path: Path) {
@@ -680,6 +946,7 @@ pub(crate) mod tests {
                             max: "1".to_string(),
                             gen: gen_0,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -689,6 +956,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -698,6 +966,7 @@ pub(crate) mod tests {
                             max: "5".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Remove {
@@ -734,6 +1003,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7
                     },
                 },
                 VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -766,6 +1036,7 @@ pub(crate) mod tests {
                         max: "3".to_string(),
                         gen: gen_1,
                         wal_ids: None,
+                        file_size: 7
                     },
                 },
                 VersionEdit::LatestTimeStamp { ts: 0.into() },
@@ -858,6 +1129,7 @@ pub(crate) mod tests {
                         max: "6".to_string(),
                         gen: gen_0,
                         wal_ids: None,
+                        file_size: 7,
                     },
                 }],
                 None,
@@ -875,6 +1147,7 @@ pub(crate) mod tests {
                             max: "3".to_string(),
                             gen: gen_1,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -884,6 +1157,7 @@ pub(crate) mod tests {
                             max: "9".to_string(),
                             gen: gen_2,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                     VersionEdit::Add {
@@ -893,6 +1167,7 @@ pub(crate) mod tests {
                             max: "0".to_string(),
                             gen: gen_3,
                             wal_ids: None,
+                            file_size: 7,
                         },
                     },
                 ],

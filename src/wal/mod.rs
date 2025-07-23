@@ -4,7 +4,7 @@ use std::{pin::pin, sync::Arc};
 
 use async_stream::stream;
 use fusio::{disk::LocalFs, DynFs};
-use fusio_log::{error::LogError, Decode, FsOptions, Logger, Options, Path};
+use fusio_log::{error::LogError, FsOptions, Logger, Options, Path};
 use futures_core::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use thiserror::Error;
@@ -60,7 +60,7 @@ impl<R> WalFile<R>
 where
     R: Record,
 {
-    pub(crate) async fn write<'r>(&mut self, data: &Log<R>) -> Result<(), LogError> {
+    pub(crate) async fn write(&mut self, data: &Log<R>) -> Result<(), LogError> {
         if self.file.is_none() {
             self.file = Some(
                 Options::new(self.path.clone())
@@ -116,7 +116,7 @@ where
     pub(crate) async fn recover(
         fs_option: FsOptions,
         path: Path,
-    ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<<R as Decode>::Error>>> {
+    ) -> impl Stream<Item = Result<Vec<Log<R>>, RecoverError<fusio::Error>>> {
         stream! {
             let mut stream = Options::new(path)
                 .fs(fs_option)

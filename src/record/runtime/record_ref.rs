@@ -17,8 +17,8 @@ use super::{DataType, DynRecord, Value};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
-        option::OptionRecordRef, Date32, Date64, Key, LargeBinary, LargeString, Record,
-        RecordEncodeError, RecordRef, Schema, Time32, Time64, TimeUnit, Timestamp, F32, F64,
+        option::OptionRecordRef, Date32, Date64, Key, LargeBinary, LargeString, Record, RecordRef,
+        Schema, Time32, Time64, TimeUnit, Timestamp, F32, F64,
     },
 };
 
@@ -30,7 +30,7 @@ pub struct DynRecordRef<'r> {
     _marker: PhantomData<&'r ()>,
 }
 
-impl<'r> DynRecordRef<'r> {
+impl DynRecordRef<'_> {
     pub(crate) fn new(columns: Vec<Value>, primary_index: usize) -> Self {
         Self {
             columns,
@@ -40,17 +40,15 @@ impl<'r> DynRecordRef<'r> {
     }
 }
 
-impl<'r> Encode for DynRecordRef<'r> {
-    type Error = RecordEncodeError;
-
-    async fn encode<W>(&self, writer: &mut W) -> Result<(), Self::Error>
+impl Encode for DynRecordRef<'_> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
         (self.columns.len() as u32).encode(writer).await?;
         (self.primary_index as u32).encode(writer).await?;
         for col in self.columns.iter() {
-            col.encode(writer).await.map_err(RecordEncodeError::Fusio)?;
+            col.encode(writer).await?;
         }
         Ok(())
     }
