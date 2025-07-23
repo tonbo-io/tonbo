@@ -23,8 +23,8 @@ use crate::{
     ondisk::scan::SsTableScan,
     record::{Key, Record, RecordRef, Schema},
     stream::{level::LevelStream, mem_projection::MemProjectionStream},
-    timestamp::Ts,
     transaction::TransactionScan,
+    version::timestamp::Ts,
 };
 
 pub enum Entry<'entry, R>

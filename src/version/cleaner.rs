@@ -5,7 +5,7 @@ use flume::{Receiver, Sender};
 use crate::{
     fs::{manager::StoreManager, FileId},
     ondisk::sstable::SsTableID,
-    timestamp::Timestamp,
+    version::timestamp::Timestamp,
     DbOption,
 };
 
