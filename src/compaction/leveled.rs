@@ -261,7 +261,7 @@ where
                     Compactor::<R>::build_tables(
                         option,
                         version_edits,
-                        level,
+                        level + 1,
                         streams,
                         instance,
                         level_fs,
@@ -1149,15 +1149,17 @@ pub(crate) mod tests {
         db.flush().await.unwrap();
 
         let version = db.ctx.version_set.current().await;
-        let sort_runs = &version.level_slice[0];
+        let sort_runs_zero = &version.level_slice[0];
+        let sort_runs_one = &version.level_slice[1];
 
-        assert_eq!(sort_runs.len(), 2);
+        assert_eq!(sort_runs_zero.len(), 1);
+        assert_eq!(sort_runs_one.len(), 1);
 
-        assert_eq!(sort_runs[0].min, "3");
-        assert_eq!(sort_runs[0].max, "7");
+        assert_eq!(sort_runs_zero[0].min, "3");
+        assert_eq!(sort_runs_zero[0].max, "7");
 
-        assert_eq!(sort_runs[1].min, "2");
-        assert_eq!(sort_runs[1].max, "9");
+        assert_eq!(sort_runs_one[0].min, "2");
+        assert_eq!(sort_runs_one[0].max, "9");
     }
 
     // Test manual self compaction when no key ranges are met
@@ -1274,7 +1276,7 @@ pub(crate) mod tests {
 
         db.flush().await.unwrap();
 
-        // Flush again with SST of min: 2 and max: 6
+        // Flush again with SST of min: 20 and max: 24
         for i in 20..25 {
             let item = Test {
                 vstring: i.to_string(),
@@ -1286,7 +1288,7 @@ pub(crate) mod tests {
 
         db.flush().await.unwrap();
 
-        for i in 2..7 {
+        for i in 2..5 {
             let item = Test {
                 vstring: i.to_string(),
                 vu32: i,
@@ -1307,18 +1309,20 @@ pub(crate) mod tests {
         db.flush().await.unwrap();
 
         let version = db.ctx.version_set.current().await;
-        let sort_runs = &version.level_slice[0];
+        let sort_runs_l0 = &version.level_slice[0];
+        let sort_runs_l1 = &version.level_slice[1];
 
-        assert_eq!(sort_runs.len(), 3);
+        assert_eq!(sort_runs_l0.len(), 2);
+        assert_eq!(sort_runs_l1.len(), 1);
 
-        assert_eq!(sort_runs[0].min, "20");
-        assert_eq!(sort_runs[0].max, "24");
+        assert_eq!(sort_runs_l0[0].min, "20");
+        assert_eq!(sort_runs_l0[0].max, "24");
 
-        assert_eq!(sort_runs[1].min, "3");
-        assert_eq!(sort_runs[1].max, "7");
+        assert_eq!(sort_runs_l0[1].min, "3");
+        assert_eq!(sort_runs_l0[1].max, "7");
 
-        assert_eq!(sort_runs[2].min, "2");
-        assert_eq!(sort_runs[2].max, "9");
+        assert_eq!(sort_runs_l1[0].min, "2");
+        assert_eq!(sort_runs_l1[0].max, "9");
     }
 
     // This is to check that it doesnt self compact if the threshold is exceeded
