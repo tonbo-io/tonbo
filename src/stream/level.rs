@@ -107,7 +107,7 @@ where
     }
 }
 
-impl<'level, R> Stream for LevelStream<'level, R>
+impl<R> Stream for LevelStream<'_, R>
 where
     R: Record,
 {

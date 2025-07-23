@@ -46,11 +46,11 @@ where
         }
     }
 
-    async fn build_tables<'scan>(
+    async fn build_tables(
         option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
-        streams: Vec<ScanStream<'scan, R>>,
+        streams: Vec<ScanStream<'_, R>>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {

@@ -265,7 +265,7 @@ macro_rules! implement_key_col {
     }
 }
 
-impl<'r> KeyRef<'r> for Value {
+impl KeyRef<'_> for Value {
     type Key = Value;
 
     fn to_key(self) -> Self::Key {

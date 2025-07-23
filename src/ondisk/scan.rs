@@ -46,7 +46,7 @@ impl<R> SsTableScan<'_, R> {
     }
 }
 
-impl<'scan, R> Stream for SsTableScan<'scan, R>
+impl<R> Stream for SsTableScan<'_, R>
 where
     R: Record,
 {

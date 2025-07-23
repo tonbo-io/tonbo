@@ -100,7 +100,7 @@ impl Key for Timestamp {
     }
 }
 
-impl<'r> KeyRef<'r> for Timestamp {
+impl KeyRef<'_> for Timestamp {
     type Key = Timestamp;
 
     fn to_key(self) -> Self::Key {
