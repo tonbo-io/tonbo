@@ -45,6 +45,7 @@ impl From<DbError> for PyErr {
         match err.0 {
             tonbo::DbError::Io(err) => PyIOError::new_err(err.to_string()),
             tonbo::DbError::Version(err) => PyValueError::new_err(err.to_string()),
+            tonbo::DbError::Manifest(err) => PyValueError::new_err(err.to_string()),
             tonbo::DbError::Parquet(err) => InnerError::new_err(err.to_string()),
             tonbo::DbError::UlidDecode(err) => DecodeError::new_err(err.to_string()),
             tonbo::DbError::Fusio(err) => InnerError::new_err(err.to_string()),
