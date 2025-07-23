@@ -182,7 +182,7 @@ where
     }
 }
 
-impl<'iter, R> Iterator for ImmutableScan<'iter, R>
+impl<R> Iterator for ImmutableScan<'_, R>
 where
     R: Record,
 {

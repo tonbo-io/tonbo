@@ -30,7 +30,7 @@ pub struct DynRecordRef<'r> {
     _marker: PhantomData<&'r ()>,
 }
 
-impl<'r> DynRecordRef<'r> {
+impl DynRecordRef<'_> {
     pub(crate) fn new(columns: Vec<Value>, primary_index: usize) -> Self {
         Self {
             columns,
@@ -40,7 +40,7 @@ impl<'r> DynRecordRef<'r> {
     }
 }
 
-impl<'r> Encode for DynRecordRef<'r> {
+impl Encode for DynRecordRef<'_> {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,

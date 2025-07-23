@@ -60,7 +60,7 @@ impl<R> WalFile<R>
 where
     R: Record,
 {
-    pub(crate) async fn write<'r>(&mut self, data: &Log<R>) -> Result<(), LogError> {
+    pub(crate) async fn write(&mut self, data: &Log<R>) -> Result<(), LogError> {
         if self.file.is_none() {
             self.file = Some(
                 Options::new(self.path.clone())
