@@ -2,6 +2,7 @@ use std::{
     any::Any,
     collections::Bound,
     fmt::{Debug, Formatter},
+    path::PathBuf,
     pin::{pin, Pin},
     sync::Arc,
     task::{Context, Poll},
@@ -228,7 +229,12 @@ async fn main() -> Result<()> {
     let _ = fs::create_dir_all("./db_path/music").await;
 
     let options = DbOption::new(
-        Path::from_filesystem_path("./db_path/music").unwrap(),
+        Path::from_filesystem_path(
+            fs::canonicalize(PathBuf::from("./db_path/music"))
+                .await
+                .unwrap(),
+        )
+        .unwrap(),
         &MusicSchema,
     );
 

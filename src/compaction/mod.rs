@@ -46,11 +46,11 @@ where
         }
     }
 
-    async fn build_tables<'scan>(
+    async fn build_tables(
         option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
-        streams: Vec<ScanStream<'scan, R>>,
+        streams: Vec<ScanStream<'_, R>>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
@@ -173,15 +173,14 @@ pub(crate) mod tests {
     use crate::{
         fs::{generate_file_id, manager::StoreManager, FileId, FileType},
         inmem::{
-            immutable::{tests::TestSchema, Immutable},
+            immutable::{tests::TestSchema, ImmutableMemTable},
             mutable::MutableMemTable,
         },
         record::{Record, Schema},
         scope::Scope,
         tests::Test,
-        timestamp::Timestamp,
         trigger::TriggerFactory,
-        version::Version,
+        version::{timestamp::Timestamp, Version},
         wal::log::LogType,
         DbError, DbOption,
     };
@@ -191,7 +190,7 @@ pub(crate) mod tests {
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
+    ) -> Result<ImmutableMemTable<<R::Schema as Schema>::Columns>, DbError>
     where
         R: Record + Send,
     {

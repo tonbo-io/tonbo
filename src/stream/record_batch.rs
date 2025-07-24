@@ -11,7 +11,7 @@ use parquet::arrow::ProjectionMask;
 use crate::{
     option::Order,
     record::{option::OptionRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
-    timestamp::Ts,
+    version::timestamp::Ts,
 };
 
 pub struct RecordBatchEntry<R>

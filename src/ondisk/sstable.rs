@@ -20,7 +20,7 @@ use crate::{
     option::Order,
     record::{Record, Schema},
     stream::record_batch::RecordBatchEntry,
-    timestamp::{Timestamp, TsRef},
+    version::timestamp::{Timestamp, TsRef},
 };
 
 #[derive(Clone)]
@@ -167,7 +167,7 @@ pub(crate) mod tests {
         inmem::immutable::tests::TestSchema,
         record::{Record, Schema},
         tests::{get_test_record_batch, Test},
-        timestamp::Ts,
+        version::timestamp::Ts,
         DbOption,
     };
 

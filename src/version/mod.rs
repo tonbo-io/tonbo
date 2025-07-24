@@ -1,6 +1,7 @@
 pub(crate) mod cleaner;
 pub(crate) mod edit;
 pub(crate) mod set;
+pub(crate) mod timestamp;
 
 use std::{
     ops::Bound,
@@ -25,8 +26,11 @@ use crate::{
     record::{Record, Schema},
     scope::Scope,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
-    timestamp::{Timestamp, TsRef},
-    version::{cleaner::CleanTag, edit::VersionEdit},
+    version::{
+        cleaner::CleanTag,
+        edit::VersionEdit,
+        timestamp::{Timestamp, TsRef},
+    },
     DbOption, ParquetLru,
 };
 

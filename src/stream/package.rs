@@ -47,7 +47,7 @@ where
     }
 }
 
-impl<'package, R> Stream for PackageStream<'package, R>
+impl<R> Stream for PackageStream<'_, R>
 where
     R: Record,
 {

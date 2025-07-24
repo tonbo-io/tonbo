@@ -23,8 +23,7 @@ use crate::{
     record::{Record, Schema},
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
-    timestamp::Timestamp,
-    version::Version,
+    version::{timestamp::Timestamp, Version},
     DbOption,
 };
 
@@ -111,7 +110,7 @@ where
     }
 }
 
-impl<'level, R> Stream for LevelStream<'level, R>
+impl<R> Stream for LevelStream<'_, R>
 where
     R: Record,
 {

@@ -4,7 +4,7 @@ use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode, FsOptions, Options, Path};
 use futures_util::TryStreamExt;
 
-use crate::{fs::FileId, scope::Scope, timestamp::Timestamp};
+use crate::{fs::FileId, scope::Scope, version::timestamp::Timestamp};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum VersionEdit<K> {

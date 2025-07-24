@@ -9,11 +9,11 @@ use fusio::DynFs;
 
 use crate::{
     fs::{generate_file_id, FileId},
-    inmem::immutable::Immutable,
+    inmem::immutable::ImmutableMemTable,
     option::Order,
     record::{KeyRef, Record, Schema},
-    timestamp::{Timestamp, Ts, TsRef, EPOCH},
     trigger::FreezeTrigger,
+    version::timestamp::{Timestamp, Ts, TsRef, EPOCH},
     wal::{
         log::{Log, LogType},
         WalFile,
@@ -227,7 +227,10 @@ where
     pub(crate) async fn into_immutable(
         self,
     ) -> Result<
-        (Option<FileId>, Immutable<<R::Schema as Schema>::Columns>),
+        (
+            Option<FileId>,
+            ImmutableMemTable<<R::Schema as Schema>::Columns>,
+        ),
         fusio_log::error::LogError,
     > {
         let mut file_id = None;
@@ -240,7 +243,7 @@ where
 
         Ok((
             file_id,
-            Immutable::new(self.data, self.schema.arrow_schema().clone()),
+            ImmutableMemTable::new(self.data, self.schema.arrow_schema().clone()),
         ))
     }
 
@@ -274,8 +277,8 @@ mod tests {
         inmem::immutable::tests::TestSchema,
         record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
         tests::{Test, TestRef},
-        timestamp::Ts,
         trigger::TriggerFactory,
+        version::timestamp::Ts,
         wal::log::LogType,
         DbOption,
     };
