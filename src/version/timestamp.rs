@@ -1,9 +1,55 @@
-use std::{borrow::Borrow, cmp::Ordering, marker::PhantomData, mem::size_of, ptr};
+use std::{borrow::Borrow, cmp::Ordering, marker::PhantomData, ptr};
 
+use arrow::{
+    array::{PrimitiveArray, Scalar},
+    datatypes::UInt32Type,
+};
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use crate::timestamp::Timestamp;
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
+pub struct Timestamp(u32);
+
+pub(crate) const EPOCH: Timestamp = Timestamp(0);
+
+impl From<u32> for Timestamp {
+    fn from(ts: u32) -> Self {
+        Self(ts)
+    }
+}
+
+impl From<Timestamp> for u32 {
+    fn from(value: Timestamp) -> Self {
+        value.0
+    }
+}
+
+impl Timestamp {
+    pub(crate) fn to_arrow_scalar(self) -> Scalar<PrimitiveArray<UInt32Type>> {
+        PrimitiveArray::<UInt32Type>::new_scalar(self.0)
+    }
+}
+
+impl Encode for Timestamp {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
+    where
+        W: Write,
+    {
+        self.0.encode(writer).await
+    }
+    fn size(&self) -> usize {
+        self.0.size()
+    }
+}
+impl Decode for Timestamp {
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
+    where
+        R: SeqRead,
+    {
+        u32::decode(reader).await.map(Timestamp)
+    }
+}
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Ts<V> {
@@ -170,56 +216,51 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Ts, TsRef};
+#[test]
+fn test_value_cmp() {
+    let value1 = Ts::new(&1, 1_u32.into());
+    let value2 = Ts::new(&2, 2_u32.into());
+    assert!(value1 < value2);
 
-    #[test]
-    fn test_value_cmp() {
-        let value1 = Ts::new(&1, 1_u32.into());
-        let value2 = Ts::new(&2, 2_u32.into());
-        assert!(value1 < value2);
+    let value1 = Ts::new(&1, 1_u32.into());
+    let value2 = Ts::new(&1, 2_u32.into());
+    assert!(value1 > value2);
+}
 
-        let value1 = Ts::new(&1, 1_u32.into());
-        let value2 = Ts::new(&1, 2_u32.into());
-        assert!(value1 > value2);
-    }
+#[test]
+fn test_value_eq() {
+    let value1 = Ts::new(&1, 1_u32.into());
+    let value2 = Ts::new(&1, 1_u32.into());
+    assert_eq!(value1, value2);
 
-    #[test]
-    fn test_value_eq() {
-        let value1 = Ts::new(&1, 1_u32.into());
-        let value2 = Ts::new(&1, 1_u32.into());
-        assert_eq!(value1, value2);
+    let value1 = Ts::new(&1, 1_u32.into());
+    let value2 = Ts::new(&2, 1_u32.into());
+    assert_ne!(value1, value2);
 
-        let value1 = Ts::new(&1, 1_u32.into());
-        let value2 = Ts::new(&2, 1_u32.into());
-        assert_ne!(value1, value2);
+    let value1 = Ts::new(&1, 1_u32.into());
+    let value2 = Ts::new(&1, 2_u32.into());
+    assert_ne!(value1, value2);
+}
 
-        let value1 = Ts::new(&1, 1_u32.into());
-        let value2 = Ts::new(&1, 2_u32.into());
-        assert_ne!(value1, value2);
-    }
+#[test]
+fn test_timestamped_ref() {
+    let value = Ts::new(1, 1_u32.into());
+    let value_ref = TsRef::new(&value.value, value.ts);
+    assert_eq!(value_ref.value(), &1);
+    assert_eq!(value_ref.ts(), 1_u32.into());
+}
 
-    #[test]
-    fn test_timestamped_ref() {
-        let value = Ts::new(1, 1_u32.into());
-        let value_ref = TsRef::new(&value.value, value.ts);
-        assert_eq!(value_ref.value(), &1);
-        assert_eq!(value_ref.ts(), 1_u32.into());
-    }
+#[test]
+fn test_timestamped_ref_cmp() {
+    let value1 = Ts::new(1, 1_u32.into());
+    let value2 = Ts::new(2, 2_u32.into());
+    let value_ref1 = TsRef::new(&value1.value, value1.ts);
+    let value_ref2 = TsRef::new(&value2.value, value2.ts);
+    assert!(value_ref1 < value_ref2);
 
-    #[test]
-    fn test_timestamped_ref_cmp() {
-        let value1 = Ts::new(1, 1_u32.into());
-        let value2 = Ts::new(2, 2_u32.into());
-        let value_ref1 = TsRef::new(&value1.value, value1.ts);
-        let value_ref2 = TsRef::new(&value2.value, value2.ts);
-        assert!(value_ref1 < value_ref2);
-
-        let value1 = Ts::new(1, 1_u32.into());
-        let value2 = Ts::new(1, 2_u32.into());
-        let value_ref1 = TsRef::new(&value1.value, value1.ts);
-        let value_ref2 = TsRef::new(&value2.value, value2.ts);
-        assert!(value_ref1 > value_ref2);
-    }
+    let value1 = Ts::new(1, 1_u32.into());
+    let value2 = Ts::new(1, 2_u32.into());
+    let value_ref1 = TsRef::new(&value1.value, value1.ts);
+    let value_ref2 = TsRef::new(&value2.value, value2.ts);
+    assert!(value_ref1 > value_ref2);
 }

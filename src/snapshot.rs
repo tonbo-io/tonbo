@@ -7,8 +7,7 @@ use crate::{
     context::Context,
     record::{Record, Schema as RecordSchema},
     stream::{self, ScanStream},
-    timestamp::Timestamp,
-    version::{TransactionTs, VersionRef},
+    version::{timestamp::Timestamp, TransactionTs, VersionRef},
     DbError, DbStorage, Projection, Scan,
 };
 

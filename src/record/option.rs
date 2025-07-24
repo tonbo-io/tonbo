@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, mem::transmute};
 
 use super::{Key, Record, RecordRef, Schema};
-use crate::timestamp::{Timestamp, Ts};
+use crate::version::timestamp::{Timestamp, Ts};
 
 #[derive(Debug)]
 pub struct OptionRecordRef<'r, R>

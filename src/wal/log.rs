@@ -3,7 +3,7 @@ use fusio_log::{Decode, Encode};
 
 use crate::{
     record::{Record, Schema},
-    timestamp::Ts,
+    version::timestamp::Ts,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +107,7 @@ mod tests {
     use tokio::io::AsyncSeekExt;
 
     use crate::{
-        timestamp::Ts,
+        version::timestamp::Ts,
         wal::log::{Log, LogType},
     };
 

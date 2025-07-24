@@ -158,7 +158,7 @@ mod tests {
     use super::{log::LogType, WalFile};
     use crate::{
         fs::{generate_file_id, FileType},
-        timestamp::Ts,
+        version::timestamp::Ts,
         wal::log::Log,
     };
 
