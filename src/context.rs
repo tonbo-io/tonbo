@@ -5,8 +5,7 @@ use arrow::datatypes::Schema;
 use crate::{
     fs::manager::StoreManager,
     record::Record,
-    timestamp::Timestamp,
-    version::{set::VersionSet, TransactionTs},
+    version::{set::VersionSet, timestamp::Timestamp, TransactionTs},
     ParquetLru,
 };
 

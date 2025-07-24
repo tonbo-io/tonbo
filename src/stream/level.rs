@@ -22,8 +22,7 @@ use crate::{
     record::{Record, Schema},
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
-    timestamp::Timestamp,
-    version::Version,
+    version::{timestamp::Timestamp, Version},
     DbOption,
 };
 

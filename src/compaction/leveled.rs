@@ -9,7 +9,7 @@ use crate::{
     compaction::CompactionError,
     context::Context,
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
-    inmem::{immutable::Immutable, mutable::MutableMemTable},
+    inmem::{immutable::ImmutableMemTable, mutable::MutableMemTable},
     ondisk::sstable::{SsTable, SsTableID},
     record::{Record, Schema as RecordSchema},
     scope::Scope,
@@ -163,7 +163,7 @@ where
         recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(
             Option<FileId>,
-            Immutable<<R::Schema as RecordSchema>::Columns>,
+            ImmutableMemTable<<R::Schema as RecordSchema>::Columns>,
         )],
         schema: &R::Schema,
         manager: &StoreManager,
@@ -576,15 +576,17 @@ pub(crate) mod tests {
         executor::tokio::TokioExecutor,
         fs::{generate_file_id, manager::StoreManager},
         inmem::{
-            immutable::{tests::TestSchema, Immutable},
+            immutable::{tests::TestSchema, ImmutableMemTable},
             mutable::MutableMemTable,
         },
         record::{DataType, DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
         scope::Scope,
         tests::Test,
-        timestamp::Timestamp,
         trigger::{TriggerFactory, TriggerType},
-        version::{cleaner::Cleaner, edit::VersionEdit, set::VersionSet, Version, MAX_LEVEL},
+        version::{
+            cleaner::Cleaner, edit::VersionEdit, set::VersionSet, timestamp::Timestamp, Version,
+            MAX_LEVEL,
+        },
         wal::log::LogType,
         DbError, DbOption, DB,
     };
@@ -594,7 +596,7 @@ pub(crate) mod tests {
         records: Vec<(LogType, R, Timestamp)>,
         schema: &Arc<R::Schema>,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<Immutable<<R::Schema as Schema>::Columns>, DbError>
+    ) -> Result<ImmutableMemTable<<R::Schema as Schema>::Columns>, DbError>
     where
         R: Record + Send,
     {

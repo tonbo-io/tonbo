@@ -12,10 +12,10 @@ use parquet::arrow::ProjectionMask;
 use crate::{
     record::{option::OptionRecordRef, Key, Record, RecordRef, Schema},
     stream::record_batch::RecordBatchEntry,
-    timestamp::{Timestamp, Ts, TsRef, EPOCH},
+    version::timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };
 
-pub trait ArrowArrays: Sized + Sync {
+pub trait ArrowArrays: Sized {
     type Record: Record;
 
     type Builder: Builder<Self>;
@@ -46,7 +46,7 @@ where
     fn finish(&mut self, indices: Option<&[usize]>) -> S;
 }
 
-pub(crate) struct Immutable<A>
+pub(crate) struct ImmutableMemTable<A>
 where
     A: ArrowArrays,
 {
@@ -54,7 +54,7 @@ where
     index: BTreeMap<Ts<<<A::Record as Record>::Schema as Schema>::Key>, u32>,
 }
 
-impl<A> Immutable<A>
+impl<A> ImmutableMemTable<A>
 where
     A: ArrowArrays,
     A::Record: Send,
@@ -80,7 +80,7 @@ where
     }
 }
 
-impl<A> Immutable<A>
+impl<A> ImmutableMemTable<A>
 where
     A: ArrowArrays,
 {
@@ -229,7 +229,7 @@ pub(crate) mod tests {
         magic,
         record::{Record, Schema},
         tests::{Test, TestRef},
-        timestamp::Ts,
+        version::timestamp::Ts,
     };
 
     #[derive(Debug)]

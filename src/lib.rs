@@ -118,7 +118,6 @@ pub mod record;
 mod scope;
 pub(crate) mod snapshot;
 pub(crate) mod stream;
-pub(crate) mod timestamp;
 pub mod transaction;
 mod trigger;
 mod version;
@@ -137,7 +136,7 @@ pub use fusio::{SeqRead, Write};
 pub use fusio_log::{Decode, Encode};
 use futures_core::Stream;
 use futures_util::StreamExt;
-use inmem::{immutable::Immutable, mutable::MutableMemTable};
+use inmem::{immutable::ImmutableMemTable, mutable::MutableMemTable};
 use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
 pub use once_cell;
@@ -149,12 +148,12 @@ use parquet::{
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
 use thiserror::Error;
-use timestamp::{Timestamp, TsRef};
 use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
 use trigger::FreezeTrigger;
+use version::timestamp::{Timestamp, TsRef};
 use wal::log::Log;
 
 // Re-export items needed by macros and tests
@@ -163,7 +162,7 @@ pub use crate::inmem::immutable::{ArrowArrays, Builder};
 #[doc(hidden)]
 pub use crate::magic::TS;
 #[doc(hidden)]
-pub use crate::timestamp::Ts;
+pub use crate::version::timestamp::Ts;
 use crate::{
     compaction::{error::CompactionError, CompactTask, Compactor},
     executor::Executor,
@@ -521,7 +520,10 @@ where
     R: Record,
 {
     pub mutable: MutableMemTable<R>,
-    pub immutables: Vec<(Option<FileId>, Immutable<<R::Schema as Schema>::Columns>)>,
+    pub immutables: Vec<(
+        Option<FileId>,
+        ImmutableMemTable<<R::Schema as Schema>::Columns>,
+    )>,
     compaction_tx: Sender<CompactTask>,
     recover_wal_ids: Option<Vec<FileId>>,
     trigger: Arc<dyn FreezeTrigger<R>>,
@@ -1113,7 +1115,7 @@ pub(crate) mod tests {
         pub vbool: Option<bool>,
     }
 
-    impl<'r> Encode for TestRef<'r> {
+    impl Encode for TestRef<'_> {
         async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
         where
             W: Write,

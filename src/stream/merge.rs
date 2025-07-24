@@ -10,7 +10,7 @@ use futures_util::stream::StreamExt;
 use pin_project_lite::pin_project;
 
 use super::{Entry, ScanStream};
-use crate::{record::Record, timestamp::Timestamp};
+use crate::{record::Record, version::timestamp::Timestamp};
 
 pin_project! {
     pub struct MergeStream<'merge, R>
