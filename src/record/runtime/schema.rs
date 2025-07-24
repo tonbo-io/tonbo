@@ -7,14 +7,37 @@ use arrow::{
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
 use thiserror::Error;
 
-use super::{array::DynRecordImmutableArrays, DynRecord, Value, ValueDesc};
+use super::{array::DynRecordImmutableArrays, DynRecord, Value};
 use crate::{magic, record::Schema};
+
+#[derive(Debug, Clone)]
+pub struct DynamicField {
+    pub name: String,
+    pub data_type: DataType,
+    pub is_nullable: bool,
+    // offset is the index of the field in the primary key
+    // pub offset: Option<usize>,
+}
 
 #[derive(Debug)]
 pub struct DynSchema {
-    schema: Vec<ValueDesc>,
+    schema: Vec<DynamicField>,
     primary_index: usize,
     arrow_schema: Arc<ArrowSchema>,
+}
+
+impl DynamicField {
+    pub fn new(name: String, data_type: DataType, is_nullable: bool) -> Self {
+        Self {
+            name,
+            data_type,
+            is_nullable,
+        }
+    }
+
+    fn arrow_field(&self) -> Field {
+        Field::new(&self.name, self.data_type.clone(), self.is_nullable)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -25,7 +48,7 @@ pub enum SchemaError {
 }
 
 impl DynSchema {
-    pub fn new(schema: Vec<ValueDesc>, primary_index: usize) -> Self {
+    pub fn new(schema: Vec<DynamicField>, primary_index: usize) -> Self {
         let mut metadata = HashMap::new();
         metadata.insert("primary_key_index".to_string(), primary_index.to_string());
         let arrow_schema = Arc::new(ArrowSchema::new_with_metadata(
@@ -65,7 +88,11 @@ impl DynSchema {
         ])?;
         let mut schema = Vec::with_capacity(arrow_schema.fields.len());
         for field in arrow_schema.fields.iter() {
-            let col = ValueDesc::from(field.as_ref());
+            let col = DynamicField::new(
+                field.name().to_string(),
+                field.data_type().clone(),
+                field.is_nullable(),
+            );
             schema.push(col);
         }
 
@@ -121,7 +148,7 @@ impl Schema for DynSchema {
 /// use tonbo::dyn_schema;
 ///
 /// let schema = dyn_schema!(
-///     ("foo", String, false),
+///     ("foo", Utf8, false),
 ///     ("bar", Int32, true),
 ///     ("baz", UInt64, true),
 ///     0
@@ -134,7 +161,7 @@ macro_rules! dyn_schema {
             $crate::record::DynSchema::new(
                 vec![
                     $(
-                        $crate::record::ValueDesc::new($name.into(), $crate::record::DataType::$type, $nullable),
+                        $crate::record::DynamicField::new($name.into(), $crate::arrow::datatypes::DataType::$type, $nullable),
                     )*
                 ],
                 $primary,
@@ -150,7 +177,7 @@ macro_rules! make_dyn_schema {
             $crate::record::DynSchema::new(
                 vec![
                     $(
-                        $crate::record::ValueDesc::new($name.into(), $type, $nullable),
+                        $crate::record::DynamicField::new($name.into(), $type, $nullable),
                     )*
                 ],
                 $primary,
@@ -192,7 +219,7 @@ mod tests {
         for (expected, actual) in dyn_schema.schema.iter().skip(2).zip(arrow_schema.fields()) {
             assert_eq!(&expected.name, actual.name());
             assert_eq!(expected.is_nullable, actual.is_nullable());
-            assert_eq!(expected.datatype, actual.data_type().into());
+            assert_eq!(&expected.data_type, actual.data_type());
         }
 
         let metadata = dyn_schema.arrow_schema.metadata();

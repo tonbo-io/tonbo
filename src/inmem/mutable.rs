@@ -227,12 +227,13 @@ where
 mod tests {
     use std::{ops::Bound, sync::Arc};
 
+    use arrow::datatypes::DataType as ArrayDataType;
     use fusio::{disk::TokioFs, path::Path, DynFs};
 
     use super::MutableMemTable;
     use crate::{
         inmem::immutable::tests::TestSchema,
-        record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{test::StringSchema, DynRecord, DynSchema, DynamicField, Record, Value},
         tests::{Test, TestRef},
         trigger::TriggerFactory,
         version::timestamp::Ts,
@@ -392,8 +393,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let schema = DynSchema::new(
             vec![
-                ValueDesc::new("age".to_string(), DataType::Int8, false),
-                ValueDesc::new("height".to_string(), DataType::Int16, true),
+                DynamicField::new("age".to_string(), ArrayDataType::Int8, false),
+                DynamicField::new("height".to_string(), ArrayDataType::Int16, true),
             ],
             0,
         );
@@ -415,18 +416,7 @@ mod tests {
         mutable
             .insert(
                 LogType::Full,
-                DynRecord::new(
-                    vec![
-                        Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                        Value::new(
-                            DataType::Int16,
-                            "height".to_string(),
-                            Arc::new(1236_i16),
-                            true,
-                        ),
-                    ],
-                    0,
-                ),
+                DynRecord::new(vec![Value::Int8(1_i8), Value::Int16(1236_i16)], 0),
                 0_u32.into(),
             )
             .await
@@ -435,13 +425,7 @@ mod tests {
         {
             let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
             let entry = scan.next().unwrap();
-            assert_eq!(
-                entry.key(),
-                &Ts::new(
-                    Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                    0_u32.into()
-                )
-            );
+            assert_eq!(entry.key(), &Ts::new(Value::Int8(1_i8), 0_u32.into()));
             dbg!(entry.clone().value().as_ref().unwrap());
         }
     }
