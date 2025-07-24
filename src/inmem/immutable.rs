@@ -256,23 +256,23 @@ pub(crate) mod tests {
             &SCHEMA
         }
 
-        fn primary_key_index(&self) -> usize {
-            2
+        fn primary_key_indices(&self) -> &[usize] {
+            &[2]
         }
 
-        fn primary_key_path(
+        fn primary_key_paths(
             &self,
-        ) -> (
+        ) -> Vec<(
             parquet::schema::types::ColumnPath,
             Vec<parquet::format::SortingColumn>,
-        ) {
-            (
+        )> {
+            vec![(
                 ColumnPath::new(vec![magic::TS.to_string(), "vstring".to_string()]),
                 vec![
                     SortingColumn::new(1, true, true),
                     SortingColumn::new(2, false, true),
                 ],
-            )
+            )]
         }
     }
 

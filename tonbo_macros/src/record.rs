@@ -4,7 +4,11 @@ use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{DeriveInput, Error, GenericArgument, Type};
 
-use crate::{keys::PrimaryKey, utils::ident_generator::IdentGenerator, DataType};
+use crate::{
+    keys::{PrimaryKey, PrimaryKeyField},
+    utils::ident_generator::IdentGenerator,
+    DataType,
+};
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(record))]
 struct RecordOpts {
@@ -64,52 +68,61 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         ));
     };
 
-    // todo: deny multiple primary_key definition
-    let Some((primary_key_field_index, primary_key_field)) = data_struct
+    // Collect all primary key fields
+    let primary_key_fields: Vec<(usize, &RecordStructFieldOpt)> = data_struct
         .fields
         .iter()
         .enumerate()
-        .find(|field| field.1.primary_key == Some(true))
-    else {
+        .filter(|(_, field)| field.primary_key == Some(true))
+        .collect();
+
+    if primary_key_fields.is_empty() {
         return Err(syn::Error::new_spanned(
             struct_name,
             "missing primary key field, use #[record(primary_key)] to define one",
         ));
     };
 
-    // check if primary key is nullable
-    let primary_key_data_type = primary_key_field
-        .to_data_type()
-        .expect("only Path ty is supported");
-    if primary_key_data_type.1 {
-        return Err(syn::Error::new_spanned(
-            struct_name,
-            "primary key cannot be nullable",
-        ));
-    }
-    let primary_key_ident = primary_key_field
-        .ident
-        .as_ref()
-        .expect("cannot find primary key ident");
-    let primary_key_value = match primary_key_data_type.0 {
-        DataType::Float32 | DataType::Float64 => quote!(key.value.into()),
-        _ => quote!(key.value),
-    };
-    let primary_key_definitions = PrimaryKey {
-        name: primary_key_ident.clone(),
-        builder_append_value: quote! {
-            self.#primary_key_ident .append_value(#primary_key_value);
-        },
-        base_ty: primary_key_field.ty.clone(),
-        index: primary_key_field_index + 2,
-        fn_key: if matches!(primary_key_data_type.0, DataType::String) {
-            quote!(&self.#primary_key_ident)
-        } else {
-            quote!(self.#primary_key_ident)
-        },
-    };
+    // Build primary key fields
+    let mut pk_fields = Vec::new();
 
-    let builder_append_primary_key = &primary_key_definitions.builder_append_value;
+    for (idx, field) in &primary_key_fields {
+        let data_type = field.to_data_type().expect("only Path ty is supported");
+        if data_type.1 {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "primary key fields cannot be nullable",
+            ));
+        }
+
+        let field_ident = field
+            .ident
+            .as_ref()
+            .expect("primary key must be named field");
+        let primary_key_value = match data_type.0 {
+            DataType::Float32 | DataType::Float64 => quote!(key.value.into()),
+            _ => quote!(key.value),
+        };
+
+        pk_fields.push(PrimaryKeyField {
+            name: field_ident.clone(),
+            builder_append_value: quote! {
+                self.#field_ident.append_value(#primary_key_value);
+            },
+            base_ty: field.ty.clone(),
+            index: idx + 2, // +2 for _null and _ts columns
+            fn_key: if matches!(data_type.0, DataType::String) {
+                quote!(&self.#field_ident)
+            } else {
+                quote!(self.#field_ident)
+            },
+        });
+    }
+
+    let primary_key_definitions = PrimaryKey {
+        fields: pk_fields,
+        is_composite: primary_key_fields.len() > 1,
+    };
 
     let record_codegen =
         trait_record_codegen(&data_struct.fields, struct_name, &primary_key_definitions);
@@ -122,17 +135,17 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         struct_schema_codegen(struct_name, &data_struct.fields, &primary_key_definitions);
 
     let decode_ref_codegen =
-        trait_decode_ref_codegen(&struct_name, primary_key_ident, &data_struct.fields);
+        trait_decode_ref_codegen(struct_name, &primary_key_definitions, &data_struct.fields);
 
     let encode_codegen = trait_encode_codegen(struct_name, &data_struct.fields);
 
     let struct_array_codegen = struct_array_codegen(struct_name, &data_struct.fields);
 
     let arrow_array_codegen =
-        trait_arrow_array_codegen(struct_name, primary_key_ident, &data_struct.fields);
+        trait_arrow_array_codegen(struct_name, &primary_key_definitions, &data_struct.fields);
 
     let builder_codegen =
-        struct_builder_codegen(struct_name, builder_append_primary_key, &data_struct.fields);
+        struct_builder_codegen(struct_name, &primary_key_definitions, &data_struct.fields);
 
     let gen = quote! {
 
@@ -219,10 +232,21 @@ fn trait_record_codegen(
     };
     let struct_schema_name = struct_name.to_schema_ident();
 
-    let PrimaryKey {
-        fn_key: fn_primary_key,
-        ..
-    } = primary_key;
+    // Generate key extraction based on whether it's composite
+    let key_extraction = if primary_key.is_composite {
+        // For composite keys, we'll generate a struct
+        let key_struct_name = struct_name.to_key_ident();
+        let field_names: Vec<_> = primary_key.fields.iter().map(|f| &f.name).collect();
+        quote! {
+            #key_struct_name {
+                #(#field_names: self.#field_names.clone(),)*
+            }
+        }
+    } else {
+        // For single keys, just return the field
+        let field = &primary_key.fields[0];
+        field.fn_key.clone()
+    };
 
     quote! {
         impl ::tonbo::record::Record for #struct_name {
@@ -233,7 +257,7 @@ fn trait_record_codegen(
                 Self: 'r;
 
             fn key(&self) -> <<Self::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_> {
-                #fn_primary_key
+                #key_extraction
             }
 
             fn as_record_ref(&self) -> Self::Ref<'_> {
@@ -354,13 +378,20 @@ fn struct_schema_codegen(
     let struct_arrays_name = struct_name.to_immutable_array_ident();
     let mut schema_fields: Vec<TokenStream> = Vec::new();
 
-    let PrimaryKey {
-        name: primary_key_name,
-        base_ty: primary_key_ty,
-        builder_append_value: _builder_append_primary_key,
-        index: primary_key_index,
-        ..
-    } = primary_key;
+    // Generate key type based on single vs composite
+    let key_type = if primary_key.is_composite {
+        let key_struct_name = struct_name.to_key_ident();
+        quote! { #key_struct_name }
+    } else {
+        // For single key, use the field type directly
+        let field = &primary_key.fields[0];
+        let ty = &field.base_ty;
+        quote! { #ty }
+    };
+
+    // Collect primary key indices
+    let primary_key_indices: Vec<usize> = primary_key.fields.iter().map(|f| f.index).collect();
+    let indices_tokens = quote! { &[#(#primary_key_indices),*] };
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -373,6 +404,22 @@ fn struct_schema_codegen(
                 });
     }
 
+    // Generate primary_key_paths implementation
+    let primary_key_paths_impl = {
+        let mut paths = Vec::new();
+        for field in &primary_key.fields {
+            let field_name = &field.name;
+            let field_index = field.index;
+            paths.push(quote! {
+                (
+                    ::tonbo::parquet::schema::types::ColumnPath::new(vec![::tonbo::TS.to_string(), stringify!(#field_name).to_string()]),
+                    vec![::tonbo::parquet::format::SortingColumn::new(1_i32, true, true), ::tonbo::parquet::format::SortingColumn::new(#field_index as i32, false, true)]
+                )
+            });
+        }
+        quote! { vec![#(#paths),*] }
+    };
+
     quote! {
         #[derive(Debug, PartialEq, Eq, Clone, Copy)]
         pub struct #struct_schema_name;
@@ -382,17 +429,14 @@ fn struct_schema_codegen(
 
             type Columns = #struct_arrays_name;
 
-            type Key = #primary_key_ty;
+            type Key = #key_type;
 
-            fn primary_key_index(&self) -> usize {
-                #primary_key_index
+            fn primary_key_indices(&self) -> &[usize] {
+                #indices_tokens
             }
 
-            fn primary_key_path(&self) -> (::tonbo::parquet::schema::types::ColumnPath, Vec<::tonbo::parquet::format::SortingColumn>) {
-                (
-                    ::tonbo::parquet::schema::types::ColumnPath::new(vec![::tonbo::TS.to_string(), stringify!(#primary_key_name).to_string()]),
-                    vec![::tonbo::parquet::format::SortingColumn::new(1_i32, true, true), ::tonbo::parquet::format::SortingColumn::new(#primary_key_index as i32, false, true)]
-                )
+            fn primary_key_paths(&self) -> Vec<(::tonbo::parquet::schema::types::ColumnPath, Vec<::tonbo::parquet::format::SortingColumn>)> {
+                #primary_key_paths_impl
             }
 
             fn arrow_schema(&self) -> &'static ::std::sync::Arc<::tonbo::arrow::datatypes::Schema> {
@@ -411,8 +455,8 @@ fn struct_schema_codegen(
 }
 
 fn trait_decode_ref_codegen(
-    struct_name: &&Ident,
-    primary_key_name: &Ident,
+    struct_name: &Ident,
+    primary_key: &PrimaryKey,
     fields: &[RecordStructFieldOpt],
 ) -> TokenStream {
     let mut ref_projection_fields: Vec<TokenStream> = Vec::new();
@@ -499,12 +543,29 @@ fn trait_decode_ref_codegen(
         }
     };
 
+    // Generate key extraction based on whether it's composite
+    let key_extraction = if primary_key.is_composite {
+        // For composite keys, we'll generate a struct
+        let key_struct_name = struct_name.to_key_ident();
+        let field_names: Vec<_> = primary_key.fields.iter().map(|f| &f.name).collect();
+        quote! {
+            #key_struct_name {
+                #(#field_names: self.#field_names,)*
+            }
+        }
+    } else {
+        // For single keys, just return the field
+        let field = &primary_key.fields[0];
+        let field_name = &field.name;
+        quote! { self.#field_name }
+    };
+
     quote! {
         impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_type {
             type Record = #struct_name;
 
             fn key(self) -> <<<<#struct_ref_type as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'r> {
-                self.#primary_key_name
+                #key_extraction
             }
 
             fn projection(&mut self, projection_mask: &::tonbo::parquet::arrow::ProjectionMask) {
@@ -631,8 +692,7 @@ fn struct_array_codegen(struct_name: &Ident, fields: &[RecordStructFieldOpt]) ->
 
 fn trait_arrow_array_codegen(
     struct_name: &Ident,
-    primary_key_name: &Ident,
-
+    primary_key: &PrimaryKey,
     fields: &[RecordStructFieldOpt],
 ) -> TokenStream {
     let struct_builder_name = struct_name.to_builder_ident();
@@ -681,6 +741,9 @@ fn trait_arrow_array_codegen(
     let struct_ref_name = struct_name.to_ref_ident();
     let struct_arrays_name = struct_name.to_immutable_array_ident();
 
+    // Get the first primary key field name for bounds checking
+    let first_pk_field_name = &primary_key.fields[0].name;
+
     quote! {
         impl ::tonbo::ArrowArrays for #struct_arrays_name {
             type Record = #struct_name;
@@ -703,7 +766,8 @@ fn trait_arrow_array_codegen(
             ) -> Option<Option<<Self::Record as ::tonbo::record::Record>::Ref<'_>>> {
                 let offset = offset as usize;
 
-                if offset >= ::tonbo::arrow::array::Array::len(self.#primary_key_name.as_ref()) {
+                // Check if offset is valid by checking the first primary key field
+                if offset >= ::tonbo::arrow::array::Array::len(self.#first_pk_field_name.as_ref()) {
                     return None;
                 }
                 if self._null.value(offset) {
@@ -726,8 +790,7 @@ fn trait_arrow_array_codegen(
 
 fn struct_builder_codegen(
     struct_name: &Ident,
-    builder_append_primary_key: &TokenStream,
-
+    primary_key: &PrimaryKey,
     fields: &[RecordStructFieldOpt],
 ) -> TokenStream {
     let struct_schema_name = struct_name.to_schema_ident();
@@ -810,6 +873,27 @@ fn struct_builder_codegen(
     let struct_ref_name = struct_name.to_ref_ident();
     let struct_arrays_name = struct_name.to_immutable_array_ident();
 
+    // Generate builder append code for primary keys based on whether it's composite
+    let builder_append_primary_keys: Vec<TokenStream> = if primary_key.is_composite {
+        // For composite keys, extract fields from the key struct
+        primary_key
+            .fields
+            .iter()
+            .map(|field| {
+                let field_name = &field.name;
+                let append_code = &field.builder_append_value;
+                // Replace 'key.value' with 'key.value.field_name'
+                let append_str = append_code.to_string();
+                let modified =
+                    append_str.replace("key.value", &format!("key.value.{}", field_name));
+                modified.parse().unwrap()
+            })
+            .collect()
+    } else {
+        // For single keys, use the append code directly
+        vec![primary_key.fields[0].builder_append_value.clone()]
+    };
+
     quote! {
         pub struct #struct_builder_name {
             #(#builder_fields)*
@@ -820,7 +904,8 @@ fn struct_builder_codegen(
 
         impl ::tonbo::Builder<#struct_arrays_name> for #struct_builder_name {
             fn push(&mut self, key: ::tonbo::Ts<<<<#struct_name as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
-                #builder_append_primary_key
+                // Append primary key fields
+                #(#builder_append_primary_keys)*
                 match row {
                     Some(row) => {
                         #(#builder_push_some_fields)*

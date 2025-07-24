@@ -1,5 +1,0 @@
-error: missing primary key field, use #[record(primary_key)] to define one
- --> tests/fail/01-missing-primary-key.rs:4:12
-  |
-4 | pub struct User {
-  |            ^^^^

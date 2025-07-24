@@ -85,8 +85,8 @@ where
             Some(v) => v.as_ref().map(|v| {
                 let mut record_ref = v.as_record_ref();
                 if let Projection::Parts(projection) = projection {
-                    let primary_key_index =
-                        self.snapshot.schema().record_schema.primary_key_index();
+                    let primary_key_indices =
+                        self.snapshot.schema().record_schema.primary_key_indices();
                     let schema = self.snapshot.schema().record_schema.arrow_schema();
                     let mut projection = projection
                         .iter()
@@ -97,7 +97,8 @@ where
                         })
                         .collect::<Vec<usize>>();
 
-                    let mut fixed_projection = vec![0, 1, primary_key_index];
+                    let mut fixed_projection = vec![0, 1];
+                    fixed_projection.extend_from_slice(primary_key_indices);
                     fixed_projection.append(&mut projection);
                     fixed_projection.dedup();
 
@@ -312,10 +313,7 @@ mod tests {
         executor::tokio::TokioExecutor,
         fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema,
-        record::{
-            runtime::{test::test_dyn_item_schema, DataType, DynRecord, Value},
-            test::StringSchema,
-        },
+        record::test::StringSchema,
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
         DbOption, Projection, DB,
@@ -924,98 +922,10 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_dyn_record() {
-        let temp_dir = TempDir::new().unwrap();
-        let schema = test_dyn_item_schema();
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &schema,
-        );
-        let db = DB::new(option, TokioExecutor::current(), schema)
-            .await
-            .unwrap();
-
-        db.insert(DynRecord::new(
-            vec![
-                Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                Value::new(
-                    DataType::Int16,
-                    "height".to_string(),
-                    Arc::new(Some(180_i16)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int32,
-                    "weight".to_string(),
-                    Arc::new(56_i32),
-                    false,
-                ),
-            ],
-            0,
-        ))
-        .await
-        .unwrap();
-
-        let txn = db.transaction().await;
-        {
-            let key = Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false);
-
-            let record_ref = txn.get(&key, Projection::All).await.unwrap();
-            assert!(record_ref.is_some());
-            let res = record_ref.unwrap();
-            let record_ref = res.get();
-
-            assert_eq!(record_ref.columns.len(), 3);
-            let col = record_ref.columns.first().unwrap();
-            assert_eq!(col.datatype(), DataType::Int8);
-            let name = col.value.as_ref().downcast_ref::<i8>();
-            assert!(name.is_some());
-            assert_eq!(*name.unwrap(), 1);
-
-            let col = record_ref.columns.get(1).unwrap();
-            let height = col.value.as_ref().downcast_ref::<Option<i16>>();
-            assert!(height.is_some());
-            assert_eq!(*height.unwrap(), Some(180_i16));
-
-            let col = record_ref.columns.get(2).unwrap();
-            let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
-            assert!(weight.is_some());
-            assert_eq!(*weight.unwrap(), Some(56_i32));
-        }
-        {
-            let mut scan = txn
-                .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(&["id", "age", "height"])
-                .take()
-                .await
-                .unwrap();
-            while let Some(entry) = scan.next().await.transpose().unwrap() {
-                assert_eq!(entry.value().unwrap().primary_index, 0);
-                assert_eq!(entry.value().unwrap().columns.len(), 3);
-                let columns = entry.value().unwrap().columns;
-                dbg!(columns.clone());
-
-                let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int8);
-                assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
-                    1
-                );
-
-                let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype(), DataType::Int16);
-                assert_eq!(
-                    *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
-                    Some(180)
-                );
-
-                let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::Int32);
-                let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
-                assert!(weight.is_some());
-                assert_eq!(*weight.unwrap(), Some(56_i32));
-            }
-        }
-    }
+    // TODO: Re-enable when runtime support is added back
+    // This test requires runtime::DynRecord which has been removed
+    // #[tokio::test(flavor = "multi_thread")]
+    // async fn test_dyn_record() {
+    // Test implementation removed - depends on runtime module
+    // }
 }

@@ -82,7 +82,14 @@ pub struct DbOption {
 impl DbOption {
     /// build the default configured [`DbOption`] with base path and primary key
     pub fn new<S: Schema>(base_path: Path, schema: &S) -> Self {
-        let (column_paths, sorting_columns) = schema.primary_key_path();
+        let primary_key_paths = schema.primary_key_paths();
+        // For now, we'll use the first key path as the default
+        // TODO: Handle multiple key paths in sorting columns
+        let (column_paths, sorting_columns) = if primary_key_paths.is_empty() {
+            panic!("Schema must have at least one primary key")
+        } else {
+            primary_key_paths[0].clone()
+        };
 
         DbOption {
             immutable_chunk_num: 3,

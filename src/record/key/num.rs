@@ -19,8 +19,8 @@ macro_rules! implement_key {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(*self))
+            fn to_arrow_fields(&self) -> Vec<Arc<dyn Datum>> {
+                vec![Arc::new($array_name::new_scalar(*self))]
             }
         }
 
@@ -138,8 +138,8 @@ macro_rules! implement_float_key {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-                Arc::new($array_name::new_scalar(self.0))
+            fn to_arrow_fields(&self) -> Vec<Arc<dyn Datum>> {
+                vec![Arc::new($array_name::new_scalar(self.0))]
             }
         }
 

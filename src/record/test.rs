@@ -41,18 +41,18 @@ impl Schema for StringSchema {
         &SCHEMA
     }
 
-    fn primary_key_index(&self) -> usize {
-        2
+    fn primary_key_indices(&self) -> &[usize] {
+        &[2]
     }
 
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
-        (
+    fn primary_key_paths(&self) -> Vec<(ColumnPath, Vec<SortingColumn>)> {
+        vec![(
             ColumnPath::new(vec![magic::TS.to_string(), PRIMARY_FIELD_NAME.to_string()]),
             vec![
                 SortingColumn::new(1, true, true),
                 SortingColumn::new(2, false, true),
             ],
-        )
+        )]
     }
 }
 
@@ -70,10 +70,6 @@ impl Record for String {
 
     fn as_record_ref(&self) -> Self::Ref<'_> {
         self
-    }
-
-    fn size(&self) -> usize {
-        self.len()
     }
 }
 

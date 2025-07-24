@@ -88,21 +88,28 @@ impl Schema for DynSchema {
         &self.arrow_schema
     }
 
-    fn primary_key_index(&self) -> usize {
-        self.primary_index + 2
+    fn primary_key_indices(&self) -> &[usize] {
+        // For now, runtime schema only supports single primary keys
+        // Store the index in a static slice
+        unsafe {
+            static mut INDEX: [usize; 1] = [0];
+            INDEX[0] = self.primary_index + 2;
+            &INDEX
+        }
     }
 
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
-        (
+    fn primary_key_paths(&self) -> Vec<(ColumnPath, Vec<SortingColumn>)> {
+        // For now, runtime schema only supports single primary keys
+        vec![(
             ColumnPath::new(vec![
                 magic::TS.to_string(),
                 self.schema[self.primary_index].name.clone(),
             ]),
             vec![
                 SortingColumn::new(1_i32, true, true),
-                SortingColumn::new(self.primary_key_index() as i32, false, true),
+                SortingColumn::new((self.primary_index + 2) as i32, false, true),
             ],
-        )
+        )]
     }
 }
 

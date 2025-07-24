@@ -71,18 +71,38 @@ where
         move |record_batch| lt_eq(record_batch.column(0), &ts.to_arrow_scalar() as &dyn Datum),
     ))];
     if let Some(lower_key) = lower_key {
+        // For now, we'll temporarily go back to single key filtering
+        // TODO: Implement proper composite key filtering
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                lower_cmp(record_batch.column(0), lower_key.to_arrow_datum().as_ref())
+                let key_fields = lower_key.to_arrow_fields();
+                if key_fields.is_empty() {
+                    Ok(BooleanArray::new(
+                        BooleanBuffer::new_set(record_batch.num_rows()),
+                        None,
+                    ))
+                } else {
+                    lower_cmp(record_batch.column(0), key_fields[0].as_ref())
+                }
             },
         )));
     }
     if let Some(upper_key) = upper_key {
+        // For now, we'll temporarily go back to single key filtering
+        // TODO: Implement proper composite key filtering
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, [2]),
             move |record_batch| {
-                upper_cmp(upper_key.to_arrow_datum().as_ref(), record_batch.column(0))
+                let key_fields = upper_key.to_arrow_fields();
+                if key_fields.is_empty() {
+                    Ok(BooleanArray::new(
+                        BooleanBuffer::new_set(record_batch.num_rows()),
+                        None,
+                    ))
+                } else {
+                    upper_cmp(key_fields[0].as_ref(), record_batch.column(0))
+                }
             },
         )));
     }

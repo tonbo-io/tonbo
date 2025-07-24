@@ -141,8 +141,8 @@ macro_rules! make_date_type {
                 *self
             }
 
-            fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-                Arc::new(<$array_ty>::new_scalar(self.0))
+            fn to_arrow_fields(&self) -> Vec<std::sync::Arc<dyn arrow::array::Datum>> {
+                vec![Arc::new(<$array_ty>::new_scalar(self.0))]
             }
         }
         impl<'r> KeyRef<'r> for $struct_name {
@@ -207,14 +207,14 @@ impl Key for Time32 {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
+    fn to_arrow_fields(&self) -> Vec<std::sync::Arc<dyn arrow::array::Datum>> {
+        vec![match self.unit {
             TimeUnit::Second => Arc::new(Time32SecondArray::new_scalar(self.time)),
             TimeUnit::Millisecond => Arc::new(Time32MillisecondArray::new_scalar(self.time)),
             TimeUnit::Microsecond | TimeUnit::Nanosecond => {
                 unreachable!("microsecond and nanosecond is not supported")
             }
-        }
+        }]
     }
 }
 
@@ -225,14 +225,14 @@ impl Key for Time64 {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
-        match self.unit {
+    fn to_arrow_fields(&self) -> Vec<std::sync::Arc<dyn arrow::array::Datum>> {
+        vec![match self.unit {
             TimeUnit::Microsecond => Arc::new(Time64MicrosecondArray::new_scalar(self.time)),
             TimeUnit::Nanosecond => Arc::new(Time64NanosecondArray::new_scalar(self.time)),
             TimeUnit::Second | TimeUnit::Millisecond => {
                 unreachable!("second and millisecond is not supported")
             }
-        }
+        }]
     }
 }
 
