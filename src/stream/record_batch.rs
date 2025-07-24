@@ -111,10 +111,8 @@ where
             if num_rows == 0 || self.offset >= num_rows {
                 return None;
             }
-        } else {
-            if self.offset >= num_rows {
-                return None;
-            }
+        } else if self.offset >= num_rows {
+            return None;
         }
 
         let record_batch = self.record_batch.clone();

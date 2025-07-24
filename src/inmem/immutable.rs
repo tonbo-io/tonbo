@@ -483,7 +483,7 @@ pub(crate) mod tests {
         use crossbeam_skiplist::SkipMap;
         use parquet::arrow::ProjectionMask;
 
-        use super::Immutable;
+        use super::ImmutableMemTable;
 
         // Create test data with String keys (not &str)
         let skip_map = SkipMap::new();
@@ -514,7 +514,7 @@ pub(crate) mod tests {
 
         let schema = Arc::new(TestSchema);
         let immutable =
-            Immutable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
+            ImmutableMemTable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
 
         // Test forward scan
         let projection = ProjectionMask::all();
@@ -541,7 +541,7 @@ pub(crate) mod tests {
         use crossbeam_skiplist::SkipMap;
         use parquet::arrow::ProjectionMask;
 
-        use super::Immutable;
+        use super::ImmutableMemTable;
         use crate::option::Order;
 
         // Create test data with String keys (not &str)
@@ -573,7 +573,7 @@ pub(crate) mod tests {
 
         let schema = Arc::new(TestSchema);
         let immutable =
-            Immutable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
+            ImmutableMemTable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
 
         // Test reverse scan
         let projection = ProjectionMask::all();
@@ -600,7 +600,7 @@ pub(crate) mod tests {
         use crossbeam_skiplist::SkipMap;
         use parquet::arrow::ProjectionMask;
 
-        use super::Immutable;
+        use super::ImmutableMemTable;
         use crate::option::Order;
 
         // Create test data with more entries
@@ -619,7 +619,7 @@ pub(crate) mod tests {
 
         let schema = Arc::new(TestSchema);
         let immutable =
-            Immutable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
+            ImmutableMemTable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
 
         // Test reverse scan with bounds: from "key2" to "key4" (inclusive)
         let projection = ProjectionMask::all();

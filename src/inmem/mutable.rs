@@ -21,36 +21,25 @@ use crate::{
     DbError, DbOption,
 };
 
+type MutableRange<'scan, R> = Range<
+    'scan,
+    TsRef<<<R as Record>::Schema as Schema>::Key>,
+    (
+        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
+        Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
+    ),
+    Ts<<<R as Record>::Schema as Schema>::Key>,
+    Option<R>,
+>;
+
+type MutableRangeRev<'scan, R> = Rev<MutableRange<'scan, R>>;
+
 pub(crate) enum MutableScan<'scan, R>
 where
     R: Record,
 {
-    Forward(
-        Range<
-            'scan,
-            TsRef<<<R as Record>::Schema as Schema>::Key>,
-            (
-                Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
-                Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
-            ),
-            Ts<<<R as Record>::Schema as Schema>::Key>,
-            Option<R>,
-        >,
-    ),
-    Reverse(
-        Rev<
-            Range<
-                'scan,
-                TsRef<<<R as Record>::Schema as Schema>::Key>,
-                (
-                    Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
-                    Bound<&'scan TsRef<<<R as Record>::Schema as Schema>::Key>>,
-                ),
-                Ts<<<R as Record>::Schema as Schema>::Key>,
-                Option<R>,
-            >,
-        >,
-    ),
+    Forward(MutableRange<'scan, R>),
+    Reverse(MutableRangeRev<'scan, R>),
 }
 
 impl<'scan, R> Iterator for MutableScan<'scan, R>
