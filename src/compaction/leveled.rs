@@ -123,7 +123,7 @@ where
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
-                if Self::is_threshold_exceeded_major(&self.option, &version_ref, 0) {
+                if Self::is_threshold_exceeded_major(&self.option, &version_ref, 0) || is_manual {
                     Self::major_compaction(
                         &version_ref,
                         &self.option,
@@ -133,6 +133,7 @@ where
                         &mut delete_gens,
                         &guard.record_schema,
                         &self.ctx,
+                        is_manual,
                     )
                     .await?;
                 }
@@ -235,14 +236,87 @@ where
         delete_gens: &mut Vec<SsTableID>,
         instance: &R::Schema,
         ctx: &Context<R>,
+        is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
         let mut level = 0;
 
         while level < MAX_LEVEL - 2 {
-            if !Self::is_threshold_exceeded_major(option, version, level) {
+            let threshold_exceeded = Self::is_threshold_exceeded_major(option, version, level);
+
+            // Continue if it is manual compaction and there is still files on the next level
+            // Check if the version slice is empty because we skip the threshold check for manual
+            // compaction.
+            if (!threshold_exceeded && !is_manual) || version.level_slice[level].is_empty() {
                 break;
             }
-            let (meet_scopes_l, start_l, end_l) = Self::this_level_scopes(version, min, max, level);
+
+            // If threshold is not exceeded during a manual compaction with the next level being
+            // empty we will either self compact on Level 0 or stop compaction on
+            // another level.
+            if !threshold_exceeded && is_manual && version.level_slice[level + 1].is_empty() {
+                // Perform self compaction for level 0 if `is_manual`
+                if level == 0 {
+                    let (meet_scopes_l, _, _) =
+                        Self::this_level_scopes(version, min, max, level, threshold_exceeded);
+
+                    // For self compaction if there is only one SST that falls under the range we
+                    // can return early This avoids appending it back to the end
+                    // of the level
+                    if meet_scopes_l.len() <= 1 {
+                        return Ok(());
+                    }
+
+                    let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
+                    let level_fs = ctx.manager.get_fs(level_path);
+                    let mut streams = Vec::with_capacity(meet_scopes_l.len());
+                    for scope in meet_scopes_l.iter() {
+                        let file = level_fs
+                            .open_options(
+                                &option.table_path(scope.gen, level),
+                                FileType::Parquet.open_options(true),
+                            )
+                            .await?;
+
+                        streams.push(ScanStream::SsTable {
+                            inner: SsTable::open(ctx.parquet_lru.clone(), scope.gen, file)
+                                .await?
+                                .scan(
+                                    (Bound::Unbounded, Bound::Unbounded),
+                                    u32::MAX.into(),
+                                    None,
+                                    ProjectionMask::all(),
+                                )
+                                .await?,
+                        });
+                    }
+                    Compactor::<R>::build_tables(
+                        option,
+                        version_edits,
+                        level + 1,
+                        streams,
+                        instance,
+                        level_fs,
+                    )
+                    .await?;
+
+                    for scope in meet_scopes_l {
+                        version_edits.push(VersionEdit::Remove {
+                            level: level as u8,
+                            gen: scope.gen,
+                        });
+                        delete_gens.push(SsTableID::new(scope.gen, level));
+                    }
+                }
+
+                return Ok(());
+            }
+
+            let (meet_scopes_l, start_l, end_l) =
+                Self::this_level_scopes(version, min, max, level, threshold_exceeded);
+            if meet_scopes_l.is_empty() {
+                return Ok(());
+            }
+
             let (meet_scopes_ll, start_ll, end_ll) =
                 Self::next_level_scopes(version, &mut min, &mut max, level, &meet_scopes_l)?;
 
@@ -404,6 +478,7 @@ where
         min: &<R::Schema as RecordSchema>::Key,
         max: &<R::Schema as RecordSchema>::Key,
         level: usize,
+        is_threshold_exceeded: bool,
     ) -> (
         Vec<&'a Scope<<R::Schema as RecordSchema>::Key>>,
         usize,
@@ -414,17 +489,40 @@ where
         let mut end_l = start_l;
         let option = version.option();
 
-        for scope in version.level_slice[level][start_l..].iter() {
-            if (scope.contains(min) || scope.contains(max))
-                && meet_scopes_l.len() <= option.major_l_selection_table_max_num
-            {
-                meet_scopes_l.push(scope);
-                end_l += 1;
-            } else {
-                break;
+        if level == 0 {
+            let add_scopes: Vec<_> = version.level_slice[0]
+                .iter()
+                .filter(|s| s.contains(min) || s.contains(max))
+                .collect();
+
+            // Do not need to update start and end values because level 0 does not open SST tables
+            // with a range
+            meet_scopes_l.extend(add_scopes);
+
+            // TODO: Not return early here and adjust the logic to not return `end_l - 1`
+            // Return early here to avoid underflow subtraction error
+            if !meet_scopes_l.is_empty() {
+                return (meet_scopes_l, 0, 0);
+            }
+        } else {
+            for scope in version.level_slice[level][start_l..].iter() {
+                if (scope.contains(min) || scope.contains(max))
+                    && meet_scopes_l.len() <= option.major_l_selection_table_max_num
+                {
+                    meet_scopes_l.push(scope);
+                    end_l += 1;
+                } else {
+                    break;
+                }
             }
         }
+
         if meet_scopes_l.is_empty() {
+            // If meet scopes is empty during manual compaction, compaction can be halted
+            if !is_threshold_exceeded {
+                return (meet_scopes_l, 0, 0);
+            }
+
             start_l = 0;
             end_l = cmp::min(
                 option.major_default_oldest_table_num,
@@ -438,6 +536,7 @@ where
                 meet_scopes_l.push(scope);
             }
         }
+
         (meet_scopes_l, start_l, end_l - 1)
     }
 
@@ -758,6 +857,7 @@ pub(crate) mod tests {
             &mut vec![],
             &TestSchema,
             &ctx,
+            false,
         )
         .await
         .unwrap();
@@ -908,6 +1008,7 @@ pub(crate) mod tests {
             &mut vec![],
             &TestSchema,
             &ctx,
+            false,
         )
         .await
         .unwrap();
@@ -1025,5 +1126,377 @@ pub(crate) mod tests {
             }
         }
         dbg!(version);
+    }
+
+    // Self compaction is when on level 0 there is no files in the next level
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_manual_self_compaction() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 5;
+        option.level_sst_magnification = 1;
+
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        // Flush once with SST of min: 5 and max: 9
+        for i in 5..10 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        // Flush again with SST of min: 2 and max: 6
+        for i in 2..7 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        // Insert SST of min: 3 and max: 7
+        // This should trigger compaction for the first two SSTs because
+        // their key ranges fall under 3-7
+        for i in 3..8 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let version = db.ctx.version_set.current().await;
+        let sort_runs_zero = &version.level_slice[0];
+        let sort_runs_one = &version.level_slice[1];
+
+        assert_eq!(sort_runs_zero.len(), 1);
+        assert_eq!(sort_runs_one.len(), 1);
+
+        assert_eq!(sort_runs_zero[0].min, "3");
+        assert_eq!(sort_runs_zero[0].max, "7");
+
+        assert_eq!(sort_runs_one[0].min, "2");
+        assert_eq!(sort_runs_one[0].max, "9");
+    }
+
+    // Test manual self compaction when no key ranges are met
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_manual_self_no_compaction() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 5;
+        option.level_sst_magnification = 1;
+
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        // Flush once with SST of min: 5 and max: 9
+        for i in 5..10 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        // Flush again with SST of min: 2 and max: 6
+        for i in 2..7 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        // Insert SST of min: 10 and max: 15
+        // Should not trigger compaction as the first two SST's
+        // key ranges do not fall in udner 10-15
+        for i in 10..15 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let version = db.ctx.version_set.current().await;
+        let sort_runs = &version.level_slice[0];
+
+        assert_eq!(sort_runs.len(), 3);
+
+        assert_eq!(sort_runs[0].min, "5");
+        assert_eq!(sort_runs[0].max, "9");
+
+        assert_eq!(sort_runs[1].min, "2");
+        assert_eq!(sort_runs[1].max, "6");
+
+        assert_eq!(sort_runs[2].min, "10");
+        assert_eq!(sort_runs[2].max, "14");
+    }
+
+    // This use to fail because SSTs on level 0 would be returned as a range;
+    // this logic was in [`LeveledCompactor::this_level_scopes`].
+    // In the case of SST(1-5), SST(20-25), SST(5-10), SST(4-6); the fourth
+    // SST manual flush should trigger a compaction between the first and third
+    // SST however because it was in a range it would drop after the first SST.
+    //
+    // This test makes sure that it will find all SSTs in that range.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_self_manual_compaction_fix_range() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 5;
+        option.level_sst_magnification = 1;
+
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        // Flush once with SST of min: 5 and max: 9
+        for i in 5..10 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        // Flush again with SST of min: 20 and max: 24
+        for i in 20..25 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        for i in 2..5 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 3..8 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let version = db.ctx.version_set.current().await;
+        let sort_runs_l0 = &version.level_slice[0];
+        let sort_runs_l1 = &version.level_slice[1];
+
+        assert_eq!(sort_runs_l0.len(), 2);
+        assert_eq!(sort_runs_l1.len(), 1);
+
+        assert_eq!(sort_runs_l0[0].min, "20");
+        assert_eq!(sort_runs_l0[0].max, "24");
+
+        assert_eq!(sort_runs_l0[1].min, "3");
+        assert_eq!(sort_runs_l0[1].max, "7");
+
+        assert_eq!(sort_runs_l1[0].min, "2");
+        assert_eq!(sort_runs_l1[0].max, "9");
+    }
+
+    // This is to check that it doesnt self compact if the threshold is exceeded
+    // It also checks that if the threshold is reached a second time that the manual
+    // compaction will flush to the next level even if threshold isnt reached.
+    // issue: https://github.com/tonbo-io/tonbo/issues/158
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_self_manual_compaction_level_1() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 5;
+        option.level_sst_magnification = 1;
+
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(5);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        for i in 0..5 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 5..10 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 10..15 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 15..20 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 20..25 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 4..7 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let version = db.ctx.version_set.current().await;
+        let sort_runs_level_0 = &version.level_slice[0];
+        let sort_runs_level_1 = &version.level_slice[1];
+
+        // Six SSTs are inserted
+        // The logic here is as follows:
+        //  1. Inserts 5 non overlapping SSTs to not trigger self compaction
+        //  2. The sixth SST is inserted which overlaps with two SSTs and pushes the length over the
+        //     threshold. This compacts the two SSTs into the next level and adds the new SST into
+        //     level 0.
+        assert_eq!(sort_runs_level_0.len(), 4);
+        assert_eq!(sort_runs_level_1.len(), 1);
+
+        for i in 25..30 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 4..7 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let sort_runs_level_0 = &version.level_slice[0];
+        let sort_runs_level_1 = &version.level_slice[1];
+        let sort_runs_level_2 = &version.level_slice[1];
+
+        // Two SSTs are inserted.
+        // The logic here is as follow:
+        //  1. Add one non overlapping SST
+        //  2. Add an which overlaps with the level 1 SST but not level 0. This SST triggers
+        //     compaction again since threshold has been reached.
+        //  3. Level 0 will not have any overlapping keys and will take 1 SST to compact to the next
+        //     level due to the `major_default_oldest_table_num` = 1
+        //  4. Compaction continues into level 1 which has one overlapping SST and gets compacted to
+        //     level 2
+        assert_eq!(sort_runs_level_0.len(), 4);
+        assert_eq!(sort_runs_level_1.len(), 1);
+        assert_eq!(sort_runs_level_2.len(), 1);
     }
 }
