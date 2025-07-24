@@ -304,7 +304,7 @@ where
                             level: level as u8,
                             gen: scope.gen,
                         });
-                        delete_gens.push((scope.gen, level));
+                        delete_gens.push(SsTableID::new(scope.gen, level));
                     }
                 }
 
