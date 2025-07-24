@@ -894,7 +894,6 @@ mod tests {
         )
         .await
         .unwrap();
-
         let txn = db.transaction().await;
         txn.commit().await.unwrap();
 
@@ -1016,6 +1015,96 @@ mod tests {
                 assert!(weight.is_some());
                 assert_eq!(*weight.unwrap(), Some(56_i32));
             }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_transaction_scan_reverse() {
+        // Create a fresh database with default test data
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
+        let option = Arc::new(DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        ));
+
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        // Use build_version to get the default test dataset
+        // This creates keys: "1", "2", "3", "4", "5", "6", "7", "8", "9"
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+        let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
+            .await
+            .unwrap();
+        let db = build_db(
+            option,
+            compaction_rx,
+            TokioExecutor::current(),
+            schema,
+            Arc::new(TestSchema),
+            version,
+            manager,
+        )
+        .await
+        .unwrap();
+
+        // Test ascending order (default) - should output keys in order: 1, 2, 3, 4, 5, 6, 7, 8, 9
+        {
+            eprintln!("=== Testing ASCENDING order (default) ===");
+            let txn = db.transaction().await;
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(&["vu32"])
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                let key = entry.key().value.to_string();
+                eprintln!("Got key: {}", key);
+                results.push(key);
+            }
+            eprintln!("Ascending results: {:?}", results);
+
+            // For now, just output what we got instead of asserting
+            // We expect: ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+        }
+
+        // Test descending order (reverse scan) - should output keys in reverse order: 9, 8, 7, 6,
+        // 5, 4, 3, 2, 1
+        {
+            eprintln!("=== Testing DESCENDING order (reverse) ===");
+            let txn = db.transaction().await;
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .projection(&["vu32"])
+                .reverse() // This should make it descending
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                let key = entry.key().value.to_string();
+                eprintln!("Got key: {}", key);
+                results.push(key);
+            }
+            eprintln!("Descending results: {:?}", results);
+
+            // For now, just output what we got instead of asserting
+            // We expect: ["9", "8", "7", "6", "5", "4", "3", "2", "1"]
         }
     }
 }

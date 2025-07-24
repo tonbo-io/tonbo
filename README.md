@@ -117,6 +117,21 @@ async fn main() {
             }
         }
 
+        {
+            let upper = "Blob".into();
+            // reverse scan of users (newest first)
+            let mut scan = txn
+                .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+                .reverse() // scan in descending order
+                .limit(10) // get last 10 records
+                .take()
+                .await
+                .unwrap();
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                println!("User in reverse order: {:?}", entry.value());
+            }
+        }
+
         // commit transaction
         txn.commit().await.unwrap();
     }
@@ -144,6 +159,7 @@ async fn main() {
     - [x] (Optimistic) Transactions.
     - [x] Leveled compaction strategy.
     - [x] Push down filter, limit and projection.
+    - [x] Reverse scan (descending order) for efficient newest-first queries.
 - [x] Runtime schema definition.
 - [ ] SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
 - [ ] Fusion storage across RAM, flash, SSD, and remote Object Storage Service (OSS) for each column-family, balancing performance and cost efficiency per data block:

@@ -1,5 +1,6 @@
 use std::{
     collections::{btree_map::Range, BTreeMap},
+    iter::Rev,
     mem::transmute,
     ops::Bound,
     sync::Arc,
@@ -10,6 +11,7 @@ use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
+    option::Order,
     record::{option::OptionRecordRef, Key, Record, RecordRef, Schema},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, Ts, TsRef, EPOCH},
@@ -108,6 +110,7 @@ where
         ),
         ts: Timestamp,
         projection_mask: ProjectionMask,
+        order: Option<Order>,
     ) -> ImmutableScan<'scan, A::Record> {
         let lower = match range.0 {
             Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
@@ -124,7 +127,19 @@ where
             .index
             .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((lower, upper));
 
-        ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
+        if order == Some(Order::Desc) {
+            ImmutableScan::<A::Record>::new_reverse(
+                range.rev(),
+                self.data.as_record_batch(),
+                projection_mask,
+            )
+        } else {
+            ImmutableScan::<A::Record>::new_forward(
+                range,
+                self.data.as_record_batch(),
+                projection_mask,
+            )
+        }
     }
 
     pub(crate) fn get(
@@ -137,6 +152,7 @@ where
             (Bound::Included(key), Bound::Included(key)),
             ts,
             projection_mask,
+            None, // Order doesn't matter for single-key get
         )
         .next()
     }
@@ -156,25 +172,44 @@ where
     }
 }
 
-pub(crate) struct ImmutableScan<'iter, R>
+pub(crate) enum ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
-    record_batch: &'iter RecordBatch,
-    projection_mask: ProjectionMask,
+    Forward {
+        range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
+        record_batch: &'iter RecordBatch,
+        projection_mask: ProjectionMask,
+    },
+    Reverse {
+        range: Rev<Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>>,
+        record_batch: &'iter RecordBatch,
+        projection_mask: ProjectionMask,
+    },
 }
 
 impl<'iter, R> ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    fn new(
+    fn new_forward(
         range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
         record_batch: &'iter RecordBatch,
         projection_mask: ProjectionMask,
     ) -> Self {
-        Self {
+        Self::Forward {
+            range,
+            record_batch,
+            projection_mask,
+        }
+    }
+
+    fn new_reverse(
+        range: Rev<Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>>,
+        record_batch: &'iter RecordBatch,
+        projection_mask: ProjectionMask,
+    ) -> Self {
+        Self::Reverse {
             range,
             record_batch,
             projection_mask,
@@ -189,24 +224,56 @@ where
     type Item = RecordBatchEntry<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|(_, &offset)| {
-            let schema = self.record_batch.schema();
-            let record_ref = R::Ref::from_record_batch(
-                self.record_batch,
-                offset as usize,
-                &self.projection_mask,
-                &schema,
-            );
-            // TODO: remove cloning record batch
-            RecordBatchEntry::new(self.record_batch.clone(), {
-                // Safety: record_ref self-references the record batch
-                unsafe {
-                    transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
-                        record_ref,
-                    )
-                }
-            })
-        })
+        match self {
+            ImmutableScan::Forward {
+                range,
+                record_batch,
+                projection_mask,
+            } => {
+                range.next().map(|(_, &offset)| {
+                    let schema = record_batch.schema();
+                    let record_ref = R::Ref::from_record_batch(
+                        record_batch,
+                        offset as usize,
+                        projection_mask,
+                        &schema,
+                    );
+                    // TODO: remove cloning record batch
+                    RecordBatchEntry::new(record_batch.clone(), {
+                        // Safety: record_ref self-references the record batch
+                        unsafe {
+                            transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
+                                record_ref,
+                            )
+                        }
+                    })
+                })
+            }
+            ImmutableScan::Reverse {
+                range,
+                record_batch,
+                projection_mask,
+            } => {
+                range.next().map(|(_, &offset)| {
+                    let schema = record_batch.schema();
+                    let record_ref = R::Ref::from_record_batch(
+                        record_batch,
+                        offset as usize,
+                        projection_mask,
+                        &schema,
+                    );
+                    // TODO: remove cloning record batch
+                    RecordBatchEntry::new(record_batch.clone(), {
+                        // Safety: record_ref self-references the record batch
+                        unsafe {
+                            transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
+                                record_ref,
+                            )
+                        }
+                    })
+                })
+            }
+        }
     }
 }
 
@@ -407,5 +474,170 @@ pub(crate) mod tests {
                 record_batch,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_immutable_scan_forward() {
+        use std::ops::Bound;
+
+        use crossbeam_skiplist::SkipMap;
+        use parquet::arrow::ProjectionMask;
+
+        use super::Immutable;
+
+        // Create test data with String keys (not &str)
+        let skip_map = SkipMap::new();
+        skip_map.insert(
+            Ts::new("a".to_string(), 1.into()),
+            Some(Test {
+                vstring: "a".to_string(),
+                vu32: 1,
+                vbool: Some(true),
+            }),
+        );
+        skip_map.insert(
+            Ts::new("b".to_string(), 2.into()),
+            Some(Test {
+                vstring: "b".to_string(),
+                vu32: 2,
+                vbool: Some(false),
+            }),
+        );
+        skip_map.insert(
+            Ts::new("c".to_string(), 3.into()),
+            Some(Test {
+                vstring: "c".to_string(),
+                vu32: 3,
+                vbool: None,
+            }),
+        );
+
+        let schema = Arc::new(TestSchema);
+        let immutable =
+            Immutable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
+
+        // Test forward scan
+        let projection = ProjectionMask::all();
+        let scan = immutable.scan(
+            (Bound::Unbounded, Bound::Unbounded),
+            10.into(),
+            projection,
+            None, // Forward order (default)
+        );
+
+        let entries: Vec<_> = scan.collect();
+        assert_eq!(entries.len(), 3);
+
+        // Verify forward order: a, b, c
+        assert_eq!(entries[0].get().unwrap().vstring, "a");
+        assert_eq!(entries[1].get().unwrap().vstring, "b");
+        assert_eq!(entries[2].get().unwrap().vstring, "c");
+    }
+
+    #[tokio::test]
+    async fn test_immutable_scan_reverse() {
+        use std::ops::Bound;
+
+        use crossbeam_skiplist::SkipMap;
+        use parquet::arrow::ProjectionMask;
+
+        use super::Immutable;
+        use crate::option::Order;
+
+        // Create test data with String keys (not &str)
+        let skip_map = SkipMap::new();
+        skip_map.insert(
+            Ts::new("a".to_string(), 1.into()),
+            Some(Test {
+                vstring: "a".to_string(),
+                vu32: 1,
+                vbool: Some(true),
+            }),
+        );
+        skip_map.insert(
+            Ts::new("b".to_string(), 2.into()),
+            Some(Test {
+                vstring: "b".to_string(),
+                vu32: 2,
+                vbool: Some(false),
+            }),
+        );
+        skip_map.insert(
+            Ts::new("c".to_string(), 3.into()),
+            Some(Test {
+                vstring: "c".to_string(),
+                vu32: 3,
+                vbool: None,
+            }),
+        );
+
+        let schema = Arc::new(TestSchema);
+        let immutable =
+            Immutable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
+
+        // Test reverse scan
+        let projection = ProjectionMask::all();
+        let scan = immutable.scan(
+            (Bound::Unbounded, Bound::Unbounded),
+            10.into(),
+            projection,
+            Some(Order::Desc), // Reverse order
+        );
+
+        let entries: Vec<_> = scan.collect();
+        assert_eq!(entries.len(), 3);
+
+        // Verify reverse order: c, b, a
+        assert_eq!(entries[0].get().unwrap().vstring, "c");
+        assert_eq!(entries[1].get().unwrap().vstring, "b");
+        assert_eq!(entries[2].get().unwrap().vstring, "a");
+    }
+
+    #[tokio::test]
+    async fn test_immutable_scan_reverse_with_bounds() {
+        use std::ops::Bound;
+
+        use crossbeam_skiplist::SkipMap;
+        use parquet::arrow::ProjectionMask;
+
+        use super::Immutable;
+        use crate::option::Order;
+
+        // Create test data with more entries
+        let skip_map = SkipMap::new();
+        for i in 1..=5 {
+            let key = format!("key{}", i);
+            skip_map.insert(
+                Ts::new(key.clone(), i.into()),
+                Some(Test {
+                    vstring: key,
+                    vu32: i as u32,
+                    vbool: Some(i % 2 == 0),
+                }),
+            );
+        }
+
+        let schema = Arc::new(TestSchema);
+        let immutable =
+            Immutable::<TestImmutableArrays>::new(skip_map, schema.arrow_schema().clone());
+
+        // Test reverse scan with bounds: from "key2" to "key4" (inclusive)
+        let projection = ProjectionMask::all();
+        let key2 = "key2".to_string();
+        let key4 = "key4".to_string();
+        let scan = immutable.scan(
+            (Bound::Included(&key2), Bound::Included(&key4)),
+            10.into(),
+            projection,
+            Some(Order::Desc), // Reverse order
+        );
+
+        let entries: Vec<_> = scan.collect();
+        assert_eq!(entries.len(), 3);
+
+        // Verify reverse order within bounds: key4, key3, key2
+        assert_eq!(entries[0].get().unwrap().vstring, "key4");
+        assert_eq!(entries[1].get().unwrap().vstring, "key3");
+        assert_eq!(entries[2].get().unwrap().vstring, "key2");
     }
 }

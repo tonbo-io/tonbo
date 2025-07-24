@@ -774,7 +774,7 @@ where
         Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
 
     limit: Option<usize>,
-    asc: Option<bool>,
+    order: Option<Order>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
     ctx: Arc<Context<R>>,
@@ -805,7 +805,7 @@ where
             version,
             fn_pre_stream,
             limit: None,
-            asc: None,
+            order: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
             ctx,
@@ -822,7 +822,7 @@ where
 
     pub fn reverse(self) -> Self {
         Self {
-            asc: Some(false),
+            order: Some(Order::Desc),
             ..self
         }
     }
@@ -898,7 +898,7 @@ where
             let mut mutable_scan = self
                 .schema
                 .mutable
-                .scan((self.lower, self.upper), self.ts)
+                .scan((self.lower, self.upper), self.ts, self.order)
                 .into();
             if is_projection {
                 mutable_scan =
@@ -909,7 +909,12 @@ where
         for (_, immutable) in self.schema.immutables.iter().rev() {
             streams.push(
                 immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .scan(
+                        (self.lower, self.upper),
+                        self.ts,
+                        self.projection.clone(),
+                        self.order,
+                    )
                     .into(),
             );
         }
@@ -921,10 +926,11 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.order,
             )
             .await?;
 
-        let mut merge_stream = MergeStream::from_vec(streams, self.ts, self.asc).await?;
+        let mut merge_stream = MergeStream::from_vec(streams, self.ts, self.order).await?;
         if let Some(limit) = self.limit {
             merge_stream = merge_stream.limit(limit);
         }
@@ -953,7 +959,7 @@ where
             let mut mutable_scan = self
                 .schema
                 .mutable
-                .scan((self.lower, self.upper), self.ts)
+                .scan((self.lower, self.upper), self.ts, self.order)
                 .into();
             if is_projection {
                 mutable_scan =
@@ -964,7 +970,12 @@ where
         for (_, immutable) in self.schema.immutables.iter().rev() {
             streams.push(
                 immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .scan(
+                        (self.lower, self.upper),
+                        self.ts,
+                        self.projection.clone(),
+                        self.order,
+                    )
                     .into(),
             );
         }
@@ -976,9 +987,10 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.order,
             )
             .await?;
-        let merge_stream = MergeStream::from_vec(streams, self.ts, self.asc).await?;
+        let merge_stream = MergeStream::from_vec(streams, self.ts, self.order).await?;
 
         Ok(PackageStream::new(
             batch_size,

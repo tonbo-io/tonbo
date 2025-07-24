@@ -17,6 +17,7 @@ use ulid::Ulid;
 use super::{arrows::get_range_filter, scan::SsTableScan};
 use crate::{
     fs::FileId,
+    option::Order,
     record::{Record, Schema},
     stream::record_batch::RecordBatchEntry,
     timestamp::{Timestamp, TsRef},
@@ -101,6 +102,7 @@ where
             key.ts(),
             Some(1),
             projection_mask,
+            None, // Order doesn't matter for single-key get
         )
         .await?
         .next()
@@ -117,6 +119,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        order: Option<Order>,
     ) -> Result<SsTableScan<'scan, R>, parquet::errors::ParquetError> {
         let builder = self
             .into_parquet_builder(limit, projection_mask.clone())
@@ -133,6 +136,7 @@ where
             builder.with_row_filter(filter).build()?,
             projection_mask,
             full_schema,
+            order,
         ))
     }
 }
@@ -330,6 +334,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2, 3],
                     ),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -357,6 +362,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2, 4],
                     ),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -384,6 +390,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2],
                     ),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -398,5 +405,311 @@ pub(crate) mod tests {
             assert_eq!(entry_1.get().unwrap().vu32, None);
             assert_eq!(entry_1.get().unwrap().vbool, None);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sstable_reverse_scan_basic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let base_fs = manager.base_fs();
+        let record_batch = get_test_record_batch::<TokioExecutor>(
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            ),
+            TokioExecutor::current(),
+        )
+        .await;
+        let table_path = temp_dir.path().join("reverse_scan_basic_test.parquet");
+        let _ = File::create(&table_path).unwrap();
+        let table_path = Path::from_filesystem_path(table_path).unwrap();
+
+        let file = base_fs
+            .open_options(&table_path, FileType::Parquet.open_options(false))
+            .await
+            .unwrap();
+        write_record_batch(file, &record_batch).await.unwrap();
+
+        // Test forward scan (baseline)
+        {
+            let mut forward_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Unbounded, Bound::Unbounded),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::all(),
+                    None, // Forward order (default)
+                )
+                .await
+                .unwrap();
+
+            let entry_0 = forward_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_0.get().unwrap().vstring, "hello");
+
+            let entry_1 = forward_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_1.get().unwrap().vstring, "world");
+
+            assert!(forward_scan.next().await.is_none());
+        }
+
+        // Test reverse scan
+        {
+            use crate::option::Order;
+            let mut reverse_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Unbounded, Bound::Unbounded),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::all(),
+                    Some(Order::Desc), // Reverse order
+                )
+                .await
+                .unwrap();
+
+            let entry_0 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_0.get().unwrap().vstring, "world");
+
+            let entry_1 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_1.get().unwrap().vstring, "hello");
+
+            assert!(reverse_scan.next().await.is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sstable_reverse_scan_with_projections() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let base_fs = manager.base_fs();
+        let record_batch = get_test_record_batch::<TokioExecutor>(
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            ),
+            TokioExecutor::current(),
+        )
+        .await;
+        let table_path = temp_dir.path().join("reverse_scan_projection_test.parquet");
+        let _ = File::create(&table_path).unwrap();
+        let table_path = Path::from_filesystem_path(table_path).unwrap();
+
+        let file = base_fs
+            .open_options(&table_path, FileType::Parquet.open_options(false))
+            .await
+            .unwrap();
+        write_record_batch(file, &record_batch).await.unwrap();
+
+        use crate::option::Order;
+
+        // Test reverse scan with different projections
+        {
+            let mut reverse_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Unbounded, Bound::Unbounded),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::roots(
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
+                        [0, 1, 2, 3], // Include vu32, exclude vbool
+                    ),
+                    Some(Order::Desc),
+                )
+                .await
+                .unwrap();
+
+            let entry_0 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_0.get().unwrap().vstring, "world");
+            assert_eq!(entry_0.get().unwrap().vu32, Some(12));
+            assert_eq!(entry_0.get().unwrap().vbool, None); // Excluded by projection
+
+            let entry_1 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_1.get().unwrap().vstring, "hello");
+            assert_eq!(entry_1.get().unwrap().vu32, Some(12));
+            assert_eq!(entry_1.get().unwrap().vbool, None); // Excluded by projection
+
+            assert!(reverse_scan.next().await.is_none());
+        }
+
+        // Test reverse scan with different projection (include vbool, exclude vu32)
+        {
+            let mut reverse_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Unbounded, Bound::Unbounded),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::roots(
+                        &ArrowSchemaConverter::new()
+                            .convert(TestSchema {}.arrow_schema())
+                            .unwrap(),
+                        [0, 1, 2, 4], // Include vbool, exclude vu32
+                    ),
+                    Some(Order::Desc),
+                )
+                .await
+                .unwrap();
+
+            let entry_0 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_0.get().unwrap().vstring, "world");
+            assert_eq!(entry_0.get().unwrap().vu32, None); // Excluded by projection
+            assert_eq!(entry_0.get().unwrap().vbool, None);
+
+            let entry_1 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_1.get().unwrap().vstring, "hello");
+            assert_eq!(entry_1.get().unwrap().vu32, None); // Excluded by projection
+            assert_eq!(entry_1.get().unwrap().vbool, Some(true));
+
+            assert!(reverse_scan.next().await.is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sstable_reverse_scan_with_bounds() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let base_fs = manager.base_fs();
+        let record_batch = get_test_record_batch::<TokioExecutor>(
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            ),
+            TokioExecutor::current(),
+        )
+        .await;
+        let table_path = temp_dir.path().join("reverse_scan_bounds_test.parquet");
+        let _ = File::create(&table_path).unwrap();
+        let table_path = Path::from_filesystem_path(table_path).unwrap();
+
+        let file = base_fs
+            .open_options(&table_path, FileType::Parquet.open_options(false))
+            .await
+            .unwrap();
+        write_record_batch(file, &record_batch).await.unwrap();
+
+        use crate::option::Order;
+
+        // Test reverse scan with bounds (only "hello" to "world" range)
+        let hello_key = "hello".to_string();
+        let world_key = "world".to_string();
+
+        {
+            let mut reverse_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Included(&hello_key), Bound::Included(&world_key)),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::all(),
+                    Some(Order::Desc),
+                )
+                .await
+                .unwrap();
+
+            let entry_0 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_0.get().unwrap().vstring, "world");
+
+            let entry_1 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_1.get().unwrap().vstring, "hello");
+
+            assert!(reverse_scan.next().await.is_none());
+        }
+
+        // Test reverse scan with exclusive upper bound (should only return "hello")
+        {
+            let mut reverse_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Unbounded, Bound::Excluded(&world_key)),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::all(),
+                    Some(Order::Desc),
+                )
+                .await
+                .unwrap();
+
+            let entry_0 = reverse_scan.next().await.unwrap().unwrap();
+            assert_eq!(entry_0.get().unwrap().vstring, "hello");
+
+            assert!(reverse_scan.next().await.is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sstable_forward_vs_reverse_consistency() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let base_fs = manager.base_fs();
+        let record_batch = get_test_record_batch::<TokioExecutor>(
+            DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            ),
+            TokioExecutor::current(),
+        )
+        .await;
+        let table_path = temp_dir.path().join("forward_vs_reverse_test.parquet");
+        let _ = File::create(&table_path).unwrap();
+        let table_path = Path::from_filesystem_path(table_path).unwrap();
+
+        let file = base_fs
+            .open_options(&table_path, FileType::Parquet.open_options(false))
+            .await
+            .unwrap();
+        write_record_batch(file, &record_batch).await.unwrap();
+
+        use crate::option::Order;
+
+        // Collect forward scan results
+        let mut forward_results = Vec::new();
+        {
+            let mut forward_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Unbounded, Bound::Unbounded),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::all(),
+                    None, // Forward order
+                )
+                .await
+                .unwrap();
+
+            while let Some(entry) = forward_scan.next().await.transpose().unwrap() {
+                forward_results.push(entry.get().unwrap().vstring.to_string());
+            }
+        }
+
+        // Collect reverse scan results
+        let mut reverse_results = Vec::new();
+        {
+            let mut reverse_scan = open_sstable::<Test>(base_fs, &table_path)
+                .await
+                .scan(
+                    (Bound::Unbounded, Bound::Unbounded),
+                    10_u32.into(),
+                    None,
+                    ProjectionMask::all(),
+                    Some(Order::Desc), // Reverse order
+                )
+                .await
+                .unwrap();
+
+            while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+                reverse_results.push(entry.get().unwrap().vstring.to_string());
+            }
+        }
+
+        // Verify reverse scan is exact inverse of forward scan
+        forward_results.reverse();
+        assert_eq!(forward_results, reverse_results);
+
+        // Verify expected content
+        assert_eq!(reverse_results, vec!["world", "hello"]);
     }
 }

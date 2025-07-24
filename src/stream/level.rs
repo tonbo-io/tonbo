@@ -19,6 +19,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
+    option::Order,
     record::{Record, Schema},
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
@@ -59,6 +60,7 @@ where
     fs: Arc<dyn DynFs>,
     path: Option<Path>,
     parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+    order: Option<Order>,
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -81,6 +83,7 @@ where
         projection_mask: ProjectionMask,
         fs: Arc<dyn DynFs>,
         parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+        order: Option<Order>,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -103,6 +106,7 @@ where
             fs,
             path: None,
             parquet_lru,
+            order,
         })
     }
 }
@@ -196,6 +200,7 @@ where
                             self.ts,
                             self.limit,
                             self.projection_mask.clone(),
+                            self.order,
                         )));
                         continue;
                     }
@@ -272,6 +277,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                None, // Default order for test
             )
             .unwrap();
 
@@ -311,6 +317,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                None, // Default order for test
             )
             .unwrap();
 
@@ -350,6 +357,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                None, // Default order for test
             )
             .unwrap();
 

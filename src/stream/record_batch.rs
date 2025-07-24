@@ -9,6 +9,7 @@ use arrow::{array::RecordBatch, datatypes::Schema};
 use parquet::arrow::ProjectionMask;
 
 use crate::{
+    option::Order,
     record::{option::OptionRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
     timestamp::Ts,
 };
@@ -64,6 +65,7 @@ pub struct RecordBatchIterator<R> {
     offset: usize,
     projection_mask: ProjectionMask,
     full_schema: Arc<Schema>,
+    order: Option<Order>,
     _marker: PhantomData<R>,
 }
 
@@ -75,12 +77,21 @@ where
         record_batch: RecordBatch,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
+        order: Option<Order>,
     ) -> Self {
+        let offset = if order == Some(Order::Desc) {
+            // Start from the last row for descending order
+            record_batch.num_rows().saturating_sub(1)
+        } else {
+            0
+        };
+
         Self {
             record_batch,
-            offset: 0,
+            offset,
             projection_mask,
             full_schema,
+            order,
             _marker: PhantomData,
         }
     }
@@ -93,8 +104,17 @@ where
     type Item = RecordBatchEntry<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.offset >= self.record_batch.num_rows() {
-            return None;
+        let num_rows = self.record_batch.num_rows();
+
+        // Check bounds based on order
+        if self.order == Some(Order::Desc) {
+            if num_rows == 0 || self.offset >= num_rows {
+                return None;
+            }
+        } else {
+            if self.offset >= num_rows {
+                return None;
+            }
         }
 
         let record_batch = self.record_batch.clone();
@@ -110,7 +130,18 @@ where
                 record,
             )
         });
-        self.offset += 1;
+
+        // Update offset based on order
+        if self.order == Some(Order::Desc) {
+            if self.offset == 0 {
+                self.offset = num_rows; // Set to out of bounds to stop iteration
+            } else {
+                self.offset -= 1;
+            }
+        } else {
+            self.offset += 1;
+        }
+
         Some(entry)
     }
 }

@@ -268,6 +268,7 @@ where
                                 u32::MAX.into(),
                                 None,
                                 ProjectionMask::all(),
+                                None, // Default order for compaction
                             )
                             .await?,
                     });
@@ -285,6 +286,7 @@ where
                     ProjectionMask::all(),
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    None, // Default order for compaction
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -310,6 +312,7 @@ where
                     ProjectionMask::all(),
                     level_l_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    None, // Default order for compaction
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 

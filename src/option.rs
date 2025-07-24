@@ -19,6 +19,16 @@ use crate::{
 
 const DEFAULT_WAL_BUFFER_SIZE: usize = 4 * 1024;
 
+/// Specifies the ordering direction for scans and other operations
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum Order {
+    /// Ascending order (default)
+    #[default]
+    Asc,
+    /// Descending order
+    Desc,
+}
+
 #[derive(Clone)]
 pub enum CompactionOption {
     Leveled,
