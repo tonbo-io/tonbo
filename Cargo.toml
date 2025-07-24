@@ -1,4 +1,4 @@
-workspace = { members = ["parquet-lru", "tonbo_macros"] }
+workspace = { members = ["parquet-lru"] }
 
 [package]
 description = "An embedded persistent KV database in Rust."
@@ -45,13 +45,13 @@ tokio-http = ["fusio/tokio-http", "fusio-log/tokio-http"]
 wasm = ["aws", "bytes", "opfs", "wasm-http"]
 wasm-http = ["fusio/wasm-http", "fusio-log/web-http"]
 
-[[example]]
-name = "declare"
-required-features = ["bytes", "tokio"]
+# [[example]]
+# name = "declare"
+# required-features = ["bytes", "tokio"]
 
-[[example]]
-name = "datafusion"
-required-features = ["datafusion"]
+# [[example]]
+# name = "datafusion"
+# required-features = ["datafusion"]
 
 [[bench]]
 harness = false

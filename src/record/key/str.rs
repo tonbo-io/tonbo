@@ -13,8 +13,8 @@ impl Key for String {
         self
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn Datum> {
-        Arc::new(StringArray::new_scalar(self))
+    fn to_arrow_fields(&self) -> Vec<Arc<dyn Datum>> {
+        vec![Arc::new(StringArray::new_scalar(self))]
     }
 }
 

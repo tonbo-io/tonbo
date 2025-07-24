@@ -579,7 +579,7 @@ pub(crate) mod tests {
             immutable::{tests::TestSchema, ImmutableMemTable},
             mutable::MutableMemTable,
         },
-        record::{DataType, DynRecord, DynSchema, Record, Schema, Value, ValueDesc},
+        record::{Record, Schema},
         scope::Scope,
         tests::Test,
         trigger::{TriggerFactory, TriggerType},
@@ -724,74 +724,75 @@ pub(crate) mod tests {
         assert_eq!(scope.max, 6.to_string());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn dyn_minor_compaction() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
-        let schema = DynSchema::new(
-            vec![ValueDesc::new("id".to_owned(), DataType::Int32, false)],
-            0,
-        );
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &schema,
-        );
-        manager
-            .base_fs()
-            .create_dir_all(&option.wal_dir_path())
-            .await
-            .unwrap();
-
-        let instance = Arc::new(schema);
-
-        let mut batch1_data = vec![];
-        let mut batch2_data = vec![];
-        for i in 0..40 {
-            let col = Value::new(DataType::Int32, "id".to_owned(), Arc::new(i), false);
-            if i % 4 == 0 {
-                continue;
-            }
-            if i < 35 && (i % 2 == 0 || i % 5 == 0) {
-                batch1_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
-            } else if i >= 7 {
-                batch2_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
-            }
-        }
-
-        // data range: [2, 34]
-        let batch_1 =
-            build_immutable::<DynRecord>(&option, batch1_data, &instance, manager.base_fs())
-                .await
-                .unwrap();
-
-        // data range: [7, 39]
-        let batch_2 =
-            build_immutable::<DynRecord>(&option, batch2_data, &instance, manager.base_fs())
-                .await
-                .unwrap();
-
-        let scope = LeveledCompactor::<DynRecord>::minor_compaction(
-            &option,
-            None,
-            &vec![
-                (Some(generate_file_id()), batch_1),
-                (Some(generate_file_id()), batch_2),
-            ],
-            &instance,
-            &manager,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            scope.min,
-            Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
-        );
-        assert_eq!(
-            scope.max,
-            Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false)
-        );
-    }
+    // TODO: Re-enable when runtime support is added back
+    // #[tokio::test(flavor = "multi_thread")]
+    // async fn dyn_minor_compaction() {
+    // let temp_dir = tempfile::tempdir().unwrap();
+    // let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+    // let schema = DynSchema::new(
+    // vec![ValueDesc::new("id".to_owned(), DataType::Int32, false)],
+    // 0,
+    // );
+    // let option = DbOption::new(
+    // Path::from_filesystem_path(temp_dir.path()).unwrap(),
+    // &schema,
+    // );
+    // manager
+    // .base_fs()
+    // .create_dir_all(&option.wal_dir_path())
+    // .await
+    // .unwrap();
+    //
+    // let instance = Arc::new(schema);
+    //
+    // let mut batch1_data = vec![];
+    // let mut batch2_data = vec![];
+    // for i in 0..40 {
+    // let col = Value::new(DataType::Int32, "id".to_owned(), Arc::new(i), false);
+    // if i % 4 == 0 {
+    // continue;
+    // }
+    // if i < 35 && (i % 2 == 0 || i % 5 == 0) {
+    // batch1_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+    // } else if i >= 7 {
+    // batch2_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+    // }
+    // }
+    //
+    // data range: [2, 34]
+    // let batch_1 =
+    // build_immutable::<DynRecord>(&option, batch1_data, &instance, manager.base_fs())
+    // .await
+    // .unwrap();
+    //
+    // data range: [7, 39]
+    // let batch_2 =
+    // build_immutable::<DynRecord>(&option, batch2_data, &instance, manager.base_fs())
+    // .await
+    // .unwrap();
+    //
+    // let scope = LeveledCompactor::<DynRecord>::minor_compaction(
+    // &option,
+    // None,
+    // &vec![
+    // (Some(generate_file_id()), batch_1),
+    // (Some(generate_file_id()), batch_2),
+    // ],
+    // &instance,
+    // &manager,
+    // )
+    // .await
+    // .unwrap()
+    // .unwrap();
+    // assert_eq!(
+    // scope.min,
+    // Value::new(DataType::Int32, "id".to_owned(), Arc::new(2), false)
+    // );
+    // assert_eq!(
+    // scope.max,
+    // Value::new(DataType::Int32, "id".to_owned(), Arc::new(39), false)
+    // );
+    // }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn major_compaction() {

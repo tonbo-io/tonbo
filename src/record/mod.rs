@@ -1,8 +1,9 @@
 pub mod key;
 pub mod option;
-pub mod runtime;
 #[cfg(test)]
 pub(crate) mod test;
+#[cfg(test)]
+pub(crate) mod test_composite;
 
 use std::{error::Error, fmt::Debug, io, sync::Arc};
 
@@ -11,7 +12,6 @@ use fusio_log::{Decode, Encode};
 pub use key::*;
 use option::OptionRecordRef;
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
-pub use runtime::*;
 use thiserror::Error;
 
 use crate::inmem::immutable::ArrowArrays;
@@ -28,13 +28,14 @@ pub trait Schema: Debug + Send + Sync {
     /// **Note**: The first column should be `_null`, and the second column should be `_ts`.
     fn arrow_schema(&self) -> &Arc<ArrowSchema>;
 
-    /// Returns the index of the primary key column.
-    fn primary_key_index(&self) -> usize;
+    /// Returns the indices of the primary key columns.
+    /// For single keys, returns a slice with one element.
+    /// For composite keys, returns multiple indices in order.
+    fn primary_key_indices(&self) -> &[usize];
 
-    /// Returns the ([`ColumnPath`], [`Vec<SortingColumn>`]) of the primary key column, representing
-    /// the location of the primary key column in the parquet schema and the sort order within a
-    /// RowGroup of a leaf column
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>);
+    /// Returns the column paths and sorting columns for all primary key columns.
+    /// Each element represents one component of the (composite) primary key.
+    fn primary_key_paths(&self) -> Vec<(ColumnPath, Vec<SortingColumn>)>;
 }
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
@@ -52,9 +53,6 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
 
     /// Returns a reference to the record.
     fn as_record_ref(&self) -> Self::Ref<'_>;
-
-    /// Returns the size of the record in bytes.
-    fn size(&self) -> usize;
 }
 
 pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {

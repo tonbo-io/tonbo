@@ -10,6 +10,8 @@ pub(crate) trait IdentGenerator {
     fn to_array_ident(&self) -> Ident;
 
     fn to_immutable_array_ident(&self) -> Ident;
+
+    fn to_key_ident(&self) -> Ident;
 }
 
 impl IdentGenerator for proc_macro2::Ident {
@@ -31,5 +33,9 @@ impl IdentGenerator for proc_macro2::Ident {
 
     fn to_immutable_array_ident(&self) -> Ident {
         Ident::new(&format!("{}ImmutableArrays", self), self.span())
+    }
+
+    fn to_key_ident(&self) -> Ident {
+        Ident::new(&format!("{}Key", self), self.span())
     }
 }

@@ -35,7 +35,7 @@ impl<T> SizeOfMemTrigger<T> {
 
 impl<R: Record> FreezeTrigger<R> for SizeOfMemTrigger<R> {
     fn check_if_exceed(&self, item: &R) -> bool {
-        let size = item.size() + item.key().size();
+        let size = item.as_record_ref().size() + item.key().size();
         self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
     }
 
@@ -98,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_size_of_mem_trigger() {
-        let threshold = 16;
+        let threshold = 20;
         let trigger = SizeOfMemTrigger::new(threshold);
 
         let record = Test {
@@ -107,8 +107,8 @@ mod tests {
             vbool: None,
         };
 
-        let record_size = record.size();
-        assert_eq!(record_size, 8);
+        let record_size = record.as_record_ref().size();
+        assert_eq!(record_size, 12);
         let record_size = record.key().size();
         assert_eq!(record_size, 6);
 
@@ -160,7 +160,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_trigger_factory() {
-        let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(16));
+        let size_of_mem_trigger = TriggerFactory::<Test>::create(TriggerType::SizeOfMem(20));
         let length_trigger = TriggerFactory::<Test>::create(TriggerType::Length(2));
 
         assert!(!size_of_mem_trigger.check_if_exceed(&Test {

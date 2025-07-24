@@ -232,7 +232,7 @@ mod tests {
     use super::MutableMemTable;
     use crate::{
         inmem::immutable::tests::TestSchema,
-        record::{test::StringSchema, DataType, DynRecord, DynSchema, Record, Value, ValueDesc},
+        record::{test::StringSchema, Record},
         tests::{Test, TestRef},
         trigger::TriggerFactory,
         version::timestamp::Ts,
@@ -387,62 +387,63 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_dyn_read() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let schema = DynSchema::new(
-            vec![
-                ValueDesc::new("age".to_string(), DataType::Int8, false),
-                ValueDesc::new("height".to_string(), DataType::Int16, true),
-            ],
-            0,
-        );
-        let option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &schema,
-        );
-        let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
-        fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
-
-        let trigger = TriggerFactory::create(option.trigger_type);
-
-        let schema = Arc::new(schema);
-
-        let mutable = MutableMemTable::<DynRecord>::new(&option, trigger, fs.clone(), schema)
-            .await
-            .unwrap();
-
-        mutable
-            .insert(
-                LogType::Full,
-                DynRecord::new(
-                    vec![
-                        Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                        Value::new(
-                            DataType::Int16,
-                            "height".to_string(),
-                            Arc::new(1236_i16),
-                            true,
-                        ),
-                    ],
-                    0,
-                ),
-                0_u32.into(),
-            )
-            .await
-            .unwrap();
-
-        {
-            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
-            let entry = scan.next().unwrap();
-            assert_eq!(
-                entry.key(),
-                &Ts::new(
-                    Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                    0_u32.into()
-                )
-            );
-            dbg!(entry.clone().value().as_ref().unwrap());
-        }
-    }
+    // TODO: Re-enable when runtime support is added back
+    // #[tokio::test]
+    // async fn test_dyn_read() {
+    // let temp_dir = tempfile::tempdir().unwrap();
+    // let schema = DynSchema::new(
+    // vec![
+    // ValueDesc::new("age".to_string(), DataType::Int8, false),
+    // ValueDesc::new("height".to_string(), DataType::Int16, true),
+    // ],
+    // 0,
+    // );
+    // let option = DbOption::new(
+    // Path::from_filesystem_path(temp_dir.path()).unwrap(),
+    // &schema,
+    // );
+    // let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
+    // fs.create_dir_all(&option.wal_dir_path()).await.unwrap();
+    //
+    // let trigger = TriggerFactory::create(option.trigger_type);
+    //
+    // let schema = Arc::new(schema);
+    //
+    // let mutable = MutableMemTable::<DynRecord>::new(&option, trigger, fs.clone(), schema)
+    // .await
+    // .unwrap();
+    //
+    // mutable
+    // .insert(
+    // LogType::Full,
+    // DynRecord::new(
+    // vec![
+    // Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
+    // Value::new(
+    // DataType::Int16,
+    // "height".to_string(),
+    // Arc::new(1236_i16),
+    // true,
+    // ),
+    // ],
+    // 0,
+    // ),
+    // 0_u32.into(),
+    // )
+    // .await
+    // .unwrap();
+    //
+    // {
+    // let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+    // let entry = scan.next().unwrap();
+    // assert_eq!(
+    // entry.key(),
+    // &Ts::new(
+    // Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
+    // 0_u32.into()
+    // )
+    // );
+    // dbg!(entry.clone().value().as_ref().unwrap());
+    // }
+    // }
 }
