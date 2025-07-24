@@ -1,4 +1,4 @@
-use std::{fs, sync::Arc};
+use std::{fs, path::PathBuf, sync::Arc};
 
 use fusio::path::Path;
 use tonbo::{
@@ -15,7 +15,8 @@ async fn main() {
     let schema = dyn_schema!(("foo", String, false), ("bar", Int32, true), 0);
 
     let options = DbOption::new(
-        Path::from_filesystem_path("./db_path/users").unwrap(),
+        Path::from_filesystem_path(fs::canonicalize(PathBuf::from("./db_path/users")).unwrap())
+            .unwrap(),
         &schema,
     );
     let db = DB::new(options, TokioExecutor::current(), schema)
