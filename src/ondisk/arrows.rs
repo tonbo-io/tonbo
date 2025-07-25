@@ -16,7 +16,7 @@ use parquet::{
 
 use crate::{
     record::{Key, Record, Schema},
-    timestamp::Timestamp,
+    version::timestamp::Timestamp,
 };
 
 unsafe fn get_range_bound_fn<R>(

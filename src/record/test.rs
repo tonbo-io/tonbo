@@ -14,7 +14,7 @@ use super::{option::OptionRecordRef, Key, Record, RecordRef, Schema};
 use crate::{
     inmem::immutable::{ArrowArrays, Builder},
     magic,
-    timestamp::Ts,
+    version::timestamp::Ts,
 };
 
 const PRIMARY_FIELD_NAME: &str = "vstring";

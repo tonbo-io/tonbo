@@ -17,16 +17,16 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
-    record::{Key, KeyRef, RecordRef, Schema as RecordSchema},
+    record::{Key, KeyRef, RecordRef, Schema},
     snapshot::Snapshot,
     stream::{self, mem_projection::MemProjectionStream},
-    timestamp::{Timestamp, Ts},
+    version::timestamp::{Timestamp, Ts},
     wal::log::LogType,
     DbError, DbStorage, LockMap, Projection, Record, Scan,
 };
 
 pub(crate) struct TransactionScan<'scan, R: Record> {
-    inner: Range<'scan, <R::Schema as RecordSchema>::Key, Option<R>>,
+    inner: Range<'scan, <R::Schema as Schema>::Key, Option<R>>,
     ts: Timestamp,
 }
 
@@ -35,7 +35,7 @@ where
     R: Record,
 {
     type Item = (
-        Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'scan>>,
+        Ts<<<R::Schema as Schema>::Key as Key>::Ref<'scan>>,
         &'scan Option<R>,
     );
 
@@ -54,9 +54,9 @@ pub struct Transaction<'txn, R>
 where
     R: Record,
 {
-    local: BTreeMap<<R::Schema as RecordSchema>::Key, Option<R>>,
+    local: BTreeMap<<R::Schema as Schema>::Key, Option<R>>,
     snapshot: Snapshot<'txn, R>,
-    lock_map: LockMap<<R::Schema as RecordSchema>::Key>,
+    lock_map: LockMap<<R::Schema as Schema>::Key>,
 }
 
 impl<'txn, R> Transaction<'txn, R>
@@ -65,7 +65,7 @@ where
 {
     pub(crate) fn new(
         snapshot: Snapshot<'txn, R>,
-        lock_map: LockMap<<R::Schema as RecordSchema>::Key>,
+        lock_map: LockMap<<R::Schema as Schema>::Key>,
     ) -> Self {
         Self {
             local: BTreeMap::new(),
@@ -78,7 +78,7 @@ where
     /// [`Projection`]
     pub async fn get<'get>(
         &'get self,
-        key: &'get <R::Schema as RecordSchema>::Key,
+        key: &'get <R::Schema as Schema>::Key,
         projection: Projection<'get>,
     ) -> Result<Option<TransactionEntry<'get, R>>, DbError> {
         Ok(match self.local.get(key) {
@@ -145,8 +145,8 @@ where
     pub fn scan<'scan, 'range>(
         &'scan self,
         range: (
-            Bound<&'range <R::Schema as RecordSchema>::Key>,
-            Bound<&'range <R::Schema as RecordSchema>::Key>,
+            Bound<&'range <R::Schema as Schema>::Key>,
+            Bound<&'range <R::Schema as Schema>::Key>,
         ),
     ) -> Scan<'scan, 'range, R> {
         let ts = self.snapshot.ts();
@@ -169,11 +169,11 @@ where
     }
 
     /// delete the record with the primary key as the `key` on this transaction
-    pub fn remove(&mut self, key: <R::Schema as RecordSchema>::Key) {
+    pub fn remove(&mut self, key: <R::Schema as Schema>::Key) {
         self.entry(key, None)
     }
 
-    fn entry(&mut self, key: <R::Schema as RecordSchema>::Key, value: Option<R>) {
+    fn entry(&mut self, key: <R::Schema as Schema>::Key, value: Option<R>) {
         match self.local.entry(key) {
             Entry::Vacant(v) => {
                 v.insert(value);
@@ -274,7 +274,7 @@ where
     async fn append(
         schema: &DbStorage<R>,
         log_ty: LogType,
-        key: <R::Schema as RecordSchema>::Key,
+        key: <R::Schema as Schema>::Key,
         record: Option<R>,
         new_ts: Timestamp,
     ) -> Result<bool, CommitError<R>> {
@@ -321,7 +321,7 @@ where
     #[error("transaction database error {:?}", .0)]
     Database(#[from] DbError),
     #[error("transaction write conflict: {:?}", .0)]
-    WriteConflict(<R::Schema as RecordSchema>::Key),
+    WriteConflict(<R::Schema as Schema>::Key),
     #[error("Failed to send compact task")]
     SendCompactTaskError(#[from] SendError<CompactTask>),
     #[error("Channel is closed")]

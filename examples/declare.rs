@@ -1,4 +1,4 @@
-use std::ops::Bound;
+use std::{ops::Bound, path::PathBuf};
 
 use bytes::Bytes;
 use fusio::path::Path;
@@ -24,7 +24,12 @@ async fn main() {
     let _ = fs::create_dir_all("./db_path/users").await;
 
     let options = DbOption::new(
-        Path::from_filesystem_path("./db_path/users").unwrap(),
+        Path::from_filesystem_path(
+            fs::canonicalize(PathBuf::from("./db_path/users"))
+                .await
+                .unwrap(),
+        )
+        .unwrap(),
         &UserSchema,
     );
     // pluggable async runtime and I/O

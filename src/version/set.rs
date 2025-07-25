@@ -22,8 +22,10 @@ use crate::{
     ondisk::sstable::SsTableID,
     record::{Record, Schema},
     scope::Scope,
-    timestamp::Timestamp,
-    version::{cleaner::CleanTag, edit::VersionEdit, Version, VersionError, VersionRef},
+    version::{
+        cleaner::CleanTag, edit::VersionEdit, timestamp::Timestamp, Version, VersionError,
+        VersionRef,
+    },
     DbOption,
 };
 

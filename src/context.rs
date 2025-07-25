@@ -3,7 +3,10 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 
 use crate::{
-    fs::manager::StoreManager, manifest::ManifestStorage, record::Record, timestamp::Timestamp,
+    fs::manager::StoreManager,
+    manifest::ManifestStorage,
+    record::Record,
+    version::{set::VersionSet, timestamp::Timestamp, TransactionTs},
     ParquetLru,
 };
 

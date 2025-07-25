@@ -27,7 +27,7 @@ use crate::{
         Date32, Date64, Key, LargeBinary, LargeString, Record, Schema, Time32, Time64, TimeUnit,
         Timestamp, F32, F64,
     },
-    timestamp::Ts,
+    version::timestamp::Ts,
 };
 
 #[allow(unused)]
@@ -577,7 +577,7 @@ mod tests {
             let schema = dyn_schema!(("id", UInt64, false), 0);
             let record = dyn_record!(("id", UInt64, false, 1_u64), 0);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
-            let key = crate::timestamp::Ts {
+            let key = crate::version::timestamp::Ts {
                 ts: 0.into(),
                 value: record.key(),
             };
@@ -596,7 +596,7 @@ mod tests {
             let schema = dyn_schema!(("id", String, false), 0);
             let record = dyn_record!(("id", String, false, "abc".to_string()), 0);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
-            let key = crate::timestamp::Ts {
+            let key = crate::version::timestamp::Ts {
                 ts: 0.into(),
                 value: record.key(),
             };
@@ -615,7 +615,7 @@ mod tests {
             let schema = dyn_schema!(("id", Float32, false), 0);
             let record = dyn_record!(("id", Float32, false, F32::from(3.2324)), 0);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
-            let key = crate::timestamp::Ts {
+            let key = crate::version::timestamp::Ts {
                 ts: 0.into(),
                 value: record.key(),
             };
@@ -657,7 +657,7 @@ mod tests {
         );
 
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
-        let key = crate::timestamp::Ts {
+        let key = crate::version::timestamp::Ts {
             ts: 0.into(),
             value: record.key(),
         };
