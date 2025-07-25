@@ -18,9 +18,11 @@ use arrow::{
 
 use super::{record::DynRecord, record_ref::DynRecordRef, AsValue, DataType};
 use crate::{
-    inmem::immutable::{ArrowArrays, Builder},
     magic::USER_COLUMN_OFFSET,
-    record::{Key, LargeBinary, LargeString, Record, Schema, TimeUnit, ValueRef},
+    record::{
+        ArrowArrays, ArrowArraysBuilder, Key, LargeBinary, LargeString, Record, Schema, TimeUnit,
+        ValueRef,
+    },
     version::timestamp::Ts,
 };
 
@@ -143,7 +145,7 @@ macro_rules! implement_builder_array {
         { $( { $alt_ty:ty, $alt_variant:pat, $builder_ty:ty, $as_alt_value:ident } ),* $(,)? },
         { $( { $alt_ty2:ty, $alt_variant2:pat,$builder_ty2:ty, $array_ty3:ty, $as_alt_value2:ident } ),* }
     ) => {
-        impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
+        impl ArrowArraysBuilder<DynRecordImmutableArrays> for DynRecordBuilder {
             fn push(
                 &mut self,
                 key: Ts<<<<DynRecord as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
@@ -421,9 +423,9 @@ mod tests {
 
     use crate::{
         dyn_schema,
-        inmem::immutable::{ArrowArrays, Builder},
         record::{
-            DynRecord, DynRecordImmutableArrays, DynRecordRef, Record, RecordRef, Schema, Value,
+            ArrowArrays, ArrowArraysBuilder, DynRecord, DynRecordImmutableArrays, DynRecordRef,
+            Record, RecordRef, Schema, Value,
         },
     };
 

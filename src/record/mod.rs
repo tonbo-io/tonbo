@@ -4,7 +4,7 @@ pub mod option;
 #[cfg(test)]
 pub(crate) mod test;
 
-use std::{error::Error, fmt::Debug, io, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
 pub use dynamic::*;
@@ -12,9 +12,39 @@ use fusio_log::{Decode, Encode};
 pub use key::*;
 use option::OptionRecordRef;
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
-use thiserror::Error;
 
-use crate::inmem::immutable::ArrowArrays;
+use crate::version::timestamp::Ts;
+
+pub trait ArrowArrays: Sized {
+    type Record: Record;
+
+    type Builder: ArrowArraysBuilder<Self>;
+
+    fn builder(schema: Arc<ArrowSchema>, capacity: usize) -> Self::Builder;
+
+    fn get(
+        &self,
+        offset: u32,
+        projection_mask: &ProjectionMask,
+    ) -> Option<Option<<Self::Record as Record>::Ref<'_>>>;
+
+    fn as_record_batch(&self) -> &RecordBatch;
+}
+
+pub trait ArrowArraysBuilder<S>: Send
+where
+    S: ArrowArrays,
+{
+    fn push(
+        &mut self,
+        key: Ts<<<<S::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
+        row: Option<<S::Record as Record>::Ref<'_>>,
+    );
+
+    fn written_size(&self) -> usize;
+
+    fn finish(&mut self, indices: Option<&[usize]>) -> S;
+}
 
 pub trait Schema: Debug + Send + Sync {
     type Record: Record<Schema = Self>;
@@ -78,30 +108,4 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
         projection_mask: &'r ProjectionMask,
         full_schema: &'r Arc<ArrowSchema>,
     ) -> OptionRecordRef<'r, Self>;
-}
-
-#[derive(Debug, Error)]
-pub enum RecordEncodeError {
-    #[error("record's field: {field_name} encode error: {error}")]
-    Encode {
-        field_name: String,
-        error: Box<dyn Error + Send + Sync + 'static>,
-    },
-    #[error("record io error: {0}")]
-    Io(#[from] io::Error),
-    #[error("record fusio error: {0}")]
-    Fusio(#[from] fusio::Error),
-}
-
-#[derive(Debug, Error)]
-pub enum RecordDecodeError {
-    #[error("record's field: {field_name} decode error: {error}")]
-    Decode {
-        field_name: String,
-        error: Box<dyn Error + Send + Sync + 'static>,
-    },
-    #[error("record io error: {0}")]
-    Io(#[from] io::Error),
-    #[error("record fusio error: {0}")]
-    Fusio(#[from] fusio::Error),
 }
