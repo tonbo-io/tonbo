@@ -39,20 +39,20 @@ impl From<DataType> for tonbo::record::DataType {
     }
 }
 
-pub(crate) fn to_datatype(datatype: &str) -> tonbo::record::DataType {
+pub(crate) fn to_datatype(datatype: &str) -> tonbo::arrow::datatypes::DataType {
     match datatype {
-        "UInt8" => tonbo::record::DataType::UInt8,
-        "UInt16" => tonbo::record::DataType::UInt16,
-        "UInt32" => tonbo::record::DataType::UInt32,
-        "UInt64" => tonbo::record::DataType::UInt64,
-        "Int8" => tonbo::record::DataType::Int8,
-        "Int16" => tonbo::record::DataType::Int16,
-        "Int32" => tonbo::record::DataType::Int32,
-        "Int64" => tonbo::record::DataType::Int64,
-        "String" => tonbo::record::DataType::String,
-        "Boolean" => tonbo::record::DataType::Boolean,
-        "Float32" => tonbo::record::DataType::Float32,
-        "Float64" => tonbo::record::DataType::Float64,
+        "UInt8" => tonbo::arrow::datatypes::DataType::UInt8,
+        "UInt16" => tonbo::arrow::datatypes::DataType::UInt16,
+        "UInt32" => tonbo::arrow::datatypes::DataType::UInt32,
+        "UInt64" => tonbo::arrow::datatypes::DataType::UInt64,
+        "Int8" => tonbo::arrow::datatypes::DataType::Int8,
+        "Int16" => tonbo::arrow::datatypes::DataType::Int16,
+        "Int32" => tonbo::arrow::datatypes::DataType::Int32,
+        "Int64" => tonbo::arrow::datatypes::DataType::Int64,
+        "String" => tonbo::arrow::datatypes::DataType::Utf8,
+        "Boolean" => tonbo::arrow::datatypes::DataType::Boolean,
+        "Float32" => tonbo::arrow::datatypes::DataType::Float32,
+        "Float64" => tonbo::arrow::datatypes::DataType::Float64,
         _ => todo!(),
     }
 }

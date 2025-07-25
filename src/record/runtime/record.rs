@@ -1,15 +1,8 @@
-use std::sync::Arc;
-
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
-use super::{schema::DynSchema, DataType, DynRecordRef, Value};
-use crate::{
-    cast_arc_value,
-    record::{
-        Date32, Date64, LargeBinary, LargeString, Record, Time32, Time64, Timestamp, F32, F64,
-    },
-};
+use super::{schema::DynSchema, DynRecordRef, Value};
+use crate::record::{Key, Record};
 
 #[derive(Debug)]
 pub struct DynRecord {
@@ -27,197 +20,56 @@ impl DynRecord {
     }
 }
 
-macro_rules! implement_record {
-    (
-        { $( { $copy_ty:ty, $copy_pat:pat}), * $(,)? },
-        { $( { $clone_ty:ty, $clone_pat:pat}), * $(,)? },
-    ) => {
-        impl Decode for DynRecord {
-
-            async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
-            where
-                R: SeqRead,
-            {
-                let len = u32::decode(reader).await? as usize;
-                let primary_index = u32::decode(reader).await? as usize;
-                let mut values = Vec::with_capacity(len);
-                // keep invariant for record: nullable --> Some(v); non-nullable --> v
-                for i in 0..len {
-                    let mut col = Value::decode(reader).await?;
-                    if i != primary_index && !col.is_nullable() {
-                        col.value = match col.datatype() {
-                            $(
-                                $copy_pat => {
-                                    Arc::new(cast_arc_value!(col.value, Option<$copy_ty>).unwrap())
-                                }
-                            )*
-                            $(
-                                $clone_pat => {
-                                    Arc::new(cast_arc_value!(col.value, Option<$clone_ty>).clone().unwrap())
-                                }
-                            )*
-                        };
-                    }
-                    values.push(col);
-                }
-
-                Ok(DynRecord {
-                    values,
-                    primary_index,
-                })
-            }
-        }
-
-        impl Record for DynRecord {
-            type Schema = DynSchema;
-
-            type Ref<'r> = DynRecordRef<'r>;
-
-            fn as_record_ref(&self) -> Self::Ref<'_> {
-                let mut columns = vec![];
-                for (idx, col) in self.values.iter().enumerate() {
-                    let datatype = col.datatype();
-                    let is_nullable = col.is_nullable();
-                    let mut value = col.value.clone();
-                    if idx != self.primary_index && !is_nullable {
-                        value = match datatype {
-
-                            $(
-                                $copy_pat => {
-                                    Arc::new(Some(*cast_arc_value!(col.value, $copy_ty)))
-                                }
-                            )*
-                            $(
-                                $clone_pat => {
-                                    Arc::new(Some(cast_arc_value!(col.value, $clone_ty).to_owned()))
-                                }
-                            )*
-                        };
-                    }
-
-                    columns.push(Value::new(
-                        datatype,
-                        col.desc.name.to_owned(),
-                        value,
-                        is_nullable,
-                    ));
-                }
-                DynRecordRef::new(columns, self.primary_index)
-            }
-
-            fn size(&self) -> usize {
-                self.values.iter().fold(0, |acc, col| acc + col.size())
-            }
-        }
-    };
-}
-
-implement_record!(
+impl Decode for DynRecord {
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
+    where
+        R: SeqRead,
     {
-        // types that can be copied
-        { u8, DataType::UInt8 },
-        { u16, DataType::UInt16 },
-        { u32, DataType::UInt32 },
-        { u64, DataType::UInt64 },
-        { i8, DataType::Int8 },
-        { i16, DataType::Int16 },
-        { i32, DataType::Int32 },
-        { i64, DataType::Int64 },
-        { F32, DataType::Float32 },
-        { F64, DataType::Float64 },
-        { bool, DataType::Boolean },
-        { Timestamp, DataType::Timestamp(_) },
-        { Time32, DataType::Time32(_) },
-        { Time64, DataType::Time64(_) },
-        { Date32, DataType::Date32 },
-        { Date64, DataType::Date64 }
-    },
-    {
-        // types that can be cloned
-        { Vec<u8>, DataType::Bytes },
-        { LargeBinary, DataType::LargeBinary },
-        { String, DataType::String },
-        { LargeString, DataType::LargeString }
-    },
-);
-
-/// Creates a [`DynRecord`] from slice of values and primary key index, suitable for rapid
-/// testing and development.
-///
-/// ## Example:
-///
-/// ```no_run
-/// // dyn_record!(
-/// //      (name, type, nullable, value),
-/// //         ......
-/// //      (name, type, nullable, value),
-/// //      primary_key_index
-/// // );
-/// use tonbo::dyn_record;
-///
-/// let record = dyn_record!(
-///     ("foo", String, false, "hello".to_owned()),
-///     ("bar", Int32, true, 1_i32),
-///     ("baz", UInt64, true, 1_u64),
-///     0
-/// );
-/// ```
-#[macro_export]
-macro_rules! dyn_record {
-    ($(($name: expr, $type: ident, $nullable: expr, $value: expr)),*, $primary: literal) => {
-        {
-            $crate::record::DynRecord::new(
-                vec![
-                    $(
-                        $crate::record::Value::new(
-                            $crate::record::DataType::$type,
-                            $name.into(),
-                            std::sync::Arc::new($value),
-                            $nullable,
-                        ),
-                    )*
-                ],
-                $primary,
-            )
+        let len = u32::decode(reader).await? as usize;
+        let primary_index = u32::decode(reader).await? as usize;
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            let col = Value::decode(reader).await?;
+            values.push(col);
         }
+
+        Ok(DynRecord {
+            values,
+            primary_index,
+        })
     }
 }
 
-#[macro_export]
-macro_rules! make_dyn_record {
-    ($(($name: expr, $type: expr, $nullable: expr, $value: expr)),*, $primary: literal) => {
-        {
-            $crate::record::DynRecord::new(
-                vec![
-                    $(
-                        $crate::record::Value::new(
-                            $type,
-                            $name.into(),
-                            std::sync::Arc::new($value),
-                            $nullable,
-                        ),
-                    )*
-                ],
-                $primary,
-            )
+impl Record for DynRecord {
+    type Schema = DynSchema;
+
+    type Ref<'r> = DynRecordRef<'r>;
+
+    fn as_record_ref(&self) -> Self::Ref<'_> {
+        let mut columns = vec![];
+        for col in self.values.iter() {
+            columns.push(col.as_key_ref());
         }
+        DynRecordRef::new(columns, self.primary_index)
+    }
+
+    fn size(&self) -> usize {
+        self.values.iter().fold(0, |acc, col| acc + col.size())
     }
 }
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::{
-        io::{Cursor, SeekFrom},
-        sync::Arc,
-    };
+    use std::io::{Cursor, SeekFrom};
 
+    use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
     use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
 
     use super::{DynRecord, DynSchema, Record};
     use crate::{
         make_dyn_schema,
-        record::{DataType, DynRecordRef, TimeUnit, Timestamp, Value, F32, F64},
+        record::{DynRecordRef, TimeUnit, Value, ValueRef},
     };
 
     #[allow(unused)]
@@ -227,15 +79,15 @@ pub(crate) mod test {
             ("age", DataType::Int8, true),
             ("height", DataType::Int16, true),
             ("weight", DataType::Int32, false),
-            ("name", DataType::String, false),
-            ("email", DataType::String, true),
+            ("name", DataType::Utf8, false),
+            ("email", DataType::Utf8, true),
             ("enabled", DataType::Boolean, false),
-            ("bytes", DataType::Bytes, true),
+            ("bytes", DataType::Binary, true),
             ("grade", DataType::Float32, false),
             ("price", DataType::Float64, true),
             (
                 "timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond),
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                 true
             ),
             0
@@ -246,47 +98,23 @@ pub(crate) mod test {
     pub(crate) fn test_dyn_items() -> Vec<DynRecord> {
         let mut items = vec![];
         for i in 0..50 {
-            let mut record = make_dyn_record!(
-                ("id", DataType::Int64, false, i as i64),
-                ("age", DataType::Int8, true, Some(i as i8)),
-                ("height", DataType::Int16, true, Some(i as i16 * 20)),
-                ("weight", DataType::Int32, false, i * 200_i32),
-                ("name", DataType::String, false, i.to_string()),
-                (
-                    "email",
-                    DataType::String,
-                    true,
-                    Some(format!("{}@tonbo.io", i))
-                ),
-                ("enabled", DataType::Boolean, false, i % 2 == 0),
-                (
-                    "bytes",
-                    DataType::Bytes,
-                    true,
-                    Some(i.to_le_bytes().to_vec())
-                ),
-                (
-                    "grade",
-                    DataType::Float32,
-                    false,
-                    F32::from(i as f32 * 1.11)
-                ),
-                (
-                    "price",
-                    DataType::Float64,
-                    true,
-                    Some(F64::from(i as f64 * 1.01))
-                ),
-                (
-                    "timestamp",
-                    DataType::Timestamp(TimeUnit::Millisecond),
-                    true,
-                    Some(Timestamp::new_millis(i as i64))
-                ),
-                0
-            );
+            let values = vec![
+                Value::Int64(i as i64),
+                Value::Int8(i as i8),
+                Value::Int16(i as i16 * 20),
+                Value::Int32(i * 200_i32),
+                Value::String(i.to_string()),
+                Value::String(format!("{}@tonbo.io", i)),
+                Value::Boolean(i % 2 == 0),
+                Value::Binary(i.to_le_bytes().to_vec()),
+                Value::Float32(i as f32 * 1.11),
+                Value::Float64(i as f64 * 1.01),
+                Value::Timestamp(i as i64, TimeUnit::Millisecond),
+            ];
+            let mut record = DynRecord::new(values, 0);
+
             if i >= 45 {
-                record.values[2].value = Arc::<Option<i16>>::new(None);
+                record.values[2] = Value::Null;
             }
 
             items.push(record);
@@ -295,35 +123,20 @@ pub(crate) mod test {
     }
 
     fn test_dyn_record() -> DynRecord {
-        make_dyn_record!(
-            ("id", DataType::Int64, false, 10i64),
-            ("age", DataType::Int8, true, Some(10i8)),
-            ("height", DataType::Int16, true, Some(183i16)),
-            ("weight", DataType::Int32, false, 56i32),
-            ("name", DataType::String, false, "tonbo".to_string()),
-            (
-                "email",
-                DataType::String,
-                true,
-                Some("contact@tonbo.io".to_string())
-            ),
-            ("enabled", DataType::Boolean, false, true),
-            (
-                "bytes",
-                DataType::Bytes,
-                true,
-                Some(b"hello tonbo".to_vec())
-            ),
-            ("grade", DataType::Float32, false, F32::from(1.1234)),
-            ("price", DataType::Float64, true, Some(F64::from(1.01))),
-            (
-                "timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond),
-                true,
-                Some(Timestamp::new_millis(1717507203412))
-            ),
-            0
-        )
+        let values = vec![
+            Value::Int64(10i64),
+            Value::Int8(10i8),
+            Value::Int16(183i16),
+            Value::Int32(56i32),
+            Value::String("tonbo".to_string()),
+            Value::String("contact@tonbo.io".to_string()),
+            Value::Boolean(true),
+            Value::Binary(b"hello tonbo".to_vec()),
+            Value::Float32(1.1234),
+            Value::Float64(1.01),
+            Value::Timestamp(1717507203412, TimeUnit::Millisecond),
+        ];
+        DynRecord::new(values, 0)
     }
 
     #[test]
@@ -332,67 +145,17 @@ pub(crate) mod test {
         let record_ref = record.as_record_ref();
         let expected = DynRecordRef::new(
             vec![
-                Value::new(DataType::Int64, "id".to_string(), Arc::new(10i64), false),
-                Value::new(
-                    DataType::Int8,
-                    "age".to_string(),
-                    Arc::new(Some(10i8)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int16,
-                    "height".to_string(),
-                    Arc::new(Some(183i16)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int32,
-                    "weight".to_string(),
-                    Arc::new(Some(56i32)),
-                    false,
-                ),
-                Value::new(
-                    DataType::String,
-                    "name".to_string(),
-                    Arc::new(Some("tonbo".to_string())),
-                    false,
-                ),
-                Value::new(
-                    DataType::String,
-                    "email".to_string(),
-                    Arc::new(Some("contact@tonbo.io".to_string())),
-                    true,
-                ),
-                Value::new(
-                    DataType::Boolean,
-                    "enabled".to_string(),
-                    Arc::new(Some(true)),
-                    false,
-                ),
-                Value::new(
-                    DataType::Bytes,
-                    "bytes".to_string(),
-                    Arc::new(Some(b"hello tonbo".to_vec())),
-                    true,
-                ),
-                Value::new(
-                    DataType::Float32,
-                    "grade".to_string(),
-                    Arc::new(Some(F32::from(1.1234))),
-                    false,
-                ),
-                Value::new(
-                    DataType::Float64,
-                    "price".to_string(),
-                    Arc::new(Some(F64::from(1.01))),
-                    true,
-                ),
-                Value::new(
-                    DataType::Timestamp(TimeUnit::Millisecond),
-                    "timestamp".to_string(),
-                    Arc::new(Some(Timestamp::new_millis(1717507203412))),
-                    true,
-                ),
+                ValueRef::Int64(10i64),
+                ValueRef::Int8(10i8),
+                ValueRef::Int16(183i16),
+                ValueRef::Int32(56i32),
+                ValueRef::String("tonbo"),
+                ValueRef::String("contact@tonbo.io"),
+                ValueRef::Boolean(true),
+                ValueRef::Binary(b"hello tonbo"),
+                ValueRef::Float32(1.1234),
+                ValueRef::Float64(1.01),
+                ValueRef::Timestamp(1717507203412, TimeUnit::Millisecond),
             ],
             0,
         );

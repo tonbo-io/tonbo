@@ -3,27 +3,27 @@ use std::{mem::transmute, sync::Arc};
 use futures::StreamExt;
 use js_sys::Object;
 use tonbo::{
-    record::{DynRecord, ValueDesc},
+    record::{DynRecord, DynamicField},
     transaction, Projection,
 };
 use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 
 use crate::{
     range::Bound,
-    utils::{parse_key, parse_record, to_record},
+    utils::{parse_key, parse_record, to_record_ref},
 };
 
 #[wasm_bindgen]
 pub struct Transaction {
     txn: Option<transaction::Transaction<'static, DynRecord>>,
-    desc: Arc<Vec<ValueDesc>>,
+    desc: Arc<Vec<DynamicField>>,
     primary_key_index: usize,
 }
 
 impl Transaction {
     pub(crate) fn new<'txn>(
         txn: transaction::Transaction<'txn, DynRecord>,
-        desc: Arc<Vec<ValueDesc>>,
+        desc: Arc<Vec<DynamicField>>,
         primary_key_index: usize,
     ) -> Self {
         Transaction {
@@ -78,7 +78,7 @@ impl Transaction {
             .map_err(|err| JsValue::from(err.to_string()))?;
 
         match entry {
-            Some(entry) => Ok(to_record(&entry.get().columns, self.primary_key_index).into()),
+            Some(entry) => Ok(to_record_ref(&self.desc, &entry.get().columns).into()),
             None => Ok(JsValue::NULL),
         }
     }
@@ -152,10 +152,11 @@ impl Transaction {
             .take()
             .await
             .map_err(|err| JsValue::from(err.to_string()))?;
+        let schema = self.desc.clone();
 
-        let stream = stream.map(|res| {
+        let stream = stream.map(move |res| {
             res.map(|entry| match entry.value() {
-                Some(record) => to_record(&record.columns, record.primary_index).into(),
+                Some(record) => to_record_ref(&schema, &record.columns).into(),
                 None => JsValue::NULL,
             })
             .map_err(|err| JsValue::from(err.to_string()))
