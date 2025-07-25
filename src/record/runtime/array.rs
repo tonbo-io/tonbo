@@ -4,14 +4,15 @@ use arrow::{
     array::{
         Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, BooleanBuilder,
         Date32Builder, Date64Builder, Float32Builder, Float64Builder, GenericBinaryBuilder,
-        LargeStringBuilder, PrimitiveBuilder, StringBuilder, Time32MillisecondBuilder,
-        Time32SecondBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder,
-        TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder,
-        TimestampSecondBuilder, UInt32Builder,
+        Int16Builder, Int32Builder, Int64Builder, Int8Builder, LargeStringBuilder,
+        PrimitiveBuilder, StringBuilder, Time32MillisecondBuilder, Time32SecondBuilder,
+        Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampMicrosecondBuilder,
+        TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
+        UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
     },
     datatypes::{
-        Date32Type, Date64Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-        Int8Type, Schema as ArrowSchema, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+        Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
+        UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
 
@@ -57,9 +58,8 @@ impl DynRecordBuilder {
 
 macro_rules! implement_arrow_array {
     (
-        { $( { $primitive_ty:ty, $primitive_tonbo_ty:ty, $primitive_pat:pat, $arrow_ty:ty } ),* $(,)? },
-        { $( { $alt_ty:ty, $alt_variant:pat, $builder_ty:ty,  $array_ty2:ty } ),* $(,)? },
-        { $( { $alt_ty2:ty, $alt_variant2:pat,$builder_ty2:ty,  $array_ty3:ty } ),* }
+        { $( { $primitive_pat:pat, $arrow_ty:ty } ),* $(,)? },
+        { $( { $alt_variant:pat, $builder_ty:ty } ),*  },
     ) => {
         impl ArrowArrays for DynRecordImmutableArrays {
             type Record = DynRecord;
@@ -74,22 +74,14 @@ macro_rules! implement_arrow_array {
                     match &datatype {
                         $(
                             $primitive_pat => {
-                                builders.push(Box::new(PrimitiveBuilder::<$arrow_ty>::with_capacity(
+                                builders.push(Box::new(<$arrow_ty>::with_capacity(
                                     capacity,
                                 )));
                             }
                         )*
-                        DataType::Boolean => {
-                            builders.push(Box::new(BooleanBuilder::with_capacity(capacity)));
-                        }
                         $(
                             $alt_variant => {
                                 builders.push(Box::new(<$builder_ty>::with_capacity(capacity, 0)));
-                            }
-                        )*
-                        $(
-                            $alt_variant2 => {
-                                builders.push(Box::new(<$builder_ty2>::with_capacity(capacity)));
                             }
                         )*
                         DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
@@ -148,7 +140,7 @@ macro_rules! implement_arrow_array {
 macro_rules! implement_builder_array {
     (
         { $( { $primitive_ty:ty, $primitive_pat:pat, $arrow_ty:ty, $as_primitive_value:ident } ),* $(,)? },
-        { $( { $alt_ty:ty, $alt_variant:pat, $builder_ty:ty,  $array_ty2:ty, $as_alt_value:ident } ),* $(,)? },
+        { $( { $alt_ty:ty, $alt_variant:pat, $builder_ty:ty, $as_alt_value:ident } ),* $(,)? },
         { $( { $alt_ty2:ty, $alt_variant2:pat,$builder_ty2:ty, $array_ty3:ty, $as_alt_value2:ident } ),* }
     ) => {
         impl Builder<DynRecordImmutableArrays> for DynRecordBuilder {
@@ -356,36 +348,35 @@ macro_rules! implement_builder_array {
 implement_arrow_array!(
     {
         // primitive_ty type
-        { u8, u8, DataType::UInt8, UInt8Type },
-        { u16, u16, DataType::UInt16, UInt16Type },
-        { u32, u32, DataType::UInt32, UInt32Type },
-        { u64, u64, DataType::UInt64, UInt64Type },
-        { i8, i8, DataType::Int8, Int8Type },
-        { i16, i16, DataType::Int16, Int16Type },
-        { i32, i32, DataType::Int32, Int32Type },
-        { i64, i64, DataType::Int64, Int64Type },
-        { f32, F32, DataType::Float32, Float32Type },
-        { f64, F64, DataType::Float64, Float64Type },
-        { i32, Date32, DataType::Date32, Date32Type },
-        { i64, Date64, DataType::Date64, Date64Type },
+        {  DataType::Boolean, BooleanBuilder },
+        {  DataType::UInt8, UInt8Builder },
+        {  DataType::UInt16, UInt16Builder },
+        {  DataType::UInt32, UInt32Builder },
+        {  DataType::UInt64, UInt64Builder },
+        {  DataType::Int8, Int8Builder },
+        {  DataType::Int16, Int16Builder },
+        {  DataType::Int32, Int32Builder },
+        {  DataType::Int64, Int64Builder },
+        {  DataType::Float32, Float32Builder },
+        {  DataType::Float64, Float64Builder },
+        {  DataType::Date32, Date32Builder },
+        {  DataType::Date64, Date64Builder },
+        { DataType::Timestamp(TimeUnit::Second), TimestampSecondBuilder },
+        { DataType::Timestamp(TimeUnit::Millisecond), TimestampMillisecondBuilder },
+        { DataType::Timestamp(TimeUnit::Microsecond),TimestampMicrosecondBuilder },
+        { DataType::Timestamp(TimeUnit::Nanosecond),TimestampNanosecondBuilder },
+        { DataType::Time32(TimeUnit::Second), Time32SecondBuilder },
+        { DataType::Time32(TimeUnit::Millisecond), Time32MillisecondBuilder },
+        { DataType::Time64(TimeUnit::Microsecond),Time64MicrosecondBuilder },
+        { DataType::Time64(TimeUnit::Nanosecond),Time64NanosecondBuilder }
     },
     // f32, f64, and bool are special cases, they are handled separately
     {
-        { String, DataType::String, StringBuilder, StringArray },
-        { LargeString, DataType::LargeString, LargeStringBuilder, LargeStringArray },
-        { Vec<u8>, DataType::Bytes, GenericBinaryBuilder<i32>, GenericBinaryArray<i32> },
-        { LargeBinary, DataType::LargeBinary, GenericBinaryBuilder<i64>, GenericBinaryArray<i64> }
+        { DataType::String, StringBuilder },
+        { DataType::LargeString, LargeStringBuilder },
+        { DataType::Bytes, GenericBinaryBuilder<i32> },
+        { DataType::LargeBinary, GenericBinaryBuilder<i64> }
     },
-    {
-        { Timestamp, DataType::Timestamp(TimeUnit::Second), TimestampSecondBuilder, TimestampSecondArray },
-        { Timestamp, DataType::Timestamp(TimeUnit::Millisecond), TimestampMillisecondBuilder,  TimestampMillisecondArray },
-        { Timestamp, DataType::Timestamp(TimeUnit::Microsecond),TimestampMicrosecondBuilder, TimestampMicrosecondArray },
-        { Timestamp, DataType::Timestamp(TimeUnit::Nanosecond),TimestampNanosecondBuilder, TimestampNanosecondArray },
-        { Time32, DataType::Time32(TimeUnit::Second), Time32SecondBuilder, Time32SecondArray },
-        { Time32, DataType::Time32(TimeUnit::Millisecond), Time32MillisecondBuilder,  Time32MillisecondArray },
-        { Time64, DataType::Time64(TimeUnit::Microsecond),Time64MicrosecondBuilder, Time64MicrosecondArray },
-        { Time64, DataType::Time64(TimeUnit::Nanosecond),Time64NanosecondBuilder, Time64NanosecondArray }
-    }
 );
 
 implement_builder_array!(
@@ -399,20 +390,17 @@ implement_builder_array!(
         { i16, DataType::Int16, Int16Type, as_i16_opt },
         { i32, DataType::Int32, Int32Type, as_i32_opt },
         { i64, DataType::Int64, Int64Type, as_i64_opt },
-        // { f32, DataType::Float32, PrimitiveBuilder<Float32Type> },
-        // { f64, DataType::Float64, PrimitiveBuilder<Float64Type> },
+        { f32, DataType::Float32, Float32Type, as_f32_opt },
+        { f64, DataType::Float64, Float64Type, as_f64_opt },
     },
-    // f32, f64, and bool are special cases, they are handled separately
+    // String/binary types and bool are special cases, they are handled separately
     {
-
-        { String, DataType::String, StringBuilder, StringArray, as_string_opt },
-        { LargeString, DataType::LargeString, LargeStringBuilder, LargeStringArray, as_string_opt },
-        { Vec<u8>, DataType::Bytes, GenericBinaryBuilder<i32>, GenericBinaryArray<i32>, as_bytes_opt },
-        { LargeBinary, DataType::LargeBinary, GenericBinaryBuilder<i64>, GenericBinaryArray<i64>, as_bytes_opt }
+        { String, DataType::String, StringBuilder, as_string_opt },
+        { LargeString, DataType::LargeString, LargeStringBuilder, as_string_opt },
+        { Vec<u8>, DataType::Bytes, GenericBinaryBuilder<i32>, as_bytes_opt },
+        { LargeBinary, DataType::LargeBinary, GenericBinaryBuilder<i64>, as_bytes_opt }
     },
     {
-        { F32, DataType::Float32, Float32Builder, Float32Array, as_f32_opt },
-        { F64, DataType::Float64, Float64Builder, Float64Array, as_f64_opt },
         { Date32, DataType::Date32, Date32Builder, Date32Array, as_i32_opt },
         { Date64, DataType::Date64, Date64Builder, Date64Array, as_i64_opt },
         { Timestamp, DataType::Timestamp(TimeUnit::Second), TimestampSecondBuilder, TimestampSecondArray, as_i64_opt },

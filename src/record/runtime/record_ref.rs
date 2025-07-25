@@ -85,9 +85,9 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         let mut columns = vec![];
 
         let schema = record_batch.schema();
-        let flattened_fields = schema.flattened_fields();
+        let flattened_fields = schema.fields();
 
-        for (idx, field) in full_schema.flattened_fields().iter().enumerate().skip(2) {
+        for (idx, field) in full_schema.fields().iter().enumerate().skip(2) {
             let batch_field = flattened_fields
                 .iter()
                 .enumerate()
@@ -97,7 +97,6 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
                 continue;
             }
             let array = record_batch.column(batch_field.unwrap().0);
-            // let is_nullable = field.is_nullable();
             if array.is_null(offset) || !projection_mask.leaf_included(idx) {
                 columns.push(ValueRef::Null);
             } else {
