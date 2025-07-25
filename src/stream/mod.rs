@@ -87,7 +87,7 @@ where
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Entry::Transaction((key, value)) => {
-                write!(f, "Entry::Transaction({:?} -> {:?})", key, value)
+                write!(f, "Entry::Transaction({key:?} -> {value:?})")
             }
             Entry::Mutable(mutable) => write!(
                 f,
@@ -95,9 +95,9 @@ where
                 mutable.key(),
                 mutable.value()
             ),
-            Entry::RecordBatch(sstable) => write!(f, "Entry::SsTable({:?})", sstable),
+            Entry::RecordBatch(sstable) => write!(f, "Entry::SsTable({sstable:?})"),
             Entry::Projection((entry, projection_mask)) => {
-                write!(f, "Entry::Projection({:?} -> {:?})", entry, projection_mask)
+                write!(f, "Entry::Projection({entry:?} -> {projection_mask:?})")
             }
         }
     }

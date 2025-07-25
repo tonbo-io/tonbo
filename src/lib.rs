@@ -690,7 +690,7 @@ where
                     .chain(projection.into_iter().map(|name| {
                         schema
                             .index_of(name)
-                            .unwrap_or_else(|_| panic!("unexpected field {}", name))
+                            .unwrap_or_else(|_| panic!("unexpected field {name}"))
                     }))
                     .collect();
                 fixed_projection.dedup();
@@ -828,7 +828,7 @@ where
             .map(|name| {
                 schema
                     .index_of(name)
-                    .unwrap_or_else(|_| panic!("unexpected field {}", name))
+                    .unwrap_or_else(|_| panic!("unexpected field {name}"))
             })
             .collect::<Vec<usize>>();
         let primary_key_index = self.schema.record_schema.primary_key_index();

@@ -6,7 +6,7 @@ mod seal {
 
 impl seal::Sealed for Value {}
 
-impl<'a> seal::Sealed for ValueRef<'a> {}
+impl seal::Sealed for ValueRef<'_> {}
 
 /// A conversion trait for fast access to the value of a [`Value`] or [`ValueRef`]
 pub trait AsValue: seal::Sealed {
@@ -182,7 +182,7 @@ impl AsValue for Value {
     }
 }
 
-impl<'a> AsValue for ValueRef<'a> {
+impl AsValue for ValueRef<'_> {
     fn as_bool_opt(&self) -> Option<&bool> {
         match self {
             ValueRef::Boolean(v) => Some(v),
