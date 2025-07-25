@@ -98,7 +98,7 @@ macro_rules! implement_float_key {
 
         impl Hash for FloatType<$ty> {
             fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-                state.write(&<$ty>::from_le_bytes(self.0.to_le_bytes()).to_le_bytes())
+                state.write(&self.0.to_le_bytes())
             }
         }
 
