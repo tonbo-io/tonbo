@@ -1,4 +1,4 @@
-use std::{i16, i8, sync::Arc};
+use std::{i16, i8};
 
 use pyo3::{
     prelude::*,
@@ -6,7 +6,7 @@ use pyo3::{
     types::{PyDict, PyMapping, PyString, PyTuple},
     Bound,
 };
-use tonbo::record::F64;
+use tonbo::record::Value;
 
 use crate::{column::Column, datatype::DataType};
 
@@ -49,87 +49,51 @@ impl Record {
                 match col.datatype {
                     DataType::UInt8 => {
                         let value = v.extract::<u8>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::UInt8(value)
                     }
                     DataType::UInt16 => {
                         let value = v.extract::<u16>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::UInt16(value)
                     }
                     DataType::UInt32 => {
                         let value = v.extract::<u32>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::UInt32(value)
                     }
                     DataType::UInt64 => {
                         let value = v.extract::<u64>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::UInt64(value)
                     }
                     DataType::Int8 => {
                         let value = v.extract::<i8>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::Int8(value)
                     }
                     DataType::Int16 => {
                         let value = v.extract::<i16>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::Int16(value)
                     }
                     DataType::Int32 => {
                         let value = v.extract::<i32>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::Int32(value)
                     }
                     DataType::Int64 => {
                         let value = v.extract::<i64>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::Int64(value)
                     }
                     DataType::String => {
                         let value = v.extract::<String>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::String(value)
                     }
                     DataType::Boolean => {
                         let value = v.extract::<bool>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::Boolean(value)
                     }
                     DataType::Bytes => {
                         let value = v.extract::<Vec<u8>>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(value)),
-                            false => col.value = Arc::new(value),
-                        }
+                        col.value = Value::Binary(value)
                     }
                     DataType::Float => {
                         let value = v.extract::<f64>()?;
-                        match col.nullable {
-                            true => col.value = Arc::new(Some(F64::from(value))),
-                            false => col.value = Arc::new(F64::from(value)),
-                        }
+                        col.value = Value::Float64(value)
                     }
                 };
                 record.setattr(py, attr, col)?;
