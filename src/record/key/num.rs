@@ -9,7 +9,6 @@ use fusio_log::{Decode, Encode};
 
 use crate::record::{Key, KeyRef};
 
-#[macro_export]
 macro_rules! implement_key {
     ($struct_name:ident, $array_name:ident) => {
         impl Key for $struct_name {
@@ -49,7 +48,6 @@ pub struct FloatType<T>(pub T);
 pub type F32 = FloatType<f32>;
 pub type F64 = FloatType<f64>;
 
-#[macro_export]
 macro_rules! implement_float_encode_decode {
     ($ty:ident) => {
         impl Encode for FloatType<$ty> {
@@ -77,7 +75,6 @@ macro_rules! implement_float_encode_decode {
     };
 }
 
-#[macro_export]
 macro_rules! implement_float_key {
     ($ty:ty, $array_name:ident) => {
         impl Ord for FloatType<$ty> {
