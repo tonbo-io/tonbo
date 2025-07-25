@@ -10,12 +10,10 @@ use arrow::{
 use once_cell::sync::Lazy;
 use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 
-use super::{option::OptionRecordRef, Key, Record, RecordRef, Schema};
-use crate::{
-    inmem::immutable::{ArrowArrays, Builder},
-    magic,
-    version::timestamp::Ts,
+use super::{
+    option::OptionRecordRef, ArrowArrays, ArrowArraysBuilder, Key, Record, RecordRef, Schema,
 };
+use crate::{magic, version::timestamp::Ts};
 
 const PRIMARY_FIELD_NAME: &str = "vstring";
 
@@ -154,7 +152,7 @@ pub struct StringColumnsBuilder {
     string: StringBuilder,
 }
 
-impl Builder<StringColumns> for StringColumnsBuilder {
+impl ArrowArraysBuilder<StringColumns> for StringColumnsBuilder {
     fn push(&mut self, key: Ts<&str>, row: Option<&str>) {
         self._null.append(row.is_none());
         self._ts.append_value(key.ts.into());

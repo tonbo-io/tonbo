@@ -12,8 +12,7 @@ use tokio::sync::oneshot;
 use crate::{
     compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
-    inmem::immutable::{ArrowArrays, Builder},
-    record::{KeyRef, Record, Schema as RecordSchema},
+    record::{ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     version::edit::VersionEdit,

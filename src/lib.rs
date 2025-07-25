@@ -156,11 +156,11 @@ use trigger::FreezeTrigger;
 use version::timestamp::{Timestamp, TsRef};
 use wal::log::Log;
 
-// Re-export items needed by macros and tests
-#[doc(hidden)]
-pub use crate::inmem::immutable::{ArrowArrays, Builder};
 #[doc(hidden)]
 pub use crate::magic::TS;
+// Re-export items needed by macros and tests
+#[doc(hidden)]
+pub use crate::record::{ArrowArrays, ArrowArraysBuilder};
 #[doc(hidden)]
 pub use crate::version::timestamp::Ts;
 use crate::{
