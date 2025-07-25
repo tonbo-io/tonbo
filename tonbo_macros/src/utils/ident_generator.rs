@@ -14,22 +14,22 @@ pub(crate) trait IdentGenerator {
 
 impl IdentGenerator for proc_macro2::Ident {
     fn to_ref_ident(&self) -> Ident {
-        Ident::new(&format!("{}Ref", self), self.span())
+        Ident::new(&format!("{self}Ref"), self.span())
     }
 
     fn to_schema_ident(&self) -> Ident {
-        Ident::new(&format!("{}Schema", self), self.span())
+        Ident::new(&format!("{self}Schema"), self.span())
     }
 
     fn to_builder_ident(&self) -> Ident {
-        Ident::new(&format!("{}Builder", self), self.span())
+        Ident::new(&format!("{self}Builder"), self.span())
     }
 
     fn to_array_ident(&self) -> Ident {
-        Ident::new(&format!("{}_array", self), self.span())
+        Ident::new(&format!("{self}_array"), self.span())
     }
 
     fn to_immutable_array_ident(&self) -> Ident {
-        Ident::new(&format!("{}ImmutableArrays", self), self.span())
+        Ident::new(&format!("{self}ImmutableArrays"), self.span())
     }
 }

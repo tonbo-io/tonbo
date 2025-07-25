@@ -243,7 +243,7 @@ impl<'a> ValueRef<'a> {
     }
 }
 
-impl<'a> ValueRef<'a> {
+impl ValueRef<'_> {
     /// Convert to an owned Value
     pub fn to_owned(&self) -> Value {
         match *self {
@@ -296,9 +296,9 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
     }
 }
 
-impl<'a> Eq for ValueRef<'a> {}
+impl Eq for ValueRef<'_> {}
 
-impl<'a> PartialEq for ValueRef<'a> {
+impl PartialEq for ValueRef<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (ValueRef::Null, ValueRef::Null) => true,
@@ -344,22 +344,19 @@ impl<'a> PartialEq for ValueRef<'a> {
                 s_sec == o_sec && s_nsec == o_nsec
             }
             _ => {
-                panic!(
-                    "can not compare different types: {:?} and {:?}",
-                    self, other
-                )
+                panic!("can not compare different types: {self:?} and {other:?}")
             }
         }
     }
 }
 
-impl<'a> PartialOrd for ValueRef<'a> {
+impl PartialOrd for ValueRef<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> Ord for ValueRef<'a> {
+impl Ord for ValueRef<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (ValueRef::Null, ValueRef::Null) => Ordering::Equal,
@@ -393,10 +390,7 @@ impl<'a> Ord for ValueRef<'a> {
                 }
             }
             _ => {
-                panic!(
-                    "can not compare different types: {:?} and {:?}",
-                    self, other
-                )
+                panic!("can not compare different types: {self:?} and {other:?}")
             }
         }
     }
@@ -454,7 +448,7 @@ mod tests {
             ValueRef::Float64(std::f64::consts::PI).data_type(),
             DataType::Float64
         );
-        assert_eq!(ValueRef::String("hello".into()).data_type(), DataType::Utf8);
+        assert_eq!(ValueRef::String("hello").data_type(), DataType::Utf8);
         assert_eq!(ValueRef::Binary(&[1, 2, 3]).data_type(), DataType::Binary);
     }
 
@@ -463,7 +457,7 @@ mod tests {
         assert!(ValueRef::Null.is_null());
         assert!(!ValueRef::Boolean(false).is_null());
         assert!(!ValueRef::Int32(0).is_null());
-        assert!(!ValueRef::String("hello".into()).is_null());
+        assert!(!ValueRef::String("hello").is_null());
         assert!(!ValueRef::Binary(&[1, 2, 3]).is_null());
     }
 
@@ -476,14 +470,14 @@ mod tests {
             (ValueRef::Float64(std::f64::consts::PI).as_f64() - std::f64::consts::PI).abs()
                 < 0.0001
         );
-        assert_eq!(ValueRef::String("hello".into()).as_string(), "hello");
+        assert_eq!(ValueRef::String("hello").as_string(), "hello");
         assert_eq!(ValueRef::Binary(&[1, 2, 3]).as_bytes(), &[1, 2, 3]);
     }
 
     #[test]
     fn test_value_ref_conversion_fail() {
         assert!(ValueRef::Int32(42).as_bool_opt().is_none());
-        assert!(ValueRef::String("hello".into()).as_i64_opt().is_none());
+        assert!(ValueRef::String("hello").as_i64_opt().is_none());
         assert!(ValueRef::Boolean(true).as_string_opt().is_none());
         assert!(ValueRef::Float32(1f32).as_i32_opt().is_none());
     }

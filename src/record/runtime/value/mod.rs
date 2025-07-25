@@ -233,7 +233,7 @@ impl PartialEq for Value {
                 s_sec == o_sec && s_nsec == o_nsec
             }
             _ => {
-                panic!("cannot compare different types: {:?} and {:?}", self, other)
+                panic!("cannot compare different types: {self:?} and {other:?}")
             }
         }
     }
@@ -279,7 +279,7 @@ impl Ord for Value {
                 }
             }
             _ => {
-                panic!("cannot compare different types: {:?} and {:?}", self, other)
+                panic!("cannot compare different types: {self:?} and {other:?}")
             }
         }
     }
@@ -291,7 +291,7 @@ impl Hash for Value {
         H: Hasher,
     {
         match self {
-            Value::Null => ().hash(state),
+            Value::Null => 0_u8.hash(state),
             Value::Boolean(v) => v.hash(state),
             Value::Int8(v) => v.hash(state),
             Value::Int16(v) => v.hash(state),

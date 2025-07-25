@@ -193,7 +193,7 @@ impl Decode for TimeUnit {
     }
 }
 
-impl<'a> Encode for ValueRef<'a> {
+impl Encode for ValueRef<'_> {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
