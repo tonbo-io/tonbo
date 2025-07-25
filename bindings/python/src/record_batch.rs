@@ -58,8 +58,7 @@ impl RecordBatch {
                 if col.primary_key {
                     primary_key_index = col_idx;
                 }
-                let col = Value::from(col);
-                cols.push(col);
+                cols.push(col.value);
                 col_idx += 1;
             }
         }

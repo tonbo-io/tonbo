@@ -9,7 +9,7 @@ use pyo3::{
 use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tonbo::{
     executor::tokio::TokioExecutor,
-    record::{DynRecord, DynSchema, Value, ValueDesc},
+    record::{DynRecord, DynSchema, DynamicField, Value},
     DB,
 };
 
@@ -52,7 +52,7 @@ impl TonboDB {
                     primary_key_index = Some(desc.len());
                 }
                 cols.push(col.clone());
-                desc.push(ValueDesc::from(col));
+                desc.push(DynamicField::from(col));
             }
         }
         let schema = DynSchema::new(desc, primary_key_index.unwrap());
@@ -70,7 +70,7 @@ impl TonboDB {
     /// Insert record to `TonboDB`.
     ///
     /// * `record`: Primary key of record that is to be removed
-    fn insert<'py>(&'py self, py: Python<'py>, record: Py<PyAny>) -> PyResult<Bound<PyAny>> {
+    fn insert<'py>(&'py self, py: Python<'py>, record: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let mut cols = vec![];
         let dict = record.getattr(py, "__dict__")?;
         let values = dict.downcast_bound::<PyMapping>(py)?.values()?;
@@ -78,8 +78,8 @@ impl TonboDB {
         for i in 0..values.len() {
             let value = values.get_item(i)?;
             if let Ok(bound_col) = value.downcast::<Column>() {
-                let col = Value::from(bound_col.extract::<Column>()?);
-                cols.push(col);
+                let col = bound_col.extract::<Column>()?;
+                cols.push(col.value);
             }
         }
 
@@ -94,7 +94,11 @@ impl TonboDB {
         })
     }
 
-    fn insert_batch<'py>(&'py self, py: Python<'py>, batch: RecordBatch) -> PyResult<Bound<PyAny>> {
+    fn insert_batch<'py>(
+        &'py self,
+        py: Python<'py>,
+        batch: RecordBatch,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let record_batch = batch.into_record_batch();
         let db = self.db.clone();
 
@@ -113,14 +117,23 @@ impl TonboDB {
         let col_desc = self.desc.get(self.primary_key_index).unwrap();
         let col = to_col(py, col_desc, key);
         let db = self.db.clone();
-        let primary_key_index = self.primary_key_index;
+        let schema = self.desc.clone();
         future_into_py(py, async move {
             let record = db
-                .get(&col, |e| Some(e.get().columns))
+                // .get(&col, |e| Some(e.get().columns.to_owned()))
+                .get(&col, |e| {
+                    Some(
+                        e.get()
+                            .columns
+                            .iter()
+                            .map(|v| v.to_owned())
+                            .collect::<Vec<Value>>(),
+                    )
+                })
                 .await
                 .map_err(CommitError::from)?;
             Python::with_gil(|py| match record {
-                Some(record) => to_dict(py, primary_key_index, record).into_py_any(py),
+                Some(record) => to_dict(py, schema, record)?.into_py_any(py),
                 None => Ok(py.None()),
             })
         })
@@ -129,7 +142,7 @@ impl TonboDB {
     /// Remove record from `TonboDB`.
     ///
     /// * `key`: Primary key of record that is to be removed
-    fn remove<'py>(&'py self, py: Python<'py>, key: Py<PyAny>) -> PyResult<Bound<PyAny>> {
+    fn remove<'py>(&'py self, py: Python<'py>, key: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let col_desc = self.desc.get(self.primary_key_index).unwrap();
         let col = to_col(py, col_desc, key);
         let db = self.db.clone();
@@ -140,7 +153,7 @@ impl TonboDB {
     }
 
     /// Open an optimistic ACID `Transaction`.
-    fn transaction<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<PyAny>> {
+    fn transaction<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.db.clone();
         let desc = self.desc.clone();
         future_into_py(py, async move {
@@ -149,7 +162,7 @@ impl TonboDB {
         })
     }
 
-    fn flush<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<PyAny>> {
+    fn flush<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.db.clone();
 
         future_into_py(py, async move {
@@ -159,7 +172,7 @@ impl TonboDB {
     }
 
     /// Flush wal manually
-    fn flush_wal<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<PyAny>> {
+    fn flush_wal<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.db.clone();
 
         future_into_py(py, async move {

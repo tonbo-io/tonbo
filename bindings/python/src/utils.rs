@@ -1,178 +1,99 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use pyo3::{
-    types::{PyBytes, PyDict, PyDictMethods},
-    Bound, Py, PyAny, Python,
+    types::{PyDict, PyDictMethods},
+    Bound, Py, PyAny, PyResult, Python,
 };
-use tonbo::{
-    cast_arc_value,
-    record::{DataType as TonboDataType, Value, F64},
-};
+use tonbo::record::{Value, ValueRef};
 
 use crate::{column::Column, datatype::DataType, range};
 
-pub(crate) fn to_dict(py: Python, primary_key_index: usize, record: Vec<Value>) -> Bound<PyDict> {
+/// Convert a collection of [`Value`] to a dict
+pub(crate) fn to_dict(
+    py: Python,
+    schema: Arc<Vec<Column>>,
+    record: Vec<Value>,
+) -> PyResult<Bound<PyDict>> {
     let dict = PyDict::new(py);
-    for (idx, col) in record.iter().enumerate() {
-        let name = col.desc.name.clone();
-        match &col.datatype() {
-            TonboDataType::UInt8 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<u8>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<u8>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::UInt16 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<u16>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<u16>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::UInt32 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<u32>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<u32>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::UInt64 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<u64>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<u64>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::Int8 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<i8>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<i8>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::Int16 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<i16>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::Int32 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<i32>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<i32>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::Int64 => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<i64>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<i64>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::Float64 => {
-                if idx == primary_key_index {
-                    let value: f64 = cast_arc_value!(col.value, F64).into();
-                    dict.set_item(name, value).unwrap();
-                } else {
-                    let value = cast_arc_value!(col.value, Option<F64>).map(|v| f64::from(v));
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::String => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<String>())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<String>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::Boolean => {
-                if idx == primary_key_index {
-                    dict.set_item(name, col.value.as_ref().downcast_ref::<bool>().unwrap())
-                        .unwrap();
-                } else {
-                    let value = col.value.as_ref().downcast_ref::<Option<bool>>().unwrap();
-                    dict.set_item(name, value).unwrap();
-                }
-            }
-            TonboDataType::Bytes => {
-                if idx == primary_key_index {
-                    let value = col.value.as_ref().downcast_ref::<Vec<u8>>().unwrap();
-                    let v = PyBytes::new(py, value);
-                    dict.set_item(name, v).unwrap();
-                } else {
-                    let value = col
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<Vec<u8>>>()
-                        .unwrap();
-                    dict.set_item(name, value.as_ref().map(|v| PyBytes::new(py, v)))
-                        .unwrap();
-                }
-            }
-            TonboDataType::Timestamp(_) => {
-                unimplemented!()
-            }
-            TonboDataType::Float32 => {
-                unreachable!()
-            }
-            _ => {
-                unimplemented!()
-            }
+    for (value, col) in record.into_iter().zip(schema.iter()) {
+        let name = col.name.clone();
+        match value {
+            Value::Null => dict.set_item(name, py.None())?,
+            Value::Boolean(v) => dict.set_item(name, v)?,
+            Value::Int8(v) => dict.set_item(name, v)?,
+            Value::Int16(v) => dict.set_item(name, v)?,
+            Value::Int32(v) => dict.set_item(name, v)?,
+            Value::Int64(v) => dict.set_item(name, v)?,
+            Value::UInt8(v) => dict.set_item(name, v)?,
+            Value::UInt16(v) => dict.set_item(name, v)?,
+            Value::UInt32(v) => dict.set_item(name, v)?,
+            Value::UInt64(v) => dict.set_item(name, v)?,
+            Value::Float32(v) => dict.set_item(name, v)?,
+            Value::Float64(v) => dict.set_item(name, v)?,
+            Value::String(v) => dict.set_item(name, v)?,
+            Value::Binary(v) => dict.set_item(name, v)?,
+            Value::Date32(_)
+            | Value::Date64(_)
+            | Value::Timestamp(_, _)
+            | Value::Time32(_, _)
+            | Value::Time64(_, _) => unimplemented!(),
         }
     }
-    dict
+
+    Ok(dict)
+}
+
+/// Convert a collection of [`ValueRef`] to a dict
+pub(crate) fn to_dict_ref<'py, 'r>(
+    py: Python<'py>,
+    schema: Arc<Vec<Column>>,
+    record: Vec<ValueRef>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    for (value, col) in record.into_iter().zip(schema.iter()) {
+        let name = col.name.clone();
+        match value {
+            ValueRef::Null => dict.set_item(name, py.None())?,
+            ValueRef::Boolean(v) => dict.set_item(name, v)?,
+            ValueRef::Int8(v) => dict.set_item(name, v)?,
+            ValueRef::Int16(v) => dict.set_item(name, v)?,
+            ValueRef::Int32(v) => dict.set_item(name, v)?,
+            ValueRef::Int64(v) => dict.set_item(name, v)?,
+            ValueRef::UInt8(v) => dict.set_item(name, v)?,
+            ValueRef::UInt16(v) => dict.set_item(name, v)?,
+            ValueRef::UInt32(v) => dict.set_item(name, v)?,
+            ValueRef::UInt64(v) => dict.set_item(name, v)?,
+            ValueRef::Float32(v) => dict.set_item(name, v)?,
+            ValueRef::Float64(v) => dict.set_item(name, v)?,
+            ValueRef::String(v) => dict.set_item(name, v)?,
+            ValueRef::Binary(v) => dict.set_item(name, v)?,
+            ValueRef::Date32(_)
+            | ValueRef::Date64(_)
+            | ValueRef::Timestamp(_, _)
+            | ValueRef::Time32(_, _)
+            | ValueRef::Time64(_, _) => unimplemented!(),
+        }
+    }
+    Ok(dict)
 }
 
 /// convert key to tonbo key
 ///
 /// Note: `f64` will be convert `F64`
-pub(crate) fn to_key(
-    py: Python,
-    datatype: &DataType,
-    key: Py<PyAny>,
-) -> Arc<dyn Any + Send + Sync> {
+pub(crate) fn to_key(py: Python, datatype: &DataType, key: Py<PyAny>) -> Value {
     match datatype {
-        DataType::UInt8 => Arc::new(key.extract::<u8>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::UInt16 => Arc::new(key.extract::<u16>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::UInt32 => Arc::new(key.extract::<u32>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::UInt64 => Arc::new(key.extract::<u64>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::Int8 => Arc::new(key.extract::<i8>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::Int16 => Arc::new(key.extract::<i16>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::Int32 => Arc::new(key.extract::<i32>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::Int64 => Arc::new(key.extract::<i64>(py).unwrap()) as Arc<dyn Any + Send + Sync>,
-        DataType::String => {
-            Arc::new(key.extract::<String>(py).unwrap()) as Arc<dyn Any + Send + Sync>
-        }
-        DataType::Boolean => {
-            Arc::new(key.extract::<bool>(py).unwrap()) as Arc<dyn Any + Send + Sync>
-        }
-        DataType::Bytes => {
-            Arc::new(key.extract::<Vec<u8>>(py).unwrap()) as Arc<dyn Any + Send + Sync>
-        }
-        DataType::Float => {
-            Arc::new(F64::from(key.extract::<f64>(py).unwrap())) as Arc<dyn Any + Send + Sync>
-        }
+        DataType::UInt8 => Value::UInt8(key.extract::<u8>(py).unwrap()),
+        DataType::UInt16 => Value::UInt16(key.extract::<u16>(py).unwrap()),
+        DataType::UInt32 => Value::UInt32(key.extract::<u32>(py).unwrap()),
+        DataType::UInt64 => Value::UInt64(key.extract::<u64>(py).unwrap()),
+        DataType::Int8 => Value::Int8(key.extract::<i8>(py).unwrap()),
+        DataType::Int16 => Value::Int16(key.extract::<i16>(py).unwrap()),
+        DataType::Int32 => Value::Int32(key.extract::<i32>(py).unwrap()),
+        DataType::Int64 => Value::Int64(key.extract::<i64>(py).unwrap()),
+        DataType::String => Value::String(key.extract::<String>(py).unwrap()),
+        DataType::Boolean => Value::Boolean(key.extract::<bool>(py).unwrap()),
+        DataType::Bytes => Value::Binary(key.extract::<Vec<u8>>(py).unwrap()),
+        DataType::Float => Value::Float64(key.extract::<f64>(py).unwrap()),
     }
 }
 
@@ -180,12 +101,7 @@ pub(crate) fn to_key(
 ///
 /// Note: `f64` will be convert `F64`
 pub(crate) fn to_col(py: Python, col: &Column, key: Py<PyAny>) -> Value {
-    Value::new(
-        TonboDataType::from(&col.datatype),
-        col.name.to_owned(),
-        to_key(py, &col.datatype, key),
-        col.nullable,
-    )
+    to_key(py, &col.datatype, key)
 }
 
 pub(crate) fn to_bound(
