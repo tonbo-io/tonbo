@@ -313,7 +313,7 @@ mod tests {
         fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema,
         record::{
-            runtime::{test::test_dyn_item_schema, DynRecord, Value},
+            dynamic::{test::test_dyn_item_schema, DynRecord, Value},
             test::StringSchema,
             ValueRef,
         },
