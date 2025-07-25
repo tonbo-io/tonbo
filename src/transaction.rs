@@ -93,7 +93,7 @@ where
                         .map(|name| {
                             schema
                                 .index_of(name)
-                                .unwrap_or_else(|_| panic!("unexpected field {}", name))
+                                .unwrap_or_else(|_| panic!("unexpected field {name}"))
                         })
                         .collect::<Vec<usize>>();
 
