@@ -1045,8 +1045,8 @@ pub(crate) mod tests {
         fs::{generate_file_id, manager::StoreManager},
         inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
         record::{
+            dynamic::test::{test_dyn_item_schema, test_dyn_items},
             option::OptionRecordRef,
-            runtime::test::{test_dyn_item_schema, test_dyn_items},
             DynRecord, Key, KeyRef, RecordRef, Schema as RecordSchema, Value, ValueRef,
         },
         trigger::{TriggerFactory, TriggerType},
