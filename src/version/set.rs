@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_lock::RwLock;
+use async_trait::async_trait;
 use flume::Sender;
 use fusio::{fs::FileMeta, DynFs};
 use fusio_log::{Logger, Options};
@@ -17,6 +18,7 @@ use itertools::Itertools;
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
+    manifest::{ManifestStorage, ManifestStorageError},
     ondisk::sstable::SsTableID,
     record::{Record, Schema},
     scope::Scope,
@@ -208,7 +210,7 @@ where
 
         // Only generate a new manifest if there is no rewrites
         if edits.is_empty() {
-            set.rewrite().await?;
+            set.compact_log().await?;
         } else {
             // Apply any existing edits from the previous version logs
             set.apply_edits(edits, None, true).await?;
@@ -217,16 +219,11 @@ where
         Ok(set)
     }
 
-    /// Return current version timestamp
-    pub(crate) async fn current(&self) -> VersionRef<R> {
-        self.inner.read().await.current.clone()
-    }
-
     /// Applies a sequence of `VersionEdit`s to the `VersionSet`, updating both
     /// the persistent manifest and the in‑memory snapshot. During normal operation
     /// (when `is_recover` is false), edits are appended to the version log; during
     /// recovery, existing edits are replayed without writing back to disk.
-    pub(crate) async fn apply_edits(
+    async fn apply_edits(
         &self,
         mut version_edits: Vec<VersionEdit<<R::Schema as Schema>::Key>>,
         delete_gens: Option<Vec<SsTableID>>,
@@ -324,14 +321,14 @@ where
 
         // Rewrite + clean if edit is not empty or during recovery
         if edit_len >= option.version_log_snapshot_threshold || is_recover {
-            self.rewrite().await?;
+            self.compact_log().await?;
             self.clean().await?;
         }
         Ok(())
     }
 
     /// Creates a new manifest file and deletes the old one
-    pub(crate) async fn rewrite(&self) -> Result<(), VersionError> {
+    async fn compact_log(&self) -> Result<(), VersionError> {
         let mut guard = self.inner.write().await;
         let mut new_version = Version::clone(&guard.current);
         let fs = self.manager.local_fs();
@@ -419,7 +416,7 @@ where
     }
 
     /// Deletes all on-disk data for this store version
-    pub(crate) async fn destroy(self) -> Result<(), VersionError> {
+    async fn destroy_log(&mut self) -> Result<(), VersionError> {
         let log_dir_path = self.option.version_log_dir_path();
         let log_fs = self.manager.base_fs();
         let mut log_stream = log_fs.list(&log_dir_path).await?;
@@ -430,6 +427,11 @@ where
             }
         }
 
+        Ok(())
+    }
+
+    async fn destroy_levels(&mut self) -> Result<(), VersionError> {
+        let log_fs = self.manager.base_fs();
         for level in 0..MAX_LEVEL {
             let level_path = self
                 .option
@@ -449,6 +451,44 @@ where
                 }
             }
         }
+
+        Ok(())
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<R> ManifestStorage<R> for VersionSet<R>
+where
+    R: Record,
+{
+    async fn current(&self) -> VersionRef<R> {
+        self.inner.read().await.current.clone()
+    }
+
+    async fn recover(
+        &self,
+        version_edits: Vec<VersionEdit<<<R as Record>::Schema as Schema>::Key>>,
+        delete_gens: Option<Vec<SsTableID>>,
+    ) -> Result<(), ManifestStorageError> {
+        Ok(self.apply_edits(version_edits, delete_gens, true).await?)
+    }
+
+    async fn update(
+        &self,
+        version_edits: Vec<VersionEdit<<<R as Record>::Schema as Schema>::Key>>,
+        delete_gens: Option<Vec<SsTableID>>,
+    ) -> Result<(), ManifestStorageError> {
+        Ok(self.apply_edits(version_edits, delete_gens, false).await?)
+    }
+
+    async fn rewrite(&self) -> Result<(), ManifestStorageError> {
+        Ok(self.compact_log().await?)
+    }
+
+    async fn destroy(&mut self) -> Result<(), ManifestStorageError> {
+        self.destroy_log().await?;
+        self.destroy_levels().await?;
 
         Ok(())
     }
