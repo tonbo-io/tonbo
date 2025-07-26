@@ -172,6 +172,20 @@ while let Some(entry) = scan.next().await.transpose().unwrap() {
     let data = entry.value(); // type of UserRef
     // ......
 }
+
+// reverse scan of user (descending order) 
+let mut reverse_scan = txn
+    .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+    .reverse() // scan in descending order
+    .limit(10) // optionally limit results
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // records in reverse order
+    // ......
+}
 ```
 
 ### Persistence

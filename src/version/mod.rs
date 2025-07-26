@@ -22,6 +22,7 @@ use crate::{
     context::Context,
     fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
+    option::Order,
     record::{Record, Schema},
     scope::Scope,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
@@ -231,6 +232,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        order: Option<Order>,
     ) -> Result<(), VersionError> {
         let level_0_path = self
             .option
@@ -252,7 +254,7 @@ where
 
             streams.push(ScanStream::SsTable {
                 inner: table
-                    .scan(range, ts, limit, projection_mask.clone())
+                    .scan(range, ts, limit, projection_mask.clone(), order)
                     .await
                     .map_err(VersionError::Parquet)?,
             })
@@ -294,6 +296,7 @@ where
                     projection_mask.clone(),
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    order,
                 )
                 .unwrap(),
             });

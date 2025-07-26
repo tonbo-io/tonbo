@@ -77,6 +77,18 @@ while let Some(entry) = scan.next().await.transpose().unwrap() {
     let data = entry.value(); // type of UserRef
     // ......
 }
+
+// Reverse scan (descending order)
+let mut reverse_scan = db
+    .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+    .reverse() // scan in descending order
+    .limit(100) // limit results
+    .await
+    .unwrap();
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // newest records first
+    // ......
+}
 ```
 ### Insert/Remove
 

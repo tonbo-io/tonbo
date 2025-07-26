@@ -1,4 +1,4 @@
-use std::{ops::Bound, sync::Arc};
+use std::{iter::Rev, ops::Bound, sync::Arc};
 
 use async_lock::Mutex;
 use crossbeam_skiplist::{
@@ -10,6 +10,7 @@ use fusio::DynFs;
 use crate::{
     fs::{generate_file_id, FileId},
     inmem::immutable::ImmutableMemTable,
+    option::Order,
     record::{KeyRef, Record, Schema},
     trigger::FreezeTrigger,
     version::timestamp::{Timestamp, Ts, TsRef, EPOCH},
@@ -20,7 +21,7 @@ use crate::{
     DbError, DbOption,
 };
 
-pub(crate) type MutableScan<'scan, R> = Range<
+type MutableRange<'scan, R> = Range<
     'scan,
     TsRef<<<R as Record>::Schema as Schema>::Key>,
     (
@@ -30,6 +31,30 @@ pub(crate) type MutableScan<'scan, R> = Range<
     Ts<<<R as Record>::Schema as Schema>::Key>,
     Option<R>,
 >;
+
+type MutableRangeRev<'scan, R> = Rev<MutableRange<'scan, R>>;
+
+pub(crate) enum MutableScan<'scan, R>
+where
+    R: Record,
+{
+    Forward(MutableRange<'scan, R>),
+    Reverse(MutableRangeRev<'scan, R>),
+}
+
+impl<'scan, R> Iterator for MutableScan<'scan, R>
+where
+    R: Record,
+{
+    type Item = Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            MutableScan::Forward(iter) => iter.next(),
+            MutableScan::Reverse(iter) => iter.next(),
+        }
+    }
+}
 
 pub(crate) struct MutableMemTable<R>
 where
@@ -152,6 +177,7 @@ where
             Bound<&'scan <R::Schema as Schema>::Key>,
         ),
         ts: Timestamp,
+        order: Option<Order>,
     ) -> MutableScan<'scan, R> {
         let lower = match range.0 {
             Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
@@ -164,7 +190,13 @@ where
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        self.data.range((lower, upper))
+        let range_iter = self.data.range((lower, upper));
+
+        if order == Some(Order::Desc) {
+            MutableScan::Reverse(range_iter.rev())
+        } else {
+            MutableScan::Forward(range_iter)
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -336,7 +368,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into(), None);
 
         assert_eq!(
             scan.next().unwrap().key(),
@@ -364,6 +396,7 @@ mod tests {
         let mut scan = mutable.scan(
             (Bound::Included(&lower), Bound::Included(&upper)),
             1_u32.into(),
+            None,
         );
 
         assert_eq!(
@@ -423,7 +456,7 @@ mod tests {
             .unwrap();
 
         {
-            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into(), None);
             let entry = scan.next().unwrap();
             assert_eq!(entry.key(), &Ts::new(Value::Int8(1_i8), 0_u32.into()));
             dbg!(entry.clone().value().as_ref().unwrap());

@@ -185,9 +185,10 @@ mod tests {
 
         let merge = MergeStream::<Test>::from_vec(
             vec![m1
-                .scan((Bound::Unbounded, Bound::Unbounded), 6.into())
+                .scan((Bound::Unbounded, Bound::Unbounded), 6.into(), None)
                 .into()],
             6.into(),
+            None,
         )
         .await
         .unwrap();
