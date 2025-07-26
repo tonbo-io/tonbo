@@ -4,6 +4,7 @@ use std::{
         BTreeMap, Bound,
     },
     io,
+    iter::Rev,
     mem::transmute,
 };
 
@@ -17,6 +18,7 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
+    option::Order,
     record::{Key, KeyRef, RecordRef, Schema},
     snapshot::Snapshot,
     stream::{self, mem_projection::MemProjectionStream},
@@ -25,8 +27,13 @@ use crate::{
     DbError, DbStorage, LockMap, Projection, Record, Scan,
 };
 
+pub(crate) enum TransactionScanInner<'scan, R: Record> {
+    Forward(Range<'scan, <R::Schema as Schema>::Key, Option<R>>),
+    Reverse(Rev<Range<'scan, <R::Schema as Schema>::Key, Option<R>>>),
+}
+
 pub(crate) struct TransactionScan<'scan, R: Record> {
-    inner: Range<'scan, <R::Schema as Schema>::Key, Option<R>>,
+    inner: TransactionScanInner<'scan, R>,
     ts: Timestamp,
 }
 
@@ -40,9 +47,14 @@ where
     );
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner
-            .next()
-            .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value))
+        match &mut self.inner {
+            TransactionScanInner::Forward(iter) => iter
+                .next()
+                .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value)),
+            TransactionScanInner::Reverse(iter) => iter
+                .next()
+                .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value)),
+        }
     }
 }
 /// optimistic ACID transaction, open with
@@ -147,16 +159,23 @@ where
         ),
     ) -> Scan<'scan, 'range, R> {
         let ts = self.snapshot.ts();
-        let inner = self.local.range(range);
+        let local = &self.local;
         self.snapshot._scan(
             range,
-            Box::new(move |projection_mask: Option<ProjectionMask>| {
-                let mut transaction_scan = TransactionScan { inner, ts }.into();
-                if let Some(mask) = projection_mask {
-                    transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();
-                }
-                Some(transaction_scan)
-            }),
+            Box::new(
+                move |projection_mask: Option<ProjectionMask>, order: Option<Order>| {
+                    let inner = if order == Some(Order::Desc) {
+                        TransactionScanInner::Reverse(local.range(range).rev())
+                    } else {
+                        TransactionScanInner::Forward(local.range(range))
+                    };
+                    let mut transaction_scan = TransactionScan { inner, ts }.into();
+                    if let Some(mask) = projection_mask {
+                        transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();
+                    }
+                    Some(transaction_scan)
+                },
+            ),
         )
     }
 
@@ -1019,51 +1038,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_transaction_scan_reverse() {
-        // Create a fresh database with default test data
+    async fn test_transaction_scan_reverse_simple() {
+        // Simple test with only transaction local data
         let temp_dir = TempDir::new().unwrap();
-        let manager = Arc::new(StoreManager::new(FsOptions::Local, vec![]).unwrap());
-        let option = Arc::new(DbOption::new(
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        ));
+        );
 
-        manager
-            .base_fs()
-            .create_dir_all(&option.version_log_dir_path())
-            .await
-            .unwrap();
-        manager
-            .base_fs()
-            .create_dir_all(&option.wal_dir_path())
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
             .await
             .unwrap();
 
-        // Use build_version to get the default test dataset
-        // This creates keys: "1", "2", "3", "4", "5", "6", "7", "8", "9"
-        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
-        let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
-            .await
-            .unwrap();
-        let db = build_db(
-            option,
-            compaction_rx,
-            TokioExecutor::current(),
-            schema,
-            Arc::new(TestSchema),
-            version,
-            manager,
-        )
-        .await
-        .unwrap();
-
-        // Test ascending order (default) - should output keys in order: 1, 2, 3, 4, 5, 6, 7, 8, 9
+        // Test with only local buffer data
         {
-            eprintln!("=== Testing ASCENDING order (default) ===");
-            let txn = db.transaction().await;
+            let mut txn = db.transaction().await;
+
+            // Add data to the transaction's local buffer
+            for i in 1..=5 {
+                txn.insert(Test {
+                    vstring: i.to_string(),
+                    vu32: i,
+                    vbool: Some(true),
+                });
+            }
+
+            // Test ascending order
             let mut stream = txn
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(&["vu32"])
                 .take()
                 .await
                 .unwrap();
@@ -1071,25 +1073,67 @@ mod tests {
             let mut results = Vec::new();
             while let Some(entry_result) = stream.next().await {
                 let entry = entry_result.unwrap();
-                let key = entry.key().value.to_string();
-                eprintln!("Got key: {}", key);
-                results.push(key);
+                results.push(entry.key().value.to_string());
             }
-            eprintln!("Ascending results: {:?}", results);
+            assert_eq!(results, vec!["1", "2", "3", "4", "5"]);
 
-            // For now, just output what we got instead of asserting
-            // We expect: ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            // Test descending order
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .reverse()
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                results.push(entry.key().value.to_string());
+            }
+            assert_eq!(results, vec!["5", "4", "3", "2", "1"]);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_transaction_scan_reverse() {
+        // Test transaction scan with reverse order
+        let temp_dir = TempDir::new().unwrap();
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        // First, insert some committed data
+        for i in [1, 3, 5, 7, 9] {
+            db.insert(Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            })
+            .await
+            .unwrap();
         }
 
-        // Test descending order (reverse scan) - should output keys in reverse order: 9, 8, 7, 6,
-        // 5, 4, 3, 2, 1
+        // Test transaction scan with local buffer data
         {
-            eprintln!("=== Testing DESCENDING order (reverse) ===");
-            let txn = db.transaction().await;
+            let mut txn = db.transaction().await;
+
+            // Add data to the transaction's local buffer
+            for i in [2, 4, 6, 8] {
+                txn.insert(Test {
+                    vstring: i.to_string(),
+                    vu32: i,
+                    vbool: Some(true),
+                });
+            }
+
+            // Test ascending order
             let mut stream = txn
                 .scan((Bound::Unbounded, Bound::Unbounded))
-                .projection(&["vu32"])
-                .reverse() // This should make it descending
                 .take()
                 .await
                 .unwrap();
@@ -1097,14 +1141,26 @@ mod tests {
             let mut results = Vec::new();
             while let Some(entry_result) = stream.next().await {
                 let entry = entry_result.unwrap();
-                let key = entry.key().value.to_string();
-                eprintln!("Got key: {}", key);
-                results.push(key);
+                results.push(entry.key().value.to_string());
             }
-            eprintln!("Descending results: {:?}", results);
+            // Verify ascending order
+            assert_eq!(results, vec!["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
 
-            // For now, just output what we got instead of asserting
-            // We expect: ["9", "8", "7", "6", "5", "4", "3", "2", "1"]
+            // Test descending order
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .reverse()
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                results.push(entry.key().value.to_string());
+            }
+            // Verify descending order
+            assert_eq!(results, vec!["9", "8", "7", "6", "5", "4", "3", "2", "1"]);
         }
     }
 }

@@ -440,7 +440,7 @@ where
                 range,
                 self.ctx.load_ts(),
                 &*current,
-                Box::new(|_| None),
+                Box::new(|_, _| None),
                 self.ctx.clone(),
             ).take().await?;
 
@@ -772,8 +772,11 @@ where
     ts: Timestamp,
 
     version: &'scan Version<R>,
-    fn_pre_stream:
-        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
+    fn_pre_stream: Box<
+        dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
+            + Send
+            + 'scan,
+    >,
 
     limit: Option<usize>,
     order: Option<Order>,
@@ -795,7 +798,9 @@ where
         ts: Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
+                + Send
+                + 'scan,
         >,
         ctx: Arc<Context<R>>,
     ) -> Self {
@@ -890,7 +895,7 @@ where
         let is_projection = self.projection_indices.is_some();
 
         if let Some(pre_stream) =
-            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()), self.order)
         {
             streams.push(pre_stream);
         }
@@ -951,7 +956,7 @@ where
         let is_projection = self.projection_indices.is_some();
 
         if let Some(pre_stream) =
-            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()), self.order)
         {
             streams.push(pre_stream);
         }
