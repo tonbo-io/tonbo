@@ -156,11 +156,11 @@ use trigger::FreezeTrigger;
 use version::timestamp::{Timestamp, TsRef};
 use wal::log::Log;
 
-// Re-export items needed by macros and tests
-#[doc(hidden)]
-pub use crate::inmem::immutable::{ArrowArrays, Builder};
 #[doc(hidden)]
 pub use crate::magic::TS;
+// Re-export items needed by macros and tests
+#[doc(hidden)]
+pub use crate::record::{ArrowArrays, ArrowArraysBuilder};
 #[doc(hidden)]
 pub use crate::version::timestamp::Ts;
 use crate::{
@@ -690,7 +690,7 @@ where
                     .chain(projection.into_iter().map(|name| {
                         schema
                             .index_of(name)
-                            .unwrap_or_else(|_| panic!("unexpected field {}", name))
+                            .unwrap_or_else(|_| panic!("unexpected field {name}"))
                     }))
                     .collect();
                 fixed_projection.dedup();
@@ -842,7 +842,7 @@ where
             .map(|name| {
                 schema
                     .index_of(name)
-                    .unwrap_or_else(|_| panic!("unexpected field {}", name))
+                    .unwrap_or_else(|_| panic!("unexpected field {name}"))
             })
             .collect::<Vec<usize>>();
         let primary_key_index = self.schema.record_schema.primary_key_index();
@@ -1065,16 +1065,15 @@ pub(crate) mod tests {
     use tracing::error;
 
     use crate::{
-        cast_arc_value,
         compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
         inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
         record::{
+            dynamic::test::{test_dyn_item_schema, test_dyn_items},
             option::OptionRecordRef,
-            runtime::test::{test_dyn_item_schema, test_dyn_items},
-            DataType, DynRecord, Key, RecordRef, Schema as RecordSchema, Value, F32, F64,
+            DynRecord, Key, KeyRef, RecordRef, Schema as RecordSchema, Value, ValueRef,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
@@ -1772,7 +1771,7 @@ pub(crate) mod tests {
 
         let mut sort_items = BTreeMap::new();
         for item in test_dyn_items() {
-            sort_items.insert(item.key(), item);
+            sort_items.insert(item.key().to_key(), item);
         }
 
         {
@@ -1858,7 +1857,7 @@ pub(crate) mod tests {
 
         for (i, item) in test_dyn_items().into_iter().enumerate() {
             if i == 28 {
-                db.remove(item.key()).await.unwrap();
+                db.remove(item.key().to_key()).await.unwrap();
             } else {
                 db.write(item, 0.into()).await.unwrap();
             }
@@ -1870,7 +1869,7 @@ pub(crate) mod tests {
             let tx = db.transaction().await;
 
             for i in 0..50 {
-                let key = Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::Int64(i as i64);
                 let option1 = tx.get(&key, Projection::All).await.unwrap();
                 if i == 28 {
                     assert!(option1.is_none());
@@ -1880,42 +1879,42 @@ pub(crate) mod tests {
                 let record_ref = entry.get();
 
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.first().unwrap().value, i64),
-                    i as i64
+                    record_ref.columns.first().unwrap(),
+                    &ValueRef::Int64(i as i64),
                 );
-                let height = cast_arc_value!(record_ref.columns.get(2).unwrap().value, Option<i16>);
+                let height = record_ref.columns.get(2).unwrap();
                 if i < 45 {
-                    assert_eq!(*height, Some(20 * i as i16),);
+                    assert_eq!(*height, ValueRef::Int16(20 * i as i16),);
                 } else {
-                    assert!(height.is_none());
+                    assert_eq!(*height, ValueRef::Null);
                 }
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(3).unwrap().value, Option<i32>),
-                    Some(200 * i),
+                    record_ref.columns.get(3).unwrap(),
+                    &ValueRef::Int32(200 * i),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(4).unwrap().value, Option<String>),
-                    Some(i.to_string()),
+                    record_ref.columns.get(4).unwrap(),
+                    &ValueRef::String(i.to_string().as_str()),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(5).unwrap().value, Option<String>),
-                    Some(format!("{}@tonbo.io", i)),
+                    record_ref.columns.get(5).unwrap(),
+                    &ValueRef::String(format!("{}@tonbo.io", i).as_str()),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(6).unwrap().value, Option<bool>),
-                    Some(i % 2 == 0),
+                    record_ref.columns.get(6).unwrap(),
+                    &ValueRef::Boolean(i % 2 == 0),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(7).unwrap().value, Option<Vec<u8>>),
-                    Some(i.to_le_bytes().to_vec()),
+                    record_ref.columns.get(7).unwrap(),
+                    &ValueRef::Binary(i.to_le_bytes().as_slice()),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(8).unwrap().value, Option<F32>),
-                    Some(F32::from(i as f32 * 1.11)),
+                    record_ref.columns.get(8).unwrap(),
+                    &ValueRef::Float32(i as f32 * 1.11),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(9).unwrap().value, Option<F64>),
-                    Some(F64::from(i as f64 * 1.01)),
+                    record_ref.columns.get(9).unwrap(),
+                    &ValueRef::Float64(i as f64 * 1.01),
                 );
             }
             tx.commit().await.unwrap();
@@ -1923,8 +1922,8 @@ pub(crate) mod tests {
         // test scan
         {
             let tx = db.transaction().await;
-            let lower = Value::new(DataType::Int64, "id".to_owned(), Arc::new(0_i64), false);
-            let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(49_i64), false);
+            let lower = Value::Int64(0_i64);
+            let upper = Value::Int64(49_i64);
             let mut scan = tx
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(&["id", "height", "bytes", "grade", "price"])
@@ -1942,71 +1941,35 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
-                assert_eq!(primary_key_col.desc.name, "id".to_string());
-                assert_eq!(
-                    *primary_key_col
-                        .value
-                        .as_ref()
-                        .downcast_ref::<i64>()
-                        .unwrap(),
-                    i
-                );
+                assert_eq!(primary_key_col, &ValueRef::Int64(i));
 
-                let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::Int16);
-                assert_eq!(col.desc.name, "height".to_string());
-                let height = *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap();
+                let height = columns.get(2).unwrap();
                 if i < 45 {
-                    assert_eq!(height, Some(i as i16 * 20));
+                    assert_eq!(height, &ValueRef::Int16(i as i16 * 20));
                 } else {
-                    assert!(col
-                        .value
-                        .as_ref()
-                        .downcast_ref::<Option<i16>>()
-                        .unwrap()
-                        .is_none(),);
+                    assert_eq!(height, &ValueRef::Null);
                 }
 
-                let col = columns.get(3).unwrap();
-                assert_eq!(col.datatype(), DataType::Int32);
-                assert_eq!(col.desc.name, "weight".to_string());
-                let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
-                assert!(weight.is_some());
-                assert_eq!(*weight.unwrap(), None);
+                let weight = columns.get(3).unwrap();
+                assert_eq!(*weight, ValueRef::Null);
 
-                let col = columns.get(4).unwrap();
-                assert_eq!(col.datatype(), DataType::String);
-                assert_eq!(col.desc.name, "name".to_string());
-                let name = col.value.as_ref().downcast_ref::<Option<String>>();
-                assert!(name.is_some());
-                assert_eq!(name.unwrap(), &None);
+                let name = columns.get(4).unwrap();
+                assert_eq!(name, &ValueRef::Null);
 
-                let col = columns.get(6).unwrap();
-                assert_eq!(col.datatype(), DataType::Boolean);
-                assert_eq!(col.desc.name, "enabled".to_string());
-                let enabled = col.value.as_ref().downcast_ref::<Option<bool>>();
-                assert!(enabled.is_some());
-                assert_eq!(*enabled.unwrap(), None);
+                let enabled = columns.get(6).unwrap();
+                assert_eq!(*enabled, ValueRef::Null);
 
-                let col = columns.get(7).unwrap();
-                assert_eq!(col.datatype(), DataType::Bytes);
-                assert_eq!(col.desc.name, "bytes".to_string());
-                let bytes = col.value.as_ref().downcast_ref::<Option<Vec<u8>>>();
-                assert!(bytes.is_some());
-                assert_eq!(bytes.unwrap(), &Some((i as i32).to_le_bytes().to_vec()));
+                let bytes = columns.get(7).unwrap();
+                assert_eq!(
+                    bytes,
+                    &ValueRef::Binary((i as i32).to_le_bytes().as_slice())
+                );
 
                 let col = columns.get(8).unwrap();
-                assert_eq!(col.datatype(), DataType::Float32);
-                let v = col.value.as_ref().downcast_ref::<Option<F32>>();
-                assert!(v.is_some());
-                assert_eq!(v.unwrap(), &Some(F32::from(i as f32 * 1.11)));
+                assert_eq!(*col, ValueRef::Float32(i as f32 * 1.11));
 
                 let col = columns.get(9).unwrap();
-                assert_eq!(col.datatype(), DataType::Float64);
-                let v = col.value.as_ref().downcast_ref::<Option<F64>>();
-                assert!(v.is_some());
-                assert_eq!(v.unwrap(), &Some(F64::from(i as f64 * 1.01)));
+                assert_eq!(*col, ValueRef::Float64(i as f64 * 1.01));
                 i += 1
             }
         }
@@ -2079,7 +2042,7 @@ pub(crate) mod tests {
             let tx3 = db3.transaction().await;
 
             for i in 0..50 {
-                let key = Value::new(DataType::Int64, "id".to_string(), Arc::new(i as i64), false);
+                let key = Value::Int64(i as i64);
                 let option1 = tx1.get(&key, Projection::All).await.unwrap();
                 let option2 = tx2.get(&key, Projection::All).await.unwrap();
                 let option3 = tx3.get(&key, Projection::All).await.unwrap();
@@ -2099,16 +2062,16 @@ pub(crate) mod tests {
                 let record_ref = entry.get();
 
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.first().unwrap().value, i64),
-                    i as i64
+                    record_ref.columns.first().unwrap(),
+                    &ValueRef::Int64(i as i64),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(3).unwrap().value, Option<i32>),
-                    Some(200 * i),
+                    record_ref.columns.get(3).unwrap(),
+                    &ValueRef::Int32(200 * i),
                 );
                 assert_eq!(
-                    *cast_arc_value!(record_ref.columns.get(4).unwrap().value, Option<String>),
-                    Some(i.to_string()),
+                    record_ref.columns.get(4).unwrap(),
+                    &ValueRef::String(i.to_string().as_str()),
                 );
             }
             tx1.commit().await.unwrap();
@@ -2116,8 +2079,8 @@ pub(crate) mod tests {
         // test scan
         {
             let tx1 = db1.transaction().await;
-            let lower = Value::new(DataType::Int64, "id".to_owned(), Arc::new(8_i64), false);
-            let upper = Value::new(DataType::Int64, "id".to_owned(), Arc::new(43_i64), false);
+            let lower = Value::Int64(8_i64);
+            let upper = Value::Int64(43_i64);
             let mut scan = tx1
                 .scan((Bound::Included(&lower), Bound::Included(&upper)))
                 .projection(&["id", "age"])
@@ -2130,9 +2093,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
-                assert_eq!(primary_key_col.desc.name, "id".to_string());
-                assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
+                assert_eq!(primary_key_col, &ValueRef::Int64(i));
 
                 i += 2
             }
@@ -2150,9 +2111,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
-                assert_eq!(primary_key_col.desc.name, "id".to_string());
-                assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
+                assert_eq!(primary_key_col, &ValueRef::Int64(i));
 
                 i += 2
             }
@@ -2170,9 +2129,7 @@ pub(crate) mod tests {
                 let columns = entry.value().unwrap().columns;
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int64);
-                assert_eq!(primary_key_col.desc.name, "id".to_string());
-                assert_eq!(*cast_arc_value!(primary_key_col.value, i64), i);
+                assert_eq!(primary_key_col, &ValueRef::Int64(i));
 
                 i += 1
             }

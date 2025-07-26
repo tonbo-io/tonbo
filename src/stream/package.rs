@@ -9,8 +9,7 @@ use futures_core::Stream;
 use pin_project_lite::pin_project;
 
 use crate::{
-    inmem::immutable::{ArrowArrays, Builder},
-    record::{Record, Schema},
+    record::{ArrowArrays, ArrowArraysBuilder, Record, Schema},
     stream::merge::MergeStream,
 };
 
@@ -90,13 +89,10 @@ mod tests {
 
     use crate::{
         inmem::{
-            immutable::{
-                tests::{TestImmutableArrays, TestSchema},
-                ArrowArrays,
-            },
+            immutable::tests::{TestImmutableArrays, TestSchema},
             mutable::MutableMemTable,
         },
-        record::Schema,
+        record::{ArrowArrays, Schema},
         stream::{merge::MergeStream, package::PackageStream},
         tests::Test,
         trigger::TriggerFactory,

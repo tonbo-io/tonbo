@@ -4,7 +4,7 @@ use futures::TryStreamExt;
 use js_sys::{Array, Function, JsString, Object, Reflect};
 use tonbo::{
     executor::opfs::OpfsExecutor,
-    record::{DynRecord, DynSchema, ValueDesc},
+    record::{DynRecord, DynSchema, DynamicField, Value},
     DB,
 };
 use wasm_bindgen::prelude::*;
@@ -13,7 +13,7 @@ use crate::{
     datatype::to_datatype,
     options::DbOption,
     transaction::Transaction,
-    utils::{parse_key, parse_record, to_record},
+    utils::{parse_key, parse_record, to_record, to_record_ref},
     Bound,
 };
 
@@ -21,13 +21,13 @@ type JsExecutor = OpfsExecutor;
 
 #[wasm_bindgen]
 pub struct TonboDB {
-    desc: Arc<Vec<ValueDesc>>,
+    desc: Arc<Vec<DynamicField>>,
     primary_key_index: usize,
     db: Arc<DB<DynRecord, JsExecutor>>,
 }
 
 impl TonboDB {
-    fn parse_schema(schema: Object) -> (Vec<ValueDesc>, usize) {
+    fn parse_schema(schema: Object) -> (Vec<DynamicField>, usize) {
         let mut desc = vec![];
         let mut primary_index = None;
 
@@ -61,7 +61,7 @@ impl TonboDB {
                 }
                 primary_index = Some(i);
             }
-            desc.push(ValueDesc::new(
+            desc.push(DynamicField::new(
                 name.into(),
                 to_datatype(datatype.as_str()),
                 nullable,
@@ -95,15 +95,25 @@ impl TonboDB {
     pub async fn get(&self, key: JsValue, cb: Function) -> Result<JsValue, JsValue> {
         let key = parse_key(self.desc.get(self.primary_key_index).unwrap(), key, true)?;
         let this = JsValue::null();
+        let schema = self.desc.clone();
 
         let record = self
             .db
-            .get(&key, |entry| Some(entry.get().columns))
+            .get(&key, |entry| {
+                Some(
+                    entry
+                        .get()
+                        .columns
+                        .iter()
+                        .map(|v| v.to_owned())
+                        .collect::<Vec<Value>>(),
+                )
+            })
             .await
             .map_err(|err| JsValue::from(err.to_string()))?;
 
         match record {
-            Some(record) => cb.call1(&this, &to_record(&record, self.primary_key_index).into()),
+            Some(record) => cb.call1(&this, &to_record(&schema, &record).into()),
             None => Ok(JsValue::null()),
         }
     }
@@ -147,6 +157,7 @@ impl TonboDB {
         lower: Bound,
         high: Bound,
     ) -> Result<wasm_streams::readable::sys::ReadableStream, JsValue> {
+        let schema = self.desc.clone();
         let desc = self.desc.get(self.primary_key_index).unwrap();
         let lower = lower.into_bound(desc)?;
         let high = high.into_bound(desc)?;
@@ -170,10 +181,9 @@ impl TonboDB {
                         >(high.as_ref())
                     },
                 ),
-                |entry| {
+                move |entry| {
                     let record = entry.get();
-                    // to_record(&record.columns, record.primary_index).into()
-                    to_record(&record.columns, record.primary_index)
+                    to_record_ref(&schema, &record.columns)
                 },
             )
             .await
@@ -297,7 +307,8 @@ mod tests {
                 &JsValue::from_str(i.to_string().as_str()),
             )
             .unwrap();
-            js_sys::Reflect::set(&item, &JsValue::from_str("price"), &JsValue::from(i as f64)).unwrap();
+            js_sys::Reflect::set(&item, &JsValue::from_str("price"), &JsValue::from(i as f64))
+                .unwrap();
 
             items.push(item);
         }

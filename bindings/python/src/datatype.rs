@@ -1,11 +1,7 @@
-use std::{
-    any::Any,
-    fmt::{Debug, Formatter},
-    sync::Arc,
-};
+use std::fmt::{Debug, Formatter};
 
 use pyo3::pyclass;
-use tonbo::record::{DataType as TonboDataType, F64};
+use tonbo::arrow::datatypes::DataType as ArrowDataType;
 
 #[pyclass]
 #[derive(PartialEq, Clone)]
@@ -43,59 +39,21 @@ impl Debug for DataType {
     }
 }
 
-impl DataType {
-    pub(crate) fn none_value(&self) -> Arc<dyn Any + Send + Sync> {
-        match self {
-            DataType::UInt8 => Arc::new(Option::<u8>::None),
-            DataType::UInt16 => Arc::new(Option::<u16>::None),
-            DataType::UInt32 => Arc::new(Option::<u32>::None),
-            DataType::UInt64 => Arc::new(Option::<u64>::None),
-            DataType::Int8 => Arc::new(Option::<i8>::None),
-            DataType::Int16 => Arc::new(Option::<i16>::None),
-            DataType::Int32 => Arc::new(Option::<i32>::None),
-            DataType::Int64 => Arc::new(Option::<i64>::None),
-            DataType::String => Arc::new(Option::<String>::None),
-            DataType::Boolean => Arc::new(Option::<bool>::None),
-            DataType::Bytes => Arc::new(Option::<Vec<u8>>::None),
-            DataType::Float => Arc::new(Option::<F64>::None),
-        }
-    }
-}
-
-impl From<DataType> for TonboDataType {
-    fn from(datatype: DataType) -> Self {
-        match datatype {
-            DataType::UInt8 => TonboDataType::UInt8,
-            DataType::UInt16 => TonboDataType::UInt16,
-            DataType::UInt32 => TonboDataType::UInt32,
-            DataType::UInt64 => TonboDataType::UInt64,
-            DataType::Int8 => TonboDataType::Int8,
-            DataType::Int16 => TonboDataType::Int16,
-            DataType::Int32 => TonboDataType::Int32,
-            DataType::Int64 => TonboDataType::Int64,
-            DataType::String => TonboDataType::String,
-            DataType::Boolean => TonboDataType::Boolean,
-            DataType::Bytes => TonboDataType::Bytes,
-            DataType::Float => TonboDataType::Float64,
-        }
-    }
-}
-
-impl From<&DataType> for TonboDataType {
-    fn from(datatype: &DataType) -> Self {
-        match datatype {
-            DataType::UInt8 => TonboDataType::UInt8,
-            DataType::UInt16 => TonboDataType::UInt16,
-            DataType::UInt32 => TonboDataType::UInt32,
-            DataType::UInt64 => TonboDataType::UInt64,
-            DataType::Int8 => TonboDataType::Int8,
-            DataType::Int16 => TonboDataType::Int16,
-            DataType::Int32 => TonboDataType::Int32,
-            DataType::Int64 => TonboDataType::Int64,
-            DataType::String => TonboDataType::String,
-            DataType::Boolean => TonboDataType::Boolean,
-            DataType::Bytes => TonboDataType::Bytes,
-            DataType::Float => TonboDataType::Float64,
+impl From<DataType> for tonbo::arrow::datatypes::DataType {
+    fn from(data_type: DataType) -> Self {
+        match data_type {
+            DataType::UInt8 => ArrowDataType::UInt8,
+            DataType::UInt16 => ArrowDataType::UInt16,
+            DataType::UInt32 => ArrowDataType::UInt32,
+            DataType::UInt64 => ArrowDataType::UInt64,
+            DataType::Int8 => ArrowDataType::Int8,
+            DataType::Int16 => ArrowDataType::Int16,
+            DataType::Int32 => ArrowDataType::Int32,
+            DataType::Int64 => ArrowDataType::Int64,
+            DataType::String => ArrowDataType::Utf8,
+            DataType::Boolean => ArrowDataType::Boolean,
+            DataType::Bytes => ArrowDataType::Binary,
+            DataType::Float => ArrowDataType::Float64,
         }
     }
 }

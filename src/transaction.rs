@@ -105,7 +105,7 @@ where
                         .map(|name| {
                             schema
                                 .index_of(name)
-                                .unwrap_or_else(|_| panic!("unexpected field {}", name))
+                                .unwrap_or_else(|_| panic!("unexpected field {name}"))
                         })
                         .collect::<Vec<usize>>();
 
@@ -332,8 +332,9 @@ mod tests {
         fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema,
         record::{
-            runtime::{test::test_dyn_item_schema, DataType, DynRecord, Value},
+            dynamic::{test::test_dyn_item_schema, DynRecord, Value},
             test::StringSchema,
+            ValueRef,
         },
         tests::{build_db, build_schema, Test},
         transaction::CommitError,
@@ -956,19 +957,9 @@ mod tests {
 
         db.insert(DynRecord::new(
             vec![
-                Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false),
-                Value::new(
-                    DataType::Int16,
-                    "height".to_string(),
-                    Arc::new(Some(180_i16)),
-                    true,
-                ),
-                Value::new(
-                    DataType::Int32,
-                    "weight".to_string(),
-                    Arc::new(56_i32),
-                    false,
-                ),
+                Value::Int8(1_i8),
+                Value::Int16(180_i16),
+                Value::Int32(56_i32),
             ],
             0,
         ))
@@ -977,7 +968,7 @@ mod tests {
 
         let txn = db.transaction().await;
         {
-            let key = Value::new(DataType::Int8, "age".to_string(), Arc::new(1_i8), false);
+            let key = Value::Int8(1_i8);
 
             let record_ref = txn.get(&key, Projection::All).await.unwrap();
             assert!(record_ref.is_some());
@@ -986,20 +977,13 @@ mod tests {
 
             assert_eq!(record_ref.columns.len(), 3);
             let col = record_ref.columns.first().unwrap();
-            assert_eq!(col.datatype(), DataType::Int8);
-            let name = col.value.as_ref().downcast_ref::<i8>();
-            assert!(name.is_some());
-            assert_eq!(*name.unwrap(), 1);
+            assert_eq!(col, &ValueRef::Int8(1_i8));
 
-            let col = record_ref.columns.get(1).unwrap();
-            let height = col.value.as_ref().downcast_ref::<Option<i16>>();
-            assert!(height.is_some());
-            assert_eq!(*height.unwrap(), Some(180_i16));
+            let height = record_ref.columns.get(1).unwrap();
+            assert_eq!(height, &ValueRef::Int16(180_i16));
 
-            let col = record_ref.columns.get(2).unwrap();
-            let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
-            assert!(weight.is_some());
-            assert_eq!(*weight.unwrap(), Some(56_i32));
+            let weight = record_ref.columns.get(2).unwrap();
+            assert_eq!(weight, &ValueRef::Int32(56_i32));
         }
         {
             let mut scan = txn
@@ -1015,24 +999,13 @@ mod tests {
                 dbg!(columns.clone());
 
                 let primary_key_col = columns.first().unwrap();
-                assert_eq!(primary_key_col.datatype(), DataType::Int8);
-                assert_eq!(
-                    *primary_key_col.value.as_ref().downcast_ref::<i8>().unwrap(),
-                    1
-                );
+                assert_eq!(primary_key_col, &ValueRef::Int8(1_i8));
 
                 let col = columns.get(1).unwrap();
-                assert_eq!(col.datatype(), DataType::Int16);
-                assert_eq!(
-                    *col.value.as_ref().downcast_ref::<Option<i16>>().unwrap(),
-                    Some(180)
-                );
+                assert_eq!(col, &ValueRef::Int16(180_i16));
 
                 let col = columns.get(2).unwrap();
-                assert_eq!(col.datatype(), DataType::Int32);
-                let weight = col.value.as_ref().downcast_ref::<Option<i32>>();
-                assert!(weight.is_some());
-                assert_eq!(*weight.unwrap(), Some(56_i32));
+                assert_eq!(col, &ValueRef::Int32(56_i32));
             }
         }
     }

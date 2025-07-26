@@ -32,7 +32,7 @@ where
     R: Record,
 {
     Init(FileId),
-    Ready(SsTableScan<'level, R>),
+    Ready(Box<SsTableScan<'level, R>>),
     OpenFile(
         Ulid,
         Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, Error>> + 'level>>,
@@ -142,7 +142,7 @@ where
                     self.status = FutureStatus::OpenFile(gen, reader);
                     continue;
                 }
-                FutureStatus::Ready(stream) => match Pin::new(stream).poll_next(cx) {
+                FutureStatus::Ready(stream) => match Pin::new(stream.as_mut()).poll_next(cx) {
                     Poll::Ready(None) => match self.gens.pop_front() {
                         None => Poll::Ready(None),
                         Some(gen) => {
@@ -210,7 +210,7 @@ where
                 },
                 FutureStatus::LoadStream(stream_future) => match Pin::new(stream_future).poll(cx) {
                     Poll::Ready(Ok(scan)) => {
-                        self.status = FutureStatus::Ready(scan);
+                        self.status = FutureStatus::Ready(Box::new(scan));
                         continue;
                     }
                     Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),

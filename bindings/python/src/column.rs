@@ -1,11 +1,10 @@
-use std::{
-    any::Any,
-    fmt::{Display, Formatter},
-    sync::Arc,
-};
+use std::fmt::{Display, Formatter};
 
 use pyo3::{pyclass, pymethods};
-use tonbo::record::{DataType as TonboDataType, Value, ValueDesc};
+use tonbo::{
+    arrow::datatypes::DataType as ArrowDataType,
+    record::{DynamicField, Value},
+};
 
 use crate::datatype::DataType;
 
@@ -16,7 +15,7 @@ pub struct Column {
     pub datatype: DataType,
     pub nullable: bool,
     pub primary_key: bool,
-    pub(crate) value: Arc<dyn Any + Send + Sync>,
+    pub(crate) value: Value,
 }
 
 unsafe impl Send for Column {}
@@ -32,7 +31,7 @@ impl Column {
         if primary_key && nullable {
             panic!("Primary key should not be nullable!")
         }
-        let value = datatype.none_value();
+        let value = Value::Null;
         Self {
             name,
             datatype,
@@ -58,15 +57,9 @@ impl Display for Column {
     }
 }
 
-impl From<Column> for ValueDesc {
+impl From<Column> for DynamicField {
     fn from(col: Column) -> Self {
-        let datatype = TonboDataType::from(col.datatype);
-        ValueDesc::new(col.name, datatype, col.nullable)
-    }
-}
-impl From<Column> for Value {
-    fn from(col: Column) -> Self {
-        let datatype = TonboDataType::from(col.datatype);
-        Value::new(datatype, col.name, col.value, col.nullable)
+        let datatype = ArrowDataType::from(col.datatype);
+        DynamicField::new(col.name, datatype, col.nullable)
     }
 }

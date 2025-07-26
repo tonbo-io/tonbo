@@ -34,7 +34,7 @@ mod tests {
     use tokio::io::AsyncSeekExt;
     use tonbo::{
         record::{Record, RecordRef, Schema},
-        ArrowArrays, Builder, Ts, TS,
+        ArrowArrays, ArrowArraysBuilder, Ts, TS,
     };
 
     use crate::{Point, User, UserImmutableArrays, UserRef, UserSchema};
