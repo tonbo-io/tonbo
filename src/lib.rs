@@ -167,6 +167,7 @@ use crate::{
     compaction::{error::CompactionError, CompactTask, Compactor},
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileType},
+    inmem::WriteResult,
     record::Schema,
     snapshot::Snapshot,
     stream::{
@@ -374,7 +375,10 @@ where
     }
 
     /// Delete the record with the primary key as the `key`
-    pub async fn remove(&self, key: <R::Schema as Schema>::Key) -> Result<bool, CommitError<R>> {
+    pub async fn remove(
+        &self,
+        key: <R::Schema as Schema>::Key,
+    ) -> Result<WriteResult, CommitError<R>> {
         Ok(self
             .schema
             .read()
@@ -453,10 +457,10 @@ where
     pub(crate) async fn write(&self, record: R, ts: Timestamp) -> Result<(), DbError> {
         let schema = self.schema.read().await;
 
-        if schema.write(LogType::Full, record, ts).await? {
+        let write_result = schema.write(LogType::Full, record, ts).await?;
+        if matches!(write_result, WriteResult::NeedCompaction) {
             let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
-        }
-
+        };
         Ok(())
     }
 
@@ -483,9 +487,9 @@ where
             } else {
                 schema.write(LogType::Full, first, ts).await?
             };
-            if is_excess {
+            if matches!(is_excess, WriteResult::NeedCompaction) {
                 let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
-            }
+            };
         };
 
         Ok(())
@@ -612,14 +616,14 @@ where
                         }
                         LogType::First => {
                             transaction_map.insert(ts, vec![(key, value)]);
-                            false
+                            WriteResult::Continue
                         }
                         LogType::Middle => {
                             transaction_map.get_mut(&ts).unwrap().push((key, value));
-                            false
+                            WriteResult::Continue
                         }
                         LogType::Last => {
-                            let mut is_excess = false;
+                            let mut is_excess = WriteResult::Continue;
                             let mut records = transaction_map.remove(&ts).unwrap();
                             records.push((key, value));
 
@@ -633,9 +637,9 @@ where
                     };
 
                     // Compact during recovery if exceeded memory threshold
-                    if is_excess {
+                    if matches!(is_excess, WriteResult::NeedCompaction) {
                         let _ = schema.compaction_tx.try_send(CompactTask::Freeze);
-                    }
+                    };
                 }
             }
         }
@@ -645,7 +649,12 @@ where
     }
 
     // Write individual record to mutable memtable
-    async fn write(&self, log_ty: LogType, record: R, ts: Timestamp) -> Result<bool, DbError> {
+    async fn write(
+        &self,
+        log_ty: LogType,
+        record: R,
+        ts: Timestamp,
+    ) -> Result<WriteResult, DbError> {
         self.mutable.insert(log_ty, record, ts).await
     }
 
@@ -655,7 +664,7 @@ where
         log_ty: LogType,
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         self.mutable.remove(log_ty, key, ts).await
     }
 
@@ -665,7 +674,7 @@ where
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         // Passes in None as we do not need it to be durably logged
         self.mutable.append(None, key, ts, value).await
     }
