@@ -63,9 +63,10 @@ where
 pub struct RecordBatchIterator<R> {
     record_batch: RecordBatch,
     offset: usize,
+    remaining: usize,
+    step: isize,
     projection_mask: ProjectionMask,
     full_schema: Arc<Schema>,
-    order: Option<Order>,
     _marker: PhantomData<R>,
 }
 
@@ -79,19 +80,21 @@ where
         full_schema: Arc<Schema>,
         order: Option<Order>,
     ) -> Self {
-        let offset = if order == Some(Order::Desc) {
+        let num_rows = record_batch.num_rows();
+        let (offset, step) = if matches!(order, Some(Order::Desc)) {
             // Start from the last row for descending order
-            record_batch.num_rows().saturating_sub(1)
+            (num_rows.saturating_sub(1), -1)
         } else {
-            0
+            (0, 1)
         };
 
         Self {
             record_batch,
             offset,
+            remaining: num_rows,
+            step,
             projection_mask,
             full_schema,
-            order,
             _marker: PhantomData,
         }
     }
@@ -104,14 +107,8 @@ where
     type Item = RecordBatchEntry<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let num_rows = self.record_batch.num_rows();
-
-        // Check bounds based on order
-        if self.order == Some(Order::Desc) {
-            if num_rows == 0 || self.offset >= num_rows {
-                return None;
-            }
-        } else if self.offset >= num_rows {
+        // Check if we have remaining items
+        if self.remaining == 0 {
             return None;
         }
 
@@ -129,16 +126,9 @@ where
             )
         });
 
-        // Update offset based on order
-        if self.order == Some(Order::Desc) {
-            if self.offset == 0 {
-                self.offset = num_rows; // Set to out of bounds to stop iteration
-            } else {
-                self.offset -= 1;
-            }
-        } else {
-            self.offset += 1;
-        }
+        // Update offset and remaining count
+        self.offset = (self.offset as isize + self.step) as usize;
+        self.remaining -= 1;
 
         Some(entry)
     }

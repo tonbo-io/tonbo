@@ -827,6 +827,28 @@ where
         }
     }
 
+    /// Configures the scan to return results in descending order (reverse order).
+    ///
+    /// By default, scans return results in ascending order. Use this method to scan
+    /// from highest to lowest key values.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Scan users in reverse order (newest first)
+    /// let upper = "Blob".into();
+    /// let mut scan = txn
+    ///     .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+    ///     .reverse() // scan in descending order
+    ///     .limit(10) // get last 10 records
+    ///     .take()
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// while let Some(entry) = scan.next().await.transpose().unwrap() {
+    ///     println!("User in reverse order: {:?}", entry.value());
+    /// }
+    /// ```
     pub fn reverse(self) -> Self {
         Self {
             order: Some(Order::Desc),

@@ -1,10 +1,7 @@
-use std::{iter::Rev, ops::Bound, sync::Arc};
+use std::{ops::Bound, sync::Arc};
 
 use async_lock::Mutex;
-use crossbeam_skiplist::{
-    map::{Entry, Range},
-    SkipMap,
-};
+use crossbeam_skiplist::{map::Entry, SkipMap};
 use fusio::DynFs;
 
 use crate::{
@@ -21,7 +18,8 @@ use crate::{
     DbError, DbOption,
 };
 
-type MutableRange<'scan, R> = Range<
+// Type alias to simplify the range iterator and help with type inference
+type MutableRange<'scan, R> = crossbeam_skiplist::map::Range<
     'scan,
     TsRef<<<R as Record>::Schema as Schema>::Key>,
     (
@@ -32,14 +30,28 @@ type MutableRange<'scan, R> = Range<
     Option<R>,
 >;
 
-type MutableRangeRev<'scan, R> = Rev<MutableRange<'scan, R>>;
-
-pub(crate) enum MutableScan<'scan, R>
+pub(crate) struct MutableScan<'scan, R>
 where
     R: Record,
 {
-    Forward(MutableRange<'scan, R>),
-    Reverse(MutableRangeRev<'scan, R>),
+    iter: Box<
+        dyn Iterator<Item = Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>> + Send + 'scan,
+    >,
+}
+
+impl<'scan, R> MutableScan<'scan, R>
+where
+    R: Record,
+{
+    fn new(
+        iter: Box<
+            dyn Iterator<Item = Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>>
+                + Send
+                + 'scan,
+        >,
+    ) -> Self {
+        Self { iter }
+    }
 }
 
 impl<'scan, R> Iterator for MutableScan<'scan, R>
@@ -49,10 +61,7 @@ where
     type Item = Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            MutableScan::Forward(iter) => iter.next(),
-            MutableScan::Reverse(iter) => iter.next(),
-        }
+        self.iter.next()
     }
 }
 
@@ -190,13 +199,15 @@ where
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        let range_iter = self.data.range((lower, upper));
+        let range_iter: MutableRange<'scan, R> = self.data.range((lower, upper));
 
-        if order == Some(Order::Desc) {
-            MutableScan::Reverse(range_iter.rev())
+        let boxed_iter: Box<dyn Iterator<Item = _> + Send + 'scan> = if order == Some(Order::Desc) {
+            Box::new(range_iter.rev())
         } else {
-            MutableScan::Forward(range_iter)
-        }
+            Box::new(range_iter)
+        };
+
+        MutableScan::new(boxed_iter)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

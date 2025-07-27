@@ -1,10 +1,4 @@
-use std::{
-    collections::{btree_map::Range, BTreeMap},
-    iter::Rev,
-    mem::transmute,
-    ops::Bound,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, mem::transmute, ops::Bound, sync::Arc};
 
 use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
 use crossbeam_skiplist::SkipMap;
@@ -98,19 +92,14 @@ where
             .index
             .range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((lower, upper));
 
-        if order == Some(Order::Desc) {
-            ImmutableScan::<A::Record>::new_reverse(
-                range.rev(),
-                self.data.as_record_batch(),
-                projection_mask,
-            )
+        let boxed_range: Box<dyn Iterator<Item = _> + Send + 'scan> = if order == Some(Order::Desc)
+        {
+            Box::new(range.rev())
         } else {
-            ImmutableScan::<A::Record>::new_forward(
-                range,
-                self.data.as_record_batch(),
-                projection_mask,
-            )
-        }
+            Box::new(range)
+        };
+
+        ImmutableScan::<A::Record>::new(boxed_range, self.data.as_record_batch(), projection_mask)
     }
 
     pub(crate) fn get(
@@ -143,44 +132,29 @@ where
     }
 }
 
-pub(crate) enum ImmutableScan<'iter, R>
+pub(crate) struct ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    Forward {
-        range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
-        record_batch: &'iter RecordBatch,
-        projection_mask: ProjectionMask,
-    },
-    Reverse {
-        range: Rev<Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>>,
-        record_batch: &'iter RecordBatch,
-        projection_mask: ProjectionMask,
-    },
+    range: Box<
+        dyn Iterator<Item = (&'iter Ts<<R::Schema as Schema>::Key>, &'iter u32)> + Send + 'iter,
+    >,
+    record_batch: &'iter RecordBatch,
+    projection_mask: ProjectionMask,
 }
 
 impl<'iter, R> ImmutableScan<'iter, R>
 where
     R: Record,
 {
-    fn new_forward(
-        range: Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>,
+    fn new(
+        range: Box<
+            dyn Iterator<Item = (&'iter Ts<<R::Schema as Schema>::Key>, &'iter u32)> + Send + 'iter,
+        >,
         record_batch: &'iter RecordBatch,
         projection_mask: ProjectionMask,
     ) -> Self {
-        Self::Forward {
-            range,
-            record_batch,
-            projection_mask,
-        }
-    }
-
-    fn new_reverse(
-        range: Rev<Range<'iter, Ts<<R::Schema as Schema>::Key>, u32>>,
-        record_batch: &'iter RecordBatch,
-        projection_mask: ProjectionMask,
-    ) -> Self {
-        Self::Reverse {
+        Self {
             range,
             record_batch,
             projection_mask,
@@ -195,56 +169,24 @@ where
     type Item = RecordBatchEntry<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            ImmutableScan::Forward {
-                range,
-                record_batch,
-                projection_mask,
-            } => {
-                range.next().map(|(_, &offset)| {
-                    let schema = record_batch.schema();
-                    let record_ref = R::Ref::from_record_batch(
-                        record_batch,
-                        offset as usize,
-                        projection_mask,
-                        &schema,
-                    );
-                    // TODO: remove cloning record batch
-                    RecordBatchEntry::new(record_batch.clone(), {
-                        // Safety: record_ref self-references the record batch
-                        unsafe {
-                            transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
-                                record_ref,
-                            )
-                        }
-                    })
-                })
+        let (_, &offset) = self.range.next()?;
+
+        let schema = self.record_batch.schema();
+        let record_ref = R::Ref::from_record_batch(
+            self.record_batch,
+            offset as usize,
+            &self.projection_mask,
+            &schema,
+        );
+        // TODO: remove cloning record batch
+        Some(RecordBatchEntry::new(self.record_batch.clone(), {
+            // Safety: record_ref self-references the record batch
+            unsafe {
+                transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
+                    record_ref,
+                )
             }
-            ImmutableScan::Reverse {
-                range,
-                record_batch,
-                projection_mask,
-            } => {
-                range.next().map(|(_, &offset)| {
-                    let schema = record_batch.schema();
-                    let record_ref = R::Ref::from_record_batch(
-                        record_batch,
-                        offset as usize,
-                        projection_mask,
-                        &schema,
-                    );
-                    // TODO: remove cloning record batch
-                    RecordBatchEntry::new(record_batch.clone(), {
-                        // Safety: record_ref self-references the record batch
-                        unsafe {
-                            transmute::<OptionRecordRef<R::Ref<'_>>, OptionRecordRef<R::Ref<'static>>>(
-                                record_ref,
-                            )
-                        }
-                    })
-                })
-            }
-        }
+        }))
     }
 }
 
