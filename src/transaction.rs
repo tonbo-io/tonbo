@@ -4,6 +4,7 @@ use std::{
         BTreeMap, Bound,
     },
     io,
+    iter::Rev,
     mem::transmute,
 };
 
@@ -18,6 +19,7 @@ use thiserror::Error;
 use crate::{
     compaction::CompactTask,
     inmem::mutable::WriteResult,
+    option::Order,
     record::{Key, KeyRef, RecordRef, Schema},
     snapshot::Snapshot,
     stream::{self, mem_projection::MemProjectionStream},
@@ -26,8 +28,13 @@ use crate::{
     DbError, DbStorage, LockMap, Projection, Record, Scan,
 };
 
+pub(crate) enum TransactionScanInner<'scan, R: Record> {
+    Forward(Range<'scan, <R::Schema as Schema>::Key, Option<R>>),
+    Reverse(Rev<Range<'scan, <R::Schema as Schema>::Key, Option<R>>>),
+}
+
 pub(crate) struct TransactionScan<'scan, R: Record> {
-    inner: Range<'scan, <R::Schema as Schema>::Key, Option<R>>,
+    inner: TransactionScanInner<'scan, R>,
     ts: Timestamp,
 }
 
@@ -41,9 +48,14 @@ where
     );
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner
-            .next()
-            .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value))
+        match &mut self.inner {
+            TransactionScanInner::Forward(iter) => iter
+                .next()
+                .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value)),
+            TransactionScanInner::Reverse(iter) => iter
+                .next()
+                .map(|(key, value)| (Ts::new(key.as_key_ref(), self.ts), value)),
+        }
     }
 }
 /// optimistic ACID transaction, open with
@@ -86,9 +98,12 @@ where
             Some(v) => v.as_ref().map(|v| {
                 let mut record_ref = v.as_record_ref();
                 if let Projection::Parts(projection) = projection {
-                    let primary_key_index =
-                        self.snapshot.schema().record_schema.primary_key_index();
-                    let schema = self.snapshot.schema().record_schema.arrow_schema();
+                    let primary_key_index = self
+                        .snapshot
+                        .mem_storage()
+                        .record_schema
+                        .primary_key_index();
+                    let schema = self.snapshot.mem_storage().record_schema.arrow_schema();
                     let mut projection = projection
                         .iter()
                         .map(|name| {
@@ -148,16 +163,23 @@ where
         ),
     ) -> Scan<'scan, 'range, R> {
         let ts = self.snapshot.ts();
-        let inner = self.local.range(range);
+        let local = &self.local;
         self.snapshot._scan(
             range,
-            Box::new(move |projection_mask: Option<ProjectionMask>| {
-                let mut transaction_scan = TransactionScan { inner, ts }.into();
-                if let Some(mask) = projection_mask {
-                    transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();
-                }
-                Some(transaction_scan)
-            }),
+            Box::new(
+                move |projection_mask: Option<ProjectionMask>, order: Option<Order>| {
+                    let inner = if order == Some(Order::Desc) {
+                        TransactionScanInner::Reverse(local.range(range).rev())
+                    } else {
+                        TransactionScanInner::Forward(local.range(range))
+                    };
+                    let mut transaction_scan = TransactionScan { inner, ts }.into();
+                    if let Some(mask) = projection_mask {
+                        transaction_scan = MemProjectionStream::new(transaction_scan, mask).into();
+                    }
+                    Some(transaction_scan)
+                },
+            ),
         )
     }
 
@@ -201,7 +223,7 @@ where
         for (key, _) in self.local.iter() {
             if self
                 .snapshot
-                .schema()
+                .mem_storage()
                 .check_conflict(key, self.snapshot.ts())
             {
                 return Err(CommitError::WriteConflict(key.clone()));
@@ -214,9 +236,14 @@ where
             1 => {
                 let new_ts = self.snapshot.increase_ts();
                 let (key, record) = self.local.pop_first().unwrap();
-                let write_result =
-                    Self::append(self.snapshot.schema(), LogType::Full, key, record, new_ts)
-                        .await?;
+                let write_result = Self::append(
+                    self.snapshot.mem_storage(),
+                    LogType::Full,
+                    key,
+                    record,
+                    new_ts,
+                )
+                .await?;
                 write_result.needs_compaction()
             }
             _ => {
@@ -224,24 +251,42 @@ where
                 let mut iter = self.local.into_iter();
 
                 let (key, record) = iter.next().unwrap();
-                Self::append(self.snapshot.schema(), LogType::First, key, record, new_ts).await?;
+                Self::append(
+                    self.snapshot.mem_storage(),
+                    LogType::First,
+                    key,
+                    record,
+                    new_ts,
+                )
+                .await?;
 
                 for (key, record) in (&mut iter).take(len - 2) {
-                    Self::append(self.snapshot.schema(), LogType::Middle, key, record, new_ts)
-                        .await?;
+                    Self::append(
+                        self.snapshot.mem_storage(),
+                        LogType::Middle,
+                        key,
+                        record,
+                        new_ts,
+                    )
+                    .await?;
                 }
 
                 let (key, record) = iter.next().unwrap();
-                let write_result =
-                    Self::append(self.snapshot.schema(), LogType::Last, key, record, new_ts)
-                        .await?;
+                let write_result = Self::append(
+                    self.snapshot.mem_storage(),
+                    LogType::Last,
+                    key,
+                    record,
+                    new_ts,
+                )
+                .await?;
                 write_result.needs_compaction()
             }
         };
         if is_excess {
             let _ = self
                 .snapshot
-                .schema()
+                .mem_storage()
                 .compaction_tx
                 .try_send(CompactTask::Freeze);
         }
@@ -902,7 +947,6 @@ mod tests {
         )
         .await
         .unwrap();
-
         let txn = db.transaction().await;
         txn.commit().await.unwrap();
 
@@ -996,6 +1040,133 @@ mod tests {
                 let col = columns.get(2).unwrap();
                 assert_eq!(col, &ValueRef::Int32(56_i32));
             }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_transaction_scan_reverse_simple() {
+        // Simple test with only transaction local data
+        let temp_dir = TempDir::new().unwrap();
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        // Test with only local buffer data
+        {
+            let mut txn = db.transaction().await;
+
+            // Add data to the transaction's local buffer
+            for i in 1..=5 {
+                txn.insert(Test {
+                    vstring: i.to_string(),
+                    vu32: i,
+                    vbool: Some(true),
+                });
+            }
+
+            // Test ascending order
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                results.push(entry.key().value.to_string());
+            }
+            assert_eq!(results, vec!["1", "2", "3", "4", "5"]);
+
+            // Test descending order
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .reverse()
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                results.push(entry.key().value.to_string());
+            }
+            assert_eq!(results, vec!["5", "4", "3", "2", "1"]);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_transaction_scan_reverse() {
+        // Test transaction scan with reverse order
+        let temp_dir = TempDir::new().unwrap();
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        // First, insert some committed data
+        for i in [1, 3, 5, 7, 9] {
+            db.insert(Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            })
+            .await
+            .unwrap();
+        }
+
+        // Test transaction scan with local buffer data
+        {
+            let mut txn = db.transaction().await;
+
+            // Add data to the transaction's local buffer
+            for i in [2, 4, 6, 8] {
+                txn.insert(Test {
+                    vstring: i.to_string(),
+                    vu32: i,
+                    vbool: Some(true),
+                });
+            }
+
+            // Test ascending order
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                results.push(entry.key().value.to_string());
+            }
+            // Verify ascending order
+            assert_eq!(results, vec!["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+
+            // Test descending order
+            let mut stream = txn
+                .scan((Bound::Unbounded, Bound::Unbounded))
+                .reverse()
+                .take()
+                .await
+                .unwrap();
+
+            let mut results = Vec::new();
+            while let Some(entry_result) = stream.next().await {
+                let entry = entry_result.unwrap();
+                results.push(entry.key().value.to_string());
+            }
+            // Verify descending order
+            assert_eq!(results, vec!["9", "8", "7", "6", "5", "4", "3", "2", "1"]);
         }
     }
 }

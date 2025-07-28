@@ -4,10 +4,10 @@ use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode, FsOptions, Options, Path};
 use futures_util::TryStreamExt;
 
-use crate::{fs::FileId, scope::Scope, version::timestamp::Timestamp};
+use crate::{fs::FileId, record::Key, scope::Scope, version::timestamp::Timestamp};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum VersionEdit<K> {
+pub(crate) enum VersionEdit<K: Key> {
     Add { level: u8, scope: Scope<K> },
     Remove { level: u8, gen: FileId },
     LatestTimeStamp { ts: Timestamp },
@@ -16,7 +16,7 @@ pub(crate) enum VersionEdit<K> {
 
 impl<K> VersionEdit<K>
 where
-    K: Decode + Send,
+    K: Key,
 {
     pub(crate) async fn recover(path: Path, fs_option: FsOptions) -> Vec<VersionEdit<K>> {
         let mut edits = vec![];
@@ -39,7 +39,7 @@ where
 
 impl<K> Encode for VersionEdit<K>
 where
-    K: Encode + Sync,
+    K: Key,
 {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
@@ -84,7 +84,7 @@ where
 
 impl<K> Decode for VersionEdit<K>
 where
-    K: Decode + Send,
+    K: Key,
 {
     async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let edit_type = u8::decode(reader).await?;
