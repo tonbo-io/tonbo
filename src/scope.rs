@@ -3,10 +3,10 @@ use std::ops::Bound;
 use fusio::{SeqRead, Write};
 use fusio_log::{Decode, Encode};
 
-use crate::fs::FileId;
+use crate::{fs::FileId, record::Key};
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct Scope<K> {
+pub(crate) struct Scope<K: Key> {
     pub(crate) min: K,
     pub(crate) max: K,
     pub(crate) gen: FileId,
@@ -17,7 +17,7 @@ pub(crate) struct Scope<K> {
 
 impl<K> Clone for Scope<K>
 where
-    K: Clone,
+    K: Key,
 {
     fn clone(&self) -> Self {
         Scope {
@@ -32,7 +32,7 @@ where
 
 impl<K> Scope<K>
 where
-    K: Ord,
+    K: Key,
 {
     pub(crate) fn contains(&self, key: &K) -> bool {
         &self.min <= key && key <= &self.max
@@ -80,7 +80,7 @@ where
 
 impl<K> Encode for Scope<K>
 where
-    K: Encode + Sync,
+    K: Key,
 {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
@@ -118,7 +118,7 @@ where
 
 impl<K> Decode for Scope<K>
 where
-    K: Decode + Send,
+    K: Key,
 {
     async fn decode<R: SeqRead>(reader: &mut R) -> Result<Self, fusio::Error> {
         let mut buf = [0u8; 16];
