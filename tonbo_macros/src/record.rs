@@ -818,7 +818,7 @@ fn struct_builder_codegen(
             _ts: ::tonbo::arrow::array::UInt32Builder,
         }
 
-        impl ::tonbo::Builder<#struct_arrays_name> for #struct_builder_name {
+        impl ::tonbo::ArrowArraysBuilder<#struct_arrays_name> for #struct_builder_name {
             fn push(&mut self, key: ::tonbo::Ts<<<<#struct_name as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'_>>, row: Option<#struct_ref_name>) {
                 #builder_append_primary_key
                 match row {

@@ -10,41 +10,12 @@ use crossbeam_skiplist::SkipMap;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
-    record::{option::OptionRecordRef, Key, Record, RecordRef, Schema},
+    record::{
+        option::OptionRecordRef, ArrowArrays, ArrowArraysBuilder, Key, Record, RecordRef, Schema,
+    },
     stream::record_batch::RecordBatchEntry,
     version::timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };
-
-pub trait ArrowArrays: Sized {
-    type Record: Record;
-
-    type Builder: Builder<Self>;
-
-    fn builder(schema: Arc<ArrowSchema>, capacity: usize) -> Self::Builder;
-
-    fn get(
-        &self,
-        offset: u32,
-        projection_mask: &ProjectionMask,
-    ) -> Option<Option<<Self::Record as Record>::Ref<'_>>>;
-
-    fn as_record_batch(&self) -> &RecordBatch;
-}
-
-pub trait Builder<S>: Send
-where
-    S: ArrowArrays,
-{
-    fn push(
-        &mut self,
-        key: Ts<<<<S::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
-        row: Option<<S::Record as Record>::Ref<'_>>,
-    );
-
-    fn written_size(&self) -> usize;
-
-    fn finish(&mut self, indices: Option<&[usize]>) -> S;
-}
 
 pub(crate) struct ImmutableMemTable<A>
 where
@@ -224,10 +195,9 @@ pub(crate) mod tests {
     use once_cell::sync::Lazy;
     use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
 
-    use super::{ArrowArrays, Builder};
     use crate::{
         magic,
-        record::{Record, Schema},
+        record::{ArrowArrays, ArrowArraysBuilder, Record, Schema},
         tests::{Test, TestRef},
         version::timestamp::Ts,
     };
@@ -343,7 +313,7 @@ pub(crate) mod tests {
         _ts: UInt32Builder,
     }
 
-    impl Builder<TestImmutableArrays> for TestBuilder {
+    impl ArrowArraysBuilder<TestImmutableArrays> for TestBuilder {
         fn push(&mut self, key: Ts<&str>, row: Option<TestRef>) {
             self.vstring.append_value(key.value);
             match row {

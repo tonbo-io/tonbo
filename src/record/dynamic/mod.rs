@@ -66,7 +66,7 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::Boolean => DataType::Boolean,
             ArrowDataType::Binary => DataType::Bytes,
             ArrowDataType::Timestamp(unit, tz) => {
-                debug_assert!(tz.is_none(), "expected timezone is none, get {:?}", tz);
+                debug_assert!(tz.is_none(), "expected timezone is none, get {tz:?}");
                 DataType::Timestamp(unit.into())
             }
             ArrowDataType::Time32(unit) => DataType::Time32(unit.into()),

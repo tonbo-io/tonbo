@@ -62,7 +62,7 @@ pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<File
     path.filename()
         .map(|file_name| {
             let file_id = file_name
-                .strip_suffix(&format!(".{}", suffix))
+                .strip_suffix(&format!(".{suffix}"))
                 .unwrap_or(file_name);
             FileId::from_str(file_id)
         })
