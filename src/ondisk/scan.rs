@@ -14,6 +14,7 @@ use parquet::arrow::{
 use pin_project_lite::pin_project;
 
 use crate::{
+    option::Order,
     record::Record,
     stream::record_batch::{RecordBatchEntry, RecordBatchIterator},
 };
@@ -26,6 +27,7 @@ pin_project! {
         iter: Option<RecordBatchIterator<R>>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
+        order: Option<Order>,
         _marker: PhantomData<&'scan ()>
     }
 }
@@ -35,12 +37,14 @@ impl<R> SsTableScan<'_, R> {
         stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
+        order: Option<Order>,
     ) -> Self {
         SsTableScan {
             stream,
             iter: None,
             projection_mask,
             full_schema,
+            order,
             _marker: PhantomData,
         }
     }
@@ -72,6 +76,7 @@ where
                         record_batch,
                         this.projection_mask.clone(),
                         this.full_schema.clone(),
+                        *this.order,
                     ));
                 }
             }

@@ -109,7 +109,12 @@ The query process of immutable memtable is different from memtable:
 
 ```rust
 let range = self.index.range::<TsRef<<<A::Record as Record>::Schema as Schema>::Key>, _>((lower, upper));
-ImmutableScan::<A::Record>::new(range, self.data.as_record_batch(), projection_mask)
+let boxed_range = if order == Some(Order::Desc) {
+    Box::new(range.rev())
+} else {
+    Box::new(range)
+};
+ImmutableScan::<A::Record>::new(boxed_range, self.data.as_record_batch(), projection_mask)
 ```
 
 For `get(key)`, it can be transformed into `scan(key, key)`. The final result returned by `scan` is then converted into `RecordBatchEntry` using Arrow's `.as_record_batch()` method.

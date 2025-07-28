@@ -446,7 +446,7 @@ where
                 range,
                 self.ctx.load_ts(),
                 &*current,
-                Box::new(|_| None),
+                Box::new(|_, _| None),
                 self.ctx.clone(),
             ).take().await?;
 
@@ -783,10 +783,14 @@ where
     ts: Timestamp,
 
     version: &'scan Version<R>,
-    fn_pre_stream:
-        Box<dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan>,
+    fn_pre_stream: Box<
+        dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
+            + Send
+            + 'scan,
+    >,
 
     limit: Option<usize>,
+    order: Option<Order>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
     ctx: Arc<Context<R>>,
@@ -805,7 +809,9 @@ where
         ts: Timestamp,
         version: &'scan Version<R>,
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
+                + Send
+                + 'scan,
         >,
         ctx: Arc<Context<R>>,
     ) -> Self {
@@ -817,6 +823,7 @@ where
             version,
             fn_pre_stream,
             limit: None,
+            order: None,
             projection_indices: None,
             projection: ProjectionMask::all(),
             ctx,
@@ -827,6 +834,35 @@ where
     pub fn limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
+            ..self
+        }
+    }
+
+    /// Configures the scan to return results in descending order (reverse order).
+    ///
+    /// By default, scans return results in ascending order. Use this method to scan
+    /// from highest to lowest key values.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Scan users in reverse order (newest first)
+    /// let upper = "Blob".into();
+    /// let mut scan = txn
+    ///     .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+    ///     .reverse() // scan in descending order
+    ///     .limit(10) // get last 10 records
+    ///     .take()
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// while let Some(entry) = scan.next().await.transpose().unwrap() {
+    ///     println!("User in reverse order: {:?}", entry.value());
+    /// }
+    /// ```
+    pub fn reverse(self) -> Self {
+        Self {
+            order: Some(Order::Desc),
             ..self
         }
     }
@@ -892,7 +928,7 @@ where
         let is_projection = self.projection_indices.is_some();
 
         if let Some(pre_stream) =
-            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()), self.order)
         {
             streams.push(pre_stream);
         }
@@ -902,7 +938,7 @@ where
             let mut mutable_scan = self
                 .mem_storage
                 .mutable
-                .scan((self.lower, self.upper), self.ts)
+                .scan((self.lower, self.upper), self.ts, self.order)
                 .into();
             if is_projection {
                 mutable_scan =
@@ -913,7 +949,12 @@ where
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .scan(
+                        (self.lower, self.upper),
+                        self.ts,
+                        self.projection.clone(),
+                        self.order,
+                    )
                     .into(),
             );
         }
@@ -925,10 +966,11 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.order,
             )
             .await?;
 
-        let mut merge_stream = MergeStream::from_vec(streams, self.ts).await?;
+        let mut merge_stream = MergeStream::from_vec(streams, self.ts, self.order).await?;
         if let Some(limit) = self.limit {
             merge_stream = merge_stream.limit(limit);
         }
@@ -947,7 +989,7 @@ where
         let is_projection = self.projection_indices.is_some();
 
         if let Some(pre_stream) =
-            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()))
+            (self.fn_pre_stream)(is_projection.then(|| self.projection.clone()), self.order)
         {
             streams.push(pre_stream);
         }
@@ -957,7 +999,7 @@ where
             let mut mutable_scan = self
                 .mem_storage
                 .mutable
-                .scan((self.lower, self.upper), self.ts)
+                .scan((self.lower, self.upper), self.ts, self.order)
                 .into();
             if is_projection {
                 mutable_scan =
@@ -968,7 +1010,12 @@ where
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
-                    .scan((self.lower, self.upper), self.ts, self.projection.clone())
+                    .scan(
+                        (self.lower, self.upper),
+                        self.ts,
+                        self.projection.clone(),
+                        self.order,
+                    )
                     .into(),
             );
         }
@@ -980,9 +1027,10 @@ where
                 self.ts,
                 self.limit,
                 self.projection,
+                self.order,
             )
             .await?;
-        let merge_stream = MergeStream::from_vec(streams, self.ts).await?;
+        let merge_stream = MergeStream::from_vec(streams, self.ts, self.order).await?;
 
         Ok(PackageStream::new(
             batch_size,
