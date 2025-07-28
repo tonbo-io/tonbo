@@ -1192,7 +1192,7 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs_zero = &version.level_slice[0];
         let sort_runs_one = &version.level_slice[1];
 
@@ -1265,7 +1265,7 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs = &version.level_slice[0];
 
         assert_eq!(sort_runs.len(), 3);
@@ -1352,7 +1352,7 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs_l0 = &version.level_slice[0];
         let sort_runs_l1 = &version.level_slice[1];
 
@@ -1454,7 +1454,7 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs_level_0 = &version.level_slice[0];
         let sort_runs_level_1 = &version.level_slice[1];
 

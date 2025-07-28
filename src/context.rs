@@ -3,11 +3,8 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 
 use crate::{
-    fs::manager::StoreManager,
-    manifest::ManifestStorage,
-    record::Record,
-    version::{set::VersionSet, timestamp::Timestamp, TransactionTs},
-    ParquetLru,
+    fs::manager::StoreManager, manifest::ManifestStorage, record::Record,
+    version::timestamp::Timestamp, ParquetLru,
 };
 
 pub(crate) struct Context<R: Record> {
