@@ -31,6 +31,19 @@ pub(crate) type MutableScan<'scan, R> = Range<
     Option<R>,
 >;
 
+/// Signals to memtable whether size threshold has been reached and needs compaction
+#[derive(Debug)]
+pub enum WriteResult {
+    Continue,
+    NeedCompaction,
+}
+
+impl WriteResult {
+    pub fn needs_compaction(&self) -> bool {
+        matches!(self, WriteResult::NeedCompaction)
+    }
+}
+
 pub(crate) struct MutableMemTable<R>
 where
     R: Record,
@@ -91,7 +104,7 @@ where
         log_ty: LogType,
         record: R,
         ts: Timestamp,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         self.append(Some(log_ty), record.key().to_key(), ts, Some(record))
             .await
     }
@@ -101,7 +114,7 @@ where
         log_ty: LogType,
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         self.append(Some(log_ty), key, ts, None).await
     }
 
@@ -111,7 +124,7 @@ where
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         let timestamped_key = Ts::new(key, ts);
 
         let record_entry = Log::new(timestamped_key, value, log_ty);
@@ -125,11 +138,18 @@ where
 
         let entry = self.data.insert(record_entry.key, record_entry.value);
 
-        Ok(entry
-            .value()
-            .as_ref()
-            .map(|v| self.trigger.check_if_exceed(v))
-            .unwrap_or(false))
+        Ok(
+            if entry
+                .value()
+                .as_ref()
+                .map(|v| self.trigger.check_if_exceed(v))
+                .unwrap_or(false)
+            {
+                WriteResult::NeedCompaction
+            } else {
+                WriteResult::Continue
+            },
+        )
     }
 
     pub(crate) fn get(
