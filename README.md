@@ -144,6 +144,7 @@ async fn main() {
     - [x] (Optimistic) Transactions.
     - [x] Leveled compaction strategy.
     - [x] Push down filter, limit and projection.
+    - [x] Reverse scan (descending order) for efficient newest-first queries.
 - [x] Runtime schema definition.
 - [ ] SQL (via [Apache DataFusion](https://datafusion.apache.org/)).
 - [ ] Fusion storage across RAM, flash, SSD, and remote Object Storage Service (OSS) for each column-family, balancing performance and cost efficiency per data block:

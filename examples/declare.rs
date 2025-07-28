@@ -93,6 +93,26 @@ async fn main() {
             }
         }
 
+        {
+            let upper = "Blob".into();
+            // reverse scan of user (descending order)
+            let mut reverse_scan = txn
+                .scan((Bound::Included(&name), Bound::Excluded(&upper)))
+                .reverse() // scan in descending order
+                .projection(&["name", "grade"]) // tonbo supports combining reverse with projection
+                .limit(10) // and with limits
+                .take()
+                .await
+                .unwrap();
+
+            println!("Users in reverse order:");
+            while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+                if let Some(user) = entry.value() {
+                    println!("- {}: {:?}", user.name, user.grade.unwrap_or(0.0.into()));
+                }
+            }
+        }
+
         // commit transaction
         txn.commit().await.unwrap();
     }
