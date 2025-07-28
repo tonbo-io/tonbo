@@ -35,8 +35,8 @@ where
         }
     }
 
-    pub(crate) fn manifest(&self) -> &Box<dyn ManifestStorage<R>> {
-        &self.manifest
+    pub(crate) fn manifest(&self) -> &dyn ManifestStorage<R> {
+        self.manifest.as_ref()
     }
 
     pub(crate) fn storage_manager(&self) -> &StoreManager {
