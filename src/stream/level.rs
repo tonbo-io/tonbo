@@ -241,7 +241,7 @@ mod tests {
     use crate::{
         compaction::tests::build_version, fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema, record::Schema, stream::level::LevelStream, DbOption,
-        Order
+        Order,
     };
 
     #[tokio::test(flavor = "multi_thread")]
