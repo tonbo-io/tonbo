@@ -10,6 +10,9 @@ use crate::{
 pub(crate) struct Context<R: Record> {
     pub(crate) manager: Arc<StoreManager>,
     pub(crate) parquet_lru: ParquetLru,
+    // TODO: Use concrete implementation of ManifestStorage.
+    // ManifestStorage implementation choice should be statically
+    // defined during start-up and should not change during runtime.
     pub(crate) manifest: Box<dyn ManifestStorage<R>>,
     pub(crate) arrow_schema: Arc<Schema>,
 }
