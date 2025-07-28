@@ -368,6 +368,20 @@ let mut scan = txn
 while let Some(entry) = scan.next().await.transpose().unwrap() {
     let data = entry.value(); // type of UserRef
     // ......
+}
+
+// reverse scan of user (descending order) 
+let mut reverse_scan = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .reverse() // scan in descending order
+    .limit(10) // optionally limit results
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // records in reverse order
+    // ......
 }</code></pre>
 <h3 id="persistence"><a class="header" href="#persistence">Persistence</a></h3>
 <p>Tonbo employs a Log-Structured Merge Tree (LSM) as its underlying data structure, meaning that some data may reside in memory. To persist this in-memory data, use the flush method.</p>
@@ -484,6 +498,18 @@ let mut scan = db
     .unwrap();
 while let Some(entry) = scan.next().await.transpose().unwrap() {
     let data = entry.value(); // type of UserRef
+    // ......
+}
+
+// Reverse scan (descending order)
+let mut reverse_scan = db
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .reverse() // scan in descending order
+    .limit(100) // limit results
+    .await
+    .unwrap();
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // newest records first
     // ......
 }</code></pre>
 <h3 id="insertremove"><a class="header" href="#insertremove">Insert/Remove</a></h3>

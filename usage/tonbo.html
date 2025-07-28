@@ -212,6 +212,18 @@ let mut scan = db
 while let Some(entry) = scan.next().await.transpose().unwrap() {
     let data = entry.value(); // type of UserRef
     // ......
+}
+
+// Reverse scan (descending order)
+let mut reverse_scan = db
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .reverse() // scan in descending order
+    .limit(100) // limit results
+    .await
+    .unwrap();
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // newest records first
+    // ......
 }</code></pre>
 <h3 id="insertremove"><a class="header" href="#insertremove">Insert/Remove</a></h3>
 <p>You can use <code>db.insert(record)</code> or <code>db.insert_batch(records)</code> to insert new records into the database and use <code>db.remove(key)</code> to remove a record from the database. Here is an example of updating the state of database:</p>
