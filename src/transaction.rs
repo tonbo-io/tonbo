@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::{
     compaction::CompactTask,
+    inmem::mutable::WriteResult,
     option::Order,
     record::{Key, KeyRef, RecordRef, Schema},
     snapshot::Snapshot,
@@ -235,14 +236,15 @@ where
             1 => {
                 let new_ts = self.snapshot.increase_ts();
                 let (key, record) = self.local.pop_first().unwrap();
-                Self::append(
+                let write_result = Self::append(
                     self.snapshot.mem_storage(),
                     LogType::Full,
                     key,
                     record,
                     new_ts,
                 )
-                .await?
+                .await?;
+                write_result.needs_compaction()
             }
             _ => {
                 let new_ts = self.snapshot.increase_ts();
@@ -270,14 +272,15 @@ where
                 }
 
                 let (key, record) = iter.next().unwrap();
-                Self::append(
+                let write_result = Self::append(
                     self.snapshot.mem_storage(),
                     LogType::Last,
                     key,
                     record,
                     new_ts,
                 )
-                .await?
+                .await?;
+                write_result.needs_compaction()
             }
         };
         if is_excess {
@@ -296,7 +299,7 @@ where
         key: <R::Schema as Schema>::Key,
         record: Option<R>,
         new_ts: Timestamp,
-    ) -> Result<bool, CommitError<R>> {
+    ) -> Result<WriteResult, CommitError<R>> {
         Ok(match record {
             Some(record) => schema.write(log_ty, record, new_ts).await?,
             None => schema.remove(log_ty, key, new_ts).await?,
