@@ -1,0 +1,12 @@
+[package]
+name    = "tonbo-cloud"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flume = { version = "0.11", features = ["async"] }
+fusio = "0.4.0"
+thiserror = "2.0.3"
+tokio = { version = "1", features = ["io-util"], default-features = false }
+tonbo = { path = ".." }
+ulid = { version = "1", features = ["serde"] }

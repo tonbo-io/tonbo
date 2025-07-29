@@ -1,4 +1,4 @@
-workspace = { members = ["parquet-lru", "tonbo_macros"] }
+workspace = { members = ["parquet-lru", "tonbo_macros", "cloud"] }
 
 [package]
 description = "An embedded persistent KV database in Rust."
