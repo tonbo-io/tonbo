@@ -1,5 +1,6 @@
 pub(crate) mod cleaner;
 pub(crate) mod edit;
+pub(crate) mod error;
 pub(crate) mod set;
 pub(crate) mod timestamp;
 
@@ -15,7 +16,6 @@ use flume::{SendError, Sender};
 use fusio::DynFs;
 use fusio_log::error::LogError;
 use parquet::arrow::ProjectionMask;
-use thiserror::Error;
 use tracing::error;
 
 use crate::{
@@ -29,6 +29,7 @@ use crate::{
     version::{
         cleaner::CleanTag,
         edit::VersionEdit,
+        error::VersionError,
         timestamp::{Timestamp, TsRef},
     },
     DbOption, ParquetLru,
@@ -330,22 +331,4 @@ where
             error!("[Version Drop Error]: {}", err)
         }
     }
-}
-
-#[derive(Debug, Error)]
-pub enum VersionError {
-    #[error("version encode error: {0}")]
-    Encode(#[source] fusio::Error),
-    #[error("version io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("version parquet error: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
-    #[error("version fusio error: {0}")]
-    Fusio(#[from] fusio::Error),
-    #[error("version ulid decode error: {0}")]
-    UlidDecode(#[from] ulid::DecodeError),
-    #[error("version send error: {0}")]
-    Send(#[from] SendError<CleanTag>),
-    #[error("log error: {0}")]
-    Logger(#[from] LogError),
 }
