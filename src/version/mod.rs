@@ -12,9 +12,8 @@ use std::{
     },
 };
 
-use flume::{SendError, Sender};
+use flume::Sender;
 use fusio::DynFs;
-use fusio_log::error::LogError;
 use parquet::arrow::ProjectionMask;
 use tracing::error;
 
