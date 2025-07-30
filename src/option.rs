@@ -73,7 +73,7 @@ pub struct DbOption {
     /// Version count after which a snapshot is taken of the version log
     pub(crate) version_log_snapshot_threshold: u32,
 
-    /// Trigger type used to start compactions
+    /// Trigger type used for individual memtables before being flushed
     pub(crate) trigger_type: TriggerType,
 
     /// Flag for deciding wehther to use a write-ahead log for durability

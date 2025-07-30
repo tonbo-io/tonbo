@@ -555,6 +555,8 @@ where
         version: &Version<R>,
         level: usize,
     ) -> bool {
+        println!("{}", option.major_threshold_with_sst_size
+                * option.level_sst_magnification.pow(level as u32));
         Version::<R>::tables_len(version, level)
             >= (option.major_threshold_with_sst_size
                 * option.level_sst_magnification.pow(level as u32))
@@ -1461,6 +1463,7 @@ pub(crate) mod tests {
         let version = db.ctx.manifest.current().await;
         let sort_runs_level_0 = &version.level_slice[0];
         let sort_runs_level_1 = &version.level_slice[1];
+        let sort_runs_level_2 = &version.level_slice[2];
 
         // Six SSTs are inserted
         // The logic here is as follows:
@@ -1470,6 +1473,7 @@ pub(crate) mod tests {
         //     level 0.
         assert_eq!(sort_runs_level_0.len(), 4);
         assert_eq!(sort_runs_level_1.len(), 1);
+        assert!(sort_runs_level_2.is_empty());
 
         for i in 25..30 {
             let item = Test {
@@ -1481,6 +1485,8 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
+        let version = db.ctx.manifest.current().await;
+        let sort_runs_level_0 = &version.level_slice[0];
         for i in 4..7 {
             let item = Test {
                 vstring: i.to_string(),
@@ -1506,6 +1512,74 @@ pub(crate) mod tests {
         //     level 2
         assert_eq!(sort_runs_level_0.len(), 4);
         assert_eq!(sort_runs_level_1.len(), 1);
+        for i in 100..130 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+
+        for i in 200..300 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 7..100 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 5..8 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 0..3 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 2..7 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let version = db.ctx.manifest.current().await;
+        let sort_runs_level_0 = &version.level_slice[0];
+        let sort_runs_level_1 = &version.level_slice[1];
+        let sort_runs_level_2 = &version.level_slice[2];
+
+        assert_eq!(sort_runs_level_0.len(), 1);
+        assert_eq!(sort_runs_level_1.len(), 2);
         assert_eq!(sort_runs_level_2.len(), 1);
     }
 }
