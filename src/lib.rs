@@ -305,10 +305,7 @@ where
             // compaction and `Compact::Flush` will perform manual compaction
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => {
-                        println!("FreezeCompaction");
-                        compactor.check_then_compaction(false).await
-                    },
+                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
                     CompactTask::Flush(option_tx) => {
                         let mut result = compactor.check_then_compaction(true).await;
                         if let Some(tx) = option_tx {
@@ -1493,10 +1490,7 @@ pub(crate) mod tests {
         executor.spawn(async move {
             while let Ok(task) = compaction_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => {
-                        println!("FreezeCompaction");
-                        compactor.check_then_compaction(false).await
-                    },
+                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
                     CompactTask::Flush(option_tx) => {
                         let mut result = compactor.check_then_compaction(true).await;
                         if let Some(tx) = option_tx {

@@ -555,8 +555,6 @@ where
         version: &Version<R>,
         level: usize,
     ) -> bool {
-        println!("{}", option.major_threshold_with_sst_size
-                * option.level_sst_magnification.pow(level as u32));
         Version::<R>::tables_len(version, level)
             >= (option.major_threshold_with_sst_size
                 * option.level_sst_magnification.pow(level as u32))
@@ -1507,10 +1505,10 @@ pub(crate) mod tests {
         // Two SSTs are inserted.
         // The logic here is as follow:
         //  1. Add one non overlapping SST -> there is no compaction
-        //  2. Add an which overlaps with both one SST in level 0 and level 1. These combine to 
-        //     form a new SST on level 1.
-        //  4. Compaction does not continue into the next level for level 1 because non level 0
-        //     does not self compact if threshold isn't exceeded.
+        //  2. Add an which overlaps with both one SST in level 0 and level 1. These combine to form
+        //     a new SST on level 1.
+        //  4. Compaction does not continue into the next level for level 1 because non level 0 does
+        //     not self compact if threshold isn't exceeded.
         assert_eq!(sort_runs_level_0.len(), 5);
         assert_eq!(sort_runs_level_1.len(), 1);
         assert_eq!(sort_runs_level_2.len(), 0);
@@ -1548,7 +1546,6 @@ pub(crate) mod tests {
             db.insert(item).await.unwrap();
         }
         db.flush().await.unwrap();
-
 
         for i in 200..300 {
             let item = Test {
