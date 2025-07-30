@@ -1,7 +1,10 @@
 pub(crate) mod error;
 pub(crate) mod leveled;
+pub(crate) mod tiered;
+
 use std::{pin::Pin, sync::Arc};
 
+use async_trait::async_trait;
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
@@ -18,29 +21,30 @@ use crate::{
     DbOption,
 };
 
-pub trait Compactor<R>
+#[async_trait]
+pub trait Compactor<R>: Send + Sync
 where
     R: Record,
-    Self: Send + Sync,
     <<R as record::Record>::Schema as record::Schema>::Columns: Send + Sync,
 {
-    /// The concrete task type for this compactor.
-    type Task: Send + Sync;
-
     /// Orchestrate flush + major compaction.
+    /// This is the only method custom compactors need to implement.
     async fn check_then_compaction(
         &self,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>>;
 
-    async fn build_tables(
+    async fn build_tables<'scan>(
         option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'_, R>>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError<R>>
+    where
+        Self: Sized,
+    {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
 
         // Kould: is the capacity parameter necessary?
@@ -97,7 +101,10 @@ where
             &'a <R::Schema as RecordSchema>::Key,
         ),
         CompactionError<R>,
-    > {
+    >
+    where
+        Self: Sized,
+    {
         let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
         let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
         Ok((lower, upper))
@@ -113,7 +120,10 @@ where
         max: &mut Option<<R::Schema as RecordSchema>::Key>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError<R>>
+    where
+        Self: Sized,
+    {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
