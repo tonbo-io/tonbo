@@ -10,12 +10,14 @@ use fusio_log::Encode;
 
 use crate::record::Record;
 
+/// Trait for checking if the memtable has triggered a flush to immutable memtables
 pub trait FreezeTrigger<R: Record>: Send + Sync {
     fn check_if_exceed(&self, item: &R) -> bool;
 
     fn reset(&self);
 }
 
+/// Trigger which compares against memory for memtable flush
 #[derive(Debug)]
 pub struct SizeOfMemTrigger<R> {
     threshold: usize,
@@ -24,6 +26,7 @@ pub struct SizeOfMemTrigger<R> {
 }
 
 impl<T> SizeOfMemTrigger<T> {
+    /// New instance of memory trigger
     pub fn new(max_size: usize) -> Self {
         Self {
             threshold: max_size,
@@ -34,6 +37,7 @@ impl<T> SizeOfMemTrigger<T> {
 }
 
 impl<R: Record> FreezeTrigger<R> for SizeOfMemTrigger<R> {
+    // Checks by size to see if theresold exceeded
     fn check_if_exceed(&self, item: &R) -> bool {
         let size = item.size() + item.key().size();
         self.current_size.fetch_add(size, Ordering::SeqCst) + size >= self.threshold
@@ -44,6 +48,7 @@ impl<R: Record> FreezeTrigger<R> for SizeOfMemTrigger<R> {
     }
 }
 
+/// Trigger which compares against memtable length for memtable flush
 #[derive(Debug)]
 pub struct LengthTrigger<R> {
     threshold: usize,
@@ -62,6 +67,7 @@ impl<T> LengthTrigger<T> {
 }
 
 impl<R: Record> FreezeTrigger<R> for LengthTrigger<R> {
+    // Checks by length to see if theresold exceeded
     fn check_if_exceed(&self, _: &R) -> bool {
         self.count.fetch_add(1, Ordering::SeqCst) + 1 >= self.threshold
     }
@@ -71,6 +77,7 @@ impl<R: Record> FreezeTrigger<R> for LengthTrigger<R> {
     }
 }
 
+/// Enum for trigger types
 #[derive(Copy, Clone, Debug)]
 pub enum TriggerType {
     SizeOfMem(usize),
@@ -78,6 +85,7 @@ pub enum TriggerType {
     Length(usize),
 }
 
+/// Factory for creating memtable triggers
 pub(crate) struct TriggerFactory<R> {
     _p: PhantomData<R>,
 }
