@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     ondisk::sstable::SsTableID,
     record::{Record, Schema},
-    version::{edit::VersionEdit, TransactionTs, VersionError, VersionRef},
+    version::{edit::VersionEdit, error::VersionError, TransactionTs, VersionRef},
 };
 
 #[derive(Debug, Error)]
