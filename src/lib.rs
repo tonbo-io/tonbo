@@ -178,7 +178,7 @@ use crate::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, ScanStream,
     },
     trigger::TriggerFactory,
-    version::{cleaner::Cleaner, set::VersionSet, TransactionTs, Version, VersionError},
+    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, TransactionTs, Version},
     wal::{log::LogType, RecoverError, WalFile},
 };
 pub use crate::{option::*, stream::Entry};
