@@ -1,18 +1,19 @@
 use tonbo::{executor::Executor, record::Record};
 
+mod aws;
 mod compaction;
 mod error;
 mod metadata;
-mod aws;
 
 /// Trait for implmenting a cloud instance over different object storages
 pub trait TonboCloud<R, E>
-where R: Record, 
-E: Executor
-{   
+where
+    R: Record,
+    E: Executor,
+{
     /// Creates a new Tonbo cloud instnace
     fn new();
-    
+
     fn write(&self, records: impl ExactSizeIterator<Item = R>);
 
     fn read();
