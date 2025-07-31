@@ -47,6 +47,10 @@ pub enum Value {
     Float64(f64),
     String(String),
     Binary(Vec<u8>),
+    /// A binary array of fixed size.
+    /// The first parameter specifies the value and the second parameter specifies the number of
+    /// bytes of value
+    FixedSizeBinary(Vec<u8>, u32),
     Date32(i32),
     Date64(i64),
     Time32(i32, TimeUnit),
@@ -72,6 +76,7 @@ impl Value {
             Value::Float64(_) => DataType::Float64,
             Value::String(_) => DataType::Utf8,
             Value::Binary(_) => DataType::Binary,
+            Value::FixedSizeBinary(_, byte_width) => DataType::FixedSizeBinary(*byte_width as i32),
             Value::Date32(_) => DataType::Date32,
             Value::Date64(_) => DataType::Date64,
             Value::Timestamp(_, unit) => {
@@ -127,6 +132,9 @@ impl Key for Value {
             Value::Float64(v) => ValueRef::Float64(*v),
             Value::String(v) => ValueRef::String(v.as_str()),
             Value::Binary(v) => ValueRef::Binary(v.as_slice()),
+            Value::FixedSizeBinary(v, byte_width) => {
+                ValueRef::FixedSizeBinary(v.as_slice(), *byte_width)
+            }
             Value::Date32(v) => ValueRef::Date32(*v),
             Value::Date64(v) => ValueRef::Date64(*v),
             Value::Timestamp(v, time_unit) => ValueRef::Timestamp(*v, *time_unit),
@@ -151,6 +159,9 @@ impl Key for Value {
             Value::Float64(v) => Arc::new(arrow::array::Float64Array::new_scalar(*v)),
             Value::String(v) => Arc::new(arrow::array::StringArray::new_scalar(v.as_str())),
             Value::Binary(v) => Arc::new(arrow::array::BinaryArray::new_scalar(v.as_slice())),
+            Value::FixedSizeBinary(v, _) => {
+                Arc::new(arrow::array::FixedSizeBinaryArray::new_scalar(v.as_slice()))
+            }
             Value::Date32(v) => Arc::new(arrow::array::Date32Array::new_scalar(*v)),
             Value::Date64(v) => Arc::new(arrow::array::Date64Array::new_scalar(*v)),
             Value::Timestamp(v, time_unit) => match time_unit {
@@ -206,6 +217,7 @@ impl PartialEq for Value {
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::String(a), Value::String(b)) => a.eq(b),
             (Value::Binary(a), Value::Binary(b)) => a.eq(b),
+            (Value::FixedSizeBinary(a, _), Value::FixedSizeBinary(b, _)) => a.eq(b),
             (Value::Date32(a), Value::Date32(b)) => a.eq(b),
             (Value::Date64(a), Value::Date64(b)) => a.eq(b),
             (Value::Timestamp(a, unit1), Value::Timestamp(b, unit2)) => {
@@ -264,6 +276,7 @@ impl Ord for Value {
             (Value::Float64(a), Value::Float64(b)) => a.total_cmp(b),
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Binary(a), Value::Binary(b)) => a.cmp(b),
+            (Value::FixedSizeBinary(a, _), Value::FixedSizeBinary(b, _)) => a.cmp(b),
             (Value::Date32(a), Value::Date32(b)) => a.cmp(b),
             (Value::Date64(a), Value::Date64(b)) => a.cmp(b),
             (Value::Timestamp(a, unit1), Value::Timestamp(b, unit2)) => {
@@ -305,6 +318,10 @@ impl Hash for Value {
             Value::Float64(v) => v.to_bits().hash(state),
             Value::String(v) => v.hash(state),
             Value::Binary(vec) => vec.hash(state),
+            Value::FixedSizeBinary(v, byte_width) => {
+                byte_width.hash(state);
+                v.hash(state)
+            }
             Value::Date32(v) => v.hash(state),
             Value::Date64(v) => v.hash(state),
             Value::Timestamp(v, time_unit) => {
@@ -340,6 +357,7 @@ impl fmt::Display for Value {
             Value::Float64(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "{v}"),
             Value::Binary(v) => write!(f, "{v:?}"),
+            Value::FixedSizeBinary(v, byte_width) => write!(f, "{v:?}, {byte_width}"),
             Value::Date32(v) => write!(f, "Date32({v})"),
             Value::Date64(v) => write!(f, "Date64({v})"),
             Value::Timestamp(v, unit) => write!(f, "Timestamp({v}, {unit:?})"),
@@ -398,6 +416,20 @@ mod tests {
             Value::Binary(vec![1, 2, 3]).as_bytes_opt().unwrap(),
             &[1, 2, 3]
         );
+    }
+
+    #[test]
+    fn test_binary_value_conversions() {
+        assert_eq!(Value::Binary(vec![1, 2, 3]).as_bytes(), &[1, 2, 3]);
+        assert_eq!(
+            Value::FixedSizeBinary(vec![1, 2, 3], 3).as_bytes(),
+            &[1, 2, 3]
+        );
+        assert_eq!(
+            Value::FixedSizeBinary(vec![1, 2, 3, 4, 5], 5).as_bytes(),
+            &[1, 2, 3, 4, 5]
+        );
+        assert_eq!(Value::UInt8(1).as_bytes_opt(), None);
     }
 
     #[test]
