@@ -169,7 +169,11 @@ pub use crate::record::{ArrowArrays, ArrowArraysBuilder};
 pub use crate::version::timestamp::Ts;
 use crate::{
     compaction::{
-        error::CompactionError, leveled::LeveledCompactor, tiered::TieredCompactor, CompactTask,
+        error::CompactionError, 
+        leveled::LeveledCompactor, 
+        lazyleveled::LazyLeveledCompactor, 
+        tiered::TieredCompactor, 
+        CompactTask,
         Compactor,
     },
     executor::Executor,
@@ -281,6 +285,17 @@ where
 
             CompactionOption::Tiered(opt) => {
                 let compactor = TieredCompactor::<R>::new(
+                    opt.clone(),
+                    mem_storage.clone(),
+                    record_schema.clone(),
+                    option.clone(),
+                    ctx.clone(),
+                );
+                Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
+            }
+
+            CompactionOption::LazyLeveled(opt) => {
+                let compactor = LazyLeveledCompactor::<R>::new(
                     opt.clone(),
                     mem_storage.clone(),
                     record_schema.clone(),
@@ -1205,7 +1220,10 @@ pub(crate) mod tests {
         cast_arc_value,
        
         compaction::{
-            error::CompactionError, leveled::LeveledCompactor, tiered::TieredCompactor,
+            error::CompactionError, 
+            leveled::LeveledCompactor, 
+            lazyleveled::LazyLeveledCompactor, 
+            tiered::TieredCompactor,
             CompactTask,
         },
        
@@ -1598,6 +1616,18 @@ pub(crate) mod tests {
                 );
                 finish_db_with_compactor(executor, mem_storage, ctx, compactor, cleaner, compaction_rx).await
             }
+
+            CompactionOption::LazyLeveled(opt) => {
+                let compactor = LazyLeveledCompactor::<R>::new(
+                    opt.clone(),
+                    mem_storage.clone(),
+                    record_schema.clone(),
+                    option.clone(),
+                    ctx.clone(),
+                );
+                finish_db_with_compactor(executor, mem_storage, ctx, compactor, cleaner, compaction_rx).await
+            }
+
         }
     }
 

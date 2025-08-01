@@ -1658,6 +1658,7 @@ pub(crate) mod tests_metric {
     use tempfile::TempDir;
 
     use crate::{
+        compaction::leveled::LeveledOptions,
         executor::tokio::TokioExecutor,
         inmem::{
             immutable::{tests::TestSchema},
@@ -1668,7 +1669,7 @@ pub(crate) mod tests_metric {
         DbOption, DB,
     };
 
-    pub(crate) fn convert_test_ref_to_test(entry: crate::transaction::TransactionEntry<'_, Test>) -> Option<Test> {
+    fn convert_test_ref_to_test(entry: crate::transaction::TransactionEntry<'_, Test>) -> Option<Test> {
         match &entry {
             crate::transaction::TransactionEntry::Stream(stream_entry) => {
                 if stream_entry.value().is_some() {
@@ -1697,16 +1698,19 @@ pub(crate) mod tests_metric {
     #[ignore]
     async fn test_read_write_amplification_measurement() {
         let temp_dir = TempDir::new().unwrap();
-        let mut option = DbOption::new(
+        let leveled_options = LeveledOptions {
+            major_threshold_with_sst_size: 3,
+            level_sst_magnification: 4,
+            ..Default::default()
+        };
+        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
         )
-        .major_threshold_with_sst_size(3)
-        .level_sst_magnification(4)
+        .leveled_compaction(leveled_options)
         .max_sst_file_size(1024); // Small file size to force multiple files
-        option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
             .await
             .unwrap();
 
@@ -1716,7 +1720,8 @@ pub(crate) mod tests_metric {
 
         // Insert initial dataset with more substantial data
         let initial_records = 1000;
-        for i in 0..initial_records {
+        let iter_num = 10;
+        for i in 0..initial_records * iter_num {
             let record = Test {
                 vstring: format!("this_is_a_longer_key_to_make_files_bigger_{:05}", i),
                 vu32: i as u32,
@@ -1731,59 +1736,53 @@ pub(crate) mod tests_metric {
             total_bytes_written_by_user += record_size as u64;
             
             db.insert(record).await.unwrap();
-        }
 
-        // Force flush and compaction
-        db.flush().await.unwrap();
-        compaction_rounds += 1;
-
-        // Get initial version to measure file sizes
-        let initial_version = db.ctx.manifest.current().await;
-        let mut total_file_size_initial = 0u64;
-        for level in 0..MAX_LEVEL {
-            for scope in &initial_version.level_slice[level] {
-                total_file_size_initial += scope.file_size;
+            if i%initial_records == 0 {
+                // Force flush and compaction
+                db.flush().await.unwrap();
+                compaction_rounds += 1;
             }
         }
 
-        // Add more data to trigger additional compactions
-        for i in initial_records..(initial_records * 2) {
-            let record = Test {
-                vstring: format!("this_is_a_longer_key_to_make_files_bigger_{:05}", i),
-                vu32: i as u32,
-                vbool: Some(i % 3 == 0),
-            };
-            
-            let string_bytes = record.vstring.as_bytes().len();
-            let u32_bytes = 4;
-            let bool_bytes = 1;
-            let record_size = string_bytes + u32_bytes + bool_bytes;
-            total_bytes_written_by_user += record_size as u64;
-            
-            db.insert(record).await.unwrap();
-        }
-
-        db.flush().await.unwrap();
-        compaction_rounds += 1;
+        // Verify data integrity after all compactions (check a sample of keys)
+        for i in 0..initial_records * iter_num {
+            let key = format!("this_is_a_longer_key_to_make_files_bigger_{:05}", i);
+            let result = db.get(&key, convert_test_ref_to_test).await.unwrap();
+            if result.is_some() {
+                let record = result.unwrap();
+                assert_eq!(record.vu32, i as u32, "Value should be preserved after compaction");
+            } else {
+                panic!("Key {} should exist after compaction", key);
+            }
+        }        
 
         // Get final version to measure total file sizes
         let final_version = db.ctx.manifest.current().await;
-        let mut total_file_size_final = 0u64;
         let mut files_per_level = vec![0; MAX_LEVEL];
+
+        // Verify that total scope.file_size matches total actual file size on disk
+        let manager = crate::fs::manager::StoreManager::new(option.base_fs.clone(), vec![]).unwrap();
+        let fs = manager.base_fs();
+        let mut total_actual_file_size = 0u64;
         
         for level in 0..MAX_LEVEL {
             files_per_level[level] = final_version.level_slice[level].len();
             for scope in &final_version.level_slice[level] {
-                total_file_size_final += scope.file_size;
+                let file = fs
+                    .open_options(
+                        &option.table_path(scope.gen, level),
+                        crate::fs::FileType::Parquet.open_options(true),
+                    )
+                    .await
+                    .unwrap();
+                let actual_size = file.size().await.unwrap();
+                total_actual_file_size += actual_size;
             }
         }
-
-        // Calculate amplification metrics
-        let write_amplification = if total_bytes_written_by_user > 0 {
-            total_file_size_final as f64 / total_bytes_written_by_user as f64
-        } else {
-            0.0
-        };
+        
+        // Calculate amplification metrics using actual file sizes
+        let write_amplification = 
+            total_actual_file_size as f64 / total_bytes_written_by_user as f64;
 
         // Read amplification estimation (simplified)
         // In a real scenario, this would require tracking actual read operations
@@ -1805,11 +1804,10 @@ pub(crate) mod tests_metric {
 
         println!("=== Amplification Metrics ===");
         println!("User data written: {} bytes", total_bytes_written_by_user);
-        println!("Total file size: {} bytes", total_file_size_final);
+        println!("Total file size: {} bytes", total_actual_file_size);
         println!("Write Amplification: {:.2}x", write_amplification);
         println!("Estimated Read Amplification: {:.2}x", estimated_read_amplification);
         println!("Compaction rounds: {}", compaction_rounds);
-        println!("Note: Small file sizes (4 bytes each) are due to Parquet format overhead with minimal test data");
         
         for level in 0..MAX_LEVEL {
             if files_per_level[level] > 0 {
@@ -1824,22 +1822,160 @@ pub(crate) mod tests_metric {
         assert!(write_amplification > 0.0, "Write amplification should be positive");
         assert!(write_amplification < 10.0, "Write amplification should be reasonable (< 10x)");
         assert!(estimated_read_amplification >= 1.0, "Read amplification should be at least 1.0");
-        assert!(total_file_size_final > 0, "Should have written some data to disk");
+        assert!(total_actual_file_size > 0, "Should have written some data to disk");
+    }
 
-        // Verify data integrity after all compactions (check a sample of keys)
-        // Note: With many small files, some keys might not be found due to the test setup
-        let mut found_keys = 0;
-        for i in (0..(initial_records * 2)).step_by(100) {
-            let key = format!("this_is_a_longer_key_to_make_files_bigger_{:05}", i);
-            let result = db.get(&key, convert_test_ref_to_test).await.unwrap();
-            if result.is_some() {
-                let record = result.unwrap();
-                assert_eq!(record.vu32, i as u32, "Value should be preserved after compaction");
-                found_keys += 1;
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn test_throughput() {
+        use std::time::Instant;
+        use futures_util::StreamExt;
+        use rand::seq::SliceRandom;
+        use rand::SeedableRng;
+        
+        let temp_dir = TempDir::new().unwrap();
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        )
+        .leveled_compaction(LeveledOptions::default());
+        option.trigger_type = TriggerType::SizeOfMem(1 * 1024 * 1024);
+
+        // Create DB with EcoTune compactor using the standard open method
+        let db: DB<Test, TokioExecutor> = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        // Test parameters based on EcoTune paper (Section 5.1: 35% Get, 35% Seek, 30% long range scans)
+        let total_operations = 100000;
+        let insert_ratio = 0.3; // 30% inserts to build up data
+        let get_ratio = 0.35; // 35% Get operations (point queries)
+        let seek_ratio = 0.35; // 35% Seek operations  
+        let long_range_ratio = 0.30; // 30% long range scans (paper workload)
+        
+        let insert_count = (total_operations as f64 * insert_ratio) as usize;
+        let query_count = total_operations - insert_count;
+        let get_count = (query_count as f64 * (get_ratio / (get_ratio + seek_ratio + long_range_ratio))) as usize;
+        let seek_count = (query_count as f64 * (seek_ratio / (get_ratio + seek_ratio + long_range_ratio))) as usize;
+        let long_range_count = query_count - get_count - seek_count;
+        
+        println!("EcoTune throughput test with paper proportions:");
+        println!("- {} inserts ({:.1}%)", insert_count, insert_ratio * 100.0);
+        println!("- {} Get queries ({:.1}%)", get_count, (get_count as f64 / total_operations as f64) * 100.0);
+        println!("- {} Seek queries ({:.1}%)", seek_count, (seek_count as f64 / total_operations as f64) * 100.0);
+        println!("- {} long-range scans ({:.1}%)", long_range_count, (long_range_count as f64 / total_operations as f64) * 100.0);
+
+        // Create mixed workload operations vector
+        
+        let mut operations = Vec::new();
+        
+        // Add insert operations
+        for i in 0..insert_count {
+            operations.push(("insert", i));
+        }
+        
+        // Add get operations  
+        for i in 0..get_count {
+            operations.push(("get", i));
+        }
+        
+        // Add seek operations
+        for i in 0..seek_count {
+            operations.push(("seek", i));
+        }
+        
+        // Add long-range scan operations
+        for i in 0..long_range_count {
+            operations.push(("long_range", i));
+        }
+        
+        // Shuffle operations to create mixed workload
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42); // Fixed seed for reproducibility
+        operations.shuffle(&mut rng);
+        
+        // Execute mixed workload
+        let mixed_start = Instant::now();
+        let mut insert_ops = 0;
+        let mut successful_queries = 0;
+        
+        for (op_type, index) in operations {
+            match op_type {
+                "insert" => {
+                    let record = Test {
+                        vstring: format!("test_key_{:06}", index),
+                        vu32: index as u32,
+                        vbool: Some(index % 2 == 0),
+                    };
+                    db.insert(record).await.unwrap();
+                    insert_ops += 1;
+                }
+                "get" => {
+                    // Use modulo to ensure key exists (only query from inserted keys)
+                    let key = format!("test_key_{:06}", index % insert_ops.max(1));
+                    let found = db.get(&key, |entry| {
+                        match entry {
+                            crate::transaction::TransactionEntry::Stream(stream_entry) => {
+                                Some(stream_entry.value().is_some())
+                            }
+                            crate::transaction::TransactionEntry::Local(_) => Some(true),
+                        }
+                    }).await.unwrap();
+                    if found.unwrap_or(false) {
+                        successful_queries += 1;
+                    }
+                }
+                "seek" => {
+                    let key = format!("test_key_{:06}", index % insert_ops.max(1));
+                    let scan = db.scan((
+                        std::ops::Bound::Included(&key),
+                        std::ops::Bound::Unbounded
+                    ), |entry| {
+                        match entry {
+                            crate::transaction::TransactionEntry::Stream(_) => true,
+                            crate::transaction::TransactionEntry::Local(_) => true,
+                        }
+                    }).await.take(1);
+                    let mut scan = std::pin::pin!(scan);
+                    
+                    if let Some(result) = scan.next().await {
+                        if result.is_ok() {
+                            successful_queries += 1;
+                        }
+                    }
+                }
+                "long_range" => {
+                    let start_key = format!("test_key_{:06}", index % insert_ops.max(1));
+                    let scan = db.scan((
+                        std::ops::Bound::Included(&start_key),
+                        std::ops::Bound::Unbounded
+                    ), |entry| {
+                        match entry {
+                            crate::transaction::TransactionEntry::Stream(_) => true,
+                            crate::transaction::TransactionEntry::Local(_) => true,
+                        }
+                    }).await.take(100);
+                    let mut scan = std::pin::pin!(scan);
+                    
+                    let mut count = 0;
+                    while let Some(result) = scan.next().await {
+                        if result.is_ok() {
+                            count += 1;
+                            if count >= 100 { break; } // Limit to K=100
+                        }
+                    }
+                    if count > 0 { successful_queries += 1; }
+                }
+                _ => unreachable!()
             }
         }
         
-        // We should find at least some of the keys
-        assert!(found_keys > 0, "Should find at least some keys after compaction, found: {}", found_keys);
-    }
+        let mixed_duration = mixed_start.elapsed();
+        let mixed_throughput = total_operations as f64 / mixed_duration.as_secs_f64();
+        
+        // Calculate mixed workload results
+        println!("Mixed Workload Throughput Results:");
+        println!("Overall throughput: {:.2} ops/sec", mixed_throughput);
+        println!("Total operations: {} (inserts: {}, successful queries: {})", total_operations, insert_ops, successful_queries);
+        println!("Total time: {:.3}s", mixed_duration.as_secs_f64());
+    }    
 }

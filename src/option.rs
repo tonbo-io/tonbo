@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::{
     compaction::{
+        lazyleveled::LazyLeveledOptions,
         leveled::LeveledOptions, 
         tiered::TieredOptions,
     },
@@ -36,6 +37,7 @@ pub enum Order {
 pub enum CompactionOption {
     Leveled(LeveledOptions),
     Tiered(TieredOptions),
+    LazyLeveled(LazyLeveledOptions),
 }
 
 impl std::fmt::Debug for CompactionOption {
@@ -43,6 +45,7 @@ impl std::fmt::Debug for CompactionOption {
         match self {
             CompactionOption::Leveled(opts) => f.debug_tuple("Leveled").field(opts).finish(),
             CompactionOption::Tiered(opts) => f.debug_tuple("Tiered").field(opts).finish(),
+            CompactionOption::LazyLeveled(opts) => f.debug_tuple("LazyLeveled").field(opts).finish(),
         }
     }
 }
@@ -52,6 +55,7 @@ impl Clone for CompactionOption {
         match self {
             CompactionOption::Leveled(opts) => CompactionOption::Leveled(opts.clone()),
             CompactionOption::Tiered(opts) => CompactionOption::Tiered(opts.clone()),
+            CompactionOption::LazyLeveled(opts) => CompactionOption::LazyLeveled(opts.clone()),
         }
     }
 }
@@ -170,24 +174,36 @@ impl DbOption {
         self
     }
 
-    /// Set major threshold with SST size (for leveled compaction only)
+    /// Configure lazy leveled compaction with custom options
+    pub fn lazy_leveled_compaction(mut self, options: LazyLeveledOptions) -> Self {
+        self.compaction_option = CompactionOption::LazyLeveled(options);
+        self
+    }
+
+    /// Set major threshold with SST size (for leveled and lazy leveled compaction)
     pub fn major_threshold_with_sst_size(mut self, value: usize) -> Self {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => {
                 opts.major_threshold_with_sst_size = value;
             },
-            _ => {} // No-op for non-leveled compaction
+            CompactionOption::LazyLeveled(opts) => {
+                opts.major_threshold_with_sst_size = value;
+            },
+            _ => {} // No-op for other compaction types
         }
         self
     }
 
-    /// Set level SST magnification (for leveled compaction only)
+    /// Set level SST magnification (for leveled and lazy leveled compaction)
     pub fn level_sst_magnification(mut self, value: usize) -> Self {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => {
                 opts.level_sst_magnification = value;
             },
-            _ => {} // No-op for non-leveled compaction
+            CompactionOption::LazyLeveled(opts) => {
+                opts.level_sst_magnification = value;
+            },
+            _ => {} // No-op for other compaction types
         }
         self
     }
@@ -203,6 +219,7 @@ impl DbOption {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => opts.immutable_chunk_num = value,
             CompactionOption::Tiered(opts) => opts.immutable_chunk_num = value,
+            CompactionOption::LazyLeveled(opts) => opts.immutable_chunk_num = value,
         }
         self
     }
@@ -212,6 +229,7 @@ impl DbOption {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => opts.immutable_chunk_max_num = value,
             CompactionOption::Tiered(opts) => opts.immutable_chunk_max_num = value,
+            CompactionOption::LazyLeveled(opts) => opts.immutable_chunk_max_num = value,
         }
         self
     }
@@ -252,13 +270,16 @@ impl DbOption {
         }
     }
 
-    /// Set major default oldest table number (for leveled compaction only)
+    /// Set major default oldest table number (for leveled and lazy leveled compaction)
     pub fn major_default_oldest_table_num(mut self, value: usize) -> Self {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => {
                 opts.major_default_oldest_table_num = value;
             },
-            _ => panic!("major_default_oldest_table_num only applies to tiered compaction"),
+            CompactionOption::LazyLeveled(opts) => {
+                opts.major_default_oldest_table_num = value;
+            },
+            _ => panic!("major_default_oldest_table_num only applies to leveled-based compaction"),
         }
         self
     }

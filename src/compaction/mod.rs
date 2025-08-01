@@ -1,4 +1,5 @@
 pub(crate) mod error;
+pub(crate) mod lazyleveled;
 pub(crate) mod leveled;
 pub(crate) mod tiered;
 
