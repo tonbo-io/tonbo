@@ -176,8 +176,8 @@ where
             Self::tier_compaction(
                 &version_ref,
                 &self.db_option,
-                &min,
-                &max,
+                min,
+                max,
                 &mut version_edits,
                 &mut delete_gens,
                 &self.record_schema,

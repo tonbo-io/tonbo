@@ -147,15 +147,15 @@ where
         }
 
         // Check the bottom-most level (leveled compaction)
-        if self.options.bottom_most_level < MAX_LEVEL {
-            if Self::is_leveled_threshold_exceeded(
+        if self.options.bottom_most_level < MAX_LEVEL &&
+             Self::is_leveled_threshold_exceeded(
                 &self.options,
                 &version_ref,
                 self.options.bottom_most_level,
             ) {
                 return true;
             }
-        }
+        
 
         false
     }
@@ -708,7 +708,6 @@ pub(crate) mod tests {
         compaction::{
             lazyleveled::{LazyLeveledCompactor, LazyLeveledOptions},
         },
-        context::Context,
         executor::tokio::TokioExecutor,
         fs::{generate_file_id, manager::StoreManager},
         inmem::{
@@ -720,9 +719,8 @@ pub(crate) mod tests {
         tests::Test,
         version::timestamp::Timestamp,
         trigger::TriggerFactory,
-        version::{cleaner::Cleaner, set::VersionSet, Version, MAX_LEVEL},
-        wal::log::LogType,
-        CompactionExecutor, Compactor, DbError, DbOption, DB,
+        version::{Version, MAX_LEVEL},
+        wal::log::LogType, DbError, DbOption, DB,
     };
 
     async fn build_immutable<R>(

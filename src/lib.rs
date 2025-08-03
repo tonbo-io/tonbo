@@ -268,7 +268,7 @@ where
         schema: R::Schema,
         lru_cache: ParquetLru,
     ) -> Result<Self, DbError> {
-        let (record_schema, manager, cleaner, task_rx, mem_storage, ctx) = 
+        let (record_schema, _manager, cleaner, task_rx, mem_storage, ctx) = 
             Self::build_common_setup(option.clone(), schema, lru_cache).await?;
 
         match &option.compaction_option {
@@ -1217,8 +1217,6 @@ pub(crate) mod tests {
     use tracing::error;
 
     use crate::{
-        cast_arc_value,
-       
         compaction::{
             error::CompactionError, 
             leveled::LeveledCompactor, 
@@ -1581,7 +1579,7 @@ pub(crate) mod tests {
 
         let mem_storage = Arc::new(RwLock::new(mem_storage));
 
-        let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
+        let (cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
             build_version_set(version, clean_sender, option.clone(), manager.clone())
                 .await

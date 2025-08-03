@@ -23,7 +23,7 @@ use crate::{
 };
 
 #[async_trait]
-pub trait Compactor<R>: Send + Sync
+pub(crate) trait Compactor<R>: Send + Sync
 where
     R: Record,
     <<R as record::Record>::Schema as record::Schema>::Columns: Send + Sync,

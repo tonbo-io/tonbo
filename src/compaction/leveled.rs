@@ -6,7 +6,6 @@ use std::sync::Arc;
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
-use ulid::Ulid;
 
 use super::{CompactionError, Compactor};
 use crate::fs::manager::StoreManager;
@@ -27,9 +26,9 @@ use crate::{
     DbOption, DbStorage,
 };
 
-pub struct LeveledTask {
+/* pub struct LeveledTask {
     pub input: Vec<(usize, Vec<Ulid>)>,
-}
+} */
 
 pub struct LeveledCompactor<R: Record> {
     options: LeveledOptions,
@@ -613,7 +612,7 @@ pub(crate) mod tests {
 
     use crate::{
         compaction::{
-            error::CompactionError, leveled::{LeveledCompactor, LeveledOptions}, tests::{build_parquet_table, build_version}
+            leveled::{LeveledCompactor, LeveledOptions}, tests::{build_parquet_table, build_version}
         },
         context::Context,
         executor::tokio::TokioExecutor,
@@ -622,7 +621,7 @@ pub(crate) mod tests {
             immutable::{tests::TestSchema, ImmutableMemTable},
             mutable::MutableMemTable,
         },
-        record::{self, DynRecord, DynSchema, DynamicField, Record, Schema, Value},
+        record::{DynRecord, DynSchema, DynamicField, Record, Schema, Value},
         scope::Scope,
         tests::Test,
         trigger::{TriggerFactory, TriggerType},
@@ -632,7 +631,6 @@ pub(crate) mod tests {
         },
         wal::log::LogType,
         DbError, DbOption, DB,
-        CompactionExecutor,Compactor,
     };
 
     async fn build_immutable<R>(
