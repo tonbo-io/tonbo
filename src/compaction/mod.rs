@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use crate::{
     compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
-    record::{ArrowArrays, ArrowArraysBuilder, self, KeyRef, Record, Schema as RecordSchema},
+    record::{self, ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     version::edit::VersionEdit,
@@ -30,10 +30,7 @@ where
 {
     /// Orchestrate flush + major compaction.
     /// This is the only method custom compactors need to implement.
-    async fn check_then_compaction(
-        &self,
-        is_manual: bool,
-    ) -> Result<(), CompactionError<R>>;
+    async fn check_then_compaction(&self, is_manual: bool) -> Result<(), CompactionError<R>>;
 
     async fn build_tables<'scan>(
         option: &DbOption,

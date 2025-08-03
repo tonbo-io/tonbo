@@ -11,11 +11,7 @@ use parquet::{
 use thiserror::Error;
 
 use crate::{
-    compaction::{
-        lazyleveled::LazyLeveledOptions,
-        leveled::LeveledOptions, 
-        tiered::TieredOptions,
-    },
+    compaction::{lazyleveled::LazyLeveledOptions, leveled::LeveledOptions, tiered::TieredOptions},
     fs::{FileId, FileType},
     record::Schema,
     trigger::TriggerType,
@@ -45,7 +41,9 @@ impl std::fmt::Debug for CompactionOption {
         match self {
             CompactionOption::Leveled(opts) => f.debug_tuple("Leveled").field(opts).finish(),
             CompactionOption::Tiered(opts) => f.debug_tuple("Tiered").field(opts).finish(),
-            CompactionOption::LazyLeveled(opts) => f.debug_tuple("LazyLeveled").field(opts).finish(),
+            CompactionOption::LazyLeveled(opts) => {
+                f.debug_tuple("LazyLeveled").field(opts).finish()
+            }
         }
     }
 }
@@ -59,7 +57,6 @@ impl Clone for CompactionOption {
         }
     }
 }
-
 
 /// Configure the operating parameters of each component in the [`DB`](crate::DB)
 #[derive(Clone)]
@@ -98,7 +95,6 @@ pub struct DbOption {
     pub(crate) compaction_option: CompactionOption,
 }
 
-
 impl DbOption {
     /// build the default configured [`DbOption`] with base path and primary key
     pub fn new<S: Schema>(base_path: Path, schema: &S) -> Self {
@@ -127,7 +123,11 @@ impl DbOption {
     }
 
     /// build configured [`DbOption`] with base path, primary key, and custom compaction options
-    pub fn new_with_options<S: Schema>(base_path: Path, schema: &S, compaction_option: CompactionOption) -> Self {
+    pub fn new_with_options<S: Schema>(
+        base_path: Path,
+        schema: &S,
+        compaction_option: CompactionOption,
+    ) -> Self {
         let (column_paths, sorting_columns) = schema.primary_key_path();
 
         DbOption {
@@ -185,10 +185,10 @@ impl DbOption {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => {
                 opts.major_threshold_with_sst_size = value;
-            },
+            }
             CompactionOption::LazyLeveled(opts) => {
                 opts.major_threshold_with_sst_size = value;
-            },
+            }
             _ => {} // No-op for other compaction types
         }
         self
@@ -199,10 +199,10 @@ impl DbOption {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => {
                 opts.level_sst_magnification = value;
-            },
+            }
             CompactionOption::LazyLeveled(opts) => {
                 opts.level_sst_magnification = value;
-            },
+            }
             _ => {} // No-op for other compaction types
         }
         self
@@ -275,10 +275,10 @@ impl DbOption {
         match &mut self.compaction_option {
             CompactionOption::Leveled(opts) => {
                 opts.major_default_oldest_table_num = value;
-            },
+            }
             CompactionOption::LazyLeveled(opts) => {
                 opts.major_default_oldest_table_num = value;
-            },
+            }
             _ => panic!("major_default_oldest_table_num only applies to leveled-based compaction"),
         }
         self
@@ -341,7 +341,6 @@ impl DbOption {
         self.base_fs = base_fs;
         self
     }
-
 }
 
 #[derive(Debug, Error)]

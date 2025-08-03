@@ -147,15 +147,15 @@ where
         }
 
         // Check the bottom-most level (leveled compaction)
-        if self.options.bottom_most_level < MAX_LEVEL &&
-             Self::is_leveled_threshold_exceeded(
+        if self.options.bottom_most_level < MAX_LEVEL
+            && Self::is_leveled_threshold_exceeded(
                 &self.options,
                 &version_ref,
                 self.options.bottom_most_level,
-            ) {
-                return true;
-            }
-        
+            )
+        {
+            return true;
+        }
 
         false
     }
@@ -358,10 +358,7 @@ where
                     ts: version_ref.increase_ts(),
                 });
 
-                self.ctx
-                    .manifest
-                    .update(version_edits, None)
-                    .await?;
+                self.ctx.manifest.update(version_edits, None).await?;
             }
             let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
             let sources = guard.immutables.split_off(chunk_num);
@@ -560,7 +557,7 @@ where
             if !source_scopes.is_empty() {
                 let source_min = source_scopes.iter().map(|scope| &scope.min).min().unwrap();
                 let source_max = source_scopes.iter().map(|scope| &scope.max).max().unwrap();
-                
+
                 version.level_slice[target_level]
                     .iter()
                     .filter(|scope| {
@@ -601,7 +598,7 @@ where
                         u32::MAX.into(),
                         None,
                         ProjectionMask::all(),
-                        None
+                        None,
                     )
                     .await?,
             });
@@ -705,9 +702,7 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::{
-            lazyleveled::{LazyLeveledCompactor, LazyLeveledOptions},
-        },
+        compaction::lazyleveled::{LazyLeveledCompactor, LazyLeveledOptions},
         executor::tokio::TokioExecutor,
         fs::{generate_file_id, manager::StoreManager},
         inmem::{
@@ -717,10 +712,11 @@ pub(crate) mod tests {
         record::{Record, Schema},
         scope::Scope,
         tests::Test,
-        version::timestamp::Timestamp,
         trigger::TriggerFactory,
+        version::timestamp::Timestamp,
         version::{Version, MAX_LEVEL},
-        wal::log::LogType, DbError, DbOption, DB,
+        wal::log::LogType,
+        DbError, DbOption, DB,
     };
 
     async fn build_immutable<R>(
@@ -1067,25 +1063,28 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
-            
+
             // Force compaction every 1000 insertions to see intermediate states
             if i > 0 && i % 1000 == 0 {
                 db.flush().await.unwrap();
-                
+
                 // Log current state every 1000 insertions
-                    let version = db.ctx.manifest.current().await;
-                    println!("After {} insertions:", i);
-                    for level in 0..MAX_LEVEL {
-                        if !version.level_slice[level].is_empty() {
-                            println!(
-                                "  Level {}: {} files ({})",
-                                level,
-                                version.level_slice[level].len(),
-                                if level == MAX_LEVEL - 1 { "leveled" } else { "tiered" }
-                            );
-                        }
+                let version = db.ctx.manifest.current().await;
+                println!("After {} insertions:", i);
+                for level in 0..MAX_LEVEL {
+                    if !version.level_slice[level].is_empty() {
+                        println!(
+                            "  Level {}: {} files ({})",
+                            level,
+                            version.level_slice[level].len(),
+                            if level == MAX_LEVEL - 1 {
+                                "leveled"
+                            } else {
+                                "tiered"
+                            }
+                        );
                     }
-                
+                }
             }
         }
 
@@ -1146,22 +1145,15 @@ pub(crate) mod tests {
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests_metric {
 
-    use fusio::{path::Path};
-    use tempfile::TempDir;
     use crate::compaction::lazyleveled::tests::convert_test_ref_to_test;
+    use fusio::path::Path;
+    use tempfile::TempDir;
 
     use crate::compaction::lazyleveled::LazyLeveledOptions;
     use crate::{
-        executor::tokio::TokioExecutor,
-        inmem::{
-            immutable::{tests::TestSchema},
-        },
-        tests::Test,
-        trigger::{TriggerType},
-        version::MAX_LEVEL,
-        DbOption, DB,
+        executor::tokio::TokioExecutor, inmem::immutable::tests::TestSchema, tests::Test,
+        trigger::TriggerType, version::MAX_LEVEL, DbOption, DB,
     };
-
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
@@ -1186,9 +1178,10 @@ pub(crate) mod tests_metric {
         .max_sst_file_size(1024);
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> =
+            DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                .await
+                .unwrap();
 
         // Track metrics for amplification calculation
         let mut total_bytes_written_by_user = 0u64;
@@ -1203,17 +1196,17 @@ pub(crate) mod tests_metric {
                 vu32: i as u32,
                 vbool: Some(i % 2 == 0),
             };
-            
+
             // More accurate user data size calculation
             let string_bytes = record.vstring.as_bytes().len();
             let u32_bytes = 4;
             let bool_bytes = 1;
             let record_size = string_bytes + u32_bytes + bool_bytes;
             total_bytes_written_by_user += record_size as u64;
-            
+
             db.insert(record).await.unwrap();
 
-            if i%initial_records == 0 {
+            if i % initial_records == 0 {
                 // Force flush and compaction
                 db.flush().await.unwrap();
                 compaction_rounds += 1;
@@ -1226,21 +1219,25 @@ pub(crate) mod tests_metric {
             let result = db.get(&key, convert_test_ref_to_test).await.unwrap();
             if result.is_some() {
                 let record = result.unwrap();
-                assert_eq!(record.vu32, i as u32, "Value should be preserved after compaction");
+                assert_eq!(
+                    record.vu32, i as u32,
+                    "Value should be preserved after compaction"
+                );
             } else {
                 panic!("Key {} should exist after compaction", key);
             }
-        }        
+        }
 
         // Get final version to measure total file sizes
         let final_version = db.ctx.manifest.current().await;
         let mut files_per_level = vec![0; MAX_LEVEL];
 
         // Verify that total scope.file_size matches total actual file size on disk
-        let manager = crate::fs::manager::StoreManager::new(option.base_fs.clone(), vec![]).unwrap();
+        let manager =
+            crate::fs::manager::StoreManager::new(option.base_fs.clone(), vec![]).unwrap();
         let fs = manager.base_fs();
         let mut total_actual_file_size = 0u64;
-        
+
         for level in 0..MAX_LEVEL {
             files_per_level[level] = final_version.level_slice[level].len();
             for scope in &final_version.level_slice[level] {
@@ -1255,9 +1252,9 @@ pub(crate) mod tests_metric {
                 total_actual_file_size += actual_size;
             }
         }
-        
+
         // Calculate amplification metrics using actual file sizes
-        let write_amplification = 
+        let write_amplification =
             total_actual_file_size as f64 / total_bytes_written_by_user as f64;
 
         // Read amplification estimation (simplified)
@@ -1282,33 +1279,48 @@ pub(crate) mod tests_metric {
         println!("User data written: {} bytes", total_bytes_written_by_user);
         println!("Total file size: {} bytes", total_actual_file_size);
         println!("Write Amplification: {:.2}x", write_amplification);
-        println!("Estimated Read Amplification: {:.2}x", estimated_read_amplification);
+        println!(
+            "Estimated Read Amplification: {:.2}x",
+            estimated_read_amplification
+        );
         println!("Compaction rounds: {}", compaction_rounds);
-        
+
         for level in 0..MAX_LEVEL {
             if files_per_level[level] > 0 {
                 println!("Level {}: {} files", level, files_per_level[level]);
             }
         }
 
-        // Assertions for reasonable amplification  
+        // Assertions for reasonable amplification
         // Write amplification can be less than 1.0 in some cases due to compression
         // and the way Parquet stores data efficiently. The important thing is that
         // we can measure it and it's non-zero.
-        assert!(write_amplification > 0.0, "Write amplification should be positive");
-        assert!(write_amplification < 10.0, "Write amplification should be reasonable (< 10x)");
-        assert!(estimated_read_amplification >= 1.0, "Read amplification should be at least 1.0");
-        assert!(total_actual_file_size > 0, "Should have written some data to disk");
+        assert!(
+            write_amplification > 0.0,
+            "Write amplification should be positive"
+        );
+        assert!(
+            write_amplification < 10.0,
+            "Write amplification should be reasonable (< 10x)"
+        );
+        assert!(
+            estimated_read_amplification >= 1.0,
+            "Read amplification should be at least 1.0"
+        );
+        assert!(
+            total_actual_file_size > 0,
+            "Should have written some data to disk"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
     async fn test_throughput() {
-        use std::time::Instant;
         use futures_util::StreamExt;
         use rand::seq::SliceRandom;
         use rand::SeedableRng;
-        
+        use std::time::Instant;
+
         let temp_dir = TempDir::new().unwrap();
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -1318,62 +1330,79 @@ pub(crate) mod tests_metric {
         option.trigger_type = TriggerType::SizeOfMem(1 * 1024 * 1024);
 
         // Create DB with EcoTune compactor using the standard open method
-        let db: DB<Test, TokioExecutor> = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
-            .await
-            .unwrap();
+        let db: DB<Test, TokioExecutor> =
+            DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                .await
+                .unwrap();
 
         // Test parameters based on EcoTune paper (Section 5.1: 35% Get, 35% Seek, 30% long range scans)
         let total_operations = 100000;
         let insert_ratio = 0.3; // 30% inserts to build up data
         let get_ratio = 0.35; // 35% Get operations (point queries)
-        let seek_ratio = 0.35; // 35% Seek operations  
+        let seek_ratio = 0.35; // 35% Seek operations
         let long_range_ratio = 0.30; // 30% long range scans (paper workload)
-        
+
         let insert_count = (total_operations as f64 * insert_ratio) as usize;
         let query_count = total_operations - insert_count;
-        let get_count = (query_count as f64 * (get_ratio / (get_ratio + seek_ratio + long_range_ratio))) as usize;
-        let seek_count = (query_count as f64 * (seek_ratio / (get_ratio + seek_ratio + long_range_ratio))) as usize;
+        let get_count = (query_count as f64
+            * (get_ratio / (get_ratio + seek_ratio + long_range_ratio)))
+            as usize;
+        let seek_count = (query_count as f64
+            * (seek_ratio / (get_ratio + seek_ratio + long_range_ratio)))
+            as usize;
         let long_range_count = query_count - get_count - seek_count;
-        
+
         println!("EcoTune throughput test with paper proportions:");
         println!("- {} inserts ({:.1}%)", insert_count, insert_ratio * 100.0);
-        println!("- {} Get queries ({:.1}%)", get_count, (get_count as f64 / total_operations as f64) * 100.0);
-        println!("- {} Seek queries ({:.1}%)", seek_count, (seek_count as f64 / total_operations as f64) * 100.0);
-        println!("- {} long-range scans ({:.1}%)", long_range_count, (long_range_count as f64 / total_operations as f64) * 100.0);
+        println!(
+            "- {} Get queries ({:.1}%)",
+            get_count,
+            (get_count as f64 / total_operations as f64) * 100.0
+        );
+        println!(
+            "- {} Seek queries ({:.1}%)",
+            seek_count,
+            (seek_count as f64 / total_operations as f64) * 100.0
+        );
+        println!(
+            "- {} long-range scans ({:.1}%)",
+            long_range_count,
+            (long_range_count as f64 / total_operations as f64) * 100.0
+        );
 
         // Create mixed workload operations vector
-        
+
         let mut operations = Vec::new();
-        
+
         // Add insert operations
         for i in 0..insert_count {
             operations.push(("insert", i));
         }
-        
-        // Add get operations  
+
+        // Add get operations
         for i in 0..get_count {
             operations.push(("get", i));
         }
-        
+
         // Add seek operations
         for i in 0..seek_count {
             operations.push(("seek", i));
         }
-        
+
         // Add long-range scan operations
         for i in 0..long_range_count {
             operations.push(("long_range", i));
         }
-        
+
         // Shuffle operations to create mixed workload
         let mut rng = rand::rngs::StdRng::seed_from_u64(42); // Fixed seed for reproducibility
         operations.shuffle(&mut rng);
-        
+
         // Execute mixed workload
         let mixed_start = Instant::now();
         let mut insert_ops = 0;
         let mut successful_queries = 0;
-        
+
         for (op_type, index) in operations {
             match op_type {
                 "insert" => {
@@ -1388,31 +1417,33 @@ pub(crate) mod tests_metric {
                 "get" => {
                     // Use modulo to ensure key exists (only query from inserted keys)
                     let key = format!("test_key_{:06}", index % insert_ops.max(1));
-                    let found = db.get(&key, |entry| {
-                        match entry {
+                    let found = db
+                        .get(&key, |entry| match entry {
                             crate::transaction::TransactionEntry::Stream(stream_entry) => {
                                 Some(stream_entry.value().is_some())
                             }
                             crate::transaction::TransactionEntry::Local(_) => Some(true),
-                        }
-                    }).await.unwrap();
+                        })
+                        .await
+                        .unwrap();
                     if found.unwrap_or(false) {
                         successful_queries += 1;
                     }
                 }
                 "seek" => {
                     let key = format!("test_key_{:06}", index % insert_ops.max(1));
-                    let scan = db.scan((
-                        std::ops::Bound::Included(&key),
-                        std::ops::Bound::Unbounded
-                    ), |entry| {
-                        match entry {
-                            crate::transaction::TransactionEntry::Stream(_) => true,
-                            crate::transaction::TransactionEntry::Local(_) => true,
-                        }
-                    }).await.take(1);
+                    let scan = db
+                        .scan(
+                            (std::ops::Bound::Included(&key), std::ops::Bound::Unbounded),
+                            |entry| match entry {
+                                crate::transaction::TransactionEntry::Stream(_) => true,
+                                crate::transaction::TransactionEntry::Local(_) => true,
+                            },
+                        )
+                        .await
+                        .take(1);
                     let mut scan = std::pin::pin!(scan);
-                    
+
                     if let Some(result) = scan.next().await {
                         if result.is_ok() {
                             successful_queries += 1;
@@ -1421,37 +1452,48 @@ pub(crate) mod tests_metric {
                 }
                 "long_range" => {
                     let start_key = format!("test_key_{:06}", index % insert_ops.max(1));
-                    let scan = db.scan((
-                        std::ops::Bound::Included(&start_key),
-                        std::ops::Bound::Unbounded
-                    ), |entry| {
-                        match entry {
-                            crate::transaction::TransactionEntry::Stream(_) => true,
-                            crate::transaction::TransactionEntry::Local(_) => true,
-                        }
-                    }).await.take(100);
+                    let scan = db
+                        .scan(
+                            (
+                                std::ops::Bound::Included(&start_key),
+                                std::ops::Bound::Unbounded,
+                            ),
+                            |entry| match entry {
+                                crate::transaction::TransactionEntry::Stream(_) => true,
+                                crate::transaction::TransactionEntry::Local(_) => true,
+                            },
+                        )
+                        .await
+                        .take(100);
                     let mut scan = std::pin::pin!(scan);
-                    
+
                     let mut count = 0;
                     while let Some(result) = scan.next().await {
                         if result.is_ok() {
                             count += 1;
-                            if count >= 100 { break; } // Limit to K=100
+                            if count >= 100 {
+                                break;
+                            } // Limit to K=100
                         }
                     }
-                    if count > 0 { successful_queries += 1; }
+                    if count > 0 {
+                        successful_queries += 1;
+                    }
                 }
-                _ => unreachable!()
+                _ => unreachable!(),
             }
         }
-        
+
         let mixed_duration = mixed_start.elapsed();
         let mixed_throughput = total_operations as f64 / mixed_duration.as_secs_f64();
-        
+
         // Calculate mixed workload results
         println!("Mixed Workload Throughput Results:");
         println!("Overall throughput: {:.2} ops/sec", mixed_throughput);
-        println!("Total operations: {} (inserts: {}, successful queries: {})", total_operations, insert_ops, successful_queries);
+        println!(
+            "Total operations: {} (inserts: {}, successful queries: {})",
+            total_operations, insert_ops, successful_queries
+        );
         println!("Total time: {:.3}s", mixed_duration.as_secs_f64());
-    }    
+    }
 }

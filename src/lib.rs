@@ -169,12 +169,8 @@ pub use crate::record::{ArrowArrays, ArrowArraysBuilder};
 pub use crate::version::timestamp::Ts;
 use crate::{
     compaction::{
-        error::CompactionError, 
-        leveled::LeveledCompactor, 
-        lazyleveled::LazyLeveledCompactor, 
-        tiered::TieredCompactor, 
-        CompactTask,
-        Compactor,
+        error::CompactionError, lazyleveled::LazyLeveledCompactor, leveled::LeveledCompactor,
+        tiered::TieredCompactor, CompactTask, Compactor,
     },
     executor::Executor,
     fs::{manager::StoreManager, parse_file_id, FileType},
@@ -268,7 +264,7 @@ where
         schema: R::Schema,
         lru_cache: ParquetLru,
     ) -> Result<Self, DbError> {
-        let (record_schema, _manager, cleaner, task_rx, mem_storage, ctx) = 
+        let (record_schema, _manager, cleaner, task_rx, mem_storage, ctx) =
             Self::build_common_setup(option.clone(), schema, lru_cache).await?;
 
         match &option.compaction_option {
@@ -317,7 +313,7 @@ where
     where
         C: CompactionExecutor<R> + Send + Sync + 'static,
     {
-        let (_, _, cleaner, task_rx, mem_storage, ctx) = 
+        let (_, _, cleaner, task_rx, mem_storage, ctx) =
             Self::build_common_setup(option, schema, lru_cache).await?;
 
         Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
@@ -327,7 +323,17 @@ where
         option: Arc<DbOption>,
         schema: R::Schema,
         lru_cache: ParquetLru,
-    ) -> Result<(Arc<R::Schema>, Arc<StoreManager>, Cleaner, flume::Receiver<CompactTask>, Arc<RwLock<DbStorage<R>>>, Arc<Context<R>>), DbError> {
+    ) -> Result<
+        (
+            Arc<R::Schema>,
+            Arc<StoreManager>,
+            Cleaner,
+            flume::Receiver<CompactTask>,
+            Arc<RwLock<DbStorage<R>>>,
+            Arc<Context<R>>,
+        ),
+        DbError,
+    > {
         let record_schema = Arc::new(schema);
         let manager = Arc::new(StoreManager::new(
             option.base_fs.clone(),
@@ -1218,32 +1224,23 @@ pub(crate) mod tests {
 
     use crate::{
         compaction::{
-            error::CompactionError, 
-            leveled::LeveledCompactor, 
-            lazyleveled::LazyLeveledCompactor, 
-            tiered::TieredCompactor,
-            CompactTask,
+            error::CompactionError, lazyleveled::LazyLeveledCompactor, leveled::LeveledCompactor,
+            tiered::TieredCompactor, CompactTask,
         },
-       
         context::Context,
-       
         executor::{tokio::TokioExecutor, Executor},
-       
         fs::{generate_file_id, manager::StoreManager},
-       
         inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
-       
         manifest::ManifestStorageError,
         record::{
-            option::OptionRecordRef,
             dynamic::test::{test_dyn_item_schema, test_dyn_items},
-            DynRecord, Key, Record, KeyRef, RecordRef, Schema as RecordSchema, Value, ValueRef,
+            option::OptionRecordRef,
+            DynRecord, Key, KeyRef, Record, RecordRef, Schema as RecordSchema, Value, ValueRef,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
-        CompactionExecutor, CompactionOption, DbError, DbOption, Projection,
-        DB, 
+        CompactionExecutor, CompactionOption, DbError, DbOption, Projection, DB,
     };
 
     #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1601,7 +1598,15 @@ pub(crate) mod tests {
                     option.clone(),
                     ctx.clone(),
                 );
-                finish_db_with_compactor(executor, mem_storage, ctx, compactor, cleaner, compaction_rx).await
+                finish_db_with_compactor(
+                    executor,
+                    mem_storage,
+                    ctx,
+                    compactor,
+                    cleaner,
+                    compaction_rx,
+                )
+                .await
             }
 
             CompactionOption::Tiered(opt) => {
@@ -1612,7 +1617,15 @@ pub(crate) mod tests {
                     option.clone(),
                     ctx.clone(),
                 );
-                finish_db_with_compactor(executor, mem_storage, ctx, compactor, cleaner, compaction_rx).await
+                finish_db_with_compactor(
+                    executor,
+                    mem_storage,
+                    ctx,
+                    compactor,
+                    cleaner,
+                    compaction_rx,
+                )
+                .await
             }
 
             CompactionOption::LazyLeveled(opt) => {
@@ -1623,9 +1636,16 @@ pub(crate) mod tests {
                     option.clone(),
                     ctx.clone(),
                 );
-                finish_db_with_compactor(executor, mem_storage, ctx, compactor, cleaner, compaction_rx).await
+                finish_db_with_compactor(
+                    executor,
+                    mem_storage,
+                    ctx,
+                    compactor,
+                    cleaner,
+                    compaction_rx,
+                )
+                .await
             }
-
         }
     }
 
@@ -2352,7 +2372,7 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_custom_compactor() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Set up option with tiered compaction
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -2365,7 +2385,8 @@ pub(crate) mod tests {
         .max_sst_file_size(2 * 1024 * 1024)
         .major_default_oldest_table_num(1);
         option.trigger_type = TriggerType::Length(5);
-        option.compaction_option = CompactionOption::Tiered(crate::compaction::tiered::TieredOptions::default());
+        option.compaction_option =
+            CompactionOption::Tiered(crate::compaction::tiered::TieredOptions::default());
 
         // Test 1: Create normal DB with new() for comparison
         let db_normal = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
@@ -2385,7 +2406,7 @@ pub(crate) mod tests {
         assert_eq!(result, Some("2".to_string()));
 
         // Test 2: Demonstrate that we CAN use TieredCompactor directly with Box<dyn Compactor<R>>
-        // This shows that TieredCompactor<R> implements Compactor<R>, which in turn 
+        // This shows that TieredCompactor<R> implements Compactor<R>, which in turn
         // implements CompactionExecutor<R> when boxed
 
         let temp_dir2 = TempDir::new().unwrap();
@@ -2395,32 +2416,44 @@ pub(crate) mod tests {
         // Create necessary directories first (this is what new() does internally)
         let fs = Arc::new(TokioFs) as Arc<dyn DynFs>;
         fs.create_dir_all(&option2.wal_dir_path()).await.unwrap();
-        fs.create_dir_all(&option2.version_log_dir_path()).await.unwrap();
+        fs.create_dir_all(&option2.version_log_dir_path())
+            .await
+            .unwrap();
 
         // Create a TieredCompactor directly and box it
         let tiered_compactor = crate::compaction::tiered::TieredCompactor::<Test>::new(
             crate::compaction::tiered::TieredOptions::default(),
-            Arc::new(RwLock::new(build_schema(Arc::new(option2.clone()), &fs).await.unwrap().0)),
+            Arc::new(RwLock::new(
+                build_schema(Arc::new(option2.clone()), &fs)
+                    .await
+                    .unwrap()
+                    .0,
+            )),
             Arc::new(TestSchema),
             Arc::new(option2.clone()),
             Arc::new(Context::new(
                 Arc::new(StoreManager::new(option2.base_fs.clone(), vec![]).unwrap()),
                 Arc::new(NoCache::default()),
-                Box::new(build_version_set(
-                    Version::new(
-                        Arc::new(option2.clone()),
+                Box::new(
+                    build_version_set(
+                        Version::new(
+                            Arc::new(option2.clone()),
+                            bounded(1).0,
+                            Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                        ),
                         bounded(1).0,
-                        Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                    ),
-                    bounded(1).0,
-                    Arc::new(option2.clone()),
-                    Arc::new(StoreManager::new(option2.base_fs.clone(), vec![]).unwrap()),
-                ).await.unwrap()),
+                        Arc::new(option2.clone()),
+                        Arc::new(StoreManager::new(option2.base_fs.clone(), vec![]).unwrap()),
+                    )
+                    .await
+                    .unwrap(),
+                ),
                 TestSchema.arrow_schema().clone(),
             )),
         );
 
-        let boxed_compactor: Box<dyn crate::compaction::Compactor<Test>> = Box::new(tiered_compactor);
+        let boxed_compactor: Box<dyn crate::compaction::Compactor<Test>> =
+            Box::new(tiered_compactor);
 
         let db_custom = DB::new_with_compactor(
             option2,
