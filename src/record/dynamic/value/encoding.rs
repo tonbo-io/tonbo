@@ -1,95 +1,186 @@
+use std::sync::Arc;
+
+use arrow::datatypes::DataType;
 use fusio::Write;
 use fusio_log::{Decode, Encode};
+#[cfg(not(target_arch = "wasm32"))]
+use futures_util::future::BoxFuture;
+#[cfg(target_arch = "wasm32")]
+use futures_util::future::LocalBoxFuture;
+use futures_util::FutureExt;
 
 use super::{TimeUnit, Value};
-use crate::record::{ValueError, ValueRef};
+use crate::record::{decode_arrow_datatype, encode_arrow_datatype, ValueError, ValueRef};
+
+#[cfg(not(target_arch = "wasm32"))]
+type BoxedFuture<'a, T> = BoxFuture<'a, T>;
+#[cfg(target_arch = "wasm32")]
+type BoxedFuture<'a, T> = LocalBoxFuture<'a, T>;
+
+impl Value {
+    fn encode_inner<'a, 'b, W>(
+        &'a self,
+        writer: &'b mut W,
+    ) -> BoxedFuture<'a, Result<(), fusio::Error>>
+    where
+        W: Write,
+        'b: 'a,
+    {
+        let fut = async move {
+            encode_arrow_datatype(&self.data_type(), writer).await?;
+            match self {
+                Value::Null => (),
+                Value::Boolean(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Int8(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Int16(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Int32(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Int64(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::UInt8(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::UInt16(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::UInt32(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::UInt64(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Float32(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Float64(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::String(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Binary(items) => {
+                    items.encode(writer).await?;
+                }
+                Value::Date32(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Date64(v) => {
+                    v.encode(writer).await?;
+                }
+                Value::Timestamp(v, _) => {
+                    v.encode(writer).await?;
+                }
+                Value::Time32(v, _) => {
+                    v.encode(writer).await?;
+                }
+                Value::Time64(v, _) => {
+                    v.encode(writer).await?;
+                }
+                Value::List(_, vec) => {
+                    let len = vec.len() as u32;
+                    len.encode(writer).await?;
+                    for v in vec.iter() {
+                        v.encode_inner(writer).await?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fut.boxed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            fut.boxed_local()
+        }
+    }
+
+    fn decode_inner<R>(reader: &mut R) -> BoxedFuture<Result<Self, fusio::Error>>
+    where
+        R: fusio::SeqRead,
+    {
+        let fut = async move {
+            let data_type = decode_arrow_datatype(reader).await?;
+            match &data_type {
+                DataType::Null => Ok(Value::Null),
+                DataType::Boolean => Ok(Value::Boolean(bool::decode(reader).await?)),
+                DataType::Int8 => Ok(Value::Int8(i8::decode(reader).await?)),
+                DataType::Int16 => Ok(Value::Int16(i16::decode(reader).await?)),
+                DataType::Int32 => Ok(Value::Int32(i32::decode(reader).await?)),
+                DataType::Int64 => Ok(Value::Int64(i64::decode(reader).await?)),
+                DataType::UInt8 => Ok(Value::UInt8(u8::decode(reader).await?)),
+                DataType::UInt16 => Ok(Value::UInt16(u16::decode(reader).await?)),
+                DataType::UInt32 => Ok(Value::UInt32(u32::decode(reader).await?)),
+                DataType::UInt64 => Ok(Value::UInt64(u64::decode(reader).await?)),
+                DataType::Float32 => Ok(Value::Float32(f32::decode(reader).await?)),
+                DataType::Float64 => Ok(Value::Float64(f64::decode(reader).await?)),
+                DataType::Utf8 => Ok(Value::String(String::decode(reader).await?)),
+                DataType::Binary => Ok(Value::Binary(Vec::<u8>::decode(reader).await?)),
+                DataType::Date32 => Ok(Value::Date32(i32::decode(reader).await?)),
+                DataType::Date64 => Ok(Value::Date64(i64::decode(reader).await?)),
+                DataType::Timestamp(time_unit, _) => Ok(Value::Timestamp(
+                    i64::decode(reader).await?,
+                    time_unit.into(),
+                )),
+                DataType::Time32(time_unit) => {
+                    if matches!(
+                        time_unit,
+                        arrow::datatypes::TimeUnit::Nanosecond
+                            | arrow::datatypes::TimeUnit::Microsecond
+                    ) {
+                        unreachable!()
+                    }
+                    Ok(Value::Time32(i32::decode(reader).await?, time_unit.into()))
+                }
+                DataType::Time64(time_unit) => {
+                    if matches!(
+                        time_unit,
+                        arrow::datatypes::TimeUnit::Second
+                            | arrow::datatypes::TimeUnit::Millisecond
+                    ) {
+                        unreachable!()
+                    }
+                    Ok(Value::Time64(i64::decode(reader).await?, time_unit.into()))
+                }
+                DataType::List(field) => {
+                    let len = u32::decode(reader).await?;
+                    let mut list = Vec::new();
+                    for _ in 0..len {
+                        list.push(Arc::new(Value::decode_inner(reader).await?));
+                    }
+                    Ok(Value::List(field.data_type().clone(), list))
+                }
+                _ => Err(fusio::Error::Other(Box::new(ValueError::InvalidDataType(
+                    data_type.to_string(),
+                )))),
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fut.boxed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            fut.boxed_local()
+        }
+    }
+}
 
 impl Encode for Value {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
-        match self {
-            Value::Null => {
-                0u8.encode(writer).await?;
-            }
-            Value::Boolean(v) => {
-                1u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Int8(v) => {
-                2u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Int16(v) => {
-                3u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Int32(v) => {
-                4u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Int64(v) => {
-                5u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::UInt8(v) => {
-                6u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::UInt16(v) => {
-                7u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::UInt32(v) => {
-                8u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::UInt64(v) => {
-                9u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Float32(v) => {
-                10u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Float64(v) => {
-                11u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::String(v) => {
-                12u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Binary(items) => {
-                13u8.encode(writer).await?;
-                items.encode(writer).await?;
-            }
-            Value::Date32(v) => {
-                14u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Date64(v) => {
-                15u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            Value::Timestamp(v, time_unit) => {
-                16u8.encode(writer).await?;
-                v.encode(writer).await?;
-                time_unit.encode(writer).await?;
-            }
-            Value::Time32(v, time_unit) => {
-                17u8.encode(writer).await?;
-                v.encode(writer).await?;
-                time_unit.encode(writer).await?;
-            }
-            Value::Time64(v, time_unit) => {
-                18u8.encode(writer).await?;
-                v.encode(writer).await?;
-                time_unit.encode(writer).await?;
-            }
-        }
-        Ok(())
+        self.encode_inner(writer).await
     }
 
     fn size(&self) -> usize {
@@ -113,6 +204,15 @@ impl Encode for Value {
             Value::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
             Value::Time32(v, time_unit) => 1 + v.size() + time_unit.size(),
             Value::Time64(v, time_unit) => 1 + v.size() + time_unit.size(),
+            Value::List(data_type, vec) => {
+                vec.iter().map(|v| v.size()).sum::<usize>()
+                    + match data_type {
+                        DataType::Timestamp(_, _) => 2,
+                        DataType::Time32(_) | DataType::Time64(_) => 2,
+                        DataType::List(field) => 1 + field.size(),
+                        _ => 1,
+                    }
+            }
         }
     }
 }
@@ -122,40 +222,7 @@ impl Decode for Value {
     where
         R: fusio::SeqRead,
     {
-        let data_type = u8::decode(reader).await?;
-        match data_type {
-            0 => Ok(Value::Null),
-            1 => Ok(Value::Boolean(bool::decode(reader).await?)),
-            2 => Ok(Value::Int8(i8::decode(reader).await?)),
-            3 => Ok(Value::Int16(i16::decode(reader).await?)),
-            4 => Ok(Value::Int32(i32::decode(reader).await?)),
-            5 => Ok(Value::Int64(i64::decode(reader).await?)),
-            6 => Ok(Value::UInt8(u8::decode(reader).await?)),
-            7 => Ok(Value::UInt16(u16::decode(reader).await?)),
-            8 => Ok(Value::UInt32(u32::decode(reader).await?)),
-            9 => Ok(Value::UInt64(u64::decode(reader).await?)),
-            10 => Ok(Value::Float32(f32::decode(reader).await?)),
-            11 => Ok(Value::Float64(f64::decode(reader).await?)),
-            12 => Ok(Value::String(String::decode(reader).await?)),
-            13 => Ok(Value::Binary(Vec::<u8>::decode(reader).await?)),
-            14 => Ok(Value::Date32(i32::decode(reader).await?)),
-            15 => Ok(Value::Date64(i64::decode(reader).await?)),
-            16 => Ok(Value::Timestamp(
-                i64::decode(reader).await?,
-                TimeUnit::decode(reader).await?,
-            )),
-            17 => Ok(Value::Time32(
-                i32::decode(reader).await?,
-                TimeUnit::decode(reader).await?,
-            )),
-            18 => Ok(Value::Time64(
-                i64::decode(reader).await?,
-                TimeUnit::decode(reader).await?,
-            )),
-            _ => Err(fusio::Error::Other(Box::new(ValueError::InvalidDataType(
-                data_type.to_string(),
-            )))),
-        }
+        Self::decode_inner(reader).await
     }
 }
 
@@ -193,92 +260,100 @@ impl Decode for TimeUnit {
     }
 }
 
+impl ValueRef<'_> {
+    fn encode_inner<'a, 'b, W>(
+        &'a self,
+        writer: &'b mut W,
+    ) -> BoxedFuture<'a, Result<(), fusio::Error>>
+    where
+        W: Write,
+        'b: 'a,
+    {
+        let fut = async move {
+            encode_arrow_datatype(&self.data_type(), writer).await?;
+            match self {
+                ValueRef::Null => (),
+                ValueRef::Boolean(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Int8(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Int16(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Int32(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Int64(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::UInt8(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::UInt16(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::UInt32(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::UInt64(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Float32(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Float64(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::String(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Binary(items) => {
+                    items.encode(writer).await?;
+                }
+                ValueRef::Date32(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Date64(v) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Timestamp(v, _) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Time32(v, _) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::Time64(v, _) => {
+                    v.encode(writer).await?;
+                }
+                ValueRef::List(_, vec) => {
+                    let len = vec.len() as u32;
+                    len.encode(writer).await?;
+                    for v in vec.iter() {
+                        v.encode_inner(writer).await?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fut.boxed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            fut.boxed_local()
+        }
+    }
+}
+
 impl Encode for ValueRef<'_> {
     async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
     where
         W: Write,
     {
-        match self {
-            ValueRef::Null => {
-                0u8.encode(writer).await?;
-            }
-            ValueRef::Boolean(v) => {
-                1u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Int8(v) => {
-                2u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Int16(v) => {
-                3u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Int32(v) => {
-                4u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Int64(v) => {
-                5u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::UInt8(v) => {
-                6u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::UInt16(v) => {
-                7u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::UInt32(v) => {
-                8u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::UInt64(v) => {
-                9u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Float32(v) => {
-                10u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Float64(v) => {
-                11u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::String(v) => {
-                12u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Binary(items) => {
-                13u8.encode(writer).await?;
-                items.encode(writer).await?;
-            }
-            ValueRef::Date32(v) => {
-                14u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Date64(v) => {
-                15u8.encode(writer).await?;
-                v.encode(writer).await?;
-            }
-            ValueRef::Timestamp(v, time_unit) => {
-                16u8.encode(writer).await?;
-                v.encode(writer).await?;
-                time_unit.encode(writer).await?;
-            }
-            ValueRef::Time32(v, time_unit) => {
-                17u8.encode(writer).await?;
-                v.encode(writer).await?;
-                time_unit.encode(writer).await?;
-            }
-            ValueRef::Time64(v, time_unit) => {
-                18u8.encode(writer).await?;
-                v.encode(writer).await?;
-                time_unit.encode(writer).await?;
-            }
-        }
-        Ok(())
+        self.encode_inner(writer).await
     }
 
     fn size(&self) -> usize {
@@ -302,6 +377,15 @@ impl Encode for ValueRef<'_> {
             ValueRef::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
             ValueRef::Time32(v, time_unit) => 1 + v.size() + time_unit.size(),
             ValueRef::Time64(v, time_unit) => 1 + v.size() + time_unit.size(),
+            ValueRef::List(data_type, vec) => {
+                vec.iter().map(|v| v.size()).sum::<usize>()
+                    + match data_type {
+                        DataType::Timestamp(_, _) => 2,
+                        DataType::Time32(_) | DataType::Time64(_) => 2,
+                        DataType::List(field) => 1 + field.size(),
+                        _ => 1,
+                    }
+            }
         }
     }
 }
@@ -310,24 +394,12 @@ impl Encode for ValueRef<'_> {
 mod tests {
     use std::io::{Cursor, SeekFrom};
 
+    use arrow::datatypes::Field;
     use fusio_log::{Decode, Encode};
     use tokio::io::AsyncSeekExt;
 
     use super::*;
-    use crate::record::Key;
-
-    #[tokio::test]
-    async fn test_time_unit_encode_decode() {
-        let time_unit = TimeUnit::Second;
-        let mut buf = Vec::new();
-        let mut cursor = Cursor::new(&mut buf);
-        time_unit.encode(&mut cursor).await.unwrap();
-
-        cursor.seek(SeekFrom::Start(0)).await.unwrap();
-
-        let decoded = TimeUnit::decode(&mut cursor).await.unwrap();
-        assert_eq!(time_unit, decoded);
-    }
+    use crate::record::{encode_arrow_datatype, encode_arrow_timeunit, Key};
 
     #[tokio::test]
     async fn test_value_ref_encode() {
@@ -356,12 +428,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_value_timstamp_encode_decode() {
+        let value = Value::Timestamp(1732838400, TimeUnit::Nanosecond);
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        value.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value, decoded);
+    }
+
+    #[tokio::test]
     async fn test_value_encode_decode_fail() {
         {
             let mut buf = Vec::new();
             let mut cursor = Cursor::new(&mut buf);
 
-            10u8.encode(&mut cursor).await.unwrap();
+            encode_arrow_datatype(&DataType::Float32, &mut cursor)
+                .await
+                .unwrap();
             1.23f32.encode(&mut cursor).await.unwrap();
 
             cursor.seek(SeekFrom::Start(0)).await.unwrap();
@@ -373,7 +460,9 @@ mod tests {
             let mut buf = Vec::new();
             let mut cursor = Cursor::new(&mut buf);
 
-            11u8.encode(&mut cursor).await.unwrap();
+            encode_arrow_datatype(&DataType::Float64, &mut cursor)
+                .await
+                .unwrap();
             1.23f32.encode(&mut cursor).await.unwrap();
 
             cursor.seek(SeekFrom::Start(0)).await.unwrap();
@@ -381,17 +470,47 @@ mod tests {
             let res = Value::decode(&mut cursor).await;
             assert!(res.is_err());
         }
-        {
-            let mut buf = Vec::new();
-            let mut cursor = Cursor::new(&mut buf);
+    }
 
-            19u8.encode(&mut cursor).await.unwrap();
-            1.23f32.encode(&mut cursor).await.unwrap();
+    #[should_panic]
+    #[tokio::test]
+    async fn test_value_time32_nano_encode_decode_panic() {
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
 
-            cursor.seek(SeekFrom::Start(0)).await.unwrap();
+        19u8.encode(&mut cursor).await.unwrap();
+        encode_arrow_timeunit(&arrow::datatypes::TimeUnit::Nanosecond, &mut cursor)
+            .await
+            .unwrap();
 
-            let res = Value::decode(&mut cursor).await;
-            assert!(res.is_err());
-        }
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let _ = Value::decode(&mut cursor).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_value_encode_decode() {
+        let value = Value::List(
+            DataType::List(Arc::new(Field::new(
+                "timestamp",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ))),
+            vec![Arc::new(Value::List(
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                vec![Arc::new(Value::Timestamp(
+                    1732838400,
+                    TimeUnit::Millisecond,
+                ))],
+            ))],
+        );
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        value.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value, decoded);
     }
 }

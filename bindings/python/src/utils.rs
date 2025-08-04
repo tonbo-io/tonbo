@@ -34,6 +34,7 @@ pub(crate) fn to_dict(
             Value::Binary(v) => dict.set_item(name, v)?,
             Value::Date32(_)
             | Value::Date64(_)
+            | Value::List(_, _)
             | Value::Timestamp(_, _)
             | Value::Time32(_, _)
             | Value::Time64(_, _) => unimplemented!(),
@@ -69,6 +70,7 @@ pub(crate) fn to_dict_ref<'py, 'r>(
             ValueRef::Binary(v) => dict.set_item(name, v)?,
             ValueRef::Date32(_)
             | ValueRef::Date64(_)
+            | ValueRef::List(_, _)
             | ValueRef::Timestamp(_, _)
             | ValueRef::Time32(_, _)
             | ValueRef::Time64(_, _) => unimplemented!(),
