@@ -1,14 +1,18 @@
-use std::{future::Future, ops::Bound, pin::Pin};
+use std::{future::Future, ops::Bound, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
+use futures::io;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tonbo::{
     executor::Executor,
     parquet::errors::ParquetError,
     record::{Key, Record, Schema},
+    transaction::Transaction,
     Entry,
 };
+
+use crate::error::CloudError;
 
 mod aws;
 mod compaction;
@@ -17,23 +21,23 @@ mod metadata;
 
 /// Trait for implmenting a cloud instance over different object storages
 #[async_trait]
-pub trait TonboCloud<R, E>
+pub trait TonboCloud<R>
 where
     R: Record,
-    E: Executor,
 {
     /// Creates a new Tonbo cloud instnace
-    async fn new(&self, name: String);
+     async fn new(&self, name: String, schema: R::Schema) -> Self;
 
     fn write(&self, records: impl ExactSizeIterator<Item = R>);
 
-    fn read<'a>(
+    async fn read<'a>(
         &'a self,
-        scan: ScanRequest<<R::Schema as Schema>::Key>,
-    ) -> impl Stream<Item = Result<Entry<'a, R>, ParquetError>>;
+        transaction: &'a Transaction<'_, R>,
+        scan: &'a ScanRequest<<R::Schema as Schema>::Key>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>>, CloudError>;
 
     /// Listens to new read requests from connections
-    fn listen<'a>(&'a self) -> Pin<Box<(dyn Future<Output = std::io::Result<()>> + Send + 'a)>>;
+    fn listen(&'static self) -> impl Future<Output = std::io::Result<()>> + 'static;
 
     // Updates metadata
     fn update_metadata();

@@ -1,6 +1,6 @@
-use std::{env, future::Future, marker::Send, pin::Pin, sync::Arc};
+use std::{env, fmt::Debug, future::Future, marker::Send, pin::Pin, sync::Arc};
 
-use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use fusio::{
@@ -8,21 +8,20 @@ use fusio::{
     remotes::aws::{fs::AmazonS3Builder, AwsCredential},
     DynFs,
 };
+use tonbo::record::Schema;
 use futures_core::Stream;
+use futures_util::StreamExt;
 use tokio::fs::create_dir_all;
 use tonbo::{
-    executor::{tokio::TokioExecutor, Executor},
-    parquet::errors::ParquetError,
-    record::{Record, Schema},
-    DbOption, Entry, Record, DB,
+     executor::tokio::TokioExecutor, parquet::errors::ParquetError, record::Record, transaction::Transaction, DbOption, Entry, Record, DB
 };
 
-use crate::{ScanRequest, TonboCloud};
+use crate::{error::CloudError, ScanRequest, TonboCloud};
 
 pub const DEFAULT_PORT: u32 = 8080;
 
 // Temporarily using a static schema
-#[derive(Record, Debug)]
+#[derive(Record, Default,Debug)]
 pub struct User {
     #[record(primary_key)]
     name: String,
@@ -31,16 +30,15 @@ pub struct User {
 }
 
 /// Every table has its own tonbo cloud instnace.
-pub struct AWSTonbo<R, E>
+pub struct AWSTonbo<R>
 where
     R: Record,
-    E: Executor,
 {
     // TODO: Add Tonbo DB instance
     // Name of the Tonbo cloud instance
     name: String,
     // Local Tonbo instance
-    tonbo: DB<R, E>,
+    tonbo: DB<R, TokioExecutor>,
     // Remote file system
     s3_fs: Arc<dyn DynFs>,
     // Endpoint for read requests (scans)
@@ -50,18 +48,17 @@ where
 }
 
 #[async_trait]
-impl<R, E> TonboCloud<R, E> for AWSTonbo<R, E>
+impl<R> TonboCloud<R> for AWSTonbo<R>
 where
     R: Record + Send + Sync,
     <R::Schema as Schema>::Columns: Send + Sync,
-    E: Executor + Send + Sync + 'static,
 {
     /// Creates new Tonbo cloud instance on S3
-    async fn new(&self, name: String) {
+    async fn new(&self, name: String, schema: R::Schema) -> Self {
         let key_id = env::var("AWS_ACCESS_KEY_ID").unwrap();
         let secret_key = env::var("AWS_SECRET_ACCESS_KEY").unwrap();
 
-        let s3: Arc<dyn DynFs> = Arc::new(
+        let s3_fs: Arc<dyn DynFs> = Arc::new(
             AmazonS3Builder::new("fusio-test".into())
                 .credential(AwsCredential {
                     key_id,
@@ -77,59 +74,74 @@ where
 
         let options = DbOption::new(
             TonboPath::from_filesystem_path("./db_path/users").unwrap(),
-            &UserSchema,
+            &schema,
         );
 
-        let db = DB::new(options, TokioExecutor::current(), UserSchema)
+
+        let tonbo: DB<R, TokioExecutor> = DB::new(options, TokioExecutor::current(), schema)
             .await
             .unwrap();
 
         let host = std::env::var("DEFAULT_HOST").unwrap();
 
-        self.read_endpoint = format!("http://{}:{}/tables/{}/scan", host, DEFAULT_PORT, name);
-        self.read_endpoint = format!("http://{}:{}/tables/{}/write", host, DEFAULT_PORT, name);
+        let read_endpoint = format!("http://{}:{}/tables/{}/scan", host, DEFAULT_PORT, name);
+        let write_endpoint = format!("http://{}:{}/tables/{}/write", host, DEFAULT_PORT, name);
 
-        let _ = tokio::spawn(self.listen());
+        Self {
+            name,
+            tonbo,
+            s3_fs,
+            read_endpoint,
+            write_endpoint,
+        }
     }
 
     // TODO: Use `DynRecord`
-    fn write(&self, records: impl ExactSizeIterator<Item = R>) {}
+    fn write(&self, _records: impl ExactSizeIterator<Item = R>) {}
 
-    fn read<'a>(
+    async fn read<'a>(
         &'a self,
-        scan: ScanRequest<<R::Schema as Schema>::Key>,
-    ) -> Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>> {
-        Box::pin(try_stream! {
-            // 1) await the async take() builder
-            let mut inner: _ = self
-                .tonbo
-                .transaction()
-                .await
-                .scan((scan.bounds.0.as_ref(), scan.bounds.1.as_ref()))
-                .projection(&["email"])
-                .take()
-                .await?;
+        transaction: &'a Transaction<'_, R>,
+        scan: &'a ScanRequest<<R::Schema as Schema>::Key>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>>, CloudError> {
+        Ok(Box::pin(try_stream! {
+                let projection: Vec<&str> = scan.projection.iter().map(String::as_str).collect();
 
-            while let Some(item) = inner.next().await {
-                // `item` is Result<Entry<'a,R>, ParquetError>
-                yield item?;
+            let mut inner = transaction
+                .scan((
+                    scan.bounds.0.as_ref(),
+                    scan.bounds.1.as_ref(),
+                ))
+                .projection(&projection)
+                .take()
+                .await
+                .map_err(|_db_err| {
+                    ParquetError::General("Tonbo Error".to_string())
+                })?;
+
+            while let Some(entry) = inner.next().await {
+                yield entry?;
             }
-        })
+        }))
     }
 
-    // TODO: Set up API for listening to write requests to Tonbo
-    fn listen<'a>(&'a self) -> Pin<Box<(dyn Future<Output = std::io::Result<()>> + Send + 'a)>> {
-        Box::pin(async move {
-            let shared = Arc::new(self.clone());
+    fn listen(&'static self) -> impl Future<Output = std::io::Result<()>> + 'static {
+        let tonbo = Arc::new(self.clone());
+        let endpoint = tonbo.read_endpoint.clone();
+
+        async move {
             HttpServer::new(move || {
                 App::new()
-                    .app_data(web::Data::from(shared.clone()))
-                    .service(scan_handler)
+                    .app_data(web::Data::from(tonbo.clone()))
+                    .route(
+                    "/tables/{table_name}/scan",
+                    web::post().to(scan_handler::<User>),
+                )
             })
-            .bind(self.read_endpoint)?
+            .bind(endpoint)?
             .run()
             .await
-        })
+        }
     }
 
     // This will create the new metadata update that will be sent to S3
@@ -143,21 +155,22 @@ where
     }
 }
 
-#[post("/tables/{table_name}/scan")]
-async fn scan_handler<R, E>(
+async fn scan_handler<R>(
     path: web::Path<String>,
-    req: web::Json<ScanRequest<<R::Schema as Schema>::Key>, data: web::Data<Arc<AWSTonbo<R, E>>>>,
+    req: web::Json<ScanRequest<<R::Schema as Schema>::Key>>,
+ data: web::Data<Arc<AWSTonbo<R>>>,
 ) -> impl Responder
 where
-    R: Record + Send + Sync + 'static,
-    E: Executor + Send + Sync + 'static,
+    R: Record + Send + Sync + 'static ,
+    <R::Schema as Schema>::Columns: Send + Sync,
 {
     let table = path.into_inner();
     if table != data.name {
         return HttpResponse::NotFound().body(format!("No Tonbo instance named “{}”", table));
     }
 
-    match data.read(req).await {
+    let tx = data.tonbo.transaction().await;
+    match data.read(&tx, &req).await {
         Ok(bytes) => HttpResponse::Ok()
             .content_type("application/octet-stream")
             .body(bytes),
