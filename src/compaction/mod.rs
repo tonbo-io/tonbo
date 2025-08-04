@@ -6,7 +6,7 @@ pub(crate) mod tiered;
 use std::{pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
-use fusio::DynFs;
+use fusio::{DynFs, MaybeSend, MaybeSync};
 use fusio_parquet::writer::AsyncWriter;
 use futures_util::StreamExt;
 use parquet::arrow::AsyncArrowWriter;
@@ -22,11 +22,11 @@ use crate::{
     DbOption,
 };
 
-#[async_trait]
-pub(crate) trait Compactor<R>: Send + Sync
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub(crate) trait Compactor<R>: MaybeSend + MaybeSync
 where
     R: Record,
-    <<R as record::Record>::Schema as record::Schema>::Columns: Send + Sync,
 {
     /// Orchestrate flush + major compaction.
     /// This is the only method custom compactors need to implement.
@@ -42,6 +42,7 @@ where
     ) -> Result<(), CompactionError<R>>
     where
         Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
     {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
 
@@ -121,6 +122,7 @@ where
     ) -> Result<(), CompactionError<R>>
     where
         Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
     {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());

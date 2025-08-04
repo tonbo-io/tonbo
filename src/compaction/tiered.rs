@@ -1,28 +1,23 @@
-use std::mem;
-use std::ops::Bound;
-use std::sync::Arc;
+use std::{mem, ops::Bound, sync::Arc};
 
 use async_lock::{RwLock, RwLockUpgradableReadGuard};
+use async_trait::async_trait;
+use fusio::MaybeSend;
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use ulid::Ulid;
 
 use super::{CompactionError, Compactor};
-use crate::compaction::RecordSchema;
-use crate::fs::manager::StoreManager;
-use crate::fs::{generate_file_id, FileId, FileType};
-use crate::inmem::immutable::ImmutableMemTable;
-use crate::inmem::mutable::MutableMemTable;
-use crate::ondisk::sstable::{SsTable, SsTableID};
-use crate::scope::Scope;
-use crate::stream::level::LevelStream;
-use crate::stream::ScanStream;
-use crate::version::edit::VersionEdit;
-use crate::version::TransactionTs;
 use crate::{
+    compaction::RecordSchema,
     context::Context,
-    record::{self, Record},
-    version::{Version, MAX_LEVEL},
+    fs::{generate_file_id, manager::StoreManager, FileId, FileType},
+    inmem::{immutable::ImmutableMemTable, mutable::MutableMemTable},
+    ondisk::sstable::{SsTable, SsTableID},
+    record::Record,
+    scope::Scope,
+    stream::{level::LevelStream, ScanStream},
+    version::{edit::VersionEdit, TransactionTs, Version, MAX_LEVEL},
     CompactionExecutor, DbOption, DbStorage,
 };
 
@@ -83,11 +78,12 @@ impl<R: Record> TieredCompactor<R> {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<R> Compactor<R> for TieredCompactor<R>
 where
     R: Record,
-    <<R as record::Record>::Schema as record::Schema>::Columns: Send + Sync,
+    <<R as Record>::Schema as RecordSchema>::Columns: Send + Sync,
 {
     async fn check_then_compaction(&self, is_manual: bool) -> Result<(), CompactionError<R>> {
         self.minor_flush(is_manual).await?;
@@ -110,12 +106,12 @@ where
 
 impl<R: Record> CompactionExecutor<R> for TieredCompactor<R>
 where
-    <<R as crate::record::Record>::Schema as crate::record::Schema>::Columns: Send + Sync,
+    <<R as Record>::Schema as RecordSchema>::Columns: Send + Sync,
 {
     fn check_then_compaction(
         &self,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + Send {
+    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend {
         <Self as Compactor<R>>::check_then_compaction(self, is_manual)
     }
 }
@@ -123,7 +119,7 @@ where
 impl<R> TieredCompactor<R>
 where
     R: Record,
-    <<R as record::Record>::Schema as record::Schema>::Columns: Send + Sync,
+    <<R as Record>::Schema as RecordSchema>::Columns: Send + Sync,
 {
     pub async fn should_major_compact(&self) -> bool {
         let version_ref = self.ctx.manifest.current().await;
@@ -442,8 +438,8 @@ where
 
     fn tier_capacity(options: &TieredOptions, tier: usize) -> usize {
         // Base capacity for tier 0
-        //let base_capacity = option.tier_base_capacity.unwrap_or(4);
-        //let growth_factor = option.tier_growth_factor.unwrap_or(4);
+        // let base_capacity = option.tier_base_capacity.unwrap_or(4);
+        // let growth_factor = option.tier_growth_factor.unwrap_or(4);
 
         options.tier_base_capacity * options.tier_growth_factor.pow(tier as u32)
     }
@@ -476,8 +472,10 @@ pub(crate) mod tests {
         scope::Scope,
         tests::Test,
         trigger::{TriggerFactory, TriggerType},
-        version::timestamp::Timestamp,
-        version::{cleaner::Cleaner, edit::VersionEdit, set::VersionSet, Version, MAX_LEVEL},
+        version::{
+            cleaner::Cleaner, edit::VersionEdit, set::VersionSet, timestamp::Timestamp, Version,
+            MAX_LEVEL,
+        },
         wal::log::LogType,
         DbError, DbOption, DB,
     };
@@ -1680,10 +1678,10 @@ pub(crate) mod tests_metric {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
     async fn test_throughput() {
-        use futures_util::StreamExt;
-        use rand::seq::SliceRandom;
-        use rand::SeedableRng;
         use std::time::Instant;
+
+        use futures_util::StreamExt;
+        use rand::{seq::SliceRandom, SeedableRng};
 
         let temp_dir = TempDir::new().unwrap();
         let mut option = DbOption::new(
@@ -1699,7 +1697,8 @@ pub(crate) mod tests_metric {
                 .await
                 .unwrap();
 
-        // Test parameters based on EcoTune paper (Section 5.1: 35% Get, 35% Seek, 30% long range scans)
+        // Test parameters based on EcoTune paper (Section 5.1: 35% Get, 35% Seek, 30% long range
+        // scans)
         let total_operations = 100000;
         let insert_ratio = 0.3; // 30% inserts to build up data
         let get_ratio = 0.35; // 35% Get operations (point queries)

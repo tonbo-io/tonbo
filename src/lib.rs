@@ -132,6 +132,7 @@ use async_stream::stream;
 use context::Context;
 use flume::{bounded, Sender};
 use fs::FileId;
+use fusio::{MaybeSend, MaybeSync};
 pub use fusio::{SeqRead, Write};
 pub use fusio_log::{Decode, Encode};
 use futures_core::Stream;
@@ -185,22 +186,19 @@ use crate::{
 };
 pub use crate::{option::*, stream::Entry};
 
-pub trait CompactionExecutor<R: Record>: Send + Sync {
+pub trait CompactionExecutor<R: Record>: MaybeSend + MaybeSync {
     fn check_then_compaction(
         &self,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend;
 }
 
 // Implementation for custom compactors (Box<dyn Compactor<R>>)
-impl<R: Record> CompactionExecutor<R> for Box<dyn Compactor<R>>
-where
-    <<R as record::Record>::Schema as record::Schema>::Columns: Send + Sync,
-{
+impl<R: Record> CompactionExecutor<R> for Box<dyn Compactor<R>> {
     fn check_then_compaction(
         &self,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + Send {
+    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend {
         self.as_ref().check_then_compaction(is_manual)
     }
 }
@@ -402,7 +400,7 @@ where
         task_rx: flume::Receiver<CompactTask>,
     ) -> Result<Self, DbError>
     where
-        C: CompactionExecutor<R> + Send + Sync + 'static,
+        C: CompactionExecutor<R> + MaybeSend + MaybeSync + 'static,
     {
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
@@ -1186,8 +1184,6 @@ pub enum DbError {
     ExceedsMaxLevel,
     #[error("write log error: {0}")]
     Logger(#[from] fusio_log::error::LogError),
-    #[error("custom error: {0}")]
-    Custom(String),
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
