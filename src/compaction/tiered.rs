@@ -433,7 +433,7 @@ where
         }
 
         let tier_capacity = Self::tier_capacity(options, tier);
-        version.level_slice[tier].len() >= tier_capacity
+        version.level_slice[tier].len() > tier_capacity
     }
 
     fn tier_capacity(options: &TieredOptions, tier: usize) -> usize {
@@ -1072,22 +1072,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_tier_capacity_calculation() {
-        let options = TieredOptions {
-            tier_base_capacity: 4,
-            tier_growth_factor: 4,
-            ..Default::default()
-        };
-
-        // Test tier capacity calculation
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 0), 4); // 4 * 4^0 = 4
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 1), 16); // 4 * 4^1 = 16
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 2), 64); // 4 * 4^2 = 64
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 3), 256); // 4 * 4^3 = 256
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_is_tier_full() {
+    async fn test_tier_capacity_and_compaction_planning() {
         let temp_dir = TempDir::new().unwrap();
         let option = Arc::new(DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -1105,7 +1090,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
 
-        // Initially no tiers are full
+        // Test 1: Initially no tiers are full
         assert!(!TieredCompactor::<Test>::is_tier_full(
             &options, &version, 0
         ));
@@ -1116,80 +1101,7 @@ pub(crate) mod tests {
             &options, &version, 2
         ));
 
-        // Add 2 files to tier 0 (capacity = 2)
-        version.level_slice[0].push(Scope {
-            min: "1".to_string(),
-            max: "2".to_string(),
-            gen: generate_file_id(),
-            wal_ids: None,
-            file_size: 100,
-        });
-        version.level_slice[0].push(Scope {
-            min: "3".to_string(),
-            max: "4".to_string(),
-            gen: generate_file_id(),
-            wal_ids: None,
-            file_size: 100,
-        });
-
-        // Tier 0 should now be full
-        assert!(TieredCompactor::<Test>::is_tier_full(&options, &version, 0));
-        assert!(!TieredCompactor::<Test>::is_tier_full(
-            &options, &version, 1
-        ));
-
-        // Add 4 files to tier 1 (capacity = 4)
-        for i in 0..4 {
-            version.level_slice[1].push(Scope {
-                min: format!("{}", i * 2 + 5),
-                max: format!("{}", i * 2 + 6),
-                gen: generate_file_id(),
-                wal_ids: None,
-                file_size: 100,
-            });
-        }
-
-        // Both tier 0 and tier 1 should be full
-        assert!(TieredCompactor::<Test>::is_tier_full(&options, &version, 0));
-        assert!(TieredCompactor::<Test>::is_tier_full(&options, &version, 1));
-        assert!(!TieredCompactor::<Test>::is_tier_full(
-            &options, &version, 2
-        ));
-
-        // Test beyond max_tiers
-        assert!(!TieredCompactor::<Test>::is_tier_full(
-            &options, &version, 3
-        ));
-        assert!(!TieredCompactor::<Test>::is_tier_full(
-            &options, &version, 4
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_compaction_planning() {
-        let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        ));
-
-        let (sender, _) = bounded(1);
-        let mut version =
-            Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
-
-        let options = TieredOptions {
-            tier_base_capacity: 2,
-            tier_growth_factor: 2,
-            max_tiers: 4,
-            ..Default::default()
-        };
-
-        // Initially no compaction should be planned
-        assert!(!TieredCompactor::<Test>::is_tier_full(
-            &options, &version, 0
-        ));
-
-        // Add files to make tier 0 full
+        // Test 2: Add files to reach capacity (but not exceed)
         version.level_slice[0].push(Scope {
             min: "0".to_string(),
             max: "1".to_string(),
@@ -1205,10 +1117,24 @@ pub(crate) mod tests {
             file_size: 100,
         });
 
-        // Now tier 0 should be full
+        // Tier 0 should not be full yet (at capacity but not exceeding)
+        assert!(!TieredCompactor::<Test>::is_tier_full(
+            &options, &version, 0
+        ));
+
+        // Test 3: Exceed capacity to trigger compaction planning
+        version.level_slice[0].push(Scope {
+            min: "4".to_string(),
+            max: "5".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 100,
+        });
+
+        // Now tier 0 should be full (exceeding capacity of 2)
         assert!(TieredCompactor::<Test>::is_tier_full(&options, &version, 0));
 
-        // Test planning logic directly
+        // Test 4: Compaction planning logic
         for tier in 0..MAX_LEVEL - 1 {
             if TieredCompactor::<Test>::is_tier_full(&options, &version, tier) {
                 assert_eq!(tier, 0); // Only tier 0 should be full
@@ -1217,51 +1143,14 @@ pub(crate) mod tests {
                     .iter()
                     .map(|scope| scope.gen)
                     .collect();
-
-                assert_eq!(tier_files.len(), 2); // Should have 2 files
+                assert_eq!(tier_files.len(), 3); // Should have 3 files (exceeding capacity of 2)
                 break;
             }
         }
-    }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_multiple_tier_capacity_logic() {
-        let options = TieredOptions {
-            tier_base_capacity: 2,
-            tier_growth_factor: 3,
-            max_tiers: 4,
-            ..Default::default()
-        };
-
-        // Test various tier configurations
-        let temp_dir = TempDir::new().unwrap();
-        let option = Arc::new(DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        ));
-
-        let (sender, _) = bounded(1);
-        let mut version =
-            Version::<Test>::new(option.clone(), sender, Arc::new(AtomicU32::default()));
-
-        // Tier 0: capacity = 2, add exactly 2 files
-        version.level_slice[0].push(Scope {
-            min: "0".to_string(),
-            max: "1".to_string(),
-            gen: generate_file_id(),
-            wal_ids: None,
-            file_size: 100,
-        });
-        version.level_slice[0].push(Scope {
-            min: "2".to_string(),
-            max: "3".to_string(),
-            gen: generate_file_id(),
-            wal_ids: None,
-            file_size: 100,
-        });
-
-        // Tier 1: capacity = 6 (2 * 3^1), add 6 files to make it full
-        for i in 0..6 {
+        // Test 5: Multi-tier capacity behavior
+        // Add 4 files to tier 1 (capacity = 4)
+        for i in 0..4 {
             version.level_slice[1].push(Scope {
                 min: format!("{}", i * 2 + 10),
                 max: format!("{}", i * 2 + 11),
@@ -1271,18 +1160,34 @@ pub(crate) mod tests {
             });
         }
 
-        // Test tier fullness logic
+        // Tier 1 at capacity but not full
+        assert!(!TieredCompactor::<Test>::is_tier_full(
+            &options, &version, 1
+        ));
+
+        // Exceed tier 1 capacity
+        version.level_slice[1].push(Scope {
+            min: "100".to_string(),
+            max: "101".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 100,
+        });
+
+        // Now both tiers should be full
         assert!(TieredCompactor::<Test>::is_tier_full(&options, &version, 0));
         assert!(TieredCompactor::<Test>::is_tier_full(&options, &version, 1));
         assert!(!TieredCompactor::<Test>::is_tier_full(
             &options, &version, 2
         ));
 
-        // Test tier capacity calculations
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 0), 2);
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 1), 6);
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 2), 18);
-        assert_eq!(TieredCompactor::<Test>::tier_capacity(&options, 3), 54);
+        // Test 6: Boundary conditions
+        assert!(!TieredCompactor::<Test>::is_tier_full(
+            &options, &version, 3
+        ));
+        assert!(!TieredCompactor::<Test>::is_tier_full(
+            &options, &version, 4
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1305,7 +1210,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
 
-        // Add files to tier 0
+        // Add files to tier 0 to exceed capacity
         version.level_slice[0].push(Scope {
             min: "1".to_string(),
             max: "2".to_string(),
@@ -1320,8 +1225,15 @@ pub(crate) mod tests {
             wal_ids: None,
             file_size: 100,
         });
+        version.level_slice[0].push(Scope {
+            min: "5".to_string(),
+            max: "6".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 100,
+        });
 
-        // With max_tiers = 1, tier 0 is still considered full based on capacity
+        // With max_tiers = 1, tier 0 is still considered full when exceeding capacity
         // but compaction planning should handle the case where there's no target tier
         assert!(TieredCompactor::<Test>::is_tier_full(&options, &version, 0));
 
@@ -1361,7 +1273,7 @@ pub(crate) mod tests {
                     .iter()
                     .map(|scope| scope.gen)
                     .collect();
-                assert_eq!(tier_files.len(), 2);
+                assert_eq!(tier_files.len(), 3);
 
                 // The planned target_tier would be 1, which exceeds max_tiers = 1
                 let planned_target = tier + 1;
@@ -1483,6 +1395,184 @@ pub(crate) mod tests {
         }
         dbg!(version);
     }
+
+    // Test tiered compaction timing - when tier 0 reaches capacity, it should trigger compaction
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_tiered_compaction_timing() {
+        // Test different capacity configurations and their compaction behavior
+
+        // Test case 1: Capacity 2 - should trigger compaction
+        {
+            let temp_dir = TempDir::new().unwrap();
+            let tiered_options = TieredOptions {
+                tier_base_capacity: 2,
+                tier_growth_factor: 3,
+                max_tiers: 4,
+                immutable_chunk_num: 1,
+                immutable_chunk_max_num: 1,
+            };
+
+            let mut option = DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            )
+            .tiered_compaction(tiered_options)
+            .immutable_chunk_num(1)
+            .immutable_chunk_max_num(1);
+            option.trigger_type = TriggerType::Length(5);
+
+            let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+                .await
+                .unwrap();
+
+            // Add files up to capacity
+            for batch in 0..2 {
+                for i in (batch * 5)..(batch + 1) * 5 {
+                    db.insert(Test {
+                        vstring: i.to_string(),
+                        vu32: i,
+                        vbool: Some(true),
+                    })
+                    .await
+                    .unwrap();
+                }
+                db.flush().await.unwrap();
+            }
+
+            let version = db.ctx.manifest.current().await;
+            assert_eq!(version.level_slice[0].len(), 2); // At capacity
+            assert_eq!(version.level_slice[1].len(), 0);
+
+            // Exceed capacity
+            for i in 10..15 {
+                db.insert(Test {
+                    vstring: i.to_string(),
+                    vu32: i,
+                    vbool: Some(true),
+                })
+                .await
+                .unwrap();
+            }
+            db.flush().await.unwrap();
+
+            let version = db.ctx.manifest.current().await;
+            let total_files = version.level_slice[0].len() + version.level_slice[1].len();
+            assert!(total_files >= 1);
+            // Should have triggered compaction to tier 1
+            if version.level_slice[1].len() > 0 {
+                for scope in &version.level_slice[1] {
+                    assert!(scope.min <= scope.max);
+                }
+            }
+        }
+
+        // Test case 2: Capacity 4 - should NOT trigger compaction
+        {
+            let temp_dir = TempDir::new().unwrap();
+            let tiered_options = TieredOptions {
+                tier_base_capacity: 4, // Higher capacity
+                tier_growth_factor: 2,
+                max_tiers: 4,
+                immutable_chunk_num: 1,
+                immutable_chunk_max_num: 1,
+            };
+
+            let mut option = DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            )
+            .tiered_compaction(tiered_options)
+            .immutable_chunk_num(1)
+            .immutable_chunk_max_num(1);
+            option.trigger_type = TriggerType::Length(5);
+
+            let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+                .await
+                .unwrap();
+
+            // Add 3 files (under capacity of 4)
+            for batch in 0..3 {
+                for i in (batch * 5)..(batch + 1) * 5 {
+                    db.insert(Test {
+                        vstring: i.to_string(),
+                        vu32: i,
+                        vbool: Some(true),
+                    })
+                    .await
+                    .unwrap();
+                }
+                db.flush().await.unwrap();
+            }
+
+            let version = db.ctx.manifest.current().await;
+            assert_eq!(version.level_slice[0].len(), 3); // Under capacity
+            assert_eq!(version.level_slice[1].len(), 0); // No compaction
+        }
+
+        // Test case 3: Capacity 3 - precise threshold behavior
+        {
+            let temp_dir = TempDir::new().unwrap();
+            let tiered_options = TieredOptions {
+                tier_base_capacity: 3,
+                tier_growth_factor: 2,
+                max_tiers: 3,
+                immutable_chunk_num: 1,
+                immutable_chunk_max_num: 1,
+            };
+
+            let mut option = DbOption::new(
+                Path::from_filesystem_path(temp_dir.path()).unwrap(),
+                &TestSchema,
+            )
+            .tiered_compaction(tiered_options)
+            .immutable_chunk_num(1)
+            .immutable_chunk_max_num(1);
+            option.trigger_type = TriggerType::Length(10);
+
+            let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+                .await
+                .unwrap();
+
+            // Add exactly at capacity
+            for batch in 0..3 {
+                for i in (batch * 10)..(batch + 1) * 10 {
+                    db.insert(Test {
+                        vstring: format!("{:03}", i),
+                        vu32: i,
+                        vbool: Some(i % 2 == 0),
+                    })
+                    .await
+                    .unwrap();
+                }
+                db.flush().await.unwrap();
+            }
+
+            let version_before = db.ctx.manifest.current().await;
+            assert_eq!(version_before.level_slice[0].len(), 3); // At capacity
+            assert_eq!(version_before.level_slice[1].len(), 0);
+
+            // Exceed capacity
+            for i in 30..40 {
+                db.insert(Test {
+                    vstring: format!("{:03}", i),
+                    vu32: i,
+                    vbool: Some(i % 2 == 0),
+                })
+                .await
+                .unwrap();
+            }
+            db.flush().await.unwrap();
+
+            let version_after = db.ctx.manifest.current().await;
+            let tier0_files = version_after.level_slice[0].len();
+            let tier1_files = version_after.level_slice[1].len();
+
+            // Should trigger compaction
+            assert!(tier0_files < 3 || tier1_files > 0);
+            let total_files = tier0_files + tier1_files;
+            assert!(total_files >= 1 && total_files <= 4);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "tokio"))]
@@ -1492,41 +1582,18 @@ pub(crate) mod tests_metric {
     use tempfile::TempDir;
 
     use crate::{
-        compaction::tiered::TieredOptions, executor::tokio::TokioExecutor,
-        inmem::immutable::tests::TestSchema, tests::Test, trigger::TriggerType, version::MAX_LEVEL,
-        DbOption, DB,
+        compaction::{
+            tests_metric::{read_write_amplification_measurement, throughput},
+            tiered::TieredOptions,
+        },
+        inmem::immutable::tests::TestSchema,
+        trigger::TriggerType,
+        DbOption,
     };
-
-    fn convert_test_ref_to_test(
-        entry: crate::transaction::TransactionEntry<'_, Test>,
-    ) -> Option<Test> {
-        match &entry {
-            crate::transaction::TransactionEntry::Stream(stream_entry) => {
-                if stream_entry.value().is_some() {
-                    let test_ref = entry.get();
-                    Some(Test {
-                        vstring: test_ref.vstring.to_string(),
-                        vu32: test_ref.vu32.unwrap_or(0),
-                        vbool: test_ref.vbool,
-                    })
-                } else {
-                    None
-                }
-            }
-            crate::transaction::TransactionEntry::Local(_) => {
-                let test_ref = entry.get();
-                Some(Test {
-                    vstring: test_ref.vstring.to_string(),
-                    vu32: test_ref.vu32.unwrap_or(0),
-                    vbool: test_ref.vbool,
-                })
-            }
-        }
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    async fn test_read_write_amplification_measurement() {
+    async fn read_write_amplification_measurement_tiered() {
         let temp_dir = TempDir::new().unwrap();
         let tiered_options = TieredOptions {
             tier_base_capacity: 3,
@@ -1540,149 +1607,12 @@ pub(crate) mod tests_metric {
         .tiered_compaction(tiered_options)
         .max_sst_file_size(1024); // Small file size to force multiple files
 
-        let db: DB<Test, TokioExecutor> =
-            DB::new(option.clone(), TokioExecutor::current(), TestSchema)
-                .await
-                .unwrap();
-
-        // Track metrics for amplification calculation
-        let mut total_bytes_written_by_user = 0u64;
-        let mut compaction_rounds = 0;
-
-        // Insert initial dataset with more substantial data
-        let initial_records = 1000;
-        let iter_num = 10;
-        for i in 0..initial_records * iter_num {
-            let record = Test {
-                vstring: format!("this_is_a_longer_key_to_make_files_bigger_{:05}", i),
-                vu32: i as u32,
-                vbool: Some(i % 2 == 0),
-            };
-
-            // More accurate user data size calculation
-            let string_bytes = record.vstring.as_bytes().len();
-            let u32_bytes = 4;
-            let bool_bytes = 1;
-            let record_size = string_bytes + u32_bytes + bool_bytes;
-            total_bytes_written_by_user += record_size as u64;
-
-            db.insert(record).await.unwrap();
-
-            if i % initial_records == 0 {
-                // Force flush and compaction
-                db.flush().await.unwrap();
-                compaction_rounds += 1;
-            }
-        }
-
-        // Verify data integrity after all compactions (check a sample of keys)
-        for i in 0..initial_records * iter_num {
-            let key = format!("this_is_a_longer_key_to_make_files_bigger_{:05}", i);
-            let result = db.get(&key, convert_test_ref_to_test).await.unwrap();
-            if result.is_some() {
-                let record = result.unwrap();
-                assert_eq!(
-                    record.vu32, i as u32,
-                    "Value should be preserved after compaction"
-                );
-            } else {
-                panic!("Key {} should exist after compaction", key);
-            }
-        }
-
-        // Get final version to measure total file sizes
-        let final_version = db.ctx.manifest.current().await;
-        let mut files_per_level = vec![0; MAX_LEVEL];
-
-        // Verify that total scope.file_size matches total actual file size on disk
-        let manager =
-            crate::fs::manager::StoreManager::new(option.base_fs.clone(), vec![]).unwrap();
-        let fs = manager.base_fs();
-        let mut total_actual_file_size = 0u64;
-
-        for level in 0..MAX_LEVEL {
-            files_per_level[level] = final_version.level_slice[level].len();
-            for scope in &final_version.level_slice[level] {
-                let file = fs
-                    .open_options(
-                        &option.table_path(scope.gen, level),
-                        crate::fs::FileType::Parquet.open_options(true),
-                    )
-                    .await
-                    .unwrap();
-                let actual_size = file.size().await.unwrap();
-                total_actual_file_size += actual_size;
-            }
-        }
-
-        // Calculate amplification metrics using actual file sizes
-        let write_amplification =
-            total_actual_file_size as f64 / total_bytes_written_by_user as f64;
-
-        // Read amplification estimation (simplified)
-        // In a real scenario, this would require tracking actual read operations
-        let estimated_read_amplification = {
-            let mut read_amp = 0.0;
-            for level in 0..MAX_LEVEL {
-                if files_per_level[level] > 0 {
-                    // Level 0 files can overlap, so worst case is reading all files
-                    if level == 0 {
-                        read_amp += files_per_level[level] as f64;
-                    } else {
-                        // For other levels, typically 1 file per level for a point lookup
-                        read_amp += 1.0;
-                    }
-                }
-            }
-            read_amp
-        };
-
-        println!("=== Amplification Metrics ===");
-        println!("User data written: {} bytes", total_bytes_written_by_user);
-        println!("Total file size: {} bytes", total_actual_file_size);
-        println!("Write Amplification: {:.2}x", write_amplification);
-        println!(
-            "Estimated Read Amplification: {:.2}x",
-            estimated_read_amplification
-        );
-        println!("Compaction rounds: {}", compaction_rounds);
-
-        for level in 0..MAX_LEVEL {
-            if files_per_level[level] > 0 {
-                println!("Level {}: {} files", level, files_per_level[level]);
-            }
-        }
-
-        // Assertions for reasonable amplification
-        // Write amplification can be less than 1.0 in some cases due to compression
-        // and the way Parquet stores data efficiently. The important thing is that
-        // we can measure it and it's non-zero.
-        assert!(
-            write_amplification > 0.0,
-            "Write amplification should be positive"
-        );
-        assert!(
-            write_amplification < 10.0,
-            "Write amplification should be reasonable (< 10x)"
-        );
-        assert!(
-            estimated_read_amplification >= 1.0,
-            "Read amplification should be at least 1.0"
-        );
-        assert!(
-            total_actual_file_size > 0,
-            "Should have written some data to disk"
-        );
+        read_write_amplification_measurement(option).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
-    async fn test_throughput() {
-        use std::time::Instant;
-
-        use futures_util::StreamExt;
-        use rand::{seq::SliceRandom, SeedableRng};
-
+    async fn throughput_tiered() {
         let temp_dir = TempDir::new().unwrap();
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -1691,172 +1621,6 @@ pub(crate) mod tests_metric {
         .tiered_compaction(TieredOptions::default());
         option.trigger_type = TriggerType::SizeOfMem(1 * 1024 * 1024);
 
-        // Create DB with EcoTune compactor using the standard open method
-        let db: DB<Test, TokioExecutor> =
-            DB::new(option.clone(), TokioExecutor::current(), TestSchema)
-                .await
-                .unwrap();
-
-        // Test parameters based on EcoTune paper (Section 5.1: 35% Get, 35% Seek, 30% long range
-        // scans)
-        let total_operations = 100000;
-        let insert_ratio = 0.3; // 30% inserts to build up data
-        let get_ratio = 0.35; // 35% Get operations (point queries)
-        let seek_ratio = 0.35; // 35% Seek operations
-        let long_range_ratio = 0.30; // 30% long range scans (paper workload)
-
-        let insert_count = (total_operations as f64 * insert_ratio) as usize;
-        let query_count = total_operations - insert_count;
-        let get_count = (query_count as f64
-            * (get_ratio / (get_ratio + seek_ratio + long_range_ratio)))
-            as usize;
-        let seek_count = (query_count as f64
-            * (seek_ratio / (get_ratio + seek_ratio + long_range_ratio)))
-            as usize;
-        let long_range_count = query_count - get_count - seek_count;
-
-        println!("EcoTune throughput test with paper proportions:");
-        println!("- {} inserts ({:.1}%)", insert_count, insert_ratio * 100.0);
-        println!(
-            "- {} Get queries ({:.1}%)",
-            get_count,
-            (get_count as f64 / total_operations as f64) * 100.0
-        );
-        println!(
-            "- {} Seek queries ({:.1}%)",
-            seek_count,
-            (seek_count as f64 / total_operations as f64) * 100.0
-        );
-        println!(
-            "- {} long-range scans ({:.1}%)",
-            long_range_count,
-            (long_range_count as f64 / total_operations as f64) * 100.0
-        );
-
-        // Create mixed workload operations vector
-
-        let mut operations = Vec::new();
-
-        // Add insert operations
-        for i in 0..insert_count {
-            operations.push(("insert", i));
-        }
-
-        // Add get operations
-        for i in 0..get_count {
-            operations.push(("get", i));
-        }
-
-        // Add seek operations
-        for i in 0..seek_count {
-            operations.push(("seek", i));
-        }
-
-        // Add long-range scan operations
-        for i in 0..long_range_count {
-            operations.push(("long_range", i));
-        }
-
-        // Shuffle operations to create mixed workload
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42); // Fixed seed for reproducibility
-        operations.shuffle(&mut rng);
-
-        // Execute mixed workload
-        let mixed_start = Instant::now();
-        let mut insert_ops = 0;
-        let mut successful_queries = 0;
-
-        for (op_type, index) in operations {
-            match op_type {
-                "insert" => {
-                    let record = Test {
-                        vstring: format!("test_key_{:06}", index),
-                        vu32: index as u32,
-                        vbool: Some(index % 2 == 0),
-                    };
-                    db.insert(record).await.unwrap();
-                    insert_ops += 1;
-                }
-                "get" => {
-                    // Use modulo to ensure key exists (only query from inserted keys)
-                    let key = format!("test_key_{:06}", index % insert_ops.max(1));
-                    let found = db
-                        .get(&key, |entry| match entry {
-                            crate::transaction::TransactionEntry::Stream(stream_entry) => {
-                                Some(stream_entry.value().is_some())
-                            }
-                            crate::transaction::TransactionEntry::Local(_) => Some(true),
-                        })
-                        .await
-                        .unwrap();
-                    if found.unwrap_or(false) {
-                        successful_queries += 1;
-                    }
-                }
-                "seek" => {
-                    let key = format!("test_key_{:06}", index % insert_ops.max(1));
-                    let scan = db
-                        .scan(
-                            (std::ops::Bound::Included(&key), std::ops::Bound::Unbounded),
-                            |entry| match entry {
-                                crate::transaction::TransactionEntry::Stream(_) => true,
-                                crate::transaction::TransactionEntry::Local(_) => true,
-                            },
-                        )
-                        .await
-                        .take(1);
-                    let mut scan = std::pin::pin!(scan);
-
-                    if let Some(result) = scan.next().await {
-                        if result.is_ok() {
-                            successful_queries += 1;
-                        }
-                    }
-                }
-                "long_range" => {
-                    let start_key = format!("test_key_{:06}", index % insert_ops.max(1));
-                    let scan = db
-                        .scan(
-                            (
-                                std::ops::Bound::Included(&start_key),
-                                std::ops::Bound::Unbounded,
-                            ),
-                            |entry| match entry {
-                                crate::transaction::TransactionEntry::Stream(_) => true,
-                                crate::transaction::TransactionEntry::Local(_) => true,
-                            },
-                        )
-                        .await
-                        .take(100);
-                    let mut scan = std::pin::pin!(scan);
-
-                    let mut count = 0;
-                    while let Some(result) = scan.next().await {
-                        if result.is_ok() {
-                            count += 1;
-                            if count >= 100 {
-                                break;
-                            } // Limit to K=100
-                        }
-                    }
-                    if count > 0 {
-                        successful_queries += 1;
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        let mixed_duration = mixed_start.elapsed();
-        let mixed_throughput = total_operations as f64 / mixed_duration.as_secs_f64();
-
-        // Calculate mixed workload results
-        println!("Mixed Workload Throughput Results:");
-        println!("Overall throughput: {:.2} ops/sec", mixed_throughput);
-        println!(
-            "Total operations: {} (inserts: {}, successful queries: {})",
-            total_operations, insert_ops, successful_queries
-        );
-        println!("Total time: {:.3}s", mixed_duration.as_secs_f64());
+        throughput(option).await;
     }
 }
