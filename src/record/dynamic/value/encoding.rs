@@ -88,6 +88,10 @@ impl Encode for Value {
                 v.encode(writer).await?;
                 time_unit.encode(writer).await?;
             }
+            Value::FixedSizeBinary(v, _) => {
+                19u8.encode(writer).await?;
+                v.encode(writer).await?;
+            }
         }
         Ok(())
     }
@@ -108,6 +112,7 @@ impl Encode for Value {
             Value::Float64(v) => 1 + v.size(),
             Value::String(v) => 1 + v.size(),
             Value::Binary(v) => 1 + v.size(),
+            Value::FixedSizeBinary(v, _) => 1 + v.size(),
             Value::Date32(v) => 1 + v.size(),
             Value::Date64(v) => 1 + v.size(),
             Value::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
@@ -152,6 +157,11 @@ impl Decode for Value {
                 i64::decode(reader).await?,
                 TimeUnit::decode(reader).await?,
             )),
+            19 => {
+                let data = Vec::<u8>::decode(reader).await?;
+                let width = data.len() as u32;
+                Ok(Value::FixedSizeBinary(data, width))
+            }
             _ => Err(fusio::Error::Other(Box::new(ValueError::InvalidDataType(
                 data_type.to_string(),
             )))),
@@ -277,6 +287,10 @@ impl Encode for ValueRef<'_> {
                 v.encode(writer).await?;
                 time_unit.encode(writer).await?;
             }
+            ValueRef::FixedSizeBinary(items, _) => {
+                19u8.encode(writer).await?;
+                items.encode(writer).await?;
+            }
         }
         Ok(())
     }
@@ -297,6 +311,7 @@ impl Encode for ValueRef<'_> {
             ValueRef::Float64(v) => 1 + v.size(),
             ValueRef::String(v) => 1 + v.size(),
             ValueRef::Binary(v) => 1 + v.size(),
+            ValueRef::FixedSizeBinary(v, _) => 1 + v.size(),
             ValueRef::Date32(v) => 1 + v.size(),
             ValueRef::Date64(v) => 1 + v.size(),
             ValueRef::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
@@ -393,5 +408,18 @@ mod tests {
             let res = Value::decode(&mut cursor).await;
             assert!(res.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn test_fixed_size_binary_value_encode_decode() {
+        let value = Value::FixedSizeBinary(b"hello".to_vec(), 5);
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        value.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value, decoded);
     }
 }
