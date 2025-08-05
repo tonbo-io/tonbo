@@ -17,7 +17,7 @@ pub struct RecordBatchEntry<R>
 where
     R: Record,
 {
-    _record_batch: RecordBatch,
+    record_batch: RecordBatch,
     record_ref: OptionRecordRef<'static, R::Ref<'static>>,
 }
 
@@ -26,13 +26,17 @@ where
     R: Record,
 {
     pub(crate) fn new(
-        _record_batch: RecordBatch,
+        record_batch: RecordBatch,
         record_ref: OptionRecordRef<'static, R::Ref<'static>>,
     ) -> Self {
         Self {
-            _record_batch,
+            record_batch,
             record_ref,
         }
+    }
+
+    pub fn record_batch(&self) -> &RecordBatch {
+        &self.record_batch
     }
 
     pub(crate) fn internal_key(&self) -> Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {

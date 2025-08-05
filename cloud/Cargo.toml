@@ -5,9 +5,9 @@ edition = "2021"
 
 [dependencies]
 actix-web = "4"
+arrow = { version = "14.0.0", features = ["ipc"] }
 async-trait = "0.1"
 async-stream = "0.3"
-
 flume = { version = "0.11", features = ["async"] }
 fusio = "0.4.0"
 futures = "0.3"

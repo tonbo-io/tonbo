@@ -1,6 +1,10 @@
 use std::{env, fmt::Debug, future::Future, marker::Send, pin::Pin, sync::Arc};
 
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{
+    error::ErrorInternalServerError,
+    web::{self, Bytes},
+    App, HttpResponse, HttpServer, Responder,
+};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use fusio::{
@@ -8,12 +12,17 @@ use fusio::{
     remotes::aws::{fs::AmazonS3Builder, AwsCredential},
     DynFs,
 };
-use tonbo::record::Schema;
+use futures::stream::BoxStream;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs::create_dir_all;
 use tonbo::{
-     executor::tokio::TokioExecutor, parquet::errors::ParquetError, record::Record, transaction::Transaction, DbOption, Entry, Record, DB
+    arrow::ipc::writer::StreamWriter,
+    executor::tokio::TokioExecutor,
+    parquet::errors::ParquetError,
+    record::{Record, Schema},
+    transaction::Transaction,
+    DbOption, Entry, Record, DB,
 };
 
 use crate::{error::CloudError, ScanRequest, TonboCloud};
@@ -21,7 +30,7 @@ use crate::{error::CloudError, ScanRequest, TonboCloud};
 pub const DEFAULT_PORT: u32 = 8080;
 
 // Temporarily using a static schema
-#[derive(Record, Default,Debug)]
+#[derive(Record, Default, Debug)]
 pub struct User {
     #[record(primary_key)]
     name: String,
@@ -29,7 +38,8 @@ pub struct User {
     age: u8,
 }
 
-/// Every table has its own tonbo cloud instnace.
+/// Every table has its own tonbo cloud instance.
+#[allow(dead_code)]
 pub struct AWSTonbo<R>
 where
     R: Record,
@@ -54,7 +64,7 @@ where
     <R::Schema as Schema>::Columns: Send + Sync,
 {
     /// Creates new Tonbo cloud instance on S3
-    async fn new(&self, name: String, schema: R::Schema) -> Self {
+    async fn new(name: String, schema: R::Schema) -> Self {
         let key_id = env::var("AWS_ACCESS_KEY_ID").unwrap();
         let secret_key = env::var("AWS_SECRET_ACCESS_KEY").unwrap();
 
@@ -76,7 +86,6 @@ where
             TonboPath::from_filesystem_path("./db_path/users").unwrap(),
             &schema,
         );
-
 
         let tonbo: DB<R, TokioExecutor> = DB::new(options, TokioExecutor::current(), schema)
             .await
@@ -103,7 +112,10 @@ where
         &'a self,
         transaction: &'a Transaction<'_, R>,
         scan: &'a ScanRequest<<R::Schema as Schema>::Key>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>>, CloudError> {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>>,
+        CloudError,
+    > {
         Ok(Box::pin(try_stream! {
                 let projection: Vec<&str> = scan.projection.iter().map(String::as_str).collect();
 
@@ -126,14 +138,12 @@ where
     }
 
     fn listen(&'static self) -> impl Future<Output = std::io::Result<()>> + 'static {
-        let tonbo = Arc::new(self.clone());
+        let tonbo = Arc::new(self);
         let endpoint = tonbo.read_endpoint.clone();
 
         async move {
             HttpServer::new(move || {
-                App::new()
-                    .app_data(web::Data::from(tonbo.clone()))
-                    .route(
+                App::new().app_data(web::Data::from(tonbo.clone())).route(
                     "/tables/{table_name}/scan",
                     web::post().to(scan_handler::<User>),
                 )
@@ -158,10 +168,10 @@ where
 async fn scan_handler<R>(
     path: web::Path<String>,
     req: web::Json<ScanRequest<<R::Schema as Schema>::Key>>,
- data: web::Data<Arc<AWSTonbo<R>>>,
+    data: web::Data<Arc<AWSTonbo<R>>>,
 ) -> impl Responder
 where
-    R: Record + Send + Sync + 'static ,
+    R: Record + Send + Sync + 'static,
     <R::Schema as Schema>::Columns: Send + Sync,
 {
     let table = path.into_inner();
@@ -169,11 +179,41 @@ where
         return HttpResponse::NotFound().body(format!("No Tonbo instance named “{}”", table));
     }
 
-    let tx = data.tonbo.transaction().await;
-    match data.read(&tx, &req).await {
-        Ok(bytes) => HttpResponse::Ok()
-            .content_type("application/octet-stream")
-            .body(bytes),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-    }
+    let tonbo = data.clone();
+    let scan_req = req.clone();
+
+    let ipc_stream: BoxStream<Result<Bytes, CloudError>> = Box::pin(async_stream::try_stream! {
+        let tx = tonbo.tonbo.transaction().await;
+        let mut inner = tonbo
+            .read(&tx, &scan_req)
+            .await
+            .map_err(ErrorInternalServerError)
+            .unwrap();
+
+        // Currently only converts record batches
+        while let Some(res) = inner.next().await {
+            match res {
+                Ok(Entry::RecordBatch(batch_entry)) => {
+                    let arrow_batch = batch_entry.record_batch();
+                    let mut buf = Vec::new();
+                    let mut w = StreamWriter::try_new(&mut buf, &arrow_batch.schema())
+                        .map_err(ErrorInternalServerError)
+                        .unwrap();
+                    w.write(arrow_batch)
+                        .map_err(ErrorInternalServerError)
+                        .unwrap();
+                    w.finish()
+                        .map_err(ErrorInternalServerError)
+                        .unwrap();
+                    yield Bytes::from(buf);
+                }
+                Ok(_) => todo!(),
+                Err(_) => todo!(),
+            }
+        }
+    });
+
+    HttpResponse::Ok()
+        .insert_header(("content-type", "application/vnd.apache.arrow.stream"))
+        .streaming(ipc_stream)
 }

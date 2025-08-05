@@ -6,6 +6,7 @@ use ulid::Ulid;
 pub(crate) const MAX_LEVEL: usize = 7;
 pub type FileId = Ulid;
 
+#[allow(unused)]
 struct Metadata<R>
 where
     R: Record,
@@ -19,6 +20,7 @@ impl<R> Metadata<R>
 where
     R: Record,
 {
+    #[allow(unused)]
     pub fn new(timestamp: Arc<AtomicU32>) -> Self {
         Metadata {
             latest: timestamp,
@@ -36,4 +38,5 @@ pub(crate) struct Scope<K> {
     pub(crate) file_size: u64,
 }
 
+#[allow(unused)]
 enum MetadataChanges {}

@@ -1,11 +1,9 @@
-use std::{future::Future, ops::Bound, pin::Pin, sync::Arc};
+use std::{future::Future, ops::Bound, pin::Pin};
 
 use async_trait::async_trait;
-use futures::io;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tonbo::{
-    executor::Executor,
     parquet::errors::ParquetError,
     record::{Key, Record, Schema},
     transaction::Transaction,
@@ -26,7 +24,7 @@ where
     R: Record,
 {
     /// Creates a new Tonbo cloud instnace
-     async fn new(&self, name: String, schema: R::Schema) -> Self;
+    async fn new(name: String, schema: R::Schema) -> Self;
 
     fn write(&self, records: impl ExactSizeIterator<Item = R>);
 
@@ -34,7 +32,10 @@ where
         &'a self,
         transaction: &'a Transaction<'_, R>,
         scan: &'a ScanRequest<<R::Schema as Schema>::Key>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>>, CloudError>;
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>>,
+        CloudError,
+    >;
 
     /// Listens to new read requests from connections
     fn listen(&'static self) -> impl Future<Output = std::io::Result<()>> + 'static;
@@ -47,7 +48,7 @@ where
 }
 
 // Readers will send a scan request to Tonbo Cloud
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ScanRequest<K>
 where
     K: Key,
