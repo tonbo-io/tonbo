@@ -1,7 +1,7 @@
 pub(crate) mod error;
-pub(crate) mod lazyleveled;
-pub(crate) mod leveled;
-pub(crate) mod tiered;
+pub mod lazyleveled;
+pub mod leveled;
+pub mod tiered;
 
 use std::{pin::Pin, sync::Arc};
 

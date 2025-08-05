@@ -106,7 +106,7 @@
 //!     }
 //! }
 //! ```
-mod compaction;
+pub mod compaction;
 mod context;
 pub mod executor;
 pub(crate) mod fs;

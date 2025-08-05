@@ -1,5 +1,5 @@
 use pyo3::{pyclass, pymethods, PyResult};
-use tonbo::{option::Path, record::Schema};
+use tonbo::{compaction::leveled::LeveledOptions, option::Path, record::Schema};
 
 use crate::{ExceedsMaxLevelError, FsOptions};
 
@@ -75,9 +75,12 @@ impl DbOption {
         let mut opt = tonbo::DbOption::new(Path::from(self.path), schema)
             .clean_channel_buffer(self.clean_channel_buffer)
             .immutable_chunk_num(self.immutable_chunk_num)
-            .level_sst_magnification(self.level_sst_magnification)
-            .major_default_oldest_table_num(self.major_default_oldest_table_num)
-            .major_threshold_with_sst_size(self.major_threshold_with_sst_size)
+            .leveled_compaction(LeveledOptions {
+                major_threshold_with_sst_size: self.major_threshold_with_sst_size,
+                level_sst_magnification: self.level_sst_magnification,
+                major_default_oldest_table_num: self.major_default_oldest_table_num,
+                ..Default::default()
+            })
             .max_sst_file_size(self.max_sst_file_size)
             .version_log_snapshot_threshold(self.version_log_snapshot_threshold)
             .base_fs(tonbo::option::FsOptions::from(self.base_fs));
