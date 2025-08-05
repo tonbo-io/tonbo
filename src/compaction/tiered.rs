@@ -52,6 +52,26 @@ impl Default for TieredOptions {
     }
 }
 
+impl TieredOptions {
+    /// Set maximum number of tiers
+    pub fn max_tiers(mut self, value: usize) -> Self {
+        self.max_tiers = value;
+        self
+    }
+
+    /// Set tier base capacity
+    pub fn tier_base_capacity(mut self, value: usize) -> Self {
+        self.tier_base_capacity = value;
+        self
+    }
+
+    /// Set tier growth factor
+    pub fn tier_growth_factor(mut self, value: usize) -> Self {
+        self.tier_growth_factor = value;
+        self
+    }
+}
+
 pub struct TieredCompactor<R: Record> {
     options: TieredOptions,
     db_option: Arc<DbOption>,
@@ -458,6 +478,7 @@ pub(crate) mod tests {
 
     use crate::{
         compaction::{
+            leveled::LeveledOptions,
             tests::build_parquet_table,
             tiered::{TieredCompactor, TieredOptions},
         },
@@ -954,9 +975,11 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
         );
-        option = option
-            .major_threshold_with_sst_size(1)
-            .level_sst_magnification(1);
+        option = option.leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 1,
+            level_sst_magnification: 1,
+            ..Default::default()
+        });
         let manager = Arc::new(
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap(),
         );
@@ -1295,10 +1318,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(0)
-        .major_threshold_with_sst_size(2)
-        .level_sst_magnification(1)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 2,
+            level_sst_magnification: 1,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        })
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)

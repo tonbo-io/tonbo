@@ -59,6 +59,26 @@ impl Default for LeveledOptions {
     }
 }
 
+impl LeveledOptions {
+    /// Set major threshold with SST size
+    pub fn major_threshold_with_sst_size(mut self, value: usize) -> Self {
+        self.major_threshold_with_sst_size = value;
+        self
+    }
+
+    /// Set level SST magnification
+    pub fn level_sst_magnification(mut self, value: usize) -> Self {
+        self.level_sst_magnification = value;
+        self
+    }
+
+    /// Set major default oldest table number
+    pub fn major_default_oldest_table_num(mut self, value: usize) -> Self {
+        self.major_default_oldest_table_num = value;
+        self
+    }
+}
+
 impl<R: Record> LeveledCompactor<R> {
     pub(crate) fn new(
         options: LeveledOptions,
@@ -865,7 +885,10 @@ pub(crate) mod tests {
             FsOptions::Local,
         )
         .unwrap();
-        option = option.major_threshold_with_sst_size(2);
+        option = option.leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 2,
+            ..Default::default()
+        });
         let option = Arc::new(option);
         let manager = Arc::new(
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap(),
@@ -958,8 +981,11 @@ pub(crate) mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
         )
-        .major_threshold_with_sst_size(1)
-        .level_sst_magnification(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 1,
+            level_sst_magnification: 1,
+            ..Default::default()
+        });
         let manager = Arc::new(
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap(),
         );
@@ -1092,10 +1118,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(0)
-        .major_threshold_with_sst_size(2)
-        .level_sst_magnification(1)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 2,
+            level_sst_magnification: 1,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        })
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
@@ -1204,10 +1233,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(5)
-        .level_sst_magnification(1)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 5,
+            level_sst_magnification: 1,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        })
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
@@ -1276,10 +1308,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(5)
-        .level_sst_magnification(1)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 5,
+            level_sst_magnification: 1,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        })
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
@@ -1355,10 +1390,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(5)
-        .level_sst_magnification(1)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 5,
+            level_sst_magnification: 1,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        })
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
@@ -1440,10 +1478,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(5)
-        .level_sst_magnification(1)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 5,
+            level_sst_magnification: 1,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        })
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
@@ -1578,10 +1619,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(2)
-        .level_sst_magnification(1)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 2,
+            level_sst_magnification: 1,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        })
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(100);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)

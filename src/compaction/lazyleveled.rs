@@ -64,6 +64,26 @@ impl Default for LazyLeveledOptions {
     }
 }
 
+impl LazyLeveledOptions {
+    /// Set major threshold with SST size
+    pub fn major_threshold_with_sst_size(mut self, value: usize) -> Self {
+        self.major_threshold_with_sst_size = value;
+        self
+    }
+
+    /// Set level SST magnification
+    pub fn level_sst_magnification(mut self, value: usize) -> Self {
+        self.level_sst_magnification = value;
+        self
+    }
+
+    /// Set major default oldest table number
+    pub fn major_default_oldest_table_num(mut self, value: usize) -> Self {
+        self.major_default_oldest_table_num = value;
+        self
+    }
+}
+
 pub struct LazyLeveledCompactor<R: Record> {
     options: LazyLeveledOptions,
     db_option: Arc<DbOption>,

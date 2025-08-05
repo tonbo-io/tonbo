@@ -180,34 +180,6 @@ impl DbOption {
         self
     }
 
-    /// Set major threshold with SST size (for leveled and lazy leveled compaction)
-    pub fn major_threshold_with_sst_size(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Leveled(opts) => {
-                opts.major_threshold_with_sst_size = value;
-            }
-            CompactionOption::LazyLeveled(opts) => {
-                opts.major_threshold_with_sst_size = value;
-            }
-            _ => {} // No-op for other compaction types
-        }
-        self
-    }
-
-    /// Set level SST magnification (for leveled and lazy leveled compaction)
-    pub fn level_sst_magnification(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Leveled(opts) => {
-                opts.level_sst_magnification = value;
-            }
-            CompactionOption::LazyLeveled(opts) => {
-                opts.level_sst_magnification = value;
-            }
-            _ => {} // No-op for other compaction types
-        }
-        self
-    }
-
     /// Set maximum SST file size
     pub fn max_sst_file_size(mut self, value: usize) -> Self {
         self.max_sst_file_size = value;
@@ -268,47 +240,6 @@ impl DbOption {
             wal_buffer_size,
             ..self
         }
-    }
-
-    /// Set major default oldest table number (for leveled and lazy leveled compaction)
-    pub fn major_default_oldest_table_num(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Leveled(opts) => {
-                opts.major_default_oldest_table_num = value;
-            }
-            CompactionOption::LazyLeveled(opts) => {
-                opts.major_default_oldest_table_num = value;
-            }
-            _ => panic!("major_default_oldest_table_num only applies to leveled-based compaction"),
-        }
-        self
-    }
-
-    /// Set maximum number of tiers (for tiered compaction only)
-    pub fn max_tiers(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Tiered(opts) => opts.max_tiers = value,
-            _ => panic!("max_tiers only applies to tiered compaction"),
-        }
-        self
-    }
-
-    /// Set tier base capacity (for tiered compaction only)
-    pub fn tier_base_capacity(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Tiered(opts) => opts.tier_base_capacity = value,
-            _ => panic!("tier_base_capacity only applies to tiered compaction"),
-        }
-        self
-    }
-
-    /// Set tier growth factor (for tiered compaction only)
-    pub fn tier_growth_factor(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Tiered(opts) => opts.tier_growth_factor = value,
-            _ => panic!("tier_growth_factor only applies to tiered compaction"),
-        }
-        self
     }
 
     /// VersionLog will use version_log_snapshot_threshold as the cycle to SnapShot to reduce the

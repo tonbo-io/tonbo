@@ -1220,8 +1220,11 @@ pub(crate) mod tests {
 
     use crate::{
         compaction::{
-            error::CompactionError, lazyleveled::LazyLeveledCompactor, leveled::LeveledCompactor,
-            tiered::TieredCompactor, CompactTask,
+            error::CompactionError,
+            lazyleveled::LazyLeveledCompactor,
+            leveled::{LeveledCompactor, LeveledOptions},
+            tiered::TieredCompactor,
+            CompactTask,
         },
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
@@ -1720,10 +1723,13 @@ pub(crate) mod tests {
         option = option
             .immutable_chunk_num(1)
             .immutable_chunk_max_num(1)
-            .major_threshold_with_sst_size(3)
-            .level_sst_magnification(10)
-            .max_sst_file_size(2 * 1024 * 1024)
-            .major_default_oldest_table_num(1);
+            .leveled_compaction(LeveledOptions {
+                major_threshold_with_sst_size: 3,
+                level_sst_magnification: 10,
+                major_default_oldest_table_num: 1,
+                ..Default::default()
+            })
+            .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
@@ -1761,10 +1767,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(3)
-        .level_sst_magnification(10)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .level_sst_magnification(10)
+                .major_default_oldest_table_num(1),
+        )
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
@@ -2033,8 +2042,11 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(3)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 3,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        });
         option.trigger_type = TriggerType::Length(5);
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
             .await
@@ -2073,10 +2085,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(3)
-        .level_sst_magnification(10)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .level_sst_magnification(10)
+                .major_default_oldest_table_num(1),
+        )
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<DynRecord, TokioExecutor> =
@@ -2215,8 +2230,11 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(3)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 3,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        });
         option.trigger_type = TriggerType::Length(5);
 
         let temp_dir2 = TempDir::with_prefix("db2").unwrap();
@@ -2226,8 +2244,11 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(3)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 3,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        });
         option2.trigger_type = TriggerType::Length(5);
 
         let temp_dir3 = TempDir::with_prefix("db3").unwrap();
@@ -2237,8 +2258,11 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(3)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(LeveledOptions {
+            major_threshold_with_sst_size: 3,
+            major_default_oldest_table_num: 1,
+            ..Default::default()
+        });
         option3.trigger_type = TriggerType::Length(5);
 
         let db1: DB<DynRecord, TokioExecutor> =
@@ -2376,10 +2400,13 @@ pub(crate) mod tests {
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(1)
-        .major_threshold_with_sst_size(3)
-        .level_sst_magnification(10)
-        .max_sst_file_size(2 * 1024 * 1024)
-        .major_default_oldest_table_num(1);
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .level_sst_magnification(10)
+                .major_default_oldest_table_num(1),
+        )
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
         option.compaction_option =
             CompactionOption::Tiered(crate::compaction::tiered::TieredOptions::default());

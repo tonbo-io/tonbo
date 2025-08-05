@@ -7,6 +7,7 @@ mod tests {
     use fusio::{path::Path, DynFs};
     use futures::StreamExt;
     use tonbo::{
+        compaction::leveled::LeveledOptions,
         executor::opfs::OpfsExecutor,
         record::{
             AsValue, DynRecord, DynSchema, DynamicField, KeyRef, Record, RecordRef, Schema, Value,
@@ -304,8 +305,11 @@ mod tests {
             .unwrap()
             .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
             .unwrap()
-            .major_threshold_with_sst_size(3)
-            .level_sst_magnification(1)
+            .leveled_compaction(LeveledOptions {
+                major_threshold_with_sst_size: 3,
+                level_sst_magnification: 1,
+                ..Default::default()
+            })
             .max_sst_file_size(1 * 1024);
 
         let db: DB<DynRecord, OpfsExecutor> =
