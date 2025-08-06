@@ -227,7 +227,8 @@ where
     // Accumulate all SST files in a stream that fall within the min/max range in `level` and `level
     // + 1`. Then use those files to build the new SST files and delete the olds ones
     //
-    // For manual compaction we only compact files to the bottom most level that still contains files
+    // For manual compaction we only compact files to the bottom most level that still contains
+    // files
     #[allow(clippy::too_many_arguments)]
     async fn major_compaction(
         version: &Version<R>,
@@ -254,8 +255,8 @@ where
 
             let (meet_scopes_l, start_l, end_l) =
                 Self::this_level_scopes(version, min, max, level, threshold_exceeded);
-            // Return early here to avoid a bug with 
-             if meet_scopes_l.is_empty() {
+            // Return early here to avoid a bug with
+            if meet_scopes_l.is_empty() {
                 return Ok(());
             }
 
@@ -1407,9 +1408,9 @@ pub(crate) mod tests {
     //     // Six SSTs are inserted
     //     // The logic here is as follows:
     //     //  1. Inserts 5 non overlapping SSTs to not trigger self compaction
-    //     //  2. The sixth SST is inserted which overlaps with two SSTs and pushes the length over the
-    //     //     threshold. This compacts the two SSTs into the next level and adds the new SST into
-    //     //     level 0.
+    //     //  2. The sixth SST is inserted which overlaps with two SSTs and pushes the length over
+    // the     //     threshold. This compacts the two SSTs into the next level and adds the new
+    // SST into     //     level 0.
     //     assert_eq!(sort_runs_level_0.len(), 4);
     //     assert_eq!(sort_runs_level_1.len(), 1);
     //     assert!(sort_runs_level_2.is_empty());
@@ -1446,10 +1447,10 @@ pub(crate) mod tests {
     //     // Two SSTs are inserted.
     //     // The logic here is as follow:
     //     //  1. Add one non overlapping SST -> there is no compaction
-    //     //  2. Add an which overlaps with both one SST in level 0 and level 1. These combine to form
-    //     //     a new SST on level 1.
-    //     //  4. Compaction does not continue into the next level for level 1 because non level 0 does
-    //     //     not self compact if threshold isn't exceeded.
+    //     //  2. Add an which overlaps with both one SST in level 0 and level 1. These combine to
+    // form     //     a new SST on level 1.
+    //     //  4. Compaction does not continue into the next level for level 1 because non level 0
+    // does     //     not self compact if threshold isn't exceeded.
     //     assert_eq!(sort_runs_level_0.len(), 5);
     //     assert_eq!(sort_runs_level_1.len(), 1);
     //     assert_eq!(sort_runs_level_2.len(), 0);
