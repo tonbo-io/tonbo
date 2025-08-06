@@ -124,7 +124,15 @@ mod trigger;
 mod version;
 mod wal;
 
-use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    marker::PhantomData,
+    mem,
+    ops::Bound,
+    pin::pin,
+    sync::Arc,
+};
 
 pub use arrow;
 use async_lock::RwLock;
@@ -881,18 +889,23 @@ where
     /// fields in projection Record by field indices
     pub fn projection(self, projection: &[&str]) -> Self {
         let schema = self.mem_storage.record_schema.arrow_schema();
-        let mut projection = projection
-            .iter()
-            .map(|name| {
-                schema
+
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut indices: Vec<usize> = Vec::with_capacity(projection.len());
+
+        // Remove duplicate projections
+        for &name in projection {
+            if seen.insert(name) {
+                let idx = schema
                     .index_of(name)
-                    .unwrap_or_else(|_| panic!("unexpected field {name}"))
-            })
-            .collect::<Vec<usize>>();
+                    .unwrap_or_else(|_| panic!("unexpected field {name}"));
+                indices.push(idx);
+            }
+        }
+
         let primary_key_index = self.mem_storage.record_schema.primary_key_index();
         let mut fixed_projection = vec![0, 1, primary_key_index];
-        fixed_projection.append(&mut projection);
-        fixed_projection.dedup();
+        fixed_projection.append(&mut indices);
 
         let mask = ProjectionMask::roots(
             &ArrowSchemaConverter::new().convert(schema).unwrap(),
