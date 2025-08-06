@@ -784,7 +784,7 @@ where
 
 /// Scan configuration intermediate structure. Calling `take` will execute a scan on
 /// the memtable, immutable memtables, and SSTables on disk in that order.
-/// 
+///
 /// To initialize you can call `DB.transaction().scan()` using your `DB` instance.
 /// For more information on how to use refer to the doc in [`DB::transaction()`]
 pub struct Scan<'scan, 'range, R>
@@ -801,7 +801,7 @@ where
     ts: Timestamp,
     // DB Version that is being scanned
     version: &'scan Version<R>,
-    // 
+    //
     fn_pre_stream: Box<
         dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
             + Send
@@ -819,8 +819,8 @@ where
 impl<'scan, 'range, R> Scan<'scan, 'range, R>
 where
     R: Record + Send,
-{   
-    /// Creates new `Scan` 
+{
+    /// Creates new `Scan`
     fn new(
         mem_storage: &'scan DbStorage<R>,
         (lower, upper): (
@@ -896,13 +896,12 @@ where
         let mut projection = projection
             .iter()
             .map(|name| {
-                schema
-                    .index_of(name)
-                    .unwrap_or_else(|_| panic!("Field in projection does not exist in schema: {name}"))
+                schema.index_of(name).unwrap_or_else(|_| {
+                    panic!("Field in projection does not exist in schema: {name}")
+                })
             })
             .collect::<Vec<usize>>();
 
-        
         let primary_key_index = self.mem_storage.record_schema.primary_key_index();
 
         // The scan uses a fixed projection of 0: `_null` field, 1: `_ts` field, 3: primary key
@@ -977,7 +976,7 @@ where
             streams.push(mutable_scan);
         }
 
-        // Iterates through all immutable storage
+        // Iterates through immutable memtables
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
@@ -990,6 +989,8 @@ where
                     .into(),
             );
         }
+
+        // Scans all SSTables in the coreresponding version
         self.version
             .streams(
                 &self.ctx,
@@ -1026,7 +1027,6 @@ where
             streams.push(pre_stream);
         }
 
-        // Mutable
         {
             let mut mutable_scan = self
                 .mem_storage
@@ -1039,6 +1039,7 @@ where
             }
             streams.push(mutable_scan);
         }
+
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
