@@ -84,6 +84,9 @@ impl Value {
                 Value::Time64(v, _) => {
                     v.encode(writer).await?;
                 }
+                Value::FixedSizeBinary(v, _) => {
+                    v.encode(writer).await?;
+                }
                 Value::List(_, vec) => {
                     let len = vec.len() as u32;
                     len.encode(writer).await?;
@@ -104,7 +107,7 @@ impl Value {
         }
     }
 
-    fn decode_inner<R>(reader: &mut R) -> BoxedFuture<Result<Self, fusio::Error>>
+    fn decode_inner<R>(reader: &mut R) -> BoxedFuture<'_, Result<Self, fusio::Error>>
     where
         R: fusio::SeqRead,
     {
@@ -125,6 +128,10 @@ impl Value {
                 DataType::Float64 => Ok(Value::Float64(f64::decode(reader).await?)),
                 DataType::Utf8 => Ok(Value::String(String::decode(reader).await?)),
                 DataType::Binary => Ok(Value::Binary(Vec::<u8>::decode(reader).await?)),
+                DataType::FixedSizeBinary(w) => Ok(Value::FixedSizeBinary(
+                    Vec::<u8>::decode(reader).await?,
+                    *w as u32,
+                )),
                 DataType::Date32 => Ok(Value::Date32(i32::decode(reader).await?)),
                 DataType::Date64 => Ok(Value::Date64(i64::decode(reader).await?)),
                 DataType::Timestamp(time_unit, _) => Ok(Value::Timestamp(
@@ -199,6 +206,7 @@ impl Encode for Value {
             Value::Float64(v) => 1 + v.size(),
             Value::String(v) => 1 + v.size(),
             Value::Binary(v) => 1 + v.size(),
+            Value::FixedSizeBinary(v, _) => 1 + v.size(),
             Value::Date32(v) => 1 + v.size(),
             Value::Date64(v) => 1 + v.size(),
             Value::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
@@ -327,6 +335,9 @@ impl ValueRef<'_> {
                 ValueRef::Time64(v, _) => {
                     v.encode(writer).await?;
                 }
+                ValueRef::FixedSizeBinary(v, _) => {
+                    v.encode(writer).await?;
+                }
                 ValueRef::List(_, vec) => {
                     let len = vec.len() as u32;
                     len.encode(writer).await?;
@@ -372,6 +383,7 @@ impl Encode for ValueRef<'_> {
             ValueRef::Float64(v) => 1 + v.size(),
             ValueRef::String(v) => 1 + v.size(),
             ValueRef::Binary(v) => 1 + v.size(),
+            ValueRef::FixedSizeBinary(v, _) => 1 + v.size(),
             ValueRef::Date32(v) => 1 + v.size(),
             ValueRef::Date64(v) => 1 + v.size(),
             ValueRef::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
@@ -512,5 +524,55 @@ mod tests {
 
         let decoded = Value::decode(&mut cursor).await.unwrap();
         assert_eq!(value, decoded);
+    }
+
+    #[tokio::test]
+    async fn test_list_value_ref_encode_decode() {
+        let data_type = DataType::List(Arc::new(Field::new(
+            "timestamp",
+            DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
+            false,
+        )));
+        let value = ValueRef::List(
+            &data_type,
+            vec![Arc::new(Value::List(
+                DataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
+                vec![Arc::new(Value::Time64(1732838400, TimeUnit::Microsecond))],
+            ))],
+        );
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        value.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value, decoded.as_key_ref());
+    }
+
+    #[tokio::test]
+    async fn test_fixed_size_binary_value_encode_decode() {
+        let value = Value::FixedSizeBinary(b"hello".to_vec(), 5);
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        value.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value, decoded);
+    }
+
+    #[tokio::test]
+    async fn test_fixed_size_binary_value_ref_encode_decode() {
+        let value = ValueRef::FixedSizeBinary(b"tonbo", 5);
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        value.encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value, decoded.as_key_ref());
     }
 }

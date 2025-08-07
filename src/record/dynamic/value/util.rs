@@ -95,6 +95,10 @@ where
                 20u8.encode(writer).await?;
                 encode_arrow_timeunit(time_unit, writer).await?;
             }
+            arrow::datatypes::DataType::FixedSizeBinary(w) => {
+                21u8.encode(writer).await?;
+                w.encode(writer).await?;
+            }
             arrow::datatypes::DataType::List(field) => {
                 30u8.encode(writer).await?;
                 field.name().encode(writer).await?;
@@ -117,7 +121,7 @@ where
 
 pub(crate) fn decode_arrow_datatype<R>(
     reader: &mut R,
-) -> BoxedFuture<Result<arrow::datatypes::DataType, fusio::Error>>
+) -> BoxedFuture<'_, Result<arrow::datatypes::DataType, fusio::Error>>
 where
     R: fusio::SeqRead,
 {
@@ -153,6 +157,10 @@ where
             20 => {
                 let time_unit = decode_arrow_timeunit(reader).await?;
                 Ok(arrow::datatypes::DataType::Time64(time_unit))
+            }
+            21 => {
+                let bytes_width = i32::decode(reader).await?;
+                Ok(arrow::datatypes::DataType::FixedSizeBinary(bytes_width))
             }
             30 => {
                 let name = String::decode(reader).await?;
@@ -246,6 +254,18 @@ mod tests {
     async fn test_arrow_datatype_encode_decode() {
         {
             let data_type = DataType::Binary;
+            let mut buf = Vec::new();
+            let mut cursor = Cursor::new(&mut buf);
+            encode_arrow_datatype(&data_type, &mut cursor)
+                .await
+                .unwrap();
+
+            cursor.seek(SeekFrom::Start(0)).await.unwrap();
+            let decoded = decode_arrow_datatype(&mut cursor).await.unwrap();
+            assert_eq!(data_type, decoded);
+        }
+        {
+            let data_type = DataType::FixedSizeBinary(4);
             let mut buf = Vec::new();
             let mut cursor = Cursor::new(&mut buf);
             encode_arrow_datatype(&data_type, &mut cursor)

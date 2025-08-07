@@ -3,12 +3,12 @@ use std::{mem, sync::Arc};
 use arrow::{
     array::{
         Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, BooleanBuilder,
-        Date32Builder, Date64Builder, Float32Builder, Float64Builder, GenericBinaryBuilder,
-        Int16Builder, Int32Builder, Int64Builder, Int8Builder, LargeStringBuilder,
-        PrimitiveBuilder, StringBuilder, Time32MillisecondBuilder, Time32SecondBuilder,
-        Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampMicrosecondBuilder,
-        TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
-        UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
+        Date32Builder, Date64Builder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder,
+        GenericBinaryBuilder, Int16Builder, Int32Builder, Int64Builder, Int8Builder,
+        LargeStringBuilder, PrimitiveBuilder, StringBuilder, Time32MillisecondBuilder,
+        Time32SecondBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder,
+        TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder,
+        TimestampSecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
     },
     datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
@@ -86,6 +86,7 @@ macro_rules! implement_arrow_array {
                                 builders.push(Box::new(<$builder_ty>::with_capacity(capacity, 0)));
                             }
                         )*
+                        DataType::FixedSizeBinary(w) => builders.push(Box::new(FixedSizeBinaryBuilder::with_capacity(capacity, *w))),
                         DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     }
                     datatypes.push(datatype);
@@ -205,6 +206,14 @@ macro_rules! implement_builder_array {
                                         }
                                     }
                                 )*
+                                DataType::FixedSizeBinary(w) =>{
+                                    let bd = Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut());
+                                    match col.as_bytes_opt() {
+                                        Some(value) => bd.append_value(value).unwrap(),
+                                        None if is_nullable => bd.append_null(),
+                                        None => bd.append_value(vec![0; w as usize]).unwrap(),
+                                    }
+                                }
                                 DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                             }
                         }
@@ -238,6 +247,10 @@ macro_rules! implement_builder_array {
                                             .append_value(Default::default());
                                     }
                                 )*
+                                DataType::FixedSizeBinary(w) =>{
+                                    Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut())
+                                        .append_value(vec![0; *w as usize]).unwrap();
+                                }
                                 DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                             }
                         }
@@ -274,6 +287,9 @@ macro_rules! implement_builder_array {
                                         .values_slice()
                                 ),
                             )*
+                            DataType::FixedSizeBinary(_) => mem::size_of_val(
+                                Self::as_builder::<FixedSizeBinaryBuilder>(builder.as_ref()).values_slice()
+                            ),
                             DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                         }
                     })
@@ -321,6 +337,14 @@ macro_rules! implement_builder_array {
                                 array_refs.push(array.clone());
                             }
                         )*
+                        DataType::FixedSizeBinary(_) => {
+                            let array = Arc::new(
+                                Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut())
+                                    .finish(),
+                            );
+                            array_refs.push(array.clone());
+                        }
+
                         DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     };
                 }
@@ -419,13 +443,14 @@ implement_builder_array!(
 #[cfg(test)]
 mod tests {
 
+    use arrow::datatypes::DataType;
     use parquet::arrow::ProjectionMask;
 
     use crate::{
         dyn_schema,
         record::{
             ArrowArrays, ArrowArraysBuilder, DynRecord, DynRecordImmutableArrays, DynRecordRef,
-            Record, RecordRef, Schema, Value,
+            DynSchema, DynamicField, Record, RecordRef, Schema, Value,
         },
     };
 
@@ -542,6 +567,66 @@ mod tests {
                 record_ref.get().unwrap().columns,
                 record.as_record_ref().columns
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_fixed_size_binary() {
+        let schema = DynSchema::new(
+            vec![
+                DynamicField::new("four".into(), DataType::FixedSizeBinary(4), false),
+                DynamicField::new("five".into(), DataType::FixedSizeBinary(5), true),
+                DynamicField::new("three".into(), DataType::FixedSizeBinary(3), false),
+            ],
+            0,
+        );
+
+        let record1 = DynRecord::new(
+            vec![
+                Value::FixedSizeBinary(vec![1, 2, 3, 4], 4),
+                Value::FixedSizeBinary(vec![1, 2, 3, 4, 5], 5),
+                Value::FixedSizeBinary(vec![1, 2, 3], 3),
+            ],
+            0,
+        );
+        let record2 = DynRecord::new(
+            vec![
+                Value::FixedSizeBinary(vec![2, 3, 4, 5], 4),
+                Value::Null,
+                Value::FixedSizeBinary(vec![2, 3, 7], 3),
+            ],
+            0,
+        );
+
+        let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+        let key = crate::version::timestamp::Ts {
+            ts: 0.into(),
+            value: record1.key(),
+        };
+        let key2 = crate::version::timestamp::Ts {
+            ts: 0.into(),
+            value: record2.key(),
+        };
+        builder.push(key.clone(), Some(record1.as_record_ref()));
+        builder.push(key, None);
+        builder.push(key2, Some(record2.as_record_ref()));
+        let arrays = builder.finish(None);
+
+        {
+            let res1 = arrays.get(0, &ProjectionMask::all());
+            let cols = res1.unwrap().unwrap().columns;
+            for (actual, expected) in cols.iter().zip(record1.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
+
+            let res2 = arrays.get(1, &ProjectionMask::all());
+            assert!(res2.unwrap().is_none());
+
+            let res3 = arrays.get(2, &ProjectionMask::all());
+            let cols = res3.unwrap().unwrap().columns;
+            for (actual, expected) in cols.iter().zip(record2.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
         }
     }
 }

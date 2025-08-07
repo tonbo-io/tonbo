@@ -30,6 +30,7 @@ pub enum ValueRef<'a> {
     Float64(f64),
     String(&'a str),
     Binary(&'a [u8]),
+    FixedSizeBinary(&'a [u8], u32),
     Date32(i32),
     Date64(i64),
     Timestamp(i64, TimeUnit),
@@ -55,6 +56,7 @@ impl Clone for ValueRef<'_> {
             ValueRef::Float64(v) => ValueRef::Float64(*v),
             ValueRef::String(v) => ValueRef::String(v),
             ValueRef::Binary(v) => ValueRef::Binary(v),
+            ValueRef::FixedSizeBinary(v1, w) => ValueRef::FixedSizeBinary(v1, *w),
             ValueRef::Date32(v) => ValueRef::Date32(*v),
             ValueRef::Date64(v) => ValueRef::Date64(*v),
             ValueRef::Timestamp(v, u) => ValueRef::Timestamp(*v, *u),
@@ -159,6 +161,12 @@ impl<'a> ValueRef<'a> {
                     .ok_or_else(|| ValueError::InvalidConversion("Binary cast failed".into()))?;
                 Ok(ValueRef::Binary(arr.value(index)))
             }
+            DataType::FixedSizeBinary(w) => {
+                let arr = array.as_fixed_size_binary_opt().ok_or_else(|| {
+                    ValueError::InvalidConversion("FixedSizeBinary cast failed".into())
+                })?;
+                Ok(ValueRef::FixedSizeBinary(arr.value(index), *w as u32))
+            }
             DataType::Date32 => {
                 let arr = array
                     .as_any()
@@ -224,8 +232,6 @@ impl<'a> ValueRef<'a> {
                     if data.is_null(i) {
                         values.push(Arc::new(Value::Null));
                     } else {
-                        // value reference to the value in the data, we have to convert it to owned
-                        // value
                         let value = ValueRef::from_array_ref(&data, i)?;
                         values.push(Arc::new(value.to_owned()));
                     }
@@ -257,6 +263,7 @@ impl<'a> ValueRef<'a> {
             ValueRef::Float64(_) => DataType::Float64,
             ValueRef::String(_) => DataType::Utf8,
             ValueRef::Binary(_) => DataType::Binary,
+            ValueRef::FixedSizeBinary(_, w) => DataType::FixedSizeBinary(*w as i32),
             ValueRef::Date32(_) => DataType::Date32,
             ValueRef::Date64(_) => DataType::Date64,
             ValueRef::Timestamp(_, unit) => {
@@ -318,6 +325,7 @@ impl ValueRef<'_> {
             ValueRef::Binary(b) => Value::Binary(b.to_vec()),
             ValueRef::Date32(v) => Value::Date32(*v),
             ValueRef::Date64(v) => Value::Date64(*v),
+            ValueRef::FixedSizeBinary(b, w) => Value::FixedSizeBinary(b.to_vec(), *w),
             ValueRef::Timestamp(v, unit) => Value::Timestamp(*v, *unit),
             ValueRef::Time32(v, unit) => Value::Time32(*v, *unit),
             ValueRef::Time64(v, unit) => Value::Time64(*v, *unit),
@@ -346,6 +354,7 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Float64(v) => ValueRef::Float64(*v),
             Value::String(s) => ValueRef::String(s.as_str()),
             Value::Binary(b) => ValueRef::Binary(b.as_slice()),
+            Value::FixedSizeBinary(b, w) => ValueRef::FixedSizeBinary(b.as_slice(), *w),
             Value::Date32(v) => ValueRef::Date32(*v),
             Value::Date64(v) => ValueRef::Date64(*v),
             Value::Timestamp(v, unit) => ValueRef::Timestamp(*v, *unit),
@@ -377,6 +386,7 @@ impl PartialEq for ValueRef<'_> {
             (ValueRef::Float64(a), ValueRef::Float64(b)) => a.to_bits() == b.to_bits(),
             (ValueRef::String(a), ValueRef::String(b)) => a.eq(b),
             (ValueRef::Binary(a), ValueRef::Binary(b)) => a.eq(b),
+            (ValueRef::FixedSizeBinary(a, _), ValueRef::FixedSizeBinary(b, _)) => a.eq(b),
             (ValueRef::Date32(a), ValueRef::Date32(b)) => a.eq(b),
             (ValueRef::Date64(a), ValueRef::Date64(b)) => a.eq(b),
             (ValueRef::Timestamp(a, unit1), ValueRef::Timestamp(b, unit2)) => {
@@ -434,6 +444,7 @@ impl Ord for ValueRef<'_> {
             (ValueRef::Float64(a), ValueRef::Float64(b)) => a.total_cmp(b),
             (ValueRef::String(a), ValueRef::String(b)) => a.cmp(b),
             (ValueRef::Binary(a), ValueRef::Binary(b)) => a.cmp(b),
+            (ValueRef::FixedSizeBinary(a, _), ValueRef::FixedSizeBinary(b, _)) => a.cmp(b),
             (ValueRef::Date32(a), ValueRef::Date32(b)) => a.cmp(b),
             (ValueRef::Date64(a), ValueRef::Date64(b)) => a.cmp(b),
             (ValueRef::Timestamp(a, unit1), ValueRef::Timestamp(b, unit2)) => {
@@ -479,6 +490,7 @@ impl<'a> KeyRef<'a> for ValueRef<'a> {
             ValueRef::Float64(v) => Value::Float64(v),
             ValueRef::String(v) => Value::String(v.to_string()),
             ValueRef::Binary(v) => Value::Binary(v.to_vec()),
+            ValueRef::FixedSizeBinary(v, w) => Value::FixedSizeBinary(v.to_vec(), w),
             ValueRef::Date32(v) => Value::Date32(v),
             ValueRef::Date64(v) => Value::Date64(v),
             ValueRef::Timestamp(v, time_unit) => Value::Timestamp(v, time_unit),
@@ -497,7 +509,10 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::{
-        array::{ArrayRef, Int32Array, StringArray, TimestampMillisecondArray},
+        array::{
+            ArrayRef, BinaryArray, FixedSizeBinaryArray, Int32Array, StringArray,
+            TimestampMillisecondArray,
+        },
         datatypes::{DataType, Field},
     };
 
@@ -630,6 +645,36 @@ mod tests {
                 ValueRef::from_array_ref(&array, 1).unwrap(),
                 ValueRef::Timestamp(2, TimeUnit::Millisecond)
             );
+        }
+    }
+
+    #[test]
+    fn test_binary_value_ref_from_array_ref() {
+        {
+            let values: Vec<Option<&[u8]>> = vec![Some(b"one"), Some(b"three"), None];
+            let array = Arc::new(BinaryArray::from(values)) as ArrayRef;
+            assert_eq!(
+                ValueRef::from_array_ref(&array, 0).unwrap(),
+                ValueRef::Binary(b"one")
+            );
+            assert_eq!(
+                ValueRef::from_array_ref(&array, 1).unwrap(),
+                ValueRef::Binary(b"three")
+            );
+            assert_eq!(ValueRef::from_array_ref(&array, 2).unwrap(), ValueRef::Null);
+        }
+        {
+            let values: Vec<Option<&[u8]>> = vec![Some(b"one"), Some(b"two"), None];
+            let array = Arc::new(FixedSizeBinaryArray::from(values)) as ArrayRef;
+            assert_eq!(
+                ValueRef::from_array_ref(&array, 0).unwrap(),
+                ValueRef::FixedSizeBinary(b"one", 3)
+            );
+            assert_eq!(
+                ValueRef::from_array_ref(&array, 1).unwrap(),
+                ValueRef::FixedSizeBinary(b"two", 3)
+            );
+            assert_eq!(ValueRef::from_array_ref(&array, 2).unwrap(), ValueRef::Null);
         }
     }
 

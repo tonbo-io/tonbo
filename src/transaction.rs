@@ -58,7 +58,7 @@ where
         }
     }
 }
-/// optimistic ACID transaction, open with
+/// Optimistic ACID transaction, open with
 /// [`DB::transaction`](crate::DB::transaction) method
 ///
 /// Transaction will store all mutations in local [`BTreeMap`] and only write to memtable when

@@ -1,8 +1,8 @@
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
-use super::{schema::DynSchema, DynRecordRef, Value};
-use crate::record::{Key, Record};
+use super::{schema::DynSchema, DynRecordRef, Value, ValueError};
+use crate::record::{error::RecordError, Key, Record};
 
 #[derive(Debug)]
 pub struct DynRecord {
@@ -12,11 +12,50 @@ pub struct DynRecord {
 
 #[allow(unused)]
 impl DynRecord {
+    /// Create a new DynRecord without validation.
     pub fn new(values: Vec<Value>, primary_index: usize) -> Self {
         Self {
             values,
             primary_index,
         }
+    }
+
+    /// Create a new DynRecord with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the validation failed.
+    pub fn try_new(values: Vec<Value>, primary_index: usize) -> Result<Self, RecordError> {
+        if primary_index >= values.len() {
+            return Err(RecordError::InvalidArgumentError(format!(
+                "primary key index {} can not great or equal than value length {}",
+                primary_index,
+                values.len()
+            )));
+        }
+        for (idx, value) in values.iter().enumerate() {
+            match value {
+                Value::Null if idx == primary_index => {
+                    return Err(RecordError::NullNotAllowed(
+                        "Primary can not be null".into(),
+                    ))
+                }
+                Value::FixedSizeBinary(v, w) => {
+                    if v.len() != *w as usize {
+                        return Err(RecordError::ValueError(ValueError::TypeMismatch {
+                            expected: format!("FixedSizeBinary({w})"),
+                            actual: format!("FixedSizeBinary({})", v.len()),
+                        }));
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        Ok(Self {
+            values,
+            primary_index,
+        })
     }
 }
 
@@ -181,5 +220,40 @@ pub(crate) mod test {
             record.as_record_ref().columns,
             actual.as_record_ref().columns
         );
+    }
+
+    #[test]
+    fn test_create_record() {
+        let res = DynRecord::try_new(
+            vec![
+                Value::UInt64(1),
+                Value::String("tonbo".into()),
+                Value::Null,
+                Value::FixedSizeBinary(vec![1, 2, 3], 3),
+            ],
+            0,
+        );
+        assert!(res.is_ok());
+
+        let record = res.unwrap();
+        assert_eq!(record.values[0], Value::UInt64(1));
+        assert_eq!(record.values[1], Value::String("tonbo".into()));
+        assert_eq!(record.values[2], Value::Null);
+        assert_eq!(record.values[3], Value::FixedSizeBinary(vec![1, 2, 3], 3));
+    }
+
+    #[test]
+    fn test_create_record_err() {
+        // test FixedSizeBinary width not match
+        let res = DynRecord::try_new(vec![Value::FixedSizeBinary(vec![1, 2, 3], 4)], 0);
+        assert!(res.is_err());
+
+        // test primary key is null
+        let res = DynRecord::try_new(vec![Value::Null], 0);
+        assert!(res.is_err());
+
+        // test primary key index >= values.len()
+        let res = DynRecord::try_new(vec![Value::Null], 1);
+        assert!(res.is_err());
     }
 }

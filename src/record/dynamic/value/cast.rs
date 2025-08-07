@@ -170,6 +170,7 @@ impl AsValue for Value {
     fn as_bytes_opt(&self) -> Option<&[u8]> {
         match self {
             Value::Binary(v) => Some(v),
+            Value::FixedSizeBinary(v, _) => Some(v),
             _ => None,
         }
     }
@@ -263,6 +264,7 @@ impl AsValue for ValueRef<'_> {
     fn as_bytes_opt(&self) -> Option<&[u8]> {
         match self {
             ValueRef::Binary(v) => Some(v),
+            ValueRef::FixedSizeBinary(v, _) => Some(v),
             _ => None,
         }
     }

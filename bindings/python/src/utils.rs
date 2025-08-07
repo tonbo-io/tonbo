@@ -32,6 +32,7 @@ pub(crate) fn to_dict(
             Value::Float64(v) => dict.set_item(name, v)?,
             Value::String(v) => dict.set_item(name, v)?,
             Value::Binary(v) => dict.set_item(name, v)?,
+            Value::FixedSizeBinary(v, _) => dict.set_item(name, v)?,
             Value::Date32(_)
             | Value::Date64(_)
             | Value::List(_, _)
@@ -68,6 +69,7 @@ pub(crate) fn to_dict_ref<'py, 'r>(
             ValueRef::Float64(v) => dict.set_item(name, v)?,
             ValueRef::String(v) => dict.set_item(name, v)?,
             ValueRef::Binary(v) => dict.set_item(name, v)?,
+            ValueRef::FixedSizeBinary(v, _) => dict.set_item(name, v)?,
             ValueRef::Date32(_)
             | ValueRef::Date64(_)
             | ValueRef::List(_, _)
