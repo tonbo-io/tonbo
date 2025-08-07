@@ -782,25 +782,34 @@ where
     }
 }
 
-/// Scan configuration intermediate structure
+/// Scan configuration intermediate structure. Calling `take` will execute a scan on
+/// the memtable, immutable memtables, and SSTables on disk in that order.
+///
+/// To initialize you can call `DB.transaction().scan()` using your `DB` instance.
+/// For more information on how to use refer to the doc in [`DB::transaction()`]
 pub struct Scan<'scan, 'range, R>
 where
     R: Record,
     'range: 'scan,
 {
+    // Storage to scan
     mem_storage: &'scan DbStorage<R>,
+    // Lower and upper bound for the scan
     lower: Bound<&'range <R::Schema as Schema>::Key>,
     upper: Bound<&'range <R::Schema as Schema>::Key>,
+    // Current `Snapshot`'s timestamp
     ts: Timestamp,
-
+    // DB Version that is being scanned
     version: &'scan Version<R>,
+    //
     fn_pre_stream: Box<
         dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
             + Send
             + 'scan,
     >,
-
+    // Row limit for query
     limit: Option<usize>,
+    // Specifies the direction a scan will take
     order: Option<Order>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
@@ -811,6 +820,7 @@ impl<'scan, 'range, R> Scan<'scan, 'range, R>
 where
     R: Record + Send,
 {
+    /// Creates new `Scan`
     fn new(
         mem_storage: &'scan DbStorage<R>,
         (lower, upper): (
@@ -841,7 +851,7 @@ where
         }
     }
 
-    /// limit for the scan
+    /// Limit for the scan (number of rows returned)
     pub fn limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
@@ -878,18 +888,23 @@ where
         }
     }
 
-    /// fields in projection Record by field indices
+    /// Fields in projection `Record` by field indices
     pub fn projection(self, projection: &[&str]) -> Self {
         let schema = self.mem_storage.record_schema.arrow_schema();
+
+        // Gathers all projection indexes in array
         let mut projection = projection
             .iter()
             .map(|name| {
-                schema
-                    .index_of(name)
-                    .unwrap_or_else(|_| panic!("unexpected field {name}"))
+                schema.index_of(name).unwrap_or_else(|_| {
+                    panic!("Field in projection does not exist in schema: {name}")
+                })
             })
             .collect::<Vec<usize>>();
+
         let primary_key_index = self.mem_storage.record_schema.primary_key_index();
+
+        // The scan uses a fixed projection of 0: `_null` field, 1: `_ts` field, 3: primary key
         let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
@@ -906,13 +921,16 @@ where
         }
     }
 
-    /// fields in projection Record by field indices
+    /// Fields in projection Record by field indices
     pub fn projection_with_index(self, mut projection: Vec<usize>) -> Self {
         // skip two columns: _null and _ts
         for p in &mut projection {
             *p += USER_COLUMN_OFFSET;
         }
+
         let primary_key_index = self.mem_storage.record_schema.primary_key_index();
+
+        // The scan uses a fixed projection of 0: `_null` field, 1: `_ts` field, 3: primary key
         let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
@@ -944,7 +962,7 @@ where
             streams.push(pre_stream);
         }
 
-        // Mutable
+        // In-memory memtable scan
         {
             let mut mutable_scan = self
                 .mem_storage
@@ -957,6 +975,8 @@ where
             }
             streams.push(mutable_scan);
         }
+
+        // Iterates through immutable memtables
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
@@ -969,6 +989,8 @@ where
                     .into(),
             );
         }
+
+        // Scans all SSTables in the coreresponding version
         self.version
             .streams(
                 &self.ctx,
@@ -1005,7 +1027,6 @@ where
             streams.push(pre_stream);
         }
 
-        // Mutable
         {
             let mut mutable_scan = self
                 .mem_storage
@@ -1018,6 +1039,7 @@ where
             }
             streams.push(mutable_scan);
         }
+
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
