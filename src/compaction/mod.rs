@@ -1,62 +1,57 @@
 pub(crate) mod error;
-pub(crate) mod leveled;
+pub mod leveled;
+
 use std::{pin::Pin, sync::Arc};
 
-use fusio::DynFs;
+use async_trait::async_trait;
+use fusio::{DynFs, MaybeSend, MaybeSync};
 use fusio_parquet::writer::AsyncWriter;
-use futures::channel::oneshot;
 use futures_util::StreamExt;
-use leveled::LeveledCompactor;
 use parquet::arrow::AsyncArrowWriter;
+use futures::channel::oneshot;
 
 use crate::{
     compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
-    record::{ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
+    record::{self, ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     version::edit::VersionEdit,
     DbOption,
 };
 
-pub(crate) enum Compactor<R, E>
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub(crate) trait Compactor<R>: MaybeSend + MaybeSync
 where
     R: Record,
-    <R::Schema as RecordSchema>::Columns: Send + Sync,
-    E: crate::executor::Executor,
 {
-    Leveled(LeveledCompactor<R, E>),
-}
-
-#[derive(Debug)]
-pub enum CompactTask {
-    Freeze,
-    Flush(Option<oneshot::Sender<()>>),
-}
-
-impl<R, E> Compactor<R, E>
-where
-    R: Record,
-    <R::Schema as RecordSchema>::Columns: Send + Sync,
-    E: crate::executor::Executor,
-{
-    pub(crate) async fn check_then_compaction(
-        &mut self,
+    /// Orchestrate flush + major compaction.
+    /// This is the only method custom compactors need to implement.
+    async fn check_then_compaction(
+        &self,
+        batches: Option<
+            &[(
+                Option<crate::fs::FileId>,
+                crate::inmem::immutable::ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+            )],
+        >,
+        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
         is_manual: bool,
-    ) -> Result<(), CompactionError<R>> {
-        match self {
-            Compactor::Leveled(leveled) => leveled.check_then_compaction(is_manual).await,
-        }
-    }
+    ) -> Result<(), CompactionError<R>>;
 
-    async fn build_tables(
+    async fn build_tables<'scan>(
         option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,
         streams: Vec<ScanStream<'_, R>>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError<R>>
+    where
+        Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
+    {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
 
         // Kould: is the capacity parameter necessary?
@@ -113,7 +108,10 @@ where
             &'a <R::Schema as RecordSchema>::Key,
         ),
         CompactionError<R>,
-    > {
+    >
+    where
+        Self: Sized,
+    {
         let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
         let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
         Ok((lower, upper))
@@ -129,7 +127,11 @@ where
         max: &mut Option<<R::Schema as RecordSchema>::Key>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError<R>>
+    where
+        Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
+    {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
@@ -162,6 +164,12 @@ where
         });
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub enum CompactTask {
+    Freeze,
+    Flush(Option<oneshot::Sender<()>>),
 }
 
 #[cfg(all(test, feature = "tokio"))]
