@@ -5,6 +5,7 @@ use parquet::arrow::ProjectionMask;
 
 use crate::{
     context::Context,
+    option::Order,
     record::{Record, Schema as RecordSchema},
     stream::{self, ScanStream},
     version::{timestamp::Timestamp, TransactionTs, VersionRef},
@@ -55,7 +56,7 @@ where
             range,
             self.ts,
             &self.version,
-            Box::new(move |_: Option<ProjectionMask>| None),
+            Box::new(move |_: Option<ProjectionMask>, _: Option<Order>| None),
             self.ctx.clone(),
         )
     }
@@ -81,7 +82,7 @@ where
         self.version.increase_ts()
     }
 
-    pub(crate) fn schema(&self) -> &DbStorage<R> {
+    pub(crate) fn mem_storage(&self) -> &DbStorage<R> {
         &self.share
     }
 
@@ -92,7 +93,9 @@ where
             Bound<&'range <R::Schema as RecordSchema>::Key>,
         ),
         fn_pre_stream: Box<
-            dyn FnOnce(Option<ProjectionMask>) -> Option<ScanStream<'scan, R>> + Send + 'scan,
+            dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
+                + Send
+                + 'scan,
         >,
     ) -> Scan<'scan, 'range, R> {
         Scan::new(

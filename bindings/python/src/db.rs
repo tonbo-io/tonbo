@@ -148,7 +148,7 @@ impl TonboDB {
         let db = self.db.clone();
         future_into_py(py, async move {
             let ret = db.remove(col).await.map_err(CommitError::from)?;
-            Python::with_gil(|py| ret.into_py_any(py))
+            Python::with_gil(|py| ret.needs_compaction().into_py_any(py))
         })
     }
 

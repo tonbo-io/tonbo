@@ -3,16 +3,17 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 
 use crate::{
-    fs::manager::StoreManager,
-    record::Record,
-    version::{set::VersionSet, timestamp::Timestamp, TransactionTs},
-    ParquetLru,
+    fs::manager::StoreManager, manifest::ManifestStorage, record::Record,
+    version::timestamp::Timestamp, ParquetLru,
 };
 
 pub(crate) struct Context<R: Record> {
     pub(crate) manager: Arc<StoreManager>,
     pub(crate) parquet_lru: ParquetLru,
-    pub(crate) version_set: VersionSet<R>,
+    // TODO: Use concrete implementation of ManifestStorage.
+    // ManifestStorage implementation choice should be statically
+    // defined during start-up and should not change during runtime.
+    pub(crate) manifest: Box<dyn ManifestStorage<R>>,
     pub(crate) arrow_schema: Arc<Schema>,
 }
 
@@ -23,19 +24,19 @@ where
     pub(crate) fn new(
         manager: Arc<StoreManager>,
         parquet_lru: ParquetLru,
-        version_set: VersionSet<R>,
+        manifest: Box<dyn ManifestStorage<R>>,
         arrow_schema: Arc<Schema>,
     ) -> Self {
         Self {
             manager,
             parquet_lru,
-            version_set,
+            manifest,
             arrow_schema,
         }
     }
 
-    pub(crate) fn version_set(&self) -> &VersionSet<R> {
-        &self.version_set
+    pub(crate) fn manifest(&self) -> &dyn ManifestStorage<R> {
+        self.manifest.as_ref()
     }
 
     pub(crate) fn storage_manager(&self) -> &StoreManager {
@@ -51,10 +52,10 @@ where
     }
 
     pub(crate) fn load_ts(&self) -> Timestamp {
-        self.version_set.load_ts()
+        self.manifest.load_ts()
     }
 
     pub(crate) fn increase_ts(&self) -> Timestamp {
-        self.version_set.increase_ts()
+        self.manifest.increase_ts()
     }
 }

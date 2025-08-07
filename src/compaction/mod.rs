@@ -53,7 +53,7 @@ where
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
     ) -> Result<(), CompactionError<R>> {
-        let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into()).await?;
+        let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
 
         // Kould: is the capacity parameter necessary?
         let mut builder =

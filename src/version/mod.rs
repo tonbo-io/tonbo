@@ -1,5 +1,6 @@
 pub(crate) mod cleaner;
 pub(crate) mod edit;
+pub(crate) mod error;
 pub(crate) mod set;
 pub(crate) mod timestamp;
 
@@ -11,23 +12,23 @@ use std::{
     },
 };
 
-use flume::{SendError, Sender};
+use flume::Sender;
 use fusio::DynFs;
-use fusio_log::error::LogError;
 use parquet::arrow::ProjectionMask;
-use thiserror::Error;
 use tracing::error;
 
 use crate::{
     context::Context,
     fs::{manager::StoreManager, FileId, FileType},
     ondisk::sstable::SsTable,
+    option::Order,
     record::{Record, Schema},
     scope::Scope,
     stream::{level::LevelStream, record_batch::RecordBatchEntry, ScanStream},
     version::{
         cleaner::CleanTag,
         edit::VersionEdit,
+        error::VersionError,
         timestamp::{Timestamp, TsRef},
     },
     DbOption, ParquetLru,
@@ -43,12 +44,15 @@ pub(crate) trait TransactionTs {
     fn increase_ts(&self) -> Timestamp;
 }
 
+/// Tracks the current metadata of the `DB`
 #[derive(Debug)]
 pub(crate) struct Version<R>
 where
     R: Record,
 {
+    // Timestamp at creation
     ts: Timestamp,
+    // Holds the SSTable file ids and their min/max values for every level
     pub(crate) level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
@@ -62,6 +66,7 @@ where
 {
     #[cfg(test)]
     #[allow(unused)]
+    // Creates new `Version` for testing
     pub(crate) fn new(
         option: Arc<DbOption>,
         clean_sender: Sender<CleanTag>,
@@ -77,11 +82,13 @@ where
         }
     }
 
+    /// Creates
     pub(crate) fn option(&self) -> &Arc<DbOption> {
         &self.option
     }
 }
 
+// Handles Timestamp operations for `Version`
 impl<R> TransactionTs for Version<R>
 where
     R: Record,
@@ -121,6 +128,7 @@ impl<R> Version<R>
 where
     R: Record,
 {
+    /// Queries for 'get' operations
     pub(crate) async fn query(
         &self,
         manager: &StoreManager,
@@ -133,6 +141,8 @@ where
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
         let level_0_fs = manager.get_fs(level_0_path);
+
+        // For level 0, check if the scope contains the key. If found we do a query into the level
         for scope in self.level_slice[0].iter().rev() {
             if !scope.contains(key.value()) {
                 continue;
@@ -151,16 +161,19 @@ where
                 return Ok(Some(entry));
             }
         }
+
+        // For level 1+, a binary search is done on the level to find the key before querying on it
         for (i, sort_runs) in self.level_slice[1..MAX_LEVEL].iter().enumerate() {
-            let leve = i + 1;
-            let level_path = self
-                .option
-                .level_fs_path(leve)
-                .unwrap_or(&self.option.base_path);
-            let level_fs = manager.get_fs(level_path);
             if sort_runs.is_empty() {
                 continue;
             }
+            let level = i + 1;
+            let level_path = self
+                .option
+                .level_fs_path(level)
+                .unwrap_or(&self.option.base_path);
+            let level_fs = manager.get_fs(level_path);
+
             let index = Self::scope_search(key.value(), sort_runs);
             if !sort_runs[index].contains(key.value()) {
                 continue;
@@ -169,7 +182,7 @@ where
                 .table_query(
                     level_fs,
                     key,
-                    leve,
+                    level,
                     sort_runs[index].gen,
                     projection_mask.clone(),
                     parquet_lru.clone(),
@@ -183,6 +196,7 @@ where
         Ok(None)
     }
 
+    // Opens the file by `FileId` and does a get operation on the SsTable
     async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
@@ -206,6 +220,7 @@ where
             .map_err(VersionError::Parquet)
     }
 
+    /// Perform binary search on a level using the key
     pub(crate) fn scope_search(
         key: &<R::Schema as Schema>::Key,
         level: &[Scope<<R::Schema as Schema>::Key>],
@@ -215,10 +230,12 @@ where
             .unwrap_or_else(|index| index.saturating_sub(1))
     }
 
+    /// Returns the length of a level
     pub(crate) fn tables_len(&self, level: usize) -> usize {
         self.level_slice[level].len()
     }
 
+    /// Checks all levels and pushes all data scans that fall in the range
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn streams<'streams>(
         &self,
@@ -231,12 +248,14 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        order: Option<Order>,
     ) -> Result<(), VersionError> {
         let level_0_path = self
             .option
             .level_fs_path(0)
             .unwrap_or(&self.option.base_path);
         let level_0_fs = ctx.manager.get_fs(level_0_path);
+
         for scope in self.level_slice[0].iter() {
             if !scope.meets_range(range) {
                 continue;
@@ -252,11 +271,12 @@ where
 
             streams.push(ScanStream::SsTable {
                 inner: table
-                    .scan(range, ts, limit, projection_mask.clone())
+                    .scan(range, ts, limit, projection_mask.clone(), order)
                     .await
                     .map_err(VersionError::Parquet)?,
             })
         }
+
         for (i, scopes) in self.level_slice[1..].iter().enumerate() {
             if scopes.is_empty() {
                 continue;
@@ -294,6 +314,7 @@ where
                     projection_mask.clone(),
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    order,
                 )
                 .unwrap(),
             });
@@ -301,6 +322,7 @@ where
         Ok(())
     }
 
+    // Uses the changes made in the `level_slice` and adds the corresponding edits
     pub(crate) fn to_edits(&self) -> Vec<VersionEdit<<R::Schema as Schema>::Key>> {
         let mut edits = Vec::new();
 
@@ -327,22 +349,4 @@ where
             error!("[Version Drop Error]: {}", err)
         }
     }
-}
-
-#[derive(Debug, Error)]
-pub enum VersionError {
-    #[error("version encode error: {0}")]
-    Encode(#[source] fusio::Error),
-    #[error("version io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("version parquet error: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
-    #[error("version fusio error: {0}")]
-    Fusio(#[from] fusio::Error),
-    #[error("version ulid decode error: {0}")]
-    UlidDecode(#[from] ulid::DecodeError),
-    #[error("version send error: {0}")]
-    Send(#[from] SendError<CleanTag>),
-    #[error("log error: {0}")]
-    Logger(#[from] LogError),
 }

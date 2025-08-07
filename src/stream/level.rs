@@ -19,6 +19,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, FileType},
     ondisk::{scan::SsTableScan, sstable::SsTable},
+    option::Order,
     record::{Record, Schema},
     scope::Scope,
     stream::record_batch::RecordBatchEntry,
@@ -58,6 +59,7 @@ where
     fs: Arc<dyn DynFs>,
     path: Option<Path>,
     parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+    order: Option<Order>,
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -80,12 +82,19 @@ where
         projection_mask: ProjectionMask,
         fs: Arc<dyn DynFs>,
         parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
+        order: Option<Order>,
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
             .iter()
             .map(Scope::gen)
             .collect();
+
+        // For descending order, reverse the SSTable processing order
+        if order == Some(Order::Desc) {
+            gens = gens.into_iter().rev().collect();
+        }
+
         let first_gen = gens.pop_front()?;
         let status = FutureStatus::Init(first_gen);
 
@@ -102,6 +111,7 @@ where
             fs,
             path: None,
             parquet_lru,
+            order,
         })
     }
 }
@@ -195,6 +205,7 @@ where
                             self.ts,
                             self.limit,
                             self.projection_mask.clone(),
+                            self.order,
                         )));
                         continue;
                     }
@@ -230,6 +241,7 @@ mod tests {
     use crate::{
         compaction::tests::build_version, fs::manager::StoreManager,
         inmem::immutable::tests::TestSchema, record::Schema, stream::level::LevelStream, DbOption,
+        Order,
     };
 
     #[tokio::test(flavor = "multi_thread")]
@@ -271,6 +283,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                None, // Default order for test
             )
             .unwrap();
 
@@ -310,6 +323,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                None, // Default order for test
             )
             .unwrap();
 
@@ -349,6 +363,7 @@ mod tests {
                 ),
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
+                None, // Default order for test
             )
             .unwrap();
 
@@ -370,6 +385,57 @@ mod tests {
             let entry_5 = level_stream_1.next().await.unwrap().unwrap();
             assert!(entry_5.get().unwrap().vu32.is_none());
             assert!(entry_5.get().unwrap().vbool.is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_projection_scan_rev() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
+        let option = Arc::new(DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema {},
+        ));
+
+        manager
+            .base_fs()
+            .create_dir_all(&option.version_log_dir_path())
+            .await
+            .unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let (_, version) = build_version(&option, &manager, &Arc::new(TestSchema)).await;
+
+        {
+            let mut level_stream_1 = LevelStream::new(
+                &version,
+                0,
+                0,
+                1,
+                (Bound::Unbounded, Bound::Unbounded),
+                1_u32.into(),
+                None,
+                ProjectionMask::roots(
+                    &ArrowSchemaConverter::new()
+                        .convert(TestSchema {}.arrow_schema())
+                        .unwrap(),
+                    [0, 1, 2, 3],
+                ),
+                manager.base_fs().clone(),
+                Arc::new(NoCache::default()),
+                Some(Order::Desc),
+            )
+            .unwrap();
+            let expected = ["6", "5", "4", "3", "2", "1"];
+            let mut actual = vec![];
+            while let Some(e) = level_stream_1.next().await.transpose().unwrap() {
+                actual.push(e.key().to_string());
+            }
+            assert_eq!(expected, actual.as_slice())
         }
     }
 }

@@ -42,7 +42,7 @@ where
     R: Record,
 {
     option: Arc<DbOption>,
-    schema: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     record_schema: Arc<R::Schema>,
 }
@@ -53,14 +53,14 @@ where
 {
     /// Create new instance of `LeveledCompactor`
     pub(crate) fn new(
-        schema: Arc<RwLock<DbStorage<R>>>,
+        mem_storage: Arc<RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
         option: Arc<DbOption>,
         ctx: Arc<Context<R>>,
     ) -> Self {
         LeveledCompactor::<R> {
             option,
-            schema,
+            mem_storage,
             ctx,
             record_schema,
         }
@@ -71,7 +71,7 @@ where
         &mut self,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
-        let mut guard = self.schema.write().await;
+        let mut guard = self.mem_storage.write().await;
 
         guard.trigger.reset();
 
@@ -102,7 +102,7 @@ where
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
-            let guard = self.schema.upgradable_read().await;
+            let guard = self.mem_storage.upgradable_read().await;
             let chunk_num = if is_manual {
                 guard.immutables.len()
             } else {
@@ -119,7 +119,7 @@ where
             )
             .await?
             {
-                let version_ref = self.ctx.version_set.current().await;
+                let version_ref = self.ctx.manifest().current().await;
                 let mut version_edits = vec![];
                 let mut delete_gens = vec![];
 
@@ -143,8 +143,8 @@ where
                 });
 
                 self.ctx
-                    .version_set
-                    .apply_edits(version_edits, Some(delete_gens), false)
+                    .manifest()
+                    .update(version_edits, Some(delete_gens))
                     .await?;
             }
             let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
@@ -152,7 +152,7 @@ where
             let _ = mem::replace(&mut guard.immutables, sources);
         }
         if is_manual {
-            self.ctx.version_set.rewrite().await.unwrap();
+            self.ctx.manifest().rewrite().await.unwrap();
         }
         Ok(())
     }
@@ -285,6 +285,7 @@ where
                                     u32::MAX.into(),
                                     None,
                                     ProjectionMask::all(),
+                                    None,
                                 )
                                 .await?,
                         });
@@ -342,6 +343,7 @@ where
                                 u32::MAX.into(),
                                 None,
                                 ProjectionMask::all(),
+                                None, // Default order for compaction
                             )
                             .await?,
                     });
@@ -359,6 +361,7 @@ where
                     ProjectionMask::all(),
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    None, // Default order for compaction
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -384,6 +387,7 @@ where
                     ProjectionMask::all(),
                     level_l_fs.clone(),
                     ctx.parquet_lru.clone(),
+                    None, // Default order for compaction
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -839,13 +843,15 @@ pub(crate) mod tests {
         let mut version_edits = Vec::new();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
-            .await
-            .unwrap();
+        let manifest = Box::new(
+            VersionSet::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
+        );
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),
-            version_set,
+            manifest,
             TestSchema.arrow_schema().clone(),
         );
 
@@ -991,13 +997,15 @@ pub(crate) mod tests {
         let max = 9.to_string();
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
-        let version_set = VersionSet::new(clean_sender, option.clone(), manager.clone())
-            .await
-            .unwrap();
+        let manifest = Box::new(
+            VersionSet::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
+        );
         let ctx = Context::new(
             manager.clone(),
             Arc::new(NoCache::default()),
-            version_set,
+            manifest,
             TestSchema.arrow_schema().clone(),
         );
         LeveledCompactor::<Test>::major_compaction(
@@ -1105,7 +1113,7 @@ pub(crate) mod tests {
         .unwrap();
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest().current().await;
 
         for level in 0..MAX_LEVEL {
             let sort_runs = &version.level_slice[level];
@@ -1188,7 +1196,7 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs_zero = &version.level_slice[0];
         let sort_runs_one = &version.level_slice[1];
 
@@ -1261,7 +1269,7 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs = &version.level_slice[0];
 
         assert_eq!(sort_runs.len(), 3);
@@ -1348,7 +1356,7 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs_l0 = &version.level_slice[0];
         let sort_runs_l1 = &version.level_slice[1];
 
@@ -1450,9 +1458,10 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
-        let version = db.ctx.version_set.current().await;
+        let version = db.ctx.manifest.current().await;
         let sort_runs_level_0 = &version.level_slice[0];
         let sort_runs_level_1 = &version.level_slice[1];
+        let sort_runs_level_2 = &version.level_slice[2];
 
         // Six SSTs are inserted
         // The logic here is as follows:
@@ -1462,6 +1471,7 @@ pub(crate) mod tests {
         //     level 0.
         assert_eq!(sort_runs_level_0.len(), 4);
         assert_eq!(sort_runs_level_1.len(), 1);
+        assert!(sort_runs_level_2.is_empty());
 
         for i in 25..30 {
             let item = Test {
@@ -1473,6 +1483,10 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
+        let version = db.ctx.manifest.current().await;
+        let sort_runs_level_0 = &version.level_slice[0];
+        assert_eq!(sort_runs_level_0.len(), 5);
+
         for i in 4..7 {
             let item = Test {
                 vstring: i.to_string(),
@@ -1483,21 +1497,113 @@ pub(crate) mod tests {
         }
         db.flush().await.unwrap();
 
+        let version = db.ctx.manifest.current().await;
         let sort_runs_level_0 = &version.level_slice[0];
         let sort_runs_level_1 = &version.level_slice[1];
-        let sort_runs_level_2 = &version.level_slice[1];
+        let sort_runs_level_2 = &version.level_slice[2];
 
         // Two SSTs are inserted.
         // The logic here is as follow:
-        //  1. Add one non overlapping SST
-        //  2. Add an which overlaps with the level 1 SST but not level 0. This SST triggers
-        //     compaction again since threshold has been reached.
-        //  3. Level 0 will not have any overlapping keys and will take 1 SST to compact to the next
-        //     level due to the `major_default_oldest_table_num` = 1
-        //  4. Compaction continues into level 1 which has one overlapping SST and gets compacted to
-        //     level 2
-        assert_eq!(sort_runs_level_0.len(), 4);
+        //  1. Add one non overlapping SST -> there is no compaction
+        //  2. Add an which overlaps with both one SST in level 0 and level 1. These combine to form
+        //     a new SST on level 1.
+        //  4. Compaction does not continue into the next level for level 1 because non level 0 does
+        //     not self compact if threshold isn't exceeded.
+        assert_eq!(sort_runs_level_0.len(), 5);
         assert_eq!(sort_runs_level_1.len(), 1);
+        assert_eq!(sort_runs_level_2.len(), 0);
+    }
+
+    // Issue: https://github.com/tonbo-io/tonbo/issues/151
+    // TODO: Remove the write amplification
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_amplification_test() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+        option.immutable_chunk_num = 1;
+        option.immutable_chunk_max_num = 1;
+        option.major_threshold_with_sst_size = 2;
+        option.level_sst_magnification = 1;
+
+        option.max_sst_file_size = 2 * 1024 * 1024;
+        option.major_default_oldest_table_num = 1;
+        option.trigger_type = TriggerType::Length(100);
+
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+            .await
+            .unwrap();
+
+        for i in 100..130 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 200..300 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 7..100 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 5..8 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 0..3 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 2..7 {
+            let item = Test {
+                vstring: i.to_string(),
+                vu32: i,
+                vbool: Some(true),
+            };
+            db.insert(item).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let version = db.ctx.manifest.current().await;
+        let sort_runs_level_0 = &version.level_slice[0];
+        let sort_runs_level_1 = &version.level_slice[1];
+        let sort_runs_level_2 = &version.level_slice[2];
+
+        assert_eq!(sort_runs_level_0.len(), 1);
+        assert_eq!(sort_runs_level_1.len(), 2);
         assert_eq!(sort_runs_level_2.len(), 1);
     }
 }

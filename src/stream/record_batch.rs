@@ -9,6 +9,7 @@ use arrow::{array::RecordBatch, datatypes::Schema};
 use parquet::arrow::ProjectionMask;
 
 use crate::{
+    option::Order,
     record::{option::OptionRecordRef, Key, Record, RecordRef, Schema as RecordSchema},
     version::timestamp::Ts,
 };
@@ -66,6 +67,8 @@ where
 pub struct RecordBatchIterator<R> {
     record_batch: RecordBatch,
     offset: usize,
+    remaining: usize,
+    step: isize,
     projection_mask: ProjectionMask,
     full_schema: Arc<Schema>,
     _marker: PhantomData<R>,
@@ -79,10 +82,21 @@ where
         record_batch: RecordBatch,
         projection_mask: ProjectionMask,
         full_schema: Arc<Schema>,
+        order: Option<Order>,
     ) -> Self {
+        let num_rows = record_batch.num_rows();
+        let (offset, step) = if matches!(order, Some(Order::Desc)) {
+            // Start from the last row for descending order
+            (num_rows.saturating_sub(1), -1)
+        } else {
+            (0, 1)
+        };
+
         Self {
             record_batch,
-            offset: 0,
+            offset,
+            remaining: num_rows,
+            step,
             projection_mask,
             full_schema,
             _marker: PhantomData,
@@ -97,7 +111,8 @@ where
     type Item = RecordBatchEntry<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.offset >= self.record_batch.num_rows() {
+        // Check if we have remaining items
+        if self.remaining == 0 {
             return None;
         }
 
@@ -114,7 +129,11 @@ where
                 record,
             )
         });
-        self.offset += 1;
+
+        // Update offset and remaining count
+        self.offset = (self.offset as isize + self.step) as usize;
+        self.remaining -= 1;
+
         Some(entry)
     }
 }

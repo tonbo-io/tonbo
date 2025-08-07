@@ -1,15 +1,13 @@
 use std::{ops::Bound, sync::Arc};
 
 use async_lock::Mutex;
-use crossbeam_skiplist::{
-    map::{Entry, Range},
-    SkipMap,
-};
+use crossbeam_skiplist::{map::Entry, SkipMap};
 use fusio::DynFs;
 
 use crate::{
     fs::{generate_file_id, FileId},
     inmem::immutable::ImmutableMemTable,
+    option::Order,
     record::{KeyRef, Record, Schema},
     trigger::FreezeTrigger,
     version::timestamp::{Timestamp, Ts, TsRef, EPOCH},
@@ -20,7 +18,8 @@ use crate::{
     DbError, DbOption,
 };
 
-pub(crate) type MutableScan<'scan, R> = Range<
+// Type alias to simplify the range iterator and help with type inference
+type MutableRange<'scan, R> = crossbeam_skiplist::map::Range<
     'scan,
     TsRef<<<R as Record>::Schema as Schema>::Key>,
     (
@@ -30,6 +29,54 @@ pub(crate) type MutableScan<'scan, R> = Range<
     Ts<<<R as Record>::Schema as Schema>::Key>,
     Option<R>,
 >;
+
+/// Signals to memtable whether size threshold has been reached and needs compaction
+#[derive(Debug)]
+pub enum WriteResult {
+    Continue,
+    NeedCompaction,
+}
+
+impl WriteResult {
+    pub fn needs_compaction(&self) -> bool {
+        matches!(self, WriteResult::NeedCompaction)
+    }
+}
+
+pub(crate) struct MutableScan<'scan, R>
+where
+    R: Record,
+{
+    iter: Box<
+        dyn Iterator<Item = Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>> + Send + 'scan,
+    >,
+}
+
+impl<'scan, R> MutableScan<'scan, R>
+where
+    R: Record,
+{
+    fn new(
+        iter: Box<
+            dyn Iterator<Item = Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>>
+                + Send
+                + 'scan,
+        >,
+    ) -> Self {
+        Self { iter }
+    }
+}
+
+impl<'scan, R> Iterator for MutableScan<'scan, R>
+where
+    R: Record,
+{
+    type Item = Entry<'scan, Ts<<R::Schema as Schema>::Key>, Option<R>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
 
 pub(crate) struct MutableMemTable<R>
 where
@@ -91,7 +138,7 @@ where
         log_ty: LogType,
         record: R,
         ts: Timestamp,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         self.append(Some(log_ty), record.key().to_key(), ts, Some(record))
             .await
     }
@@ -101,7 +148,7 @@ where
         log_ty: LogType,
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         self.append(Some(log_ty), key, ts, None).await
     }
 
@@ -111,7 +158,7 @@ where
         key: <R::Schema as Schema>::Key,
         ts: Timestamp,
         value: Option<R>,
-    ) -> Result<bool, DbError> {
+    ) -> Result<WriteResult, DbError> {
         let timestamped_key = Ts::new(key, ts);
 
         let record_entry = Log::new(timestamped_key, value, log_ty);
@@ -125,11 +172,18 @@ where
 
         let entry = self.data.insert(record_entry.key, record_entry.value);
 
-        Ok(entry
-            .value()
-            .as_ref()
-            .map(|v| self.trigger.check_if_exceed(v))
-            .unwrap_or(false))
+        Ok(
+            if entry
+                .value()
+                .as_ref()
+                .map(|v| self.trigger.check_if_exceed(v))
+                .unwrap_or(false)
+            {
+                WriteResult::NeedCompaction
+            } else {
+                WriteResult::Continue
+            },
+        )
     }
 
     pub(crate) fn get(
@@ -152,6 +206,7 @@ where
             Bound<&'scan <R::Schema as Schema>::Key>,
         ),
         ts: Timestamp,
+        order: Option<Order>,
     ) -> MutableScan<'scan, R> {
         let lower = match range.0 {
             Bound::Included(key) => Bound::Included(TsRef::new(key, ts)),
@@ -164,7 +219,15 @@ where
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        self.data.range((lower, upper))
+        let range_iter: MutableRange<'scan, R> = self.data.range((lower, upper));
+
+        let boxed_iter: Box<dyn Iterator<Item = _> + Send + 'scan> = if order == Some(Order::Desc) {
+            Box::new(range_iter.rev())
+        } else {
+            Box::new(range_iter)
+        };
+
+        MutableScan::new(boxed_iter)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -336,7 +399,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+        let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into(), None);
 
         assert_eq!(
             scan.next().unwrap().key(),
@@ -364,6 +427,7 @@ mod tests {
         let mut scan = mutable.scan(
             (Bound::Included(&lower), Bound::Included(&upper)),
             1_u32.into(),
+            None,
         );
 
         assert_eq!(
@@ -423,7 +487,7 @@ mod tests {
             .unwrap();
 
         {
-            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into());
+            let mut scan = mutable.scan((Bound::Unbounded, Bound::Unbounded), 0_u32.into(), None);
             let entry = scan.next().unwrap();
             assert_eq!(entry.key(), &Ts::new(Value::Int8(1_i8), 0_u32.into()));
             dbg!(entry.clone().value().as_ref().unwrap());
