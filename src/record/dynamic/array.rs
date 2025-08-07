@@ -464,8 +464,8 @@ mod tests {
                 ts: 0.into(),
                 value: record.key(),
             };
-            builder.push(key, Some(record.as_record_ref()));
-            builder.push(key, None);
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            builder.push(key.clone(), None);
             builder.push(key, Some(record.as_record_ref()));
             let arrays = builder.finish(None);
             let res = arrays.get(0, &ProjectionMask::all());
@@ -483,8 +483,8 @@ mod tests {
                 ts: 0.into(),
                 value: record.key(),
             };
-            builder.push(key, Some(record.as_record_ref()));
-            builder.push(key, None);
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            builder.push(key.clone(), None);
             builder.push(key, Some(record.as_record_ref()));
             let arrays = builder.finish(None);
             let res = arrays.get(0, &ProjectionMask::all());
@@ -502,8 +502,8 @@ mod tests {
                 ts: 0.into(),
                 value: record.key(),
             };
-            builder.push(key, Some(record.as_record_ref()));
-            builder.push(key, None);
+            builder.push(key.clone(), Some(record.as_record_ref()));
+            builder.push(key.clone(), None);
             builder.push(key, Some(record.as_record_ref()));
             let arrays = builder.finish(None);
             let res = arrays.get(0, &ProjectionMask::all());
@@ -546,8 +546,8 @@ mod tests {
             ts: 0.into(),
             value: record.key(),
         };
-        builder.push(key, Some(record.as_record_ref()));
-        builder.push(key, None);
+        builder.push(key.clone(), Some(record.as_record_ref()));
+        builder.push(key.clone(), None);
         builder.push(key, Some(record.as_record_ref()));
         let arrays = builder.finish(None);
 
@@ -607,7 +607,7 @@ mod tests {
             ts: 0.into(),
             value: record2.key(),
         };
-        builder.push(key, Some(record1.as_record_ref()));
+        builder.push(key.clone(), Some(record1.as_record_ref()));
         builder.push(key, None);
         builder.push(key2, Some(record2.as_record_ref()));
         let arrays = builder.finish(None);
