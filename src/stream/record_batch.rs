@@ -35,8 +35,8 @@ where
         }
     }
 
-    pub fn record_batch(&self) -> &RecordBatch {
-        &self.record_batch
+    pub fn record_batch(self) -> RecordBatch {
+        self.record_batch
     }
 
     pub(crate) fn internal_key(&self) -> Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {

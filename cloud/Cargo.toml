@@ -6,8 +6,11 @@ edition = "2021"
 [dependencies]
 actix-web = "4"
 arrow = { version = "14.0.0", features = ["ipc"] }
+arrow-array = "55.2.0"
+arrow-flight = { version = "55.2.0", features = ["flight-sql"] }
 async-trait = "0.1"
 async-stream = "0.3"
+bytes = "1"
 flume = { version = "0.11", features = ["async"] }
 fusio = "0.4.0"
 futures = "0.3"
@@ -16,7 +19,7 @@ futures-core = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 supabase-wrappers = { version = "=0.1.22", default-features = false, features = ["pg15"] }
 thiserror = "2.0.3"
-tokio = { version = "1", features = ["io-util"], default-features = false }
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"], default-features = false }
 tonbo = { path = ".." }
+tonic = "0.12.3"
 ulid = { version = "1", features = ["serde"] }
-

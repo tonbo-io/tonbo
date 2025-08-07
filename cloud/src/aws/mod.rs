@@ -5,6 +5,7 @@ use actix_web::{
     web::{self, Bytes},
     App, HttpResponse, HttpServer, Responder,
 };
+use arrow_flight::{encode::FlightDataEncoderBuilder, error::FlightError, flight_service_client::FlightServiceClient, FlightClient};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use fusio::{
@@ -12,18 +13,19 @@ use fusio::{
     remotes::aws::{fs::AmazonS3Builder, AwsCredential},
     DynFs,
 };
-use futures::stream::BoxStream;
+use futures::{channel::mpsc, stream::BoxStream, TryStreamExt};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs::create_dir_all;
 use tonbo::{
-    arrow::ipc::writer::StreamWriter,
+    arrow::{array::RecordBatch, ipc::writer::StreamWriter},
     executor::tokio::TokioExecutor,
     parquet::errors::ParquetError,
     record::{Record, Schema},
     transaction::Transaction,
     DbOption, Entry, Record, DB,
 };
+use tonic::transport::Channel;
 
 use crate::{error::CloudError, ScanRequest, TonboCloud};
 
@@ -55,6 +57,7 @@ where
     read_endpoint: String,
     // Endpoint for writes
     write_endpoint: String,
+    buffered_data: Option<RecordBatch>,
 }
 
 #[async_trait]
@@ -102,11 +105,21 @@ where
             s3_fs,
             read_endpoint,
             write_endpoint,
+            buffered_data: None,
         }
     }
 
     // TODO: Use `DynRecord`
     fn write(&self, _records: impl ExactSizeIterator<Item = R>) {}
+
+    // Returns the number of rows and row size (in bytes)
+    // async fn prune_metadata<'a>(
+    //     &'a self,
+    //     transaction: &'a Transaction<'_, R>,
+    //     scan: &'a ScanRequest<<R::Schema as Schema>::Key>,
+    // ) -> Result<(i64, i32), CloudError> {
+    //     Ok()
+    // }
 
     async fn read<'a>(
         &'a self,
@@ -128,7 +141,7 @@ where
                 .take()
                 .await
                 .map_err(|_db_err| {
-                    ParquetError::General("Tonbo Error".to_string())
+                    ParquetError::General("Error occured while creating transaction.".to_string())
                 })?;
 
             while let Some(entry) = inner.next().await {
@@ -145,7 +158,7 @@ where
             HttpServer::new(move || {
                 App::new().app_data(web::Data::from(tonbo.clone())).route(
                     "/tables/{table_name}/scan",
-                    web::post().to(scan_handler::<User>),
+                    web::post().to(handle_scan::<User>),
                 )
             })
             .bind(endpoint)?
@@ -165,7 +178,7 @@ where
     }
 }
 
-async fn scan_handler<R>(
+async fn handle_scan<R>(
     path: web::Path<String>,
     req: web::Json<ScanRequest<<R::Schema as Schema>::Key>>,
     data: web::Data<Arc<AWSTonbo<R>>>,
@@ -179,41 +192,40 @@ where
         return HttpResponse::NotFound().body(format!("No Tonbo instance named “{}”", table));
     }
 
-    let tonbo = data.clone();
+    let channel = Channel::from_static("http://127.0.0.1:5005")  
+        .connect()  
+        .await  
+        .unwrap(); 
+    let mut client = FlightClient::new(channel); 
+    
+
+    let batch_stream  = async_stream::stream! {  
+        let tonbo = data.clone();
     let scan_req = req.clone();
 
-    let ipc_stream: BoxStream<Result<Bytes, CloudError>> = Box::pin(async_stream::try_stream! {
-        let tx = tonbo.tonbo.transaction().await;
-        let mut inner = tonbo
-            .read(&tx, &scan_req)
-            .await
-            .map_err(ErrorInternalServerError)
-            .unwrap();
+    let transaction = tonbo.tonbo.transaction().await;
+    let mut inner = tonbo
+        .read(&transaction, &scan_req)
+        .await
+        .map_err(ErrorInternalServerError)
+        .unwrap();
+    while let Some(res) = inner.next().await {  
+            match res {  
+                Ok(Entry::RecordBatch(batch_entry)) => {  
+                    let arrow_batch = batch_entry.record_batch();  
+                    yield Ok(arrow_batch);  
+                }  
+                Ok(_) => todo!(),  
+                Err(e) => todo!(),  
+            }  
+        }  
+    };  
 
-        // Currently only converts record batches
-        while let Some(res) = inner.next().await {
-            match res {
-                Ok(Entry::RecordBatch(batch_entry)) => {
-                    let arrow_batch = batch_entry.record_batch();
-                    let mut buf = Vec::new();
-                    let mut w = StreamWriter::try_new(&mut buf, &arrow_batch.schema())
-                        .map_err(ErrorInternalServerError)
-                        .unwrap();
-                    w.write(arrow_batch)
-                        .map_err(ErrorInternalServerError)
-                        .unwrap();
-                    w.finish()
-                        .map_err(ErrorInternalServerError)
-                        .unwrap();
-                    yield Bytes::from(buf);
-                }
-                Ok(_) => todo!(),
-                Err(_) => todo!(),
-            }
-        }
-    });
+    let flight_data_stream = FlightDataEncoderBuilder::new()  
+      .build(batch_stream);  
 
-    HttpResponse::Ok()
-        .insert_header(("content-type", "application/vnd.apache.arrow.stream"))
-        .streaming(ipc_stream)
+    let response_stream = client.do_put(flight_data_stream).await.unwrap();  
+    let results: Vec<_> = response_stream.try_collect().await.unwrap();  
+
+    HttpResponse::Ok().into()
 }
