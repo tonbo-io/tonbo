@@ -27,6 +27,7 @@ opfs = [
     "fusio-log/web",
     "fusio-parquet/web",
     "fusio/opfs",
+    "dep:tokio",
 ]
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]
@@ -40,6 +41,7 @@ tokio = [
     "parquet/default",
     "tokio/fs",
     "tokio/rt-multi-thread",
+    "dep:tokio",
 ]
 tokio-http = ["fusio/tokio-http", "fusio-log/tokio-http"]
 wasm = ["aws", "bytes", "opfs", "wasm-http", "dep:async-trait"]
@@ -93,6 +95,7 @@ fusio-log = { version = "0.4.0", default-features = false, features = [
     "bytes",
 ] }
 fusio-parquet = { version = "0.4.0" }
+futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 itertools = { version = "0.14.0" }
@@ -108,8 +111,10 @@ parquet = { version = "55", default-features = false, features = [
 ] }
 parquet-lru = { version = "0.3.0", path = "parquet-lru" }
 pin-project-lite = "0.2"
-thiserror = "2.0.3"
-tokio = { version = "1", features = ["io-util"], default-features = false }
+thiserror = "2.0.12"
+tokio = { version = "1.47.1", features = [
+    "io-util",
+], default-features = false, optional = true }
 tonbo_macros = { version = "0.3.1", path = "tonbo_macros" }
 tracing = "0.1"
 ulid = { version = "1", features = ["serde"] }

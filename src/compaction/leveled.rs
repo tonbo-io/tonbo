@@ -1,6 +1,5 @@
 use std::{cmp, collections::Bound, mem, sync::Arc};
 
-use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 
@@ -8,6 +7,7 @@ use super::Compactor;
 use crate::{
     compaction::CompactionError,
     context::Context,
+    executor::RwLock,
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
     inmem::{immutable::ImmutableMemTable, mutable::MutableMemTable},
     ondisk::sstable::{SsTable, SsTableID},
@@ -37,28 +37,32 @@ use crate::{
 ///    - Deletes the old SST files from both levels after the new files are safely written
 ///
 /// This is currently the main way Tonbo does compaction
-pub(crate) struct LeveledCompactor<R>
+pub(crate) struct LeveledCompactor<R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
 {
     option: Arc<DbOption>,
-    mem_storage: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<E::RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     record_schema: Arc<R::Schema>,
 }
 
-impl<R> LeveledCompactor<R>
+impl<R, E> LeveledCompactor<R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
 {
     /// Create new instance of `LeveledCompactor`
     pub(crate) fn new(
-        mem_storage: Arc<RwLock<DbStorage<R>>>,
+        mem_storage: Arc<E::RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
         option: Arc<DbOption>,
         ctx: Arc<Context<R>>,
     ) -> Self {
-        LeveledCompactor::<R> {
+        LeveledCompactor::<R, E> {
             option,
             mem_storage,
             ctx,
@@ -102,7 +106,7 @@ where
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
-            let guard = self.mem_storage.upgradable_read().await;
+            let guard = self.mem_storage.read().await;
             let chunk_num = if is_manual {
                 guard.immutables.len()
             } else {
@@ -147,7 +151,8 @@ where
                     .update(version_edits, Some(delete_gens))
                     .await?;
             }
-            let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
+            drop(guard);
+            let mut guard = self.mem_storage.write().await;
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
@@ -290,7 +295,7 @@ where
                                 .await?,
                         });
                     }
-                    Compactor::<R>::build_tables(
+                    Compactor::<R, E>::build_tables(
                         option,
                         version_edits,
                         level + 1,
@@ -349,7 +354,7 @@ where
                     });
                 }
             } else {
-                let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_l)?;
+                let (lower, upper) = Compactor::<R, E>::full_scope(&meet_scopes_l)?;
                 let level_scan_l = LevelStream::new(
                     version,
                     level,
@@ -375,7 +380,7 @@ where
 
             // Pushes next level SSTs that fall in the range
             if !meet_scopes_ll.is_empty() {
-                let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_ll)?;
+                let (lower, upper) = Compactor::<R, E>::full_scope(&meet_scopes_ll)?;
                 let level_scan_ll = LevelStream::new(
                     version,
                     level + 1,
@@ -397,7 +402,7 @@ where
             }
 
             // Build the new SSTs
-            Compactor::<R>::build_tables(
+            Compactor::<R, E>::build_tables(
                 option,
                 version_edits,
                 level + 1,
@@ -712,19 +717,20 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let scope = LeveledCompactor::<Test>::minor_compaction(
-            &option,
-            None,
-            &vec![
-                (Some(generate_file_id()), batch_1),
-                (Some(generate_file_id()), batch_2),
-            ],
-            &TestSchema,
-            &manager,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let scope =
+            LeveledCompactor::<Test, crate::executor::tokio::TokioExecutor>::minor_compaction(
+                &option,
+                None,
+                &vec![
+                    (Some(generate_file_id()), batch_1),
+                    (Some(generate_file_id()), batch_2),
+                ],
+                &TestSchema,
+                &manager,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.min, 1.to_string());
         assert_eq!(scope.max, 6.to_string());
     }
@@ -779,19 +785,20 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-        let scope = LeveledCompactor::<DynRecord>::minor_compaction(
-            &option,
-            None,
-            &vec![
-                (Some(generate_file_id()), batch_1),
-                (Some(generate_file_id()), batch_2),
-            ],
-            &instance,
-            &manager,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let scope =
+            LeveledCompactor::<DynRecord, crate::executor::tokio::TokioExecutor>::minor_compaction(
+                &option,
+                None,
+                &vec![
+                    (Some(generate_file_id()), batch_1),
+                    (Some(generate_file_id()), batch_2),
+                ],
+                &instance,
+                &manager,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.min, Value::Int32(2));
         assert_eq!(scope.max, Value::Int32(39));
     }
@@ -844,9 +851,13 @@ pub(crate) mod tests {
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            VersionSet::new(clean_sender, option.clone(), manager.clone())
-                .await
-                .unwrap(),
+            VersionSet::<Test, crate::executor::tokio::TokioExecutor>::new(
+                clean_sender,
+                option.clone(),
+                manager.clone(),
+            )
+            .await
+            .unwrap(),
         );
         let ctx = Context::new(
             manager.clone(),
@@ -855,7 +866,7 @@ pub(crate) mod tests {
             TestSchema.arrow_schema().clone(),
         );
 
-        LeveledCompactor::<Test>::major_compaction(
+        LeveledCompactor::<Test, crate::executor::tokio::TokioExecutor>::major_compaction(
             &version,
             &option,
             &min,
@@ -998,9 +1009,13 @@ pub(crate) mod tests {
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            VersionSet::new(clean_sender, option.clone(), manager.clone())
-                .await
-                .unwrap(),
+            VersionSet::<Test, crate::executor::tokio::TokioExecutor>::new(
+                clean_sender,
+                option.clone(),
+                manager.clone(),
+            )
+            .await
+            .unwrap(),
         );
         let ctx = Context::new(
             manager.clone(),
@@ -1008,7 +1023,7 @@ pub(crate) mod tests {
             manifest,
             TestSchema.arrow_schema().clone(),
         );
-        LeveledCompactor::<Test>::major_compaction(
+        LeveledCompactor::<Test, crate::executor::tokio::TokioExecutor>::major_compaction(
             &version,
             &option,
             &min,
@@ -1041,7 +1056,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1155,7 +1170,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1228,7 +1243,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1308,7 +1323,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1394,7 +1409,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1533,7 +1548,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(100);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 

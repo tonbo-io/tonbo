@@ -37,7 +37,7 @@ async fn main() {
         &UserSchema,
     );
     // pluggable async runtime and I/O
-    let db = DB::new(options, TokioExecutor::current(), UserSchema)
+    let db = DB::new(options, TokioExecutor::default(), UserSchema)
         .await
         .unwrap();
 

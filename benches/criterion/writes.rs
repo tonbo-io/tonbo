@@ -64,7 +64,7 @@ fn single_write(c: &mut Criterion) {
         )
         .disable_wal();
         let db = runtime
-            .block_on(async { DB::new(option, TokioExecutor::current(), KVSchema).await })
+            .block_on(async { DB::new(option, TokioExecutor::default(), KVSchema).await })
             .unwrap();
 
         group.bench_with_input(BenchmarkId::new("Tonbo", batch), &batch, |b, batch| {
