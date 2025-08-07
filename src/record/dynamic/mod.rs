@@ -29,6 +29,7 @@ pub enum DataType {
     Boolean,
     Bytes,
     LargeBinary,
+    FixedSizeBinary(i32),
     Float32,
     Float64,
     Timestamp(TimeUnit),
@@ -76,6 +77,7 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::Date64 => DataType::Date64,
             ArrowDataType::LargeBinary => DataType::LargeBinary,
             ArrowDataType::LargeUtf8 => DataType::LargeString,
+            ArrowDataType::FixedSizeBinary(w) => DataType::FixedSizeBinary(*w),
             _ => todo!(),
         }
     }
