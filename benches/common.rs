@@ -25,8 +25,7 @@ pub(crate) const READ_TIMES: usize = 200;
 pub(crate) const NUM_SCAN: usize = 200_000;
 const STRING_SIZE: usize = 50;
 
-#[allow(dead_code)]
-pub(crate) const NUMBER_RECORD: usize = 40000000;
+pub(crate) const NUMBER_RECORD: usize = READ_TIMES * NUM_SCAN;
 
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
@@ -133,7 +132,7 @@ pub(crate) fn read_tbl(file_path: impl AsRef<Path>) -> Box<dyn Iterator<Item = C
 pub(crate) fn gen_records(num_records: usize) -> Vec<Customer> {
     let mut data = Vec::with_capacity(num_records);
     let mut rng = make_rng();
-    for i in 0..num_records {
+    for _ in 0..num_records {
         data.push(gen_record(&mut rng));
     }
     data
@@ -185,17 +184,17 @@ pub trait BenchReadTransaction {
 
 #[allow(clippy::len_without_is_empty)]
 pub trait BenchReader {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult>;
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult<'a>>;
 
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchResult> + 'a;
+    ) -> impl Stream<Item = BenchResult<'a>> + 'a;
 
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionResult> + 'a;
+    ) -> impl Stream<Item = ProjectionResult<'a>> + 'a;
 }
 
 pub struct TonboS3BenchDataBase {
@@ -333,8 +332,9 @@ impl BenchDatabase for TonboBenchDataBase {
     async fn build(path: impl AsRef<Path>) -> Self {
         create_dir_all(path.as_ref()).await.unwrap();
 
+        let absolute_path = std::fs::canonicalize(path.as_ref()).unwrap();
         let option = DbOption::new(
-            fusio::path::Path::from_filesystem_path(path.as_ref()).unwrap(),
+            fusio::path::Path::from_filesystem_path(absolute_path).unwrap(),
             &CustomerSchema,
         )
         .disable_wal();
@@ -366,7 +366,7 @@ pub struct TonboBenchReader<'db, 'txn> {
 }
 
 impl BenchReader for TonboBenchReader<'_, '_> {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult<'a>> {
         self.txn
             .get(key, Projection::All)
             .await
@@ -377,7 +377,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchResult> + 'a {
+    ) -> impl Stream<Item = BenchResult<'a>> + 'a {
         stream! {
             let mut stream = self.txn.scan(range).take().await.unwrap();
 
@@ -390,7 +390,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionResult> + 'a {
+    ) -> impl Stream<Item = ProjectionResult<'a>> + 'a {
         stream! {
             let mut stream = self.txn.scan(range).projection(&["c_name"]).take().await.unwrap();
 
@@ -416,8 +416,7 @@ impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
     }
 
     async fn commit(self) -> Result<(), ()> {
-        self.txn.commit().await.unwrap();
-        Ok(())
+        self.txn.commit().await.map_err(|_| ())
     }
 }
 
@@ -502,7 +501,7 @@ pub struct RedbBenchReader {
 }
 
 impl BenchReader for RedbBenchReader {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult<'a>> {
         self.table.get(key.as_bytes()).unwrap().map(|guard| {
             BenchResult::Owned(
                 bincode::deserialize::<Customer>(guard.value())
@@ -515,7 +514,7 @@ impl BenchReader for RedbBenchReader {
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchResult> + 'a {
+    ) -> impl Stream<Item = BenchResult<'a>> + 'a {
         let (lower, upper) = range;
         let iter = self
             .table
@@ -533,7 +532,7 @@ impl BenchReader for RedbBenchReader {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionResult> + 'a {
+    ) -> impl Stream<Item = ProjectionResult<'a>> + 'a {
         let (lower, upper) = range;
         let iter = self
             .table
@@ -655,7 +654,7 @@ pub struct SledBenchReader<'db> {
 }
 
 impl<'db> BenchReader for SledBenchReader<'db> {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult<'a>> {
         self.db.get(key.as_bytes()).unwrap().map(|guard| {
             BenchResult::Owned(
                 bincode::deserialize::<Customer>(guard.as_bytes())
@@ -668,7 +667,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchResult> + 'a {
+    ) -> impl Stream<Item = BenchResult<'a>> + 'a {
         let (lower, upper) = range;
         let iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
             lower.map(ItemKey::as_bytes),
@@ -686,7 +685,7 @@ impl<'db> BenchReader for SledBenchReader<'db> {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionResult> + 'a {
+    ) -> impl Stream<Item = ProjectionResult<'a>> + 'a {
         let (lower, upper) = range;
         let iter = self.db.range::<&[u8], (Bound<&[u8]>, Bound<&[u8]>)>((
             lower.map(ItemKey::as_bytes),
@@ -863,7 +862,7 @@ pub struct RocksdbBenchReader<'db, 'txn> {
 }
 
 impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
-    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult> {
+    async fn get<'a>(&'a self, key: &'a ItemKey) -> Option<BenchResult<'a>> {
         self.snapshot.get(key.as_bytes()).unwrap().map(|bytes| {
             BenchResult::Owned(bincode::deserialize::<Customer>(&bytes).unwrap().into())
         })
@@ -872,7 +871,7 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
     fn range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = BenchResult> + 'a {
+    ) -> impl Stream<Item = BenchResult<'a>> + 'a {
         fn bound_to_include(bound: Bound<&[u8]>) -> Option<&[u8]> {
             match bound {
                 Bound::Included(bytes) | Bound::Excluded(bytes) => Some(bytes),
@@ -904,7 +903,7 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
     fn projection_range_from<'a>(
         &'a self,
         range: (Bound<&'a ItemKey>, Bound<&'a ItemKey>),
-    ) -> impl Stream<Item = ProjectionResult> + 'a {
+    ) -> impl Stream<Item = ProjectionResult<'a>> + 'a {
         fn bound_to_include(bound: Bound<&[u8]>) -> Option<&[u8]> {
             match bound {
                 Bound::Included(bytes) | Bound::Excluded(bytes) => Some(bytes),
