@@ -63,7 +63,7 @@ async fn main() {
         &UserSchema,
     );
 
-    let db = DB::new(options, TokioExecutor::current(), UserSchema)
+    let db = DB::new(options, TokioExecutor::default(), UserSchema)
         .await
         .unwrap();
 

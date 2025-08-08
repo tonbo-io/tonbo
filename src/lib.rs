@@ -48,7 +48,7 @@
 //!         &UserSchema,
 //!     );
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new(options, TokioExecutor::current(), UserSchema)
+//!     let db = DB::new(options, TokioExecutor::default(), UserSchema)
 //!         .await
 //!         .unwrap();
 //!     // insert with owned value
@@ -109,6 +109,7 @@
 mod compaction;
 mod context;
 pub mod executor;
+use executor::RwLock;
 pub(crate) mod fs;
 pub(crate) mod inmem;
 pub(crate) mod magic;
@@ -127,7 +128,6 @@ mod wal;
 use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
 
 pub use arrow;
-use async_lock::RwLock;
 use async_stream::stream;
 use compaction::leveled::LeveledCompactor;
 use context::Context;
@@ -135,6 +135,7 @@ use flume::{bounded, Sender};
 use fs::FileId;
 pub use fusio::{SeqRead, Write};
 pub use fusio_log::{Decode, Encode};
+use futures::channel::oneshot;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{
@@ -143,7 +144,7 @@ use inmem::{
 };
 use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
-use manifest::ManifestStorageError;
+use manifest::{ManifestStorage, ManifestStorageError};
 pub use once_cell;
 pub use parquet;
 use parquet::{
@@ -153,7 +154,6 @@ use parquet::{
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
 use thiserror::Error;
-use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
@@ -178,7 +178,7 @@ use crate::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, ScanStream,
     },
     trigger::TriggerFactory,
-    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, TransactionTs, Version},
+    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version},
     wal::{log::LogType, RecoverError, WalFile},
 };
 pub use crate::{option::*, stream::Entry};
@@ -187,9 +187,10 @@ pub use crate::{option::*, stream::Entry};
 pub struct DB<R, E>
 where
     R: Record,
+    <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor,
 {
-    mem_storage: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<E::RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     lock_map: LockMap<<R::Schema as Schema>::Key>,
     _p: PhantomData<E>,
@@ -200,6 +201,7 @@ where
     R: Record + Send + Sync,
     <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
+    DbStorage<R>: fusio::MaybeSend + fusio::MaybeSync,
 {
     /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
     /// path specified in [`DbOption`] (if it does not exist before) and run it
@@ -222,6 +224,7 @@ where
     R: Record + Send + Sync,
     <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
+    DbStorage<R>: fusio::MaybeSend + fusio::MaybeSync,
 {
     async fn build(
         option: Arc<DbOption>,
@@ -263,15 +266,15 @@ where
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
         let manifest = Box::new(
-            VersionSet::new(clean_sender, option.clone(), manager.clone())
+            VersionSet::<R, E>::new(clean_sender, option.clone(), manager.clone())
                 .await
                 .map_err(ManifestStorageError::Version)?,
         );
-        let mem_storage = Arc::new(RwLock::new(
+        let mem_storage = Arc::new(E::rw_lock(
             DbStorage::new(
                 option.clone(),
                 task_tx,
-                &manifest,
+                manifest.as_ref(),
                 record_schema.clone(),
                 &manager,
             )
@@ -286,7 +289,7 @@ where
         ));
 
         let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
                 mem_storage.clone(),
                 record_schema,
                 option.clone(),
@@ -356,12 +359,12 @@ where
     ///
     /// txn.commit().await.unwrap();
     /// ```
-    pub async fn transaction(&self) -> Transaction<'_, R> {
+    pub async fn transaction(&self) -> Transaction<'_, R, E> {
         Transaction::new(self.snapshot().await, self.lock_map.clone())
     }
 
     /// Returns a snapshot of the database
-    pub async fn snapshot(&self) -> Snapshot<'_, R> {
+    pub async fn snapshot(&self) -> Snapshot<'_, R, E> {
         Snapshot::new(
             self.mem_storage.read().await,
             self.ctx.manifest().current().await,
@@ -531,12 +534,12 @@ where
 }
 
 /// DbStorage state for coordinating in-memory + on-disk operations
-pub(crate) struct DbStorage<R>
+pub struct DbStorage<R>
 where
     R: Record,
 {
-    pub mutable: MutableMemTable<R>,
-    pub immutables: Vec<(
+    pub(crate) mutable: MutableMemTable<R>,
+    pub(crate) immutables: Vec<(
         Option<FileId>,
         ImmutableMemTable<<R::Schema as Schema>::Columns>,
     )>,
@@ -556,7 +559,7 @@ where
     async fn new(
         option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
-        manifest: &VersionSet<R>,
+        manifest: &dyn ManifestStorage<R>,
         record_schema: Arc<R::Schema>,
         manager: &StoreManager,
     ) -> Result<Self, DbError> {
@@ -1121,7 +1124,6 @@ pub(crate) mod tests {
         array::{Array, AsArray, RecordBatch},
         datatypes::{Schema, UInt32Type},
     };
-    use async_lock::RwLock;
     use flume::{bounded, Receiver};
     use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
     use fusio_dispatch::FsOptions;
@@ -1135,7 +1137,7 @@ pub(crate) mod tests {
     use crate::{
         compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
         context::Context,
-        executor::{tokio::TokioExecutor, Executor},
+        executor::{tokio::TokioExecutor, Executor, RwLock},
         fs::{generate_file_id, manager::StoreManager},
         inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
         manifest::ManifestStorageError,
@@ -1481,11 +1483,11 @@ pub(crate) mod tests {
             let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
         }
 
-        let mem_storage = Arc::new(RwLock::new(mem_storage));
+        let mem_storage = Arc::new(E::rw_lock(mem_storage));
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            build_version_set(version, clean_sender, option.clone(), manager.clone())
+            build_version_set::<R, E>(version, clean_sender, option.clone(), manager.clone())
                 .await
                 .map_err(ManifestStorageError::Version)?,
         );
@@ -1496,7 +1498,7 @@ pub(crate) mod tests {
             TestSchema.arrow_schema().clone(),
         ));
         let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
                 mem_storage.clone(),
                 record_schema,
                 option.clone(),
@@ -1569,7 +1571,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1610,7 +1612,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1668,7 +1670,7 @@ pub(crate) mod tests {
         )
         .base_fs(s3_option.clone());
         {
-            let db = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+            let db = DB::new(option.clone(), TokioExecutor::default(), TestSchema)
                 .await
                 .unwrap();
 
@@ -1695,7 +1697,7 @@ pub(crate) mod tests {
         // test recover from s3
         {
             let db: DB<Test, TokioExecutor> =
-                DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                DB::new(option.clone(), TokioExecutor::default(), TestSchema)
                     .await
                     .unwrap();
             let mut sort_items = BTreeMap::new();
@@ -1757,7 +1759,7 @@ pub(crate) mod tests {
 
         let db: DB<Test, TokioExecutor> = DB::new(
             option.as_ref().to_owned(),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             TestSchema,
         )
         .await
@@ -1837,7 +1839,7 @@ pub(crate) mod tests {
         );
         let dyn_schema = test_dyn_item_schema();
         let db: DB<DynRecord, TokioExecutor> =
-            DB::new(option, TokioExecutor::current(), dyn_schema)
+            DB::new(option, TokioExecutor::default(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -1879,7 +1881,7 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1923,7 +1925,7 @@ pub(crate) mod tests {
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<DynRecord, TokioExecutor> =
-            DB::new(option, TokioExecutor::current(), dyn_schema)
+            DB::new(option, TokioExecutor::default(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -2085,15 +2087,15 @@ pub(crate) mod tests {
         option3.trigger_type = TriggerType::Length(5);
 
         let db1: DB<DynRecord, TokioExecutor> =
-            DB::new(option, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option, TokioExecutor::default(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db2: DB<DynRecord, TokioExecutor> =
-            DB::new(option2, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option2, TokioExecutor::default(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db3: DB<DynRecord, TokioExecutor> =
-            DB::new(option3, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option3, TokioExecutor::default(), test_dyn_item_schema())
                 .await
                 .unwrap();
 

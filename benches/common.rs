@@ -286,7 +286,7 @@ impl BenchDatabase for TonboS3BenchDataBase {
             .disable_wal();
 
         TonboS3BenchDataBase::new(
-            tonbo::DB::new(option, TokioExecutor::current(), CustomerSchema)
+            tonbo::DB::new(option, TokioExecutor::default(), CustomerSchema)
                 .await
                 .unwrap(),
         )
@@ -339,7 +339,7 @@ impl BenchDatabase for TonboBenchDataBase {
         )
         .disable_wal();
 
-        let db = tonbo::DB::new(option, TokioExecutor::current(), CustomerSchema)
+        let db = tonbo::DB::new(option, TokioExecutor::default(), CustomerSchema)
             .await
             .unwrap();
         TonboBenchDataBase::new(db)

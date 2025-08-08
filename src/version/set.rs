@@ -7,7 +7,6 @@ use std::{
     },
 };
 
-use async_lock::RwLock;
 use async_trait::async_trait;
 use flume::Sender;
 use fusio::{fs::FileMeta, DynFs};
@@ -17,6 +16,7 @@ use itertools::Itertools;
 
 use super::{TransactionTs, MAX_LEVEL};
 use crate::{
+    executor::RwLock,
     fs::{generate_file_id, manager::StoreManager, parse_file_id, FileId, FileType},
     manifest::{ManifestStorage, ManifestStorageError},
     ondisk::sstable::SsTableID,
@@ -73,12 +73,13 @@ where
 /// and SST files currently make up the database. When a reader does a scan
 /// it will use the `VersionRef` to return the `Version` which contains the
 /// frozen view of its own timestamp and file lists.
-pub(crate) struct VersionSet<R>
+pub(crate) struct VersionSet<R, E>
 where
     R: Record,
+    E: crate::executor::Executor,
 {
     // Current snapshot version
-    inner: Arc<RwLock<VersionSetInner<R>>>,
+    inner: Arc<E::RwLock<VersionSetInner<R>>>,
     // Channel sender for deleting WAL/SST
     clean_sender: Sender<CleanTag>,
     // Counter for version change
@@ -87,12 +88,13 @@ where
     manager: Arc<StoreManager>,
 }
 
-impl<R> Clone for VersionSet<R>
+impl<R, E> Clone for VersionSet<R, E>
 where
     R: Record,
+    E: crate::executor::Executor,
 {
     fn clone(&self) -> Self {
-        VersionSet {
+        VersionSet::<R, E> {
             inner: self.inner.clone(),
             clean_sender: self.clean_sender.clone(),
             timestamp: self.timestamp.clone(),
@@ -102,9 +104,10 @@ where
     }
 }
 
-impl<R> TransactionTs for VersionSet<R>
+impl<R, E> TransactionTs for VersionSet<R, E>
 where
     R: Record,
+    E: crate::executor::Executor,
 {
     fn load_ts(&self) -> Timestamp {
         self.timestamp.load(Ordering::Acquire).into()
@@ -115,9 +118,10 @@ where
     }
 }
 
-impl<R> VersionSet<R>
+impl<R, E> VersionSet<R, E>
 where
     R: Record,
+    E: crate::executor::Executor,
 {
     /// Creates a new `VersionSet` by checking the previous version log and applies previous edits
     /// to the new log if they exist.
@@ -188,8 +192,8 @@ where
         drop(log_stream);
 
         let timestamp = Arc::new(AtomicU32::default());
-        let set = VersionSet::<R> {
-            inner: Arc::new(RwLock::new(VersionSetInner {
+        let set = VersionSet::<R, E> {
+            inner: Arc::new(E::rw_lock(VersionSetInner {
                 current: Arc::new(Version::<R> {
                     ts: Timestamp::from(0),
                     level_slice: [const { Vec::new() }; MAX_LEVEL],
@@ -458,9 +462,10 @@ where
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl<R> ManifestStorage<R> for VersionSet<R>
+impl<R, E> ManifestStorage<R> for VersionSet<R, E>
 where
     R: Record,
+    E: crate::executor::Executor + Send + Sync,
 {
     async fn current(&self) -> VersionRef<R> {
         self.inner.read().await.current.clone()
@@ -498,7 +503,6 @@ where
 pub(crate) mod tests {
     use std::sync::Arc;
 
-    use async_lock::RwLock;
     use flume::{bounded, Sender};
     use fusio::path::Path;
     use fusio_dispatch::FsOptions;
@@ -518,21 +522,22 @@ pub(crate) mod tests {
         DbOption,
     };
 
-    pub(crate) async fn build_version_set<R>(
+    pub(crate) async fn build_version_set<R, E>(
         version: Version<R>,
         clean_sender: Sender<CleanTag>,
         option: Arc<DbOption>,
         manager: Arc<StoreManager>,
-    ) -> Result<VersionSet<R>, VersionError>
+    ) -> Result<VersionSet<R, E>, VersionError>
     where
         R: Record,
+        E: crate::executor::Executor,
     {
         let log_id = generate_file_id();
 
         let timestamp = version.timestamp.clone();
 
-        Ok(VersionSet::<R> {
-            inner: Arc::new(RwLock::new(VersionSetInner {
+        Ok(VersionSet::<R, E> {
+            inner: Arc::new(E::rw_lock(VersionSetInner {
                 current: Arc::new(version),
                 log_id,
                 deleted_wal: Default::default(),
@@ -560,7 +565,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, crate::executor::tokio::TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -576,7 +581,7 @@ pub(crate) mod tests {
 
         drop(version_set);
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, crate::executor::tokio::TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();
@@ -604,7 +609,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, crate::executor::tokio::TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -780,7 +785,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, crate::executor::tokio::TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -873,7 +878,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, crate::executor::tokio::TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -970,7 +975,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, crate::executor::tokio::TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone(), manager.clone())
                 .await
                 .unwrap();
@@ -1154,7 +1159,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let version_set: VersionSet<String> =
+        let version_set: VersionSet<String, crate::executor::tokio::TokioExecutor> =
             VersionSet::new(sender.clone(), option.clone(), manager)
                 .await
                 .unwrap();

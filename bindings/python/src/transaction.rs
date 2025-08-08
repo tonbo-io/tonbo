@@ -7,6 +7,7 @@ use pyo3::{
 };
 use pyo3_async_runtimes::tokio::future_into_py;
 use tonbo::{
+    executor::tokio::TokioExecutor,
     record::{DynRecord, Value},
     transaction, Projection,
 };
@@ -21,14 +22,14 @@ use crate::{
 
 #[pyclass]
 pub struct Transaction {
-    txn: Option<transaction::Transaction<'static, DynRecord>>,
+    txn: Option<transaction::Transaction<'static, DynRecord, TokioExecutor>>,
     desc: Arc<Vec<Column>>,
     primary_key_index: usize,
 }
 
 impl Transaction {
     pub(crate) fn new<'txn>(
-        txn: transaction::Transaction<'txn, DynRecord>,
+        txn: transaction::Transaction<'txn, DynRecord, TokioExecutor>,
         desc: Arc<Vec<Column>>,
     ) -> Self {
         let primary_key_index = desc
@@ -40,8 +41,8 @@ impl Transaction {
         Transaction {
             txn: Some(unsafe {
                 transmute::<
-                    transaction::Transaction<'txn, DynRecord>,
-                    transaction::Transaction<'static, DynRecord>,
+                    transaction::Transaction<'txn, DynRecord, TokioExecutor>,
+                    transaction::Transaction<'static, DynRecord, TokioExecutor>,
                 >(txn)
             }),
             desc,
@@ -87,8 +88,8 @@ impl Transaction {
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
             transmute::<
-                &transaction::Transaction<'_, DynRecord>,
-                &'static transaction::Transaction<'_, DynRecord>,
+                &transaction::Transaction<'_, DynRecord, TokioExecutor>,
+                &'static transaction::Transaction<'_, DynRecord, TokioExecutor>,
             >(txn)
         };
 
@@ -176,8 +177,8 @@ impl Transaction {
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
             transmute::<
-                &transaction::Transaction<'_, DynRecord>,
-                &'static transaction::Transaction<'_, DynRecord>,
+                &transaction::Transaction<'_, DynRecord, TokioExecutor>,
+                &'static transaction::Transaction<'_, DynRecord, TokioExecutor>,
             >(txn)
         };
         let col_desc = self.desc.get(self.primary_key_index).unwrap();

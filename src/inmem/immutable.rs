@@ -523,7 +523,7 @@ pub(crate) mod tests {
                 Ts::new(key.clone(), i.into()),
                 Some(Test {
                     vstring: key,
-                    vu32: i as u32,
+                    vu32: i,
                     vbool: Some(i % 2 == 0),
                 }),
             );

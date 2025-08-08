@@ -224,7 +224,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_query_test.parquet");
@@ -308,7 +308,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
         )
         .await;
         let table_path = temp_dir.path().join("projection_scan_test.parquet");
@@ -417,7 +417,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
         )
         .await;
         let table_path = temp_dir.path().join("reverse_scan_basic_test.parquet");
@@ -488,7 +488,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
         )
         .await;
         let table_path = temp_dir.path().join("reverse_scan_projection_test.parquet");
@@ -578,7 +578,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
         )
         .await;
         let table_path = temp_dir.path().join("reverse_scan_bounds_test.parquet");
@@ -650,7 +650,7 @@ pub(crate) mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &TestSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
         )
         .await;
         let table_path = temp_dir.path().join("forward_vs_reverse_test.parquet");

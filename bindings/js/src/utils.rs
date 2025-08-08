@@ -71,7 +71,7 @@ pub(crate) fn to_record(schema: &[DynamicField], cols: &[Value]) -> JsValue {
             Value::Float64(v) => (*v).into(),
             Value::String(v) => v.to_owned().into(),
             Value::Binary(v) => v.to_vec().into(),
-            Value::FixedSizeBinary(v, w) => v.to_vec().into(),
+            Value::FixedSizeBinary(v, _w) => v.to_vec().into(),
             Value::Date32(_)
             | Value::Date64(_)
             | Value::List(_, _)
