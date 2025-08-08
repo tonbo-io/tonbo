@@ -32,6 +32,12 @@ jobs:
           override: true
           components: rustfmt, clippy
 
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          cache-on-failure: false
+
       # `cargo clippy` command here will use installed `stable`
       # as it is set as an "override" for current directory
 
@@ -90,6 +96,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Rust example cache
+        uses: Swatinem/rust-cache@v2
       - name: Run datafusion example
         uses: actions-rs/cargo@v1
         with:
@@ -140,6 +148,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: rustup update stable
+      - name: Rust coverage cache
+        uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate code coverage
