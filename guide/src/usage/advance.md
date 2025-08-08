@@ -89,7 +89,7 @@ async fn main() {
         &schema,
     );
 
-    let db = DB::<DynRecord, TokioExecutor>::new(options, TokioExecutor::current(), DynSchema)
+    let db = DB::<DynRecord, TokioExecutor>::new(options, TokioExecutor::default(), DynSchema)
         .await
         .unwrap();
 }
@@ -259,7 +259,7 @@ async fn main() {
         .level_path(2, "l2", fs_option);
 
 
-    let db = DB::<DynRecord, TokioExecutor>::new(options, TokioExecutor::current(), schema)
+    let db = DB::<DynRecord, TokioExecutor>::new(options, TokioExecutor::default(), schema)
         .await
         .unwrap();
 }

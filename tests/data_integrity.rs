@@ -76,7 +76,7 @@ mod tests {
         );
 
         let db: DB<Customer, TokioExecutor> =
-            DB::new(option, TokioExecutor::current(), CustomerSchema)
+            DB::new(option, TokioExecutor::default(), CustomerSchema)
                 .await
                 .unwrap();
 

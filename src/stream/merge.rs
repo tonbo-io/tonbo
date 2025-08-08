@@ -514,7 +514,7 @@ mod tests {
         // Test ascending order (default)
         {
             let mut merge = MergeStream::<String>::from_vec(
-                vec![m1.scan(bound.clone(), 1.into(), None).into()],
+                vec![m1.scan(bound, 1.into(), None).into()],
                 1.into(),
                 None, // Default ascending
             )
@@ -548,7 +548,7 @@ mod tests {
         // Test descending order
         {
             let mut merge = MergeStream::<String>::from_vec(
-                vec![m1.scan(bound.clone(), 1.into(), Some(Order::Desc)).into()],
+                vec![m1.scan(bound, 1.into(), Some(Order::Desc)).into()],
                 1.into(),
                 Some(Order::Desc), // Descending order
             )
@@ -615,10 +615,10 @@ mod tests {
 
         // Test ascending order (default)
         {
-            let mut scan = m1.scan(bound.clone(), 1.into(), None);
+            let scan = m1.scan(bound, 1.into(), None);
 
             let mut results = Vec::new();
-            while let Some(entry) = scan.next() {
+            for entry in scan {
                 let key = entry.key().value.to_string();
                 results.push(key);
             }
@@ -627,10 +627,10 @@ mod tests {
 
         // Test descending order
         {
-            let mut scan = m1.scan(bound.clone(), 1.into(), Some(Order::Desc));
+            let scan = m1.scan(bound, 1.into(), Some(Order::Desc));
 
             let mut results = Vec::new();
-            while let Some(entry) = scan.next() {
+            for entry in scan {
                 let key = entry.key().value.to_string();
                 results.push(key);
             }
@@ -674,7 +674,7 @@ mod tests {
         // Test ascending order (default)
         {
             let mut merge = MergeStream::<String>::from_vec(
-                vec![m1.scan(bound.clone(), 1.into(), None).into()],
+                vec![m1.scan(bound, 1.into(), None).into()],
                 1.into(),
                 None, // Default ascending
             )
@@ -694,7 +694,7 @@ mod tests {
         // Test descending order
         {
             let mut merge = MergeStream::<String>::from_vec(
-                vec![m1.scan(bound.clone(), 1.into(), Some(Order::Desc)).into()],
+                vec![m1.scan(bound, 1.into(), Some(Order::Desc)).into()],
                 1.into(),
                 Some(Order::Desc), // Descending order
             )
