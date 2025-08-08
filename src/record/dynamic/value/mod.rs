@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field};
 pub use cast::*;
 use thiserror::Error;
 pub(crate) use util::*;
@@ -56,6 +56,8 @@ pub enum Value {
     Time32(i32, TimeUnit),
     Time64(i64, TimeUnit),
     Timestamp(i64, TimeUnit),
+    /// List of values that are of the same type.
+    List(DataType, Vec<Arc<Value>>),
 }
 
 impl Value {
@@ -104,6 +106,11 @@ impl Value {
                 };
                 DataType::Time64(arrow_unit)
             }
+            Value::List(data_type, _) => arrow::datatypes::DataType::List(Arc::new(Field::new(
+                "item",
+                data_type.clone(),
+                false,
+            ))),
         }
     }
 
@@ -117,30 +124,7 @@ impl Key for Value {
     type Ref<'r> = ValueRef<'r>;
 
     fn as_key_ref(&self) -> Self::Ref<'_> {
-        match self {
-            Value::Null => ValueRef::Null,
-            Value::Boolean(v) => ValueRef::Boolean(*v),
-            Value::Int8(v) => ValueRef::Int8(*v),
-            Value::Int16(v) => ValueRef::Int16(*v),
-            Value::Int32(v) => ValueRef::Int32(*v),
-            Value::Int64(v) => ValueRef::Int64(*v),
-            Value::UInt8(v) => ValueRef::UInt8(*v),
-            Value::UInt16(v) => ValueRef::UInt16(*v),
-            Value::UInt32(v) => ValueRef::UInt32(*v),
-            Value::UInt64(v) => ValueRef::UInt64(*v),
-            Value::Float32(v) => ValueRef::Float32(*v),
-            Value::Float64(v) => ValueRef::Float64(*v),
-            Value::String(v) => ValueRef::String(v.as_str()),
-            Value::Binary(v) => ValueRef::Binary(v.as_slice()),
-            Value::FixedSizeBinary(v, byte_width) => {
-                ValueRef::FixedSizeBinary(v.as_slice(), *byte_width)
-            }
-            Value::Date32(v) => ValueRef::Date32(*v),
-            Value::Date64(v) => ValueRef::Date64(*v),
-            Value::Timestamp(v, time_unit) => ValueRef::Timestamp(*v, *time_unit),
-            Value::Time32(v, time_unit) => ValueRef::Time32(*v, *time_unit),
-            Value::Time64(v, time_unit) => ValueRef::Time64(*v, *time_unit),
-        }
+        ValueRef::from(self)
     }
 
     fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
@@ -192,6 +176,9 @@ impl Key for Value {
                 }
                 _ => unreachable!("Time64 only supports microsecond and nanosecond"),
             },
+            Value::List(_, _) => {
+                unreachable!("List value cannot be used as primary key.")
+            }
         }
     }
 }
@@ -244,9 +231,8 @@ impl PartialEq for Value {
                 let (o_sec, o_nsec) = split_second_ns(*b, *unit2);
                 s_sec == o_sec && s_nsec == o_nsec
             }
-            _ => {
-                panic!("cannot compare different types: {self:?} and {other:?}")
-            }
+            (Value::List(ty1, a), Value::List(ty2, b)) => ty1.eq(ty2) && a.eq(b),
+            _ => false,
         }
     }
 }
@@ -290,6 +276,12 @@ impl Ord for Value {
                     Ordering::Greater => Ordering::Greater,
                     Ordering::Equal => s_nsec.cmp(&o_nsec),
                 }
+            }
+            (Value::List(ty1, a), Value::List(ty2, b)) => {
+                if ty1 != ty2 {
+                    panic!("cannot compare different list types: {self:?} and {other:?}")
+                }
+                a.cmp(b)
             }
             _ => {
                 panic!("cannot compare different types: {self:?} and {other:?}")
@@ -336,6 +328,10 @@ impl Hash for Value {
                 v.hash(state);
                 time_unit.hash(state);
             }
+            Value::List(ty, vec) => {
+                ty.hash(state);
+                vec.hash(state);
+            }
         }
     }
 }
@@ -363,13 +359,24 @@ impl fmt::Display for Value {
             Value::Timestamp(v, unit) => write!(f, "Timestamp({v}, {unit:?})"),
             Value::Time32(v, unit) => write!(f, "Time32({v}, {unit:?})"),
             Value::Time64(v, unit) => write!(f, "Time64({v}, {unit:?})"),
+            Value::List(ty, vec) => write!(
+                f,
+                "List({ty:?}, [{values}])",
+                values = vec
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field};
 
     use crate::record::{AsValue, TimeUnit, Value};
 
@@ -482,5 +489,174 @@ mod tests {
         assert!(t1 == t2);
         assert!(t1 < t3);
         assert!(t1 > t4);
+    }
+
+    #[test]
+    fn test_list_value_cmp() {
+        {
+            let l1 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                vec![Arc::new(Value::Int32(1)), Arc::new(Value::Int32(2))],
+            );
+            let l2 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                vec![Arc::new(Value::Int32(1)), Arc::new(Value::Int32(2))],
+            );
+            let l3 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                vec![Arc::new(Value::Int32(1)), Arc::new(Value::Int32(3))],
+            );
+            let l4 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+                vec![Arc::new(Value::Int32(0)), Arc::new(Value::Int32(4))],
+            );
+            assert!(l1 == l2);
+            assert!(l1 < l3);
+            assert!(l3 > l4);
+        }
+        {
+            let l1 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Date32, false))),
+                vec![Arc::new(Value::List(
+                    DataType::Date32,
+                    vec![
+                        Arc::new(Value::Date32(1)),
+                        Arc::new(Value::Date32(2)),
+                        Arc::new(Value::Date32(3)),
+                    ],
+                ))],
+            );
+            let l2 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Date32, false))),
+                vec![Arc::new(Value::List(
+                    DataType::Date32,
+                    vec![
+                        Arc::new(Value::Date32(1)),
+                        Arc::new(Value::Date32(2)),
+                        Arc::new(Value::Date32(3)),
+                    ],
+                ))],
+            );
+            let l3 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Date32, false))),
+                vec![
+                    Arc::new(Value::List(
+                        DataType::Date32,
+                        vec![
+                            Arc::new(Value::Date32(1)),
+                            Arc::new(Value::Date32(2)),
+                            Arc::new(Value::Date32(3)),
+                        ],
+                    )),
+                    Arc::new(Value::List(
+                        DataType::Date32,
+                        vec![
+                            Arc::new(Value::Date32(2)),
+                            Arc::new(Value::Date32(1)),
+                            Arc::new(Value::Date32(2)),
+                        ],
+                    )),
+                ],
+            );
+            assert!(l1 == l2);
+            assert!(l1 < l3);
+            assert!(l3 > l2);
+        }
+    }
+
+    #[should_panic]
+    #[test]
+    fn test_list_value_different_type_cmp_panic() {
+        let l1 = Value::List(
+            DataType::List(Arc::new(Field::new("item", DataType::Int16, false))),
+            vec![Arc::new(Value::Int32(1)), Arc::new(Value::Int32(2))],
+        );
+        let l2 = Value::List(
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+            vec![Arc::new(Value::Int32(1)), Arc::new(Value::Int32(2))],
+        );
+        let _ = l1.cmp(&l2);
+    }
+
+    #[test]
+    fn test_list_value_with_null_cmp() {
+        {
+            let l1 = Value::List(
+                DataType::Date64,
+                vec![Arc::new(Value::Date64(1)), Arc::new(Value::Null)],
+            );
+            let l2 = Value::List(
+                DataType::Date64,
+                vec![Arc::new(Value::Date64(1)), Arc::new(Value::Null)],
+            );
+            let l3 = Value::List(
+                DataType::Date64,
+                vec![Arc::new(Value::Null), Arc::new(Value::Date64(3))],
+            );
+            let l4 = Value::List(
+                DataType::Date64,
+                vec![Arc::new(Value::Null), Arc::new(Value::Null)],
+            );
+            assert!(l1 == l2);
+            assert!(l1 > l3);
+            assert!(l4 < l3);
+        }
+        {
+            let l1 = Value::Null;
+            let l2 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Date64, false))),
+                vec![Arc::new(Value::Null)],
+            );
+            let l3 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Date64, false))),
+                vec![Arc::new(Value::List(
+                    DataType::Date64,
+                    vec![Arc::new(Value::Null)],
+                ))],
+            );
+            let l4 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Date64, false))),
+                vec![Arc::new(Value::List(
+                    DataType::Date64,
+                    vec![Arc::new(Value::Null), Arc::new(Value::Null)],
+                ))],
+            );
+            assert!(l1 < l2);
+            assert!(l2 < l3);
+            assert!(l3 < l4);
+        }
+        {
+            let l1 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Float32, false))),
+                vec![Arc::new(Value::List(
+                    DataType::Float32,
+                    vec![
+                        Arc::new(Value::Float32(0.001)),
+                        Arc::new(Value::Float32(2.2)),
+                        Arc::new(Value::Float32(3.4)),
+                    ],
+                ))],
+            );
+            let l2 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Float32, false))),
+                vec![
+                    Arc::new(Value::List(
+                        DataType::Float32,
+                        vec![
+                            Arc::new(Value::Null),
+                            Arc::new(Value::Float32(2222.2)),
+                            Arc::new(Value::Float32(2223.4)),
+                        ],
+                    )),
+                    Arc::new(Value::Null),
+                ],
+            );
+            let l3 = Value::List(
+                DataType::List(Arc::new(Field::new("item", DataType::Float32, false))),
+                vec![Arc::new(Value::Null)],
+            );
+            assert!(l1 > l2);
+            assert!(l2 > l3);
+        }
     }
 }
