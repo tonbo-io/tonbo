@@ -11,6 +11,7 @@ use parquet::{
 use thiserror::Error;
 
 use crate::{
+    compaction::{leveled::LeveledOptions},
     fs::{FileId, FileType},
     record::Schema,
     trigger::TriggerType,
@@ -29,9 +30,32 @@ pub enum Order {
     Desc,
 }
 
-#[derive(Clone)]
 pub enum CompactionOption {
-    Leveled,
+    Leveled(LeveledOptions),
+    /* Tiered(TieredOptions),
+    LazyLeveled(LazyLeveledOptions), */
+}
+
+impl std::fmt::Debug for CompactionOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompactionOption::Leveled(opts) => f.debug_tuple("Leveled").field(opts).finish(),
+            /* CompactionOption::Tiered(opts) => f.debug_tuple("Tiered").field(opts).finish(),
+            CompactionOption::LazyLeveled(opts) => {
+                f.debug_tuple("LazyLeveled").field(opts).finish()
+            } */
+        }
+    }
+}
+
+impl Clone for CompactionOption {
+    fn clone(&self) -> Self {
+        match self {
+            CompactionOption::Leveled(opts) => CompactionOption::Leveled(opts.clone()),
+            /* CompactionOption::Tiered(opts) => CompactionOption::Tiered(opts.clone()),
+            CompactionOption::LazyLeveled(opts) => CompactionOption::LazyLeveled(opts.clone()), */
+        }
+    }
 }
 
 /// Configure the operating parameters of each component in the [`DB`](crate::DB)
@@ -51,24 +75,6 @@ pub struct DbOption {
 
     /// Optional custom paths and filesystem options for each level
     pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
-
-    /// Number of immutable chunks to accumulate before triggering a flush
-    pub(crate) immutable_chunk_num: usize,
-
-    /// Maximum allowed number of immutable chunks in memory
-    pub(crate) immutable_chunk_max_num: usize,
-
-    /// Magnification factor controlling SST file count per level
-    pub(crate) level_sst_magnification: usize,
-
-    /// Default number of oldest tables to include in a major compaction
-    pub(crate) major_default_oldest_table_num: usize,
-
-    /// Maximum number of tables to select for major compaction at level L
-    pub(crate) major_l_selection_table_max_num: usize,
-
-    /// Size threshold (in bytes) to trigger major compaction relative to SST size
-    pub(crate) major_threshold_with_sst_size: usize,
 
     /// Maximum allowed size (in bytes) for a single SST file
     pub(crate) max_sst_file_size: usize,
@@ -95,13 +101,9 @@ impl DbOption {
         let (column_paths, sorting_columns) = schema.primary_key_path();
 
         DbOption {
-            immutable_chunk_num: 3,
-            immutable_chunk_max_num: 5,
-            major_threshold_with_sst_size: 4,
-            level_sst_magnification: 10,
-            max_sst_file_size: 256 * 1024 * 1024,
             clean_channel_buffer: 10,
             base_path,
+            max_sst_file_size: 256 * 1024 * 1024,
             write_parquet_properties: WriterProperties::builder()
                 .set_compression(Compression::LZ4)
                 .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
@@ -112,13 +114,41 @@ impl DbOption {
 
             use_wal: true,
             wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
-            major_default_oldest_table_num: 3,
-            major_l_selection_table_max_num: 4,
             trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
             version_log_snapshot_threshold: 200,
             level_paths: vec![None; MAX_LEVEL],
             base_fs: FsOptions::Local,
-            compaction_option: CompactionOption::Leveled,
+            compaction_option: CompactionOption::Leveled(LeveledOptions::default()),
+        }
+    }
+
+    /// build configured [`DbOption`] with base path, primary key, and custom compaction options
+    pub fn new_with_options<S: Schema>(
+        base_path: Path,
+        schema: &S,
+        compaction_option: CompactionOption,
+    ) -> Self {
+        let (column_paths, sorting_columns) = schema.primary_key_path();
+
+        DbOption {
+            clean_channel_buffer: 10,
+            base_path,
+            max_sst_file_size: 256 * 1024 * 1024,
+            write_parquet_properties: WriterProperties::builder()
+                .set_compression(Compression::LZ4)
+                .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
+                .set_column_bloom_filter_enabled(column_paths.clone(), true)
+                .set_sorting_columns(Some(sorting_columns))
+                .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
+                .build(),
+
+            use_wal: true,
+            wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
+            trigger_type: TriggerType::SizeOfMem(64 * 1024 * 1024),
+            version_log_snapshot_threshold: 200,
+            level_paths: vec![None; MAX_LEVEL],
+            base_fs: FsOptions::Local,
+            compaction_option,
         }
     }
 }
@@ -132,36 +162,48 @@ impl DbOption {
         }
     }
 
-    /// len threshold of `immutables` when minor compaction is triggered
-    pub fn immutable_chunk_num(self, immutable_chunk_num: usize) -> Self {
-        DbOption {
-            immutable_chunk_num,
-            ..self
-        }
+    /// Configure leveled compaction with custom options
+    pub fn leveled_compaction(mut self, options: LeveledOptions) -> Self {
+        self.compaction_option = CompactionOption::Leveled(options);
+        self
     }
 
-    /// threshold for the number of `parquet` when major compaction is triggered
-    pub fn major_threshold_with_sst_size(self, major_threshold_with_sst_size: usize) -> Self {
-        DbOption {
-            major_threshold_with_sst_size,
-            ..self
-        }
+    /* /// Configure tiered compaction with custom options
+    pub fn tiered_compaction(mut self, options: TieredOptions) -> Self {
+        self.compaction_option = CompactionOption::Tiered(options);
+        self
     }
 
-    /// magnification that triggers major compaction between different levels
-    pub fn level_sst_magnification(self, level_sst_magnification: usize) -> Self {
-        DbOption {
-            level_sst_magnification,
-            ..self
-        }
+    /// Configure lazy leveled compaction with custom options
+    pub fn lazy_leveled_compaction(mut self, options: LazyLeveledOptions) -> Self {
+        self.compaction_option = CompactionOption::LazyLeveled(options);
+        self
+    } */
+
+    /// Set maximum SST file size
+    pub fn max_sst_file_size(mut self, value: usize) -> Self {
+        self.max_sst_file_size = value;
+        self
     }
 
-    /// Maximum size of each parquet
-    pub fn max_sst_file_size(self, max_sst_file_size: usize) -> Self {
-        DbOption {
-            max_sst_file_size,
-            ..self
+    /// Set immutable chunk number
+    pub fn immutable_chunk_num(mut self, value: usize) -> Self {
+        match &mut self.compaction_option {
+            CompactionOption::Leveled(opts) => opts.immutable_chunk_num = value,
+            /* CompactionOption::Tiered(opts) => opts.immutable_chunk_num = value,
+            CompactionOption::LazyLeveled(opts) => opts.immutable_chunk_num = value, */
         }
+        self
+    }
+
+    /// Set maximum immutable chunk number
+    pub fn immutable_chunk_max_num(mut self, value: usize) -> Self {
+        match &mut self.compaction_option {
+            CompactionOption::Leveled(opts) => opts.immutable_chunk_max_num = value,
+            /* CompactionOption::Tiered(opts) => opts.immutable_chunk_max_num = value,
+            CompactionOption::LazyLeveled(opts) => opts.immutable_chunk_max_num = value, */
+        }
+        self
     }
 
     /// cached message size in parquet cleaner
@@ -200,15 +242,6 @@ impl DbOption {
         }
     }
 
-    /// When selecting the compaction level during major compaction, if there are no sstables with
-    /// intersecting targets, the oldest sstables will be selected by default.
-    pub fn major_default_oldest_table_num(self, major_default_oldest_table_num: usize) -> Self {
-        DbOption {
-            major_default_oldest_table_num,
-            ..self
-        }
-    }
-
     /// VersionLog will use version_log_snapshot_threshold as the cycle to SnapShot to reduce the
     /// size.
     pub fn version_log_snapshot_threshold(self, version_log_snapshot_threshold: u32) -> Self {
@@ -238,13 +271,6 @@ impl DbOption {
     pub fn base_fs(mut self, base_fs: FsOptions) -> Self {
         self.base_fs = base_fs;
         self
-    }
-
-    pub fn compaction_option(self, compaction_option: CompactionOption) -> Self {
-        Self {
-            compaction_option,
-            ..self
-        }
     }
 }
 
@@ -291,29 +317,16 @@ impl Debug for DbOption {
             .field("base_path", &self.base_path)
             // TODO
             // .field("level_paths", &self.level_paths)
-            .field("immutable_chunk_num", &self.immutable_chunk_num)
-            .field("immutable_chunk_max_num", &self.immutable_chunk_max_num)
-            .field("level_sst_magnification", &self.level_sst_magnification)
-            .field(
-                "major_default_oldest_table_num",
-                &self.major_default_oldest_table_num,
-            )
-            .field(
-                "major_l_selection_table_max_num",
-                &self.major_l_selection_table_max_num,
-            )
-            .field(
-                "major_threshold_with_sst_size",
-                &self.major_threshold_with_sst_size,
-            )
-            .field("max_sst_file_size", &self.max_sst_file_size)
             .field(
                 "version_log_snapshot_threshold",
                 &self.version_log_snapshot_threshold,
             )
             .field("trigger_type", &self.trigger_type)
             .field("use_wal", &self.use_wal)
+            .field("max_sst_file_size", &self.max_sst_file_size)
+            .field("wal_buffer_size", &self.wal_buffer_size)
             .field("write_parquet_properties", &self.write_parquet_properties)
+            .field("compaction_option", &self.compaction_option)
             .finish()
     }
 }
