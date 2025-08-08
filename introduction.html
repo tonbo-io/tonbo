@@ -162,7 +162,7 @@ pub struct User {
 }
 
 async fn main() {
-    let db = tonbo::DB::new(&quot;./db_path/users&quot;.into(), TokioExecutor::current())
+    let db = tonbo::DB::new(&quot;./db_path/users&quot;.into(), TokioExecutor::default())
         .await
         .unwrap();
 }</code></pre>

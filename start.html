@@ -231,7 +231,7 @@ async fn main() {
         Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
         &amp;UserSchema,
     );
-    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::current(), UserSchema)
+    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::default(), UserSchema)
         .await
         .unwrap();
 }</code></pre>

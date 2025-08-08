@@ -163,7 +163,7 @@ pub struct User {
 }
 
 async fn main() {
-    let db = tonbo::DB::new(&quot;./db_path/users&quot;.into(), TokioExecutor::current())
+    let db = tonbo::DB::new(&quot;./db_path/users&quot;.into(), TokioExecutor::default())
         .await
         .unwrap();
 }</code></pre>
@@ -295,7 +295,7 @@ async fn main() {
         Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
         &amp;UserSchema,
     );
-    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::current(), UserSchema)
+    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::default(), UserSchema)
         .await
         .unwrap();
 }</code></pre>
@@ -614,7 +614,7 @@ async fn main() {
     let options = DbOption::new(Path::from_filesystem_path(&quot;s3_path&quot;).unwrap(), &amp;UserSchema)
         .level_path(2, &quot;l2&quot;, fs_option);
 
-    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::current(), UserSchema)
+    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::default(), UserSchema)
         .await
         .unwrap();
 }</code></pre>
@@ -883,7 +883,7 @@ async fn main() {
         &amp;schema,
     );
 
-    let db = DB::&lt;DynRecord, TokioExecutor&gt;::new(options, TokioExecutor::current(), DynSchema)
+    let db = DB::&lt;DynRecord, TokioExecutor&gt;::new(options, TokioExecutor::default(), DynSchema)
         .await
         .unwrap();
 }</code></pre>
@@ -1028,7 +1028,7 @@ async fn main() {
         .level_path(2, &quot;l2&quot;, fs_option);
 
 
-    let db = DB::&lt;DynRecord, TokioExecutor&gt;::new(options, TokioExecutor::current(), schema)
+    let db = DB::&lt;DynRecord, TokioExecutor&gt;::new(options, TokioExecutor::default(), schema)
         .await
         .unwrap();
 }</code></pre>
@@ -1080,7 +1080,7 @@ async fn main() {
         &amp;UserSchema,
     );
     // pluggable async runtime and I/O
-    let db = DB::new(options, TokioExecutor::current(), UserSchema)
+    let db = DB::new(options, TokioExecutor::default(), UserSchema)
         .await
         .unwrap();
 
