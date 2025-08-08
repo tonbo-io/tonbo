@@ -274,12 +274,7 @@ where
         }
         Ok(())
     }
-}
 
-impl<R> MutableMemTable<R>
-where
-    R: Record,
-{
     #[allow(unused)]
     pub(crate) fn len(&self) -> usize {
         self.data.len()

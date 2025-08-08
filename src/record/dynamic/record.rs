@@ -33,6 +33,7 @@ impl DynRecord {
                 values.len()
             )));
         }
+
         for (idx, value) in values.iter().enumerate() {
             match value {
                 Value::Null if idx == primary_index => {

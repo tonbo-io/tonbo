@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package tonbo_cloud;
+
+import "google/protobuf/empty.proto";
+
+enum TimeUnit {
+  NANOSECOND   = 0;
+  MICROSECOND  = 1;
+  MILLISECOND  = 2;
+}
+
+message FixedSizeBinary {
+  bytes  value  = 1;
+  uint32 length = 2;
+}
+
+message Time32 {
+  int32    value = 1;
+  TimeUnit unit  = 2;
+}
+
+message Time64 {
+  int64    value = 1;
+  TimeUnit unit  = 2;
+}
+
+message Timestamp {
+  int64    value = 1;
+  TimeUnit unit  = 2;
+}
+
+message NullValue {}
+
+// Dynamic Value
+message Value {
+  oneof kind {
+    NullValue         null               = 1;
+
+    // Primitives
+    bool               boolean           = 2;
+    int32              int8              = 3;
+    int32              int16             = 4;
+    int32              int32             = 5;
+    int64              int64             = 6;
+    uint32             uint8             = 7;
+    uint32             uint16            = 8;
+    uint32             uint32            = 9;
+    uint64             uint64            = 10;
+    float              float32           = 11;
+    double             float64           = 12;
+    string             string_value      = 13;
+    bytes              binary            = 14;
+
+    // Fixed-size binary array
+    FixedSizeBinary    fixed_size_binary = 15;
+
+    // Date
+    int32              date32            = 16;
+    int64              date64            = 17;
+
+    // Time + Timestamp
+    Time32             time32            = 18;
+    Time64             time64            = 19;
+    Timestamp          timestamp         = 20;
+  }
+}
+
+// Bound<Value>
+message BoundValue {
+  oneof kind {
+    // Bound::Inclusive(record)
+    Value inclusive = 1;
+    // Bound::Exclusive(record)
+    Value exclusive = 2;
+    // Bound::Unbounded
+    google.protobuf.Empty unbounded = 3;
+  }
+}
+
+message ScanRequest {
+    BoundValue lower = 1;
+    BoundValue upper = 2;
+    repeated string projection = 3;
+}
+
+// Return parquet metadata row_count + row_size
+message ParquetMetadata {
+    int64 row_count = 1;
+    int32 row_size  = 2;
+}
+
+service AWSTonbo {
+  rpc GetParquetMetadata (ScanRequest) returns (ParquetMetadata);
+  // rpc GetScan (ScanRequest) returns (ArrowRecordBatches);
+}

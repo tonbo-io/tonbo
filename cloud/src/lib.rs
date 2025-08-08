@@ -1,17 +1,18 @@
-use std::{future::Future, ops::Bound, pin::Pin};
+use std::{future::Future, ops::Bound, net::SocketAddr, pin::Pin};
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use serde::{Deserialize, Serialize};
 use tonbo::{
     parquet::errors::ParquetError,
-    record::{Key, Record, Schema},
+    record::{DynRecord, Key, Record, Schema},
     transaction::Transaction,
     Entry,
 };
+use tonbo::record::dynamic::Value;
 
 use crate::error::CloudError;
 
+pub mod gen;
 mod aws;
 mod compaction;
 mod error;
@@ -19,26 +20,24 @@ mod metadata;
 
 /// Trait for implmenting a cloud instance over different object storages
 #[async_trait]
-pub trait TonboCloud<R>
-where
-    R: Record,
+pub trait TonboCloud
 {
     /// Creates a new Tonbo cloud instnace
-    async fn new(name: String, schema: R::Schema) -> Self;
+    async fn new(name: String, schema: <DynRecord as Record>::Schema) -> Self;
 
-    fn write(&self, records: impl ExactSizeIterator<Item = R>);
+    fn write(&self, records: impl ExactSizeIterator<Item = DynRecord>);
 
     async fn read<'a>(
         &'a self,
-        transaction: &'a Transaction<'_, R>,
-        scan: &'a ScanRequest<<R::Schema as Schema>::Key>,
+        transaction: &'a Transaction<'_, DynRecord>,
+        scan: &'a ScanRequest,
     ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<Entry<'a, R>, ParquetError>> + Send + 'a>>,
+        Pin<Box<dyn Stream<Item = Result<Entry<'a, DynRecord>, ParquetError>> + Send + 'a>>,
         CloudError,
     >;
 
     /// Listens to new read requests from connections
-    fn listen(&'static self) -> impl Future<Output = std::io::Result<()>> + 'static;
+    async fn listen(self, addr: SocketAddr) -> impl Future<Output = std::io::Result<()>> + 'static;
 
     // Updates metadata
     fn update_metadata();
@@ -48,11 +47,9 @@ where
 }
 
 // Readers will send a scan request to Tonbo Cloud
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ScanRequest<K>
-where
-    K: Key,
+pub struct ScanRequest
 {
-    bounds: (Bound<K>, Bound<K>),
+    lower: Bound<Value>,
+    upper: Bound<Value>,
     projection: Vec<String>,
 }
