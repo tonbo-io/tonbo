@@ -10,7 +10,7 @@ use thiserror::Error;
 use super::{array::DynRecordImmutableArrays, DynRecord, Value};
 use crate::{magic, record::Schema};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DynamicField {
     pub name: String,
     pub data_type: DataType,
@@ -37,6 +37,22 @@ impl DynamicField {
 
     fn arrow_field(&self) -> Field {
         Field::new(&self.name, self.data_type.clone(), self.is_nullable)
+    }
+}
+
+impl From<&DynamicField> for Field {
+    fn from(value: &DynamicField) -> Self {
+        Field::new(&value.name, value.data_type.clone(), value.is_nullable)
+    }
+}
+
+impl From<&Field> for DynamicField {
+    fn from(value: &Field) -> Self {
+        DynamicField::new(
+            value.name().to_string(),
+            value.data_type().clone(),
+            value.is_nullable(),
+        )
     }
 }
 
