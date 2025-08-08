@@ -5,7 +5,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-actix-web = "4"
 arrow = { version = "14.0.0", features = ["ipc"] }
 arrow-array = "55.2.0"
 arrow-flight = { version = "55.2.0", features = ["flight-sql"] }

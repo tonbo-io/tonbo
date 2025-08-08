@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package tonbo_cloud;
+package tonbo_rpc;
 
 import "google/protobuf/empty.proto";
 
@@ -92,5 +92,5 @@ message ParquetMetadata {
 
 service AWSTonbo {
   rpc GetParquetMetadata (ScanRequest) returns (ParquetMetadata);
-  // rpc GetScan (ScanRequest) returns (ArrowRecordBatches);
+  // rpc GetBatches(ScanRequest) returns (stream arrow.flight.FlightData);
 }

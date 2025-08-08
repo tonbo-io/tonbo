@@ -1,27 +1,25 @@
-use std::{future::Future, ops::Bound, net::SocketAddr, pin::Pin};
+use std::{future::Future, net::SocketAddr, ops::Bound, pin::Pin};
 
 use async_trait::async_trait;
 use futures_core::Stream;
 use tonbo::{
     parquet::errors::ParquetError,
-    record::{DynRecord, Key, Record, Schema},
+    record::{dynamic::Value, DynRecord, Key, Record, Schema, TimeUnit},
     transaction::Transaction,
     Entry,
 };
-use tonbo::record::dynamic::Value;
 
 use crate::error::CloudError;
 
-pub mod gen;
 mod aws;
 mod compaction;
 mod error;
+pub mod gen;
 mod metadata;
 
 /// Trait for implmenting a cloud instance over different object storages
 #[async_trait]
-pub trait TonboCloud
-{
+pub trait TonboCloud {
     /// Creates a new Tonbo cloud instnace
     async fn new(name: String, schema: <DynRecord as Record>::Schema) -> Self;
 
@@ -47,8 +45,7 @@ pub trait TonboCloud
 }
 
 // Readers will send a scan request to Tonbo Cloud
-pub struct ScanRequest
-{
+pub struct ScanRequest {
     lower: Bound<Value>,
     upper: Bound<Value>,
     projection: Vec<String>,

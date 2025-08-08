@@ -263,11 +263,11 @@ pub mod aws_tonbo_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/tonbo_cloud.AWSTonbo/GetParquetMetadata",
+                "/tonbo_rpc.AWSTonbo/GetParquetMetadata",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("tonbo_cloud.AWSTonbo", "GetParquetMetadata"));
+                .insert(GrpcMethod::new("tonbo_rpc.AWSTonbo", "GetParquetMetadata"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -366,7 +366,7 @@ pub mod aws_tonbo_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/tonbo_cloud.AWSTonbo/GetParquetMetadata" => {
+                "/tonbo_rpc.AWSTonbo/GetParquetMetadata" => {
                     #[allow(non_camel_case_types)]
                     struct GetParquetMetadataSvc<T: AwsTonbo>(pub Arc<T>);
                     impl<T: AwsTonbo> tonic::server::UnaryService<super::ScanRequest>
@@ -444,7 +444,7 @@ pub mod aws_tonbo_server {
         }
     }
     /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "tonbo_cloud.AWSTonbo";
+    pub const SERVICE_NAME: &str = "tonbo_rpc.AWSTonbo";
     impl<T> tonic::server::NamedService for AwsTonboServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
