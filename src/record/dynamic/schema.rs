@@ -19,13 +19,6 @@ pub struct DynamicField {
     // pub offset: Option<usize>,
 }
 
-#[derive(Debug)]
-pub struct DynSchema {
-    schema: Vec<DynamicField>,
-    primary_index: usize,
-    arrow_schema: Arc<ArrowSchema>,
-}
-
 impl DynamicField {
     pub fn new(name: String, data_type: DataType, is_nullable: bool) -> Self {
         Self {
@@ -56,6 +49,14 @@ impl From<&Field> for DynamicField {
     }
 }
 
+#[derive(Debug)]
+pub struct DynSchema {
+    primary_index_arrow: usize,
+    pk_paths: Vec<ColumnPath>,
+    sorting: Vec<SortingColumn>,
+    arrow_schema: Arc<ArrowSchema>,
+}
+
 #[derive(Debug, Error)]
 #[error("exceeds max level, max level is {}", MAX_LEVEL)]
 pub enum SchemaError {
@@ -64,7 +65,7 @@ pub enum SchemaError {
 }
 
 impl DynSchema {
-    pub fn new(schema: Vec<DynamicField>, primary_index: usize) -> Self {
+    pub fn new(schema: &[DynamicField], primary_index: usize) -> Self {
         let mut metadata = HashMap::new();
         metadata.insert("primary_key_index".to_string(), primary_index.to_string());
         let arrow_schema = Arc::new(ArrowSchema::new_with_metadata(
@@ -77,9 +78,19 @@ impl DynSchema {
             .collect::<Vec<_>>(),
             metadata,
         ));
+        let pk_paths = vec![ColumnPath::new(vec![
+            magic::TS.to_string(),
+            schema[primary_index].name.clone(),
+        ])];
+        let sorting = vec![
+            SortingColumn::new(1_i32, true, true),
+            SortingColumn::new((primary_index + 2) as i32, false, true),
+        ];
+
         Self {
-            schema,
-            primary_index,
+            primary_index_arrow: primary_index + 2,
+            pk_paths,
+            sorting,
             arrow_schema,
         }
     }
@@ -102,19 +113,29 @@ impl DynSchema {
             ),
             arrow_schema,
         ])?;
-        let mut schema = Vec::with_capacity(arrow_schema.fields.len());
+        let mut fields_vec = Vec::with_capacity(arrow_schema.fields.len());
         for field in arrow_schema.fields.iter() {
             let col = DynamicField::new(
                 field.name().to_string(),
                 field.data_type().clone(),
                 field.is_nullable(),
             );
-            schema.push(col);
+            fields_vec.push(col);
         }
 
+        let pk_paths = vec![ColumnPath::new(vec![
+            magic::TS.to_string(),
+            fields_vec[primary_index].name.clone(),
+        ])];
+        let sorting = vec![
+            SortingColumn::new(1_i32, true, true),
+            SortingColumn::new((primary_index + 2) as i32, false, true),
+        ];
+
         Ok(Self {
-            schema,
-            primary_index,
+            primary_index_arrow: primary_index + 2,
+            pk_paths,
+            sorting,
             arrow_schema: Arc::new(arrow_schema),
         })
     }
@@ -131,21 +152,12 @@ impl Schema for DynSchema {
         &self.arrow_schema
     }
 
-    fn primary_key_index(&self) -> usize {
-        self.primary_index + 2
+    fn primary_key_indices(&self) -> &[usize] {
+        std::slice::from_ref(&self.primary_index_arrow)
     }
 
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
-        (
-            ColumnPath::new(vec![
-                magic::TS.to_string(),
-                self.schema[self.primary_index].name.clone(),
-            ]),
-            vec![
-                SortingColumn::new(1_i32, true, true),
-                SortingColumn::new(self.primary_key_index() as i32, false, true),
-            ],
-        )
+    fn primary_key_paths_and_sorting(&self) -> (&[ColumnPath], &[SortingColumn]) {
+        (&self.pk_paths, &self.sorting)
     }
 }
 
@@ -174,14 +186,11 @@ impl Schema for DynSchema {
 macro_rules! dyn_schema {
     ($(($name: expr, $type: ident, $nullable: expr )),*, $primary: literal) => {
         {
-            $crate::record::DynSchema::new(
-                vec![
-                    $(
-                        $crate::record::DynamicField::new($name.into(), $crate::arrow::datatypes::DataType::$type, $nullable),
-                    )*
-                ],
-                $primary,
-            )
+            $crate::record::DynSchema::new(&[
+                $(
+                    $crate::record::DynamicField::new($name.into(), $crate::arrow::datatypes::DataType::$type, $nullable),
+                )*
+            ][..], $primary)
         }
     }
 }
@@ -190,14 +199,11 @@ macro_rules! dyn_schema {
 macro_rules! make_dyn_schema {
     ($(($name: expr, $type: expr, $nullable: expr )),*, $primary: literal) => {
         {
-            $crate::record::DynSchema::new(
-                vec![
-                    $(
-                        $crate::record::DynamicField::new($name.into(), $type, $nullable),
-                    )*
-                ],
-                $primary,
-            )
+            $crate::record::DynSchema::new(&[
+                $(
+                    $crate::record::DynamicField::new($name.into(), $type, $nullable),
+                )*
+            ][..], $primary)
         }
     }
 }
@@ -232,11 +238,8 @@ mod tests {
         {
             assert_eq!(expected, actual)
         }
-        for (expected, actual) in dyn_schema.schema.iter().skip(2).zip(arrow_schema.fields()) {
-            assert_eq!(&expected.name, actual.name());
-            assert_eq!(expected.is_nullable, actual.is_nullable());
-            assert_eq!(&expected.data_type, actual.data_type());
-        }
+        // Dynamic fields are embedded in the Arrow schema; verifying arrow_schema equality above is
+        // sufficient.
 
         let metadata = dyn_schema.arrow_schema.metadata();
         let primary_key_index = metadata.get("primary_key_index");

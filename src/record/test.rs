@@ -41,18 +41,26 @@ impl Schema for StringSchema {
         &SCHEMA
     }
 
-    fn primary_key_index(&self) -> usize {
-        2
+    fn primary_key_indices(&self) -> &[usize] {
+        const INDICES: [usize; 1] = [2];
+        &INDICES
     }
 
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>) {
-        (
-            ColumnPath::new(vec![magic::TS.to_string(), PRIMARY_FIELD_NAME.to_string()]),
+    fn primary_key_paths_and_sorting(&self) -> (&[ColumnPath], &[SortingColumn]) {
+        use once_cell::sync::Lazy;
+        static PATHS: Lazy<Vec<ColumnPath>> = Lazy::new(|| {
+            vec![ColumnPath::new(vec![
+                magic::TS.to_string(),
+                PRIMARY_FIELD_NAME.to_string(),
+            ])]
+        });
+        static SORTING: Lazy<Vec<SortingColumn>> = Lazy::new(|| {
             vec![
                 SortingColumn::new(1, true, true),
                 SortingColumn::new(2, false, true),
-            ],
-        )
+            ]
+        });
+        (&PATHS[..], &SORTING[..])
     }
 }
 

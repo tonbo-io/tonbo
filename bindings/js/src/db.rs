@@ -78,7 +78,7 @@ impl TonboDB {
     #[wasm_bindgen(constructor)]
     pub async fn new(option: DbOption, schema: Object) -> Self {
         let (desc, primary_key_index) = Self::parse_schema(schema);
-        let schema = DynSchema::new(desc.clone(), primary_key_index);
+        let schema = DynSchema::new(&desc, primary_key_index);
 
         let db = DB::new(option.into_option(&schema), JsExecutor::new(), schema)
             .await

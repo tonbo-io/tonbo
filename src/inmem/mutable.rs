@@ -456,10 +456,10 @@ mod tests {
     async fn test_dyn_read() {
         let temp_dir = tempfile::tempdir().unwrap();
         let schema = DynSchema::new(
-            vec![
+            &vec![
                 DynamicField::new("age".to_string(), ArrayDataType::Int8, false),
                 DynamicField::new("height".to_string(), ArrayDataType::Int16, true),
-            ],
+            ][..],
             0,
         );
         let option = DbOption::new(

@@ -104,11 +104,11 @@ where
             Some(v) => v.as_ref().map(|v| {
                 let mut record_ref = v.as_record_ref();
                 if let Projection::Parts(projection) = projection {
-                    let primary_key_index = self
+                    let pk_indices = self
                         .snapshot
                         .mem_storage()
                         .record_schema
-                        .primary_key_index();
+                        .primary_key_indices();
                     let schema = self.snapshot.mem_storage().record_schema.arrow_schema();
                     let mut projection = projection
                         .iter()
@@ -119,7 +119,8 @@ where
                         })
                         .collect::<Vec<usize>>();
 
-                    let mut fixed_projection = vec![0, 1, primary_key_index];
+                    let mut fixed_projection = vec![0, 1];
+                    fixed_projection.extend_from_slice(pk_indices);
                     fixed_projection.append(&mut projection);
                     fixed_projection.dedup();
 

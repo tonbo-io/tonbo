@@ -55,6 +55,10 @@ required-features = ["bytes", "tokio"]
 name = "datafusion"
 required-features = ["datafusion"]
 
+[[example]]
+name = "dynamic"
+required-features = ["tokio"]
+
 [[bench]]
 harness = false
 name = "write_bench"

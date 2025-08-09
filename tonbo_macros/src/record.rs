@@ -384,15 +384,19 @@ fn struct_schema_codegen(
 
             type Key = #primary_key_ty;
 
-            fn primary_key_index(&self) -> usize {
-                #primary_key_index
+            fn primary_key_indices(&self) -> &[usize] {
+                const INDICES: [usize; 1] = [#primary_key_index];
+                &INDICES
             }
 
-            fn primary_key_path(&self) -> (::tonbo::parquet::schema::types::ColumnPath, Vec<::tonbo::parquet::format::SortingColumn>) {
-                (
-                    ::tonbo::parquet::schema::types::ColumnPath::new(vec![::tonbo::TS.to_string(), stringify!(#primary_key_name).to_string()]),
+            fn primary_key_paths_and_sorting(&self) -> (&[::tonbo::parquet::schema::types::ColumnPath], &[::tonbo::parquet::format::SortingColumn]) {
+                static PATHS: ::tonbo::once_cell::sync::Lazy<Vec<::tonbo::parquet::schema::types::ColumnPath>> = ::tonbo::once_cell::sync::Lazy::new(|| {
+                    vec![::tonbo::parquet::schema::types::ColumnPath::new(vec![::tonbo::TS.to_string(), stringify!(#primary_key_name).to_string()])]
+                });
+                static SORTING: ::tonbo::once_cell::sync::Lazy<Vec<::tonbo::parquet::format::SortingColumn>> = ::tonbo::once_cell::sync::Lazy::new(|| {
                     vec![::tonbo::parquet::format::SortingColumn::new(1_i32, true, true), ::tonbo::parquet::format::SortingColumn::new(#primary_key_index as i32, false, true)]
-                )
+                });
+                (&PATHS[..], &SORTING[..])
             }
 
             fn arrow_schema(&self) -> &'static ::std::sync::Arc<::tonbo::arrow::datatypes::Schema> {
