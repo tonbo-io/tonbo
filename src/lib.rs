@@ -185,6 +185,7 @@ use crate::{
 pub use crate::{option::*, stream::Entry};
 
 pub trait CompactionExecutor<R: Record>: MaybeSend + MaybeSync {
+    #[allow(private_interfaces)]
     fn check_then_compaction<'a>(
         &'a self,
         batches: Option<

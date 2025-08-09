@@ -155,6 +155,7 @@ where
     R: Record,
     <R::Schema as record::Schema>::Columns: Send + Sync,
 {
+    #[allow(private_interfaces)]
     fn check_then_compaction<'a>(
         &'a self,
         batches: Option<
