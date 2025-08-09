@@ -1,9 +1,10 @@
 use std::{cmp, ops::Bound, sync::Arc};
 
+use async_trait::async_trait;
+use fusio::MaybeSend;
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use ulid::Ulid;
-use async_trait::async_trait;
 
 use super::{CompactionError, Compactor};
 use crate::{
@@ -86,7 +87,6 @@ where
         options: LeveledOptions,
         record_schema: Arc<R::Schema>,
         db_option: Arc<DbOption>,
-        db_option: Arc<DbOption>,
         ctx: Arc<Context<R>>,
     ) -> Self {
         Self {
@@ -167,7 +167,7 @@ where
         >,
         recover_wal_ids: Option<Vec<crate::fs::FileId>>,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + Send + 'a {
+    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a {
         <Self as Compactor<R>>::check_then_compaction(self, batches, recover_wal_ids, is_manual)
     }
 }
@@ -365,14 +365,12 @@ where
         version: &Version<R>,
         option: &DbOption,
         leveled_options: &LeveledOptions,
-        leveled_options: &LeveledOptions,
         mut min: &<R::Schema as RecordSchema>::Key,
         mut max: &<R::Schema as RecordSchema>::Key,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         delete_gens: &mut Vec<SsTableID>,
         instance: &R::Schema,
         ctx: &Context<R>,
-        target_level: usize,
         target_level: usize,
     ) -> Result<(), CompactionError<R>> {
         let level = target_level;
@@ -385,19 +383,7 @@ where
         let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
         let level_fs = ctx.manager.get_fs(level_path);
         let mut streams = Vec::with_capacity(meet_scopes_l.len() + meet_scopes_ll.len());
-        let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
-        let level_fs = ctx.manager.get_fs(level_path);
-        let mut streams = Vec::with_capacity(meet_scopes_l.len() + meet_scopes_ll.len());
 
-        // Behaviour for level 0 is different as it is unsorted + has overlapping keys
-        if level == 0 {
-            for scope in meet_scopes_l.iter() {
-                let file = level_fs
-                    .open_options(
-                        &option.table_path(scope.gen, level),
-                        FileType::Parquet.open_options(true),
-                    )
-                    .await?;
         // Behaviour for level 0 is different as it is unsorted + has overlapping keys
         if level == 0 {
             for scope in meet_scopes_l.iter() {
@@ -442,13 +428,7 @@ where
                 inner: level_scan_l,
             });
         }
-            streams.push(ScanStream::Level {
-                inner: level_scan_l,
-            });
-        }
 
-        let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
-        let level_l_fs = ctx.manager.get_fs(level_l_path);
         let level_l_path = option.level_fs_path(level + 1).unwrap_or(&option.base_path);
         let level_l_fs = ctx.manager.get_fs(level_l_path);
 
@@ -475,10 +455,6 @@ where
                 inner: level_scan_ll,
             });
         }
-            streams.push(ScanStream::Level {
-                inner: level_scan_ll,
-            });
-        }
 
         // Build the new SSTs
         <LeveledCompactor<R> as Compactor<R>>::build_tables(
@@ -491,20 +467,6 @@ where
         )
         .await?;
 
-        // Delete old files on both levels
-        for scope in meet_scopes_l {
-            version_edits.push(VersionEdit::Remove {
-                level: level as u8,
-                gen: scope.gen,
-            });
-            delete_gens.push(SsTableID::new(scope.gen, level));
-        }
-        for scope in meet_scopes_ll {
-            version_edits.push(VersionEdit::Remove {
-                level: (level + 1) as u8,
-                gen: scope.gen,
-            });
-            delete_gens.push(SsTableID::new(scope.gen, level + 1));
         // Delete old files on both levels
         for scope in meet_scopes_l {
             version_edits.push(VersionEdit::Remove {
@@ -578,7 +540,6 @@ where
         max: &<R::Schema as RecordSchema>::Key,
         level: usize,
         options: &LeveledOptions,
-        options: &LeveledOptions,
     ) -> (
         Vec<&'a Scope<<R::Schema as RecordSchema>::Key>>,
         usize,
@@ -598,27 +559,14 @@ where
                 break;
             }
         }
-
-        for scope in version.level_slice[level][start_l..].iter() {
-            if (scope.contains(min) || scope.contains(max))
-                && meet_scopes_l.len() <= options.major_l_selection_table_max_num
-            {
-                meet_scopes_l.push(scope);
-                end_l += 1;
-            } else {
-                break;
-            }
-        }
         if meet_scopes_l.is_empty() {
             start_l = 0;
             end_l = cmp::min(
-                options.major_default_oldest_table_num,
                 options.major_default_oldest_table_num,
                 version.level_slice[level].len(),
             );
 
             for scope in version.level_slice[level][..end_l].iter() {
-                if meet_scopes_l.len() > options.major_l_selection_table_max_num {
                 if meet_scopes_l.len() > options.major_l_selection_table_max_num {
                     break;
                 }
@@ -636,13 +584,10 @@ where
     /// Returns true if the number of tables in the level exceeds the threshold.
     pub(crate) fn is_threshold_exceeded_major(
         options: &LeveledOptions,
-        options: &LeveledOptions,
         version: &Version<R>,
         level: usize,
     ) -> bool {
         Version::<R>::tables_len(version, level)
-            >= (options.major_threshold_with_sst_size
-                * options.level_sst_magnification.pow(level as u32))
             >= (options.major_threshold_with_sst_size
                 * options.level_sst_magnification.pow(level as u32))
     }
@@ -908,10 +853,6 @@ pub(crate) mod tests {
             major_threshold_with_sst_size: 2,
             ..Default::default()
         });
-        option = option.leveled_compaction(LeveledOptions {
-            major_threshold_with_sst_size: 2,
-            ..Default::default()
-        });
         let option = Arc::new(option);
         let manager = Arc::new(
             StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap(),
@@ -960,14 +901,12 @@ pub(crate) mod tests {
             &version,
             &option,
             &leveled_options,
-            &leveled_options,
             &min,
             &max,
             &mut version_edits,
             &mut vec![],
             &TestSchema,
             &ctx,
-            0,
             0,
         )
         .await
@@ -1007,15 +946,8 @@ pub(crate) mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let option = DbOption::new(
-        let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        )
-        .leveled_compaction(LeveledOptions {
-            major_threshold_with_sst_size: 1,
-            level_sst_magnification: 1,
-            ..Default::default()
-        });
         )
         .leveled_compaction(LeveledOptions {
             major_threshold_with_sst_size: 1,
@@ -1135,14 +1067,12 @@ pub(crate) mod tests {
             &version,
             &option,
             &leveled_options,
-            &leveled_options,
             &min,
             &max,
             &mut version_edits,
             &mut vec![],
             &TestSchema,
             &ctx,
-            0,
             0,
         )
         .await
@@ -1154,20 +1084,9 @@ pub(crate) mod tests {
     async fn test_flush_major_level_sort() {
         let temp_dir = TempDir::new().unwrap();
         eprintln!("test");
-        eprintln!("test");
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        )
-        .immutable_chunk_num(1)
-        .immutable_chunk_max_num(0)
-        .leveled_compaction(LeveledOptions {
-            major_threshold_with_sst_size: 2,
-            level_sst_magnification: 1,
-            major_default_oldest_table_num: 1,
-            ..Default::default()
-        })
-        .max_sst_file_size(2 * 1024 * 1024);
         )
         .immutable_chunk_num(1)
         .immutable_chunk_max_num(0)

@@ -70,9 +70,6 @@ pub struct DbOption {
     /// Filesystem options for the base path
     pub(crate) base_fs: FsOptions,
 
-    /// Detailed options governing compaction behavior
-    pub(crate) compaction_option: CompactionOption,
-
     /// Optional custom paths and filesystem options for each level
     pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
 

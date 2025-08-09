@@ -1,23 +1,18 @@
 pub(crate) mod error;
 pub mod leveled;
 
-pub mod leveled;
-
 use std::{pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use fusio::{DynFs, MaybeSend, MaybeSync};
-use async_trait::async_trait;
-use fusio::{DynFs, MaybeSend, MaybeSync};
 use fusio_parquet::writer::AsyncWriter;
+use futures::channel::oneshot;
 use futures_util::StreamExt;
 use parquet::arrow::AsyncArrowWriter;
-use tokio::sync::oneshot;
 
 use crate::{
     compaction::error::CompactionError,
     fs::{generate_file_id, FileType},
-    record::{self, ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
     record::{self, ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
@@ -25,9 +20,6 @@ use crate::{
     DbOption,
 };
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub(crate) trait Compactor<R>: MaybeSend + MaybeSync
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub(crate) trait Compactor<R>: MaybeSend + MaybeSync
@@ -55,11 +47,6 @@ where
         streams: Vec<ScanStream<'_, R>>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>>
-    where
-        Self: Sized,
-        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
-    {
     ) -> Result<(), CompactionError<R>>
     where
         Self: Sized,
@@ -125,10 +112,6 @@ where
     where
         Self: Sized,
     {
-    >
-    where
-        Self: Sized,
-    {
         let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
         let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
         Ok((lower, upper))
@@ -144,11 +127,6 @@ where
         max: &mut Option<<R::Schema as RecordSchema>::Key>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>>
-    where
-        Self: Sized,
-        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
-    {
     ) -> Result<(), CompactionError<R>>
     where
         Self: Sized,
@@ -186,12 +164,6 @@ where
         });
         Ok(())
     }
-}
-
-#[derive(Debug)]
-pub enum CompactTask {
-    Freeze,
-    Flush(Option<oneshot::Sender<()>>),
 }
 
 #[derive(Debug)]
