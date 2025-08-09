@@ -206,8 +206,10 @@ pub(crate) mod tests {
 
     use crate::{
         magic,
-        record::{ArrowArrays, ArrowArraysBuilder, Record, Schema},
-        tests::{Test, TestRef},
+        record::{
+            test::{Test, TestRef},
+            ArrowArrays, ArrowArraysBuilder, Record, Schema,
+        },
         version::timestamp::Ts,
     };
 

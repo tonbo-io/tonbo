@@ -13,6 +13,8 @@ use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::Colum
 use super::{
     option::OptionRecordRef, ArrowArrays, ArrowArraysBuilder, Key, Record, RecordRef, Schema,
 };
+#[cfg(all(test, feature = "tokio"))]
+use crate::inmem::immutable::tests::TestSchema;
 use crate::{magic, version::timestamp::Ts};
 
 const PRIMARY_FIELD_NAME: &str = "vstring";
@@ -200,4 +202,228 @@ impl ArrowArraysBuilder<StringColumns> for StringColumnsBuilder {
             record_batch,
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Shared test record: Test/TestRef used across crate tests
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Test {
+    pub vstring: String,
+    pub vu32: u32,
+    pub vbool: Option<bool>,
+}
+
+impl fusio_log::Decode for Test {
+    async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
+    where
+        R: fusio::SeqRead,
+    {
+        let vstring = String::decode(reader).await?;
+        let vu32 = Option::<u32>::decode(reader).await?.unwrap();
+        let vbool = Option::<bool>::decode(reader).await?;
+
+        Ok(Self {
+            vstring,
+            vu32,
+            vbool,
+        })
+    }
+}
+
+#[cfg(all(test, feature = "tokio"))]
+impl Record for Test {
+    type Schema = TestSchema;
+
+    type Ref<'r>
+        = TestRef<'r>
+    where
+        Self: 'r;
+
+    fn key(&self) -> &str {
+        &self.vstring
+    }
+
+    fn as_record_ref(&self) -> Self::Ref<'_> {
+        TestRef {
+            vstring: &self.vstring,
+            vu32: Some(self.vu32),
+            vbool: self.vbool,
+        }
+    }
+
+    fn size(&self) -> usize {
+        let string_size = self.vstring.len();
+        let u32_size = std::mem::size_of::<u32>();
+        let bool_size = self.vbool.map_or(0, |_| std::mem::size_of::<bool>());
+        string_size + u32_size + bool_size
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct TestRef<'r> {
+    pub vstring: &'r str,
+    pub vu32: Option<u32>,
+    pub vbool: Option<bool>,
+}
+
+impl fusio_log::Encode for TestRef<'_> {
+    async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
+    where
+        W: fusio::Write,
+    {
+        self.vstring.encode(writer).await?;
+        self.vu32.encode(writer).await?;
+        self.vbool.encode(writer).await?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        self.vstring.size() + self.vu32.size() + self.vbool.size()
+    }
+}
+
+#[cfg(all(test, feature = "tokio"))]
+impl<'r> RecordRef<'r> for TestRef<'r> {
+    type Record = Test;
+
+    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
+        self.vstring
+    }
+
+    fn projection(&mut self, projection_mask: &ProjectionMask) {
+        if !projection_mask.leaf_included(3) {
+            self.vu32 = None;
+        }
+        if !projection_mask.leaf_included(4) {
+            self.vbool = None;
+        }
+    }
+
+    fn from_record_batch(
+        record_batch: &'r RecordBatch,
+        offset: usize,
+        projection_mask: &'r ProjectionMask,
+        _: &Arc<ArrowSchema>,
+    ) -> OptionRecordRef<'r, Self> {
+        let mut column_i = 2;
+        let null = record_batch.column(0).as_boolean().value(offset);
+
+        let ts = record_batch
+            .column(1)
+            .as_primitive::<UInt32Type>()
+            .value(offset)
+            .into();
+
+        let vstring = record_batch
+            .column(column_i)
+            .as_string::<i32>()
+            .value(offset);
+        column_i += 1;
+
+        let mut vu32 = None;
+        if projection_mask.leaf_included(3) {
+            vu32 = Some(
+                record_batch
+                    .column(column_i)
+                    .as_primitive::<UInt32Type>()
+                    .value(offset),
+            );
+            column_i += 1;
+        }
+
+        let mut vbool = None;
+        if projection_mask.leaf_included(4) {
+            let vbool_array = record_batch.column(column_i).as_boolean();
+            if !vbool_array.is_null(offset) {
+                vbool = Some(vbool_array.value(offset));
+            }
+        }
+
+        let record = TestRef {
+            vstring,
+            vu32,
+            vbool,
+        };
+        OptionRecordRef::new(ts, record, null)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Test helpers
+// -----------------------------------------------------------------------------
+#[cfg(test)]
+pub(crate) fn test_items<I>(range: I) -> impl Iterator<Item = Test>
+where
+    I: IntoIterator<Item = u32>,
+{
+    range.into_iter().map(|i| Test {
+        vstring: i.to_string(),
+        vu32: i,
+        vbool: Some(true),
+    })
+}
+
+#[cfg(all(test, feature = "tokio"))]
+pub(crate) async fn get_test_record_batch<E: crate::executor::Executor + Send + Sync + 'static>(
+    option: crate::DbOption,
+    executor: E,
+) -> arrow::array::RecordBatch {
+    use std::{mem, sync::Arc};
+
+    use crate::{executor::RwLock, inmem::mutable::MutableMemTable, DB};
+
+    let db: DB<Test, E> = DB::new(
+        option.clone(),
+        executor,
+        crate::inmem::immutable::tests::TestSchema {},
+    )
+    .await
+    .unwrap();
+    let base_fs = db.ctx.manager.base_fs();
+
+    db.write(
+        Test {
+            vstring: "hello".to_string(),
+            vu32: 12,
+            vbool: Some(true),
+        },
+        1.into(),
+    )
+    .await
+    .unwrap();
+    db.write(
+        Test {
+            vstring: "world".to_string(),
+            vu32: 12,
+            vbool: None,
+        },
+        1.into(),
+    )
+    .await
+    .unwrap();
+
+    let mut schema = db.mem_storage.write().await;
+
+    let trigger = schema.trigger.clone();
+    let mutable = mem::replace(
+        &mut schema.mutable,
+        MutableMemTable::new(
+            &option,
+            trigger,
+            base_fs.clone(),
+            Arc::new(crate::inmem::immutable::tests::TestSchema {}),
+        )
+        .await
+        .unwrap(),
+    );
+
+    mutable
+        .into_immutable()
+        .await
+        .unwrap()
+        .1
+        .as_record_batch()
+        .clone()
 }

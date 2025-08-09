@@ -2,8 +2,10 @@ use std::{cmp::Ordering, sync::Arc};
 
 use arrow::{
     array::{
-        Array, ArrayRef, AsArray, Date32Array, Date64Array, ListArray, TimestampMicrosecondArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        Array, ArrayRef, AsArray, Date32Array, Date64Array, ListArray, Time32MillisecondArray,
+        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
     },
     datatypes::{
         DataType, Field, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
@@ -220,7 +222,49 @@ impl<'a> ValueRef<'a> {
                 }
             },
 
-            DataType::List(_field) => {
+            DataType::Time32(unit) => match unit {
+                ArrowTimeUnit::Second => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<Time32SecondArray>()
+                        .ok_or_else(|| {
+                            ValueError::InvalidConversion("Time32Second cast failed".into())
+                        })?;
+                    Ok(ValueRef::Time32(arr.value(index), TimeUnit::Second))
+                }
+                ArrowTimeUnit::Millisecond => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<Time32MillisecondArray>()
+                        .ok_or_else(|| {
+                            ValueError::InvalidConversion("Time32Millisecond cast failed".into())
+                        })?;
+                    Ok(ValueRef::Time32(arr.value(index), TimeUnit::Millisecond))
+                }
+                _ => unreachable!("Time32 only supports second and millisecond"),
+            },
+            DataType::Time64(unit) => match unit {
+                ArrowTimeUnit::Microsecond => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<Time64MicrosecondArray>()
+                        .ok_or_else(|| {
+                            ValueError::InvalidConversion("Time64Microsecond cast failed".into())
+                        })?;
+                    Ok(ValueRef::Time64(arr.value(index), TimeUnit::Second))
+                }
+                ArrowTimeUnit::Nanosecond => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<Time64NanosecondArray>()
+                        .ok_or_else(|| {
+                            ValueError::InvalidConversion("Time64Nanosecond cast failed".into())
+                        })?;
+                    Ok(ValueRef::Time64(arr.value(index), TimeUnit::Millisecond))
+                }
+                _ => unreachable!("Time64 only supports microsecond and nanosecond"),
+            },
+            DataType::List(field) => {
                 let arr = array
                     .as_any()
                     .downcast_ref::<ListArray>()
@@ -237,7 +281,7 @@ impl<'a> ValueRef<'a> {
                     }
                 }
 
-                Ok(ValueRef::List(array.data_type(), values))
+                Ok(ValueRef::List(field.data_type(), values))
             }
             _ => Err(ValueError::InvalidConversion(format!(
                 "Unsupported data type: {:?}",
@@ -511,7 +555,7 @@ mod tests {
     use arrow::{
         array::{
             ArrayRef, BinaryArray, FixedSizeBinaryArray, Int32Array, StringArray,
-            TimestampMillisecondArray,
+            Time32SecondArray, TimestampMillisecondArray,
         },
         datatypes::{DataType, Field},
     };
@@ -700,10 +744,7 @@ mod tests {
         let result = ValueRef::from_array_ref(&array, 0).unwrap();
         match result {
             ValueRef::List(data_type, values) => {
-                assert_eq!(
-                    data_type,
-                    &DataType::List(Arc::new(Field::new("item", DataType::Int32, false)))
-                );
+                assert_eq!(data_type, &DataType::Int32);
                 assert_eq!(values.len(), 2);
                 assert_eq!(values[0].as_ref(), &Value::Int32(1));
                 assert_eq!(values[1].as_ref(), &Value::Int32(2));
@@ -715,14 +756,58 @@ mod tests {
         let result = ValueRef::from_array_ref(&array, 1).unwrap();
         match result {
             ValueRef::List(data_type, values) => {
-                assert_eq!(
-                    data_type,
-                    &DataType::List(Arc::new(Field::new("item", DataType::Int32, false)))
-                );
+                assert_eq!(data_type, &DataType::Int32);
                 assert_eq!(values.len(), 3);
                 assert_eq!(values[0].as_ref(), &Value::Int32(3));
                 assert_eq!(values[1].as_ref(), &Value::Int32(4));
                 assert_eq!(values[2].as_ref(), &Value::Int32(5));
+            }
+            _ => panic!("Expected ValueRef::List"),
+        }
+    }
+
+    #[test]
+    fn test_list_value_ref_from_array_time32() {
+        use arrow::{
+            array::ListArray,
+            datatypes::{DataType, Field, TimeUnit as ArrowTimeUnit},
+        };
+
+        let values = Time32SecondArray::from(vec![1, 2, 3, 4, 5]);
+        let field = Arc::new(Field::new(
+            "item",
+            DataType::Time32(ArrowTimeUnit::Second),
+            false,
+        ));
+        let list_array = ListArray::new(
+            field,
+            arrow::buffer::OffsetBuffer::new(vec![0, 2, 5].into()),
+            Arc::new(values),
+            None,
+        );
+        let array = Arc::new(list_array) as ArrayRef;
+
+        // Test extracting the first list [1, 2]
+        let result = ValueRef::from_array_ref(&array, 0).unwrap();
+        match result {
+            ValueRef::List(data_type, values) => {
+                assert_eq!(data_type, &DataType::Time32(ArrowTimeUnit::Second));
+                assert_eq!(values.len(), 2);
+                assert_eq!(values[0].as_ref(), &Value::Time32(1, TimeUnit::Second));
+                assert_eq!(values[1].as_ref(), &Value::Time32(2, TimeUnit::Second));
+            }
+            _ => panic!("Expected ValueRef::List"),
+        }
+
+        // Test extracting the second list [3, 4, 5]
+        let result = ValueRef::from_array_ref(&array, 1).unwrap();
+        match result {
+            ValueRef::List(data_type, values) => {
+                assert_eq!(data_type, &DataType::Time32(ArrowTimeUnit::Second));
+                assert_eq!(values.len(), 3);
+                assert_eq!(values[0].as_ref(), &Value::Time32(3, TimeUnit::Second));
+                assert_eq!(values[1].as_ref(), &Value::Time32(4, TimeUnit::Second));
+                assert_eq!(values[2].as_ref(), &Value::Time32(5, TimeUnit::Second));
             }
             _ => panic!("Expected ValueRef::List"),
         }

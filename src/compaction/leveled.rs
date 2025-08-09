@@ -106,7 +106,7 @@ where
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
-            let guard = self.mem_storage.read().await;
+            let mut guard = self.mem_storage.write().await;
             let chunk_num = if is_manual {
                 guard.immutables.len()
             } else {
@@ -151,8 +151,6 @@ where
                     .update(version_edits, Some(delete_gens))
                     .await?;
             }
-            drop(guard);
-            let mut guard = self.mem_storage.write().await;
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }

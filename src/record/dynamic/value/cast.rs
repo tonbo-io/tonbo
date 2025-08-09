@@ -233,16 +233,27 @@ impl AsValue for ValueRef<'_> {
         }
     }
 
+    /// Return the value as i32 if it is a i32, time32, date32 or timestamp
+    ///
+    /// Note: only value will be returned and time unit will be ignored
     fn as_i32_opt(&self) -> Option<&i32> {
         match self {
             ValueRef::Int32(v) => Some(v),
+            ValueRef::Time32(v, _) => Some(v),
+            ValueRef::Date32(v) => Some(v),
             _ => None,
         }
     }
 
+    /// Return the value as i64 if it is a i64, time64, date64 or timestamp
+    ///
+    /// Note: only value will be returned and time unit will be ignored
     fn as_i64_opt(&self) -> Option<&i64> {
         match self {
             ValueRef::Int64(v) => Some(v),
+            ValueRef::Time64(v, _) => Some(v),
+            ValueRef::Date64(v) => Some(v),
+            ValueRef::Timestamp(v, _) => Some(v),
             _ => None,
         }
     }

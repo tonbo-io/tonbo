@@ -165,8 +165,10 @@ pub(crate) mod tests {
         executor::tokio::TokioExecutor,
         fs::{manager::StoreManager, FileType},
         inmem::immutable::tests::TestSchema,
-        record::{Record, Schema},
-        tests::{get_test_record_batch, Test},
+        record::{
+            test::{get_test_record_batch, Test},
+            Record, Schema,
+        },
         version::timestamp::Ts,
         DbOption,
     };

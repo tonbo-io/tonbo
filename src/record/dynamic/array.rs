@@ -20,8 +20,8 @@ use super::{record::DynRecord, record_ref::DynRecordRef, AsValue, DataType};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
-        ArrowArrays, ArrowArraysBuilder, Key, LargeBinary, LargeString, Record, Schema, TimeUnit,
-        ValueRef,
+        builder::NestedBuilder, ArrowArrays, ArrowArraysBuilder, Key, LargeBinary, LargeString,
+        Record, Schema, TimeUnit, ValueRef,
     },
     version::timestamp::Ts,
 };
@@ -87,6 +87,7 @@ macro_rules! implement_arrow_array {
                             }
                         )*
                         DataType::FixedSizeBinary(w) => builders.push(Box::new(FixedSizeBinaryBuilder::with_capacity(capacity, *w))),
+                        DataType::List(_field) => builders.push(Box::new(NestedBuilder::with_capacity(field.clone(), capacity))),
                         DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     }
                     datatypes.push(datatype);
@@ -214,16 +215,24 @@ macro_rules! implement_builder_array {
                                         None => bd.append_value(vec![0; w as usize]).unwrap(),
                                     }
                                 }
+                                DataType::List(_field) =>{
+                                    let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
+                                    // TODO: remove this clone
+                                    bd.append_value(col.clone())
+                                }
                                 DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                             }
                         }
                     }
                     None => {
-                        for (builder, datatype) in self
+                        for (idx, (builder, datatype)) in self
                             .builders
                             .iter_mut()
                             .zip(self.datatypes.iter_mut())
+                            .enumerate()
                         {
+                            let field = self.schema.field(idx + USER_COLUMN_OFFSET);
+                            let is_nullable = field.is_nullable();
                             match datatype {
                                 $(
                                     $primitive_pat => {
@@ -250,6 +259,14 @@ macro_rules! implement_builder_array {
                                 DataType::FixedSizeBinary(w) =>{
                                     Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut())
                                         .append_value(vec![0; *w as usize]).unwrap();
+                                }
+                                DataType::List(_field) =>{
+                                    let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
+                                    if is_nullable {
+                                        bd.append_null();
+                                    } else {
+                                        bd.append_default();
+                                    }
                                 }
                                 DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                             }
@@ -290,6 +307,9 @@ macro_rules! implement_builder_array {
                             DataType::FixedSizeBinary(_) => mem::size_of_val(
                                 Self::as_builder::<FixedSizeBinaryBuilder>(builder.as_ref()).values_slice()
                             ),
+                            DataType::List(_) => {
+                                Self::as_builder::<NestedBuilder>(builder.as_ref()).bytes_written()
+                            },
                             DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                         }
                     })
@@ -340,6 +360,13 @@ macro_rules! implement_builder_array {
                         DataType::FixedSizeBinary(_) => {
                             let array = Arc::new(
                                 Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut())
+                                    .finish(),
+                            );
+                            array_refs.push(array.clone());
+                        }
+                        DataType::List(_) => {
+                            let array = Arc::new(
+                                Self::as_builder_mut::<NestedBuilder>(builder.as_mut())
                                     .finish(),
                             );
                             array_refs.push(array.clone());
@@ -443,14 +470,16 @@ implement_builder_array!(
 #[cfg(test)]
 mod tests {
 
-    use arrow::datatypes::DataType;
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, TimeUnit as ArrowTimeUnit};
     use parquet::arrow::ProjectionMask;
 
     use crate::{
         dyn_schema,
         record::{
             ArrowArrays, ArrowArraysBuilder, DynRecord, DynRecordImmutableArrays, DynRecordRef,
-            DynSchema, DynamicField, Record, RecordRef, Schema, Value,
+            DynSchema, DynamicField, Record, RecordRef, Schema, TimeUnit, Value,
         },
     };
 
@@ -594,6 +623,117 @@ mod tests {
                 Value::FixedSizeBinary(vec![2, 3, 4, 5], 4),
                 Value::Null,
                 Value::FixedSizeBinary(vec![2, 3, 7], 3),
+            ],
+            0,
+        );
+
+        let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+        let key = crate::version::timestamp::Ts {
+            ts: 0.into(),
+            value: record1.key(),
+        };
+        let key2 = crate::version::timestamp::Ts {
+            ts: 0.into(),
+            value: record2.key(),
+        };
+        builder.push(key.clone(), Some(record1.as_record_ref()));
+        builder.push(key, None);
+        builder.push(key2, Some(record2.as_record_ref()));
+        let arrays = builder.finish(None);
+
+        {
+            let res1 = arrays.get(0, &ProjectionMask::all());
+            let cols = res1.unwrap().unwrap().columns;
+            for (actual, expected) in cols.iter().zip(record1.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
+
+            let res2 = arrays.get(1, &ProjectionMask::all());
+            assert!(res2.unwrap().is_none());
+
+            let res3 = arrays.get(2, &ProjectionMask::all());
+            let cols = res3.unwrap().unwrap().columns;
+            for (actual, expected) in cols.iter().zip(record2.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_list() {
+        let ty1 = DataType::List(Arc::new(Field::new("code", DataType::UInt16, true)));
+        let ty2 = DataType::List(Arc::new(Field::new("cofloatde", DataType::Float32, true)));
+        let ty3 = DataType::List(Arc::new(Field::new(
+            "time",
+            DataType::Time32(ArrowTimeUnit::Second),
+            true,
+        )));
+        let schema = DynSchema::new(
+            &vec![
+                DynamicField::new("id".into(), DataType::UInt64, false),
+                DynamicField::new("codes".into(), ty1.clone(), true),
+                DynamicField::new("vector".into(), ty2.clone(), true),
+                DynamicField::new("schedules".into(), ty3.clone(), true),
+            ],
+            0,
+        );
+
+        let record1 = DynRecord::new(
+            vec![
+                Value::UInt64(1),
+                Value::List(
+                    DataType::UInt16,
+                    vec![
+                        Arc::new(Value::UInt16(1)),
+                        Arc::new(Value::UInt16(2)),
+                        Arc::new(Value::UInt16(3)),
+                        Arc::new(Value::UInt16(4)),
+                    ],
+                ),
+                Value::List(
+                    DataType::Float32,
+                    vec![
+                        Arc::new(Value::Float32(1.0)),
+                        Arc::new(Value::Float32(2.0)),
+                        Arc::new(Value::Float32(3.0)),
+                        Arc::new(Value::Float32(4.0)),
+                    ],
+                ),
+                Value::List(
+                    DataType::Time32(ArrowTimeUnit::Second),
+                    vec![
+                        Arc::new(Value::Time32(1, TimeUnit::Second)),
+                        Arc::new(Value::Time32(2, TimeUnit::Second)),
+                        Arc::new(Value::Time32(3, TimeUnit::Second)),
+                        Arc::new(Value::Time32(4, TimeUnit::Second)),
+                    ],
+                ),
+            ],
+            0,
+        );
+
+        let record2 = DynRecord::new(
+            vec![
+                Value::UInt64(2),
+                Value::List(
+                    DataType::UInt16,
+                    vec![
+                        Arc::new(Value::UInt16(2)),
+                        Arc::new(Value::UInt16(3)),
+                        Arc::new(Value::UInt16(4)),
+                        Arc::new(Value::UInt16(5)),
+                    ],
+                ),
+                Value::List(
+                    DataType::Float32,
+                    vec![
+                        Arc::new(Value::Float32(1.1)),
+                        Arc::new(Value::Float32(2.1)),
+                        Arc::new(Value::Null),
+                        Arc::new(Value::Float32(4.1)),
+                    ],
+                ),
+                Value::Null,
             ],
             0,
         );
