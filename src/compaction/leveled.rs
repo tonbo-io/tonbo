@@ -3,6 +3,7 @@ use std::{cmp, ops::Bound, sync::Arc};
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 use ulid::Ulid;
+use async_trait::async_trait;
 
 use super::{CompactionError, Compactor};
 use crate::{
@@ -97,7 +98,8 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<R> Compactor<R> for LeveledCompactor<R>
 where
     R: Record,

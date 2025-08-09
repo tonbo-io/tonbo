@@ -77,10 +77,8 @@ where
 }
 
 /// Remove processed immutable memtables after successful compaction
-pub fn remove_processed_immutables<R>(
-    db_storage: &mut crate::DbStorage<R>,
-    batch_len: usize,
-) where
+pub fn remove_processed_immutables<R>(db_storage: &mut crate::DbStorage<R>, batch_len: usize)
+where
     R: Record,
     <R::Schema as RecordSchema>::Columns: Send + Sync,
 {

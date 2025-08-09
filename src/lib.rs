@@ -503,27 +503,26 @@ where
                             Ok(Some((batches, recover_wal_ids))) => {
                                 let batch_len = batches.len();
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(&batches), recover_wal_ids, false)
+                                    .check_then_compaction(Some(batches), recover_wal_ids, false)
                                     .await;
-                                
+
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
+                                    crate::inmem::flush::remove_processed_immutables(
+                                        &mut *guard,
+                                        batch_len,
+                                    );
                                 }
-                                
+
                                 compaction_result
                             }
-                            Ok(None) => {
-                                compactor
-                                    .check_then_compaction(None, None, false)
-                                    .await
-                            }
+                            Ok(None) => compactor.check_then_compaction(None, None, false).await,
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-                        
+
                         drop(guard);
                         result
                     }
@@ -549,29 +548,28 @@ where
                             Ok(Some((batches, recover_wal_ids))) => {
                                 let batch_len = batches.len();
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(&batches), recover_wal_ids, true)
+                                    .check_then_compaction(Some(batches), recover_wal_ids, true)
                                     .await;
-                                
+
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
+                                    crate::inmem::flush::remove_processed_immutables(
+                                        &mut *guard,
+                                        batch_len,
+                                    );
                                 }
-                                
+
                                 compaction_result
                             }
-                            Ok(None) => {
-                                compactor
-                                    .check_then_compaction(None, None, true)
-                                    .await
-                            }
+                            Ok(None) => compactor.check_then_compaction(None, None, true).await,
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-                        
+
                         drop(guard);
-                        
+
                         if let Some(tx) = option_tx {
                             if res.is_ok() {
                                 res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -1880,25 +1878,24 @@ pub(crate) mod tests {
                                 let compaction_result = compactor
                                     .check_then_compaction(Some(&batches), recover_wal_ids, false)
                                     .await;
-                                
+
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
+                                    crate::inmem::flush::remove_processed_immutables(
+                                        &mut *guard,
+                                        batch_len,
+                                    );
                                 }
-                                
+
                                 compaction_result
                             }
-                            Ok(None) => {
-                                compactor
-                                    .check_then_compaction(None, None, false)
-                                    .await
-                            }
+                            Ok(None) => compactor.check_then_compaction(None, None, false).await,
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-                        
+
                         drop(guard);
                         result
                     }
@@ -1926,27 +1923,26 @@ pub(crate) mod tests {
                                 let compaction_result = compactor
                                     .check_then_compaction(Some(&batches), recover_wal_ids, true)
                                     .await;
-                                
+
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
+                                    crate::inmem::flush::remove_processed_immutables(
+                                        &mut *guard,
+                                        batch_len,
+                                    );
                                 }
-                                
+
                                 compaction_result
                             }
-                            Ok(None) => {
-                                compactor
-                                    .check_then_compaction(None, None, true)
-                                    .await
-                            }
+                            Ok(None) => compactor.check_then_compaction(None, None, true).await,
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-                        
+
                         drop(guard);
-                        
+
                         if let Some(tx) = option_tx {
                             if res.is_ok() {
                                 res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
@@ -2420,7 +2416,7 @@ pub(crate) mod tests {
             }
         }
 
-        //dbg!(db.ctx.manifest.current().await);
+        // dbg!(db.ctx.manifest.current().await);
         // test get
         {
             let tx = db.transaction().await;
