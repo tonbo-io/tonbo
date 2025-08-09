@@ -573,11 +573,11 @@ mod tests {
     #[tokio::test]
     async fn test_build_fixed_size_binary() {
         let schema = DynSchema::new(
-            vec![
+            &vec![
                 DynamicField::new("four".into(), DataType::FixedSizeBinary(4), false),
                 DynamicField::new("five".into(), DataType::FixedSizeBinary(5), true),
                 DynamicField::new("three".into(), DataType::FixedSizeBinary(3), false),
-            ],
+            ][..],
             0,
         );
 

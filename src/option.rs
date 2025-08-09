@@ -92,7 +92,19 @@ pub struct DbOption {
 impl DbOption {
     /// build the default configured [`DbOption`] with base path and primary key
     pub fn new<S: Schema>(base_path: Path, schema: &S) -> Self {
-        let (column_paths, sorting_columns) = schema.primary_key_path();
+        let (column_paths, sorting_columns) = schema.primary_key_paths_and_sorting();
+
+        // Configure Parquet writer properties for all PK columns and sorting order.
+        let mut writer_builder = WriterProperties::builder()
+            .set_compression(Compression::LZ4)
+            .set_sorting_columns(Some(sorting_columns.to_vec()))
+            .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned());
+
+        for path in column_paths.iter().cloned() {
+            writer_builder = writer_builder
+                .set_column_statistics_enabled(path.clone(), EnabledStatistics::Page)
+                .set_column_bloom_filter_enabled(path, true);
+        }
 
         DbOption {
             immutable_chunk_num: 3,
@@ -102,13 +114,7 @@ impl DbOption {
             max_sst_file_size: 256 * 1024 * 1024,
             clean_channel_buffer: 10,
             base_path,
-            write_parquet_properties: WriterProperties::builder()
-                .set_compression(Compression::LZ4)
-                .set_column_statistics_enabled(column_paths.clone(), EnabledStatistics::Page)
-                .set_column_bloom_filter_enabled(column_paths.clone(), true)
-                .set_sorting_columns(Some(sorting_columns))
-                .set_created_by(concat!("tonbo version ", env!("CARGO_PKG_VERSION")).to_owned())
-                .build(),
+            write_parquet_properties: writer_builder.build(),
 
             use_wal: true,
             wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
