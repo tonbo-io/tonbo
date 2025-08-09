@@ -172,29 +172,55 @@ pub use crate::record::{ArrowArrays, ArrowArraysBuilder};
 #[doc(hidden)]
 pub use crate::version::timestamp::Ts;
 use crate::{
-    compaction::{
-        error::CompactionError, leveled::LeveledCompactor,
-        CompactTask, Compactor,
-    }, executor::{Executor, RwLock as ExecutorRwLock}, fs::{manager::StoreManager, parse_file_id, FileType}, manifest::ManifestStorage, record::Schema, snapshot::Snapshot, stream::{
+    compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
+    executor::{Executor, RwLock as ExecutorRwLock},
+    fs::{manager::StoreManager, parse_file_id, FileType},
+    inmem::flush::minor_flush,
+    manifest::ManifestStorage,
+    record::Schema,
+    snapshot::Snapshot,
+    stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, ScanStream,
-    }, trigger::TriggerFactory, version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version}, wal::{log::LogType, RecoverError, WalFile}
+    },
+    trigger::TriggerFactory,
+    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version},
+    wal::{log::LogType, RecoverError, WalFile},
 };
 pub use crate::{option::*, stream::Entry};
 
 pub trait CompactionExecutor<R: Record>: MaybeSend + MaybeSync {
-    fn check_then_compaction(
-        &self,
+    fn check_then_compaction<'a>(
+        &'a self,
+        batches: Option<
+            &'a [(
+                Option<crate::fs::FileId>,
+                crate::inmem::immutable::ImmutableMemTable<
+                    <R::Schema as crate::record::Schema>::Columns,
+                >,
+            )],
+        >,
+        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend;
+    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a;
 }
 
 // Implementation for custom compactors (Box<dyn Compactor<R>>)
 impl<R: Record> CompactionExecutor<R> for Box<dyn Compactor<R>> {
-    fn check_then_compaction(
-        &self,
+    fn check_then_compaction<'a>(
+        &'a self,
+        batches: Option<
+            &'a [(
+                Option<crate::fs::FileId>,
+                crate::inmem::immutable::ImmutableMemTable<
+                    <R::Schema as crate::record::Schema>::Columns,
+                >,
+            )],
+        >,
+        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend {
-        self.as_ref().check_then_compaction(is_manual)
+    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a {
+        self.as_ref()
+            .check_then_compaction(batches, recover_wal_ids, is_manual)
     }
 }
 
@@ -284,37 +310,34 @@ where
 
         match &option.compaction_option {
             CompactionOption::Leveled(opt) => {
-                let compactor = LeveledCompactor::<R, E>::new(
+                let compactor = LeveledCompactor::<R>::new(
                     opt.clone(),
-                    mem_storage.clone(),
                     record_schema.clone(),
                     option.clone(),
                     ctx.clone(),
                 );
                 Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
-            }
-
-            /* CompactionOption::Tiered(opt) => {
-                let compactor = TieredCompactor::<R>::new(
-                    opt.clone(),
-                    mem_storage.clone(),
-                    record_schema.clone(),
-                    option.clone(),
-                    ctx.clone(),
-                );
-                Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
-            }
-
-            CompactionOption::LazyLeveled(opt) => {
-                let compactor = LazyLeveledCompactor::<R>::new(
-                    opt.clone(),
-                    mem_storage.clone(),
-                    record_schema.clone(),
-                    option.clone(),
-                    ctx.clone(),
-                );
-                Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
-            } */
+            } /* CompactionOption::Tiered(opt) => {
+               * let compactor = TieredCompactor::<R>::new(
+               * opt.clone(),
+               * mem_storage.clone(),
+               * record_schema.clone(),
+               * option.clone(),
+               * ctx.clone(),
+               * );
+               * Self::finish_build(executor, mem_storage, ctx, compactor, cleaner,
+               * task_rx).await }
+               *
+               * CompactionOption::LazyLeveled(opt) => {
+               * let compactor = LazyLeveledCompactor::<R>::new(
+               * opt.clone(),
+               * mem_storage.clone(),
+               * record_schema.clone(),
+               * option.clone(),
+               * ctx.clone(),
+               * );
+               * Self::finish_build(executor, mem_storage, ctx, compactor, cleaner,
+               * task_rx).await } */
         }
     }
 
@@ -348,7 +371,7 @@ where
             Arc<Context<R>>,
         ),
         DbError,
-    > 
+    >
     where
         Ex: Executor + Send + Sync,
     {
@@ -450,6 +473,8 @@ where
 
         let mem_storage_task = mem_storage.clone();
         let ctx_task = ctx.clone();
+        let mem_storage_task = mem_storage.clone();
+        let ctx_task = ctx.clone();
         executor.spawn(async move {
             // Waits to receive compaction task. `CompactTask::Freeze` will perform automatic
             // compaction and `Compact::Flush` will perform manual compaction
@@ -478,26 +503,27 @@ where
                             Ok(Some((batches, recover_wal_ids))) => {
                                 let batch_len = batches.len();
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(batches), recover_wal_ids, false)
+                                    .check_then_compaction(Some(&batches), recover_wal_ids, false)
                                     .await;
-
+                                
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
+                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
                                 }
-
+                                
                                 compaction_result
                             }
-                            Ok(None) => compactor.check_then_compaction(None, None, false).await,
+                            Ok(None) => {
+                                compactor
+                                    .check_then_compaction(None, None, false)
+                                    .await
+                            }
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-
+                        
                         drop(guard);
                         result
                     }
@@ -523,36 +549,41 @@ where
                             Ok(Some((batches, recover_wal_ids))) => {
                                 let batch_len = batches.len();
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(batches), recover_wal_ids, true)
+                                    .check_then_compaction(Some(&batches), recover_wal_ids, true)
                                     .await;
-
+                                
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
+                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
                                 }
-
+                                
                                 compaction_result
                             }
-                            Ok(None) => compactor.check_then_compaction(None, None, true).await,
+                            Ok(None) => {
+                                compactor
+                                    .check_then_compaction(None, None, true)
+                                    .await
+                            }
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-
+                        
                         drop(guard);
-
+                        
                         if let Some(tx) = option_tx {
+                            if res.is_ok() {
+                                res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
                             if res.is_ok() {
                                 res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
                             }
                         }
                         res
+                        res
                     }
                 } {
+                    error!("[Compaction Error]: {}", err);
                     error!("[Compaction Error]: {}", err);
                 }
             }
@@ -1351,7 +1382,7 @@ pub(crate) mod tests {
         array::{Array, AsArray, RecordBatch},
         datatypes::{Schema, UInt32Type},
     };
-        use flume::{bounded, Receiver};
+    use flume::{bounded, Receiver};
     use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
     use fusio_dispatch::FsOptions;
     use fusio_log::{Decode, Encode};
@@ -1375,6 +1406,7 @@ pub(crate) mod tests {
         context::Context,
         executor::{tokio::TokioExecutor, Executor, RwLock},
         fs::{generate_file_id, manager::StoreManager},
+        inmem::{flush::minor_flush, immutable::tests::TestSchema, mutable::MutableMemTable},
         inmem::{flush::minor_flush, immutable::tests::TestSchema, mutable::MutableMemTable},
         manifest::ManifestStorageError,
         record::{
@@ -1739,9 +1771,8 @@ pub(crate) mod tests {
         // Create built-in compactor for tests
         match &option.compaction_option {
             CompactionOption::Leveled(opt) => {
-                let compactor = LeveledCompactor::<R, E>::new(
+                let compactor = LeveledCompactor::<R>::new(
                     opt.clone(),
-                    mem_storage.clone(),
                     record_schema.clone(),
                     option.clone(),
                     ctx.clone(),
@@ -1755,45 +1786,43 @@ pub(crate) mod tests {
                     compaction_rx,
                 )
                 .await
-            }
-
-            /* CompactionOption::Tiered(opt) => {
-                let compactor = TieredCompactor::<R>::new(
-                    opt.clone(),
-                    mem_storage.clone(),
-                    record_schema.clone(),
-                    option.clone(),
-                    ctx.clone(),
-                );
-                finish_db_with_compactor(
-                    executor,
-                    mem_storage,
-                    ctx,
-                    compactor,
-                    cleaner,
-                    compaction_rx,
-                )
-                .await
-            }
-
-            CompactionOption::LazyLeveled(opt) => {
-                let compactor = LazyLeveledCompactor::<R>::new(
-                    opt.clone(),
-                    mem_storage.clone(),
-                    record_schema.clone(),
-                    option.clone(),
-                    ctx.clone(),
-                );
-                finish_db_with_compactor(
-                    executor,
-                    mem_storage,
-                    ctx,
-                    compactor,
-                    cleaner,
-                    compaction_rx,
-                )
-                .await
-            } */
+            } /* CompactionOption::Tiered(opt) => {
+               * let compactor = TieredCompactor::<R>::new(
+               * opt.clone(),
+               * mem_storage.clone(),
+               * record_schema.clone(),
+               * option.clone(),
+               * ctx.clone(),
+               * );
+               * finish_db_with_compactor(
+               * executor,
+               * mem_storage,
+               * ctx,
+               * compactor,
+               * cleaner,
+               * compaction_rx,
+               * )
+               * .await
+               * }
+               *
+               * CompactionOption::LazyLeveled(opt) => {
+               * let compactor = LazyLeveledCompactor::<R>::new(
+               * opt.clone(),
+               * mem_storage.clone(),
+               * record_schema.clone(),
+               * option.clone(),
+               * ctx.clone(),
+               * );
+               * finish_db_with_compactor(
+               * executor,
+               * mem_storage,
+               * ctx,
+               * compactor,
+               * cleaner,
+               * compaction_rx,
+               * )
+               * .await
+               * } */
         }
     }
 
@@ -1817,7 +1846,11 @@ pub(crate) mod tests {
             }
         });
 
+        let mem_storage_task = mem_storage.clone();
+        let ctx_task = ctx.clone();
         executor.spawn(async move {
+            // Waits to receive compaction task. `CompactTask::Freeze` will perform automatic
+            // compaction and `Compact::Flush` will perform manual compaction
             // Waits to receive compaction task. `CompactTask::Freeze` will perform automatic
             // compaction and `Compact::Flush` will perform manual compaction
             while let Ok(task) = compaction_rx.recv_async().await {
@@ -1847,24 +1880,25 @@ pub(crate) mod tests {
                                 let compaction_result = compactor
                                     .check_then_compaction(Some(&batches), recover_wal_ids, false)
                                     .await;
-
+                                
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
+                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
                                 }
-
+                                
                                 compaction_result
                             }
-                            Ok(None) => compactor.check_then_compaction(None, None, false).await,
+                            Ok(None) => {
+                                compactor
+                                    .check_then_compaction(None, None, false)
+                                    .await
+                            }
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-
+                        
                         drop(guard);
                         result
                     }
@@ -1892,34 +1926,39 @@ pub(crate) mod tests {
                                 let compaction_result = compactor
                                     .check_then_compaction(Some(&batches), recover_wal_ids, true)
                                     .await;
-
+                                
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
+                                    crate::inmem::flush::remove_processed_immutables(&mut *guard, batch_len);
                                 }
-
+                                
                                 compaction_result
                             }
-                            Ok(None) => compactor.check_then_compaction(None, None, true).await,
+                            Ok(None) => {
+                                compactor
+                                    .check_then_compaction(None, None, true)
+                                    .await
+                            }
                             Err(e) => {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
                         };
-
+                        
                         drop(guard);
-
+                        
                         if let Some(tx) = option_tx {
+                            if res.is_ok() {
+                                res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
                             if res.is_ok() {
                                 res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
                             }
                         }
                         res
+                        res
                     }
                 } {
+                    error!("[Compaction Error]: {}", err);
                     error!("[Compaction Error]: {}", err);
                 }
             }
@@ -2381,7 +2420,7 @@ pub(crate) mod tests {
             }
         }
 
-        // dbg!(db.ctx.manifest.current().await);
+        //dbg!(db.ctx.manifest.current().await);
         // test get
         {
             let tx = db.transaction().await;

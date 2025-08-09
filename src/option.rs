@@ -93,6 +93,15 @@ pub struct DbOption {
 
     /// Parquet writer properties for on-disk SST files
     pub(crate) write_parquet_properties: WriterProperties,
+
+    /// Detailed options governing compaction behavior
+    pub(crate) compaction_option: CompactionOption,
+
+    /// Number of immutable chunks
+    pub(crate) immutable_chunk_num: usize,
+
+    /// Maximum number of immutable chunks
+    pub(crate) immutable_chunk_max_num: usize,
 }
 
 impl DbOption {
@@ -119,6 +128,8 @@ impl DbOption {
             level_paths: vec![None; MAX_LEVEL],
             base_fs: FsOptions::Local,
             compaction_option: CompactionOption::Leveled(LeveledOptions::default()),
+            immutable_chunk_num: 3,
+            immutable_chunk_max_num: 10,
         }
     }
 
@@ -149,6 +160,8 @@ impl DbOption {
             level_paths: vec![None; MAX_LEVEL],
             base_fs: FsOptions::Local,
             compaction_option,
+            immutable_chunk_num: 3,
+            immutable_chunk_max_num: 10,
         }
     }
 }
@@ -188,21 +201,13 @@ impl DbOption {
 
     /// Set immutable chunk number
     pub fn immutable_chunk_num(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Leveled(opts) => opts.immutable_chunk_num = value,
-            /* CompactionOption::Tiered(opts) => opts.immutable_chunk_num = value,
-            CompactionOption::LazyLeveled(opts) => opts.immutable_chunk_num = value, */
-        }
+        self.immutable_chunk_num = value;
         self
     }
 
     /// Set maximum immutable chunk number
     pub fn immutable_chunk_max_num(mut self, value: usize) -> Self {
-        match &mut self.compaction_option {
-            CompactionOption::Leveled(opts) => opts.immutable_chunk_max_num = value,
-            /* CompactionOption::Tiered(opts) => opts.immutable_chunk_max_num = value,
-            CompactionOption::LazyLeveled(opts) => opts.immutable_chunk_max_num = value, */
-        }
+        self.immutable_chunk_max_num = value;
         self
     }
 

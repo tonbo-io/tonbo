@@ -36,7 +36,17 @@ where
 {
     /// Orchestrate flush + major compaction.
     /// This is the only method custom compactors need to implement.
-    async fn check_then_compaction(&self, is_manual: bool) -> Result<(), CompactionError<R>>;
+    async fn check_then_compaction(
+        &self,
+        batches: Option<
+            &[(
+                Option<crate::fs::FileId>,
+                crate::inmem::immutable::ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+            )],
+        >,
+        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        is_manual: bool,
+    ) -> Result<(), CompactionError<R>>;
 
     async fn build_tables<'scan>(
         option: &DbOption,
