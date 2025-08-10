@@ -1,12 +1,16 @@
-pub mod flight;
+pub mod aws_tonbo_svc;
+pub mod flight_svc;
 
 use std::{
-    env, fmt::Debug, future::Future, marker::Send, net::{Ipv4Addr, SocketAddr}, ops::Bound, pin::Pin, sync::Arc,
+    env,
+    marker::Send,
+    net::{Ipv4Addr, SocketAddr},
+    ops::Bound,
+    pin::Pin,
+    sync::Arc,
 };
 
-use arrow::ipc::RecordBatchBuilder;
-use arrow_flight::{encode::FlightDataEncoderBuilder, flight_service_server::FlightServiceServer, FlightClient};
-use arrow_flight::flight_service_server::FlightService;
+use arrow_flight::flight_service_server::FlightServiceServer;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use fusio::{
@@ -21,16 +25,20 @@ use tonbo::{
     arrow::array::RecordBatch,
     executor::tokio::TokioExecutor,
     parquet::errors::ParquetError,
-    record::{DynRecord, Record, dynamic::Value},
+    record::{dynamic::Value, DynRecord, Record},
     transaction::Transaction,
-    DbOption, Entry, Record, DB,
+    DbOption, Entry, DB,
 };
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::transport::Server;
 
 use crate::{
-    aws::flight::FlightServer, error::CloudError, gen::grpc::{
-        self, aws_tonbo_server::{AwsTonbo as AwsTonboRPC, AwsTonboServer}, ParquetMetadata
-    }, ScanRequest, TonboCloud
+    aws::{aws_tonbo_svc::AWSTonboSvc, flight_svc::TonboFlightSvc},
+    error::CloudError,
+    gen::grpc::{
+        self,
+        aws_tonbo_server::{AwsTonbo as AwsTonboRPC, AwsTonboServer},
+    },
+    ScanRequest, TonboCloud,
 };
 
 pub const DEFAULT_PORT: u32 = 8080;
@@ -51,10 +59,6 @@ pub struct AWSTonbo {
 }
 
 impl AWSTonbo {
-    fn endpoint(self) -> String {
-        self.endpoint
-    }
-
     // todo: Separate the data
     // Returns number of rows and row size
     async fn parquet_metadata<'a>(
@@ -65,9 +69,8 @@ impl AWSTonbo {
         let mut row_count = 0;
         let mut row_size = 0;
 
-        let scan_req = scan.clone();
         let mut inner = self
-            .read(&transaction, &scan_req)
+            .read(&transaction, &scan)
             .await
             .map_err(|e| CloudError::Cloud(e.to_string()))
             .unwrap();
@@ -80,35 +83,17 @@ impl AWSTonbo {
                     row_size =
                         (batch.get_array_memory_size() as i64 / batch.num_rows() as i64) as i32;
                 }
-                Ok(Entry::Mutable(entry)) => {
+                Ok(Entry::Mutable(_entry)) => {
                     // if let Some(batch) = entry.value() {
                     //     let batch_builder = RecordBatchBuilder
                     // }
                 }
                 Ok(_) => todo!(),
-                Err(e) => todo!(),
+                Err(_e) => todo!(),
             }
         }
 
         Ok((row_count, row_size))
-    }
-}
-
-#[tonic::async_trait]
-impl AwsTonboRPC for AWSTonbo {
-    async fn get_parquet_metadata(
-    &self,
-    request: tonic::Request<grpc::ScanRequest>,
-) -> Result<tonic::Response<grpc::ParquetMetadata>, tonic::Status>  {
-        let tx = self.tonbo.transaction().await;
-        let scan_request = ScanRequest::from(request.into_inner());
-
-        let (row_count, row_size) = self.parquet_metadata(&tx, &scan_request).await.unwrap();
-        let meta = grpc::ParquetMetadata {
-            row_count,
-            row_size,
-        };
-        Ok(Response::new(meta))
     }
 }
 
@@ -143,9 +128,8 @@ impl TonboCloud for AWSTonbo {
                 .await
                 .unwrap();
 
-
-        let localhost = Ipv4Addr::new(127, 0, 0, 1);
-        let endpoint = format!("http://{}:{}/tables/{}/", localhost, DEFAULT_PORT, name);
+        let local_host = Ipv4Addr::new(127, 0, 0, 1);
+        let endpoint = format!("http://{}:{}/tables/{}/", local_host, DEFAULT_PORT, name);
 
         Self {
             name,
@@ -156,7 +140,6 @@ impl TonboCloud for AWSTonbo {
         }
     }
 
-    // TODO: Use `DynRecord`
     fn write(&self, _records: impl ExactSizeIterator<Item = DynRecord>) {}
 
     async fn read<'a>(
@@ -167,7 +150,6 @@ impl TonboCloud for AWSTonbo {
         Pin<Box<dyn Stream<Item = Result<Entry<'a, DynRecord>, ParquetError>> + Send + 'a>>,
         CloudError,
     > {
-
         Ok(Box::pin(try_stream! {
                 let projection: Vec<&str> = scan.projection.iter().map(String::as_str).collect();
 
@@ -189,12 +171,18 @@ impl TonboCloud for AWSTonbo {
         }))
     }
 
-    async fn listen(self, addr: SocketAddr, flight_svc: FlightServer) -> impl Future<Output = std::io::Result<()>> + 'static {
+    async fn listen(self, addr: SocketAddr) -> std::io::Result<()> {
+        let shared = Arc::new(self);
+
+        let app = AwsTonboServer::new(AWSTonboSvc::new(shared.clone()));
+        let flight = FlightServiceServer::new(TonboFlightSvc::new(shared.clone()));
+
         Server::builder()
-            .add_service(AwsTonboServer::new(self))
-            .add_service(FlightServiceServer::new(flight_svc))
+            .add_service(app)
+            .add_service(flight)
             .serve(addr)
             .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     // This will create the new metadata update that will be sent to S3
@@ -257,9 +245,7 @@ impl TonboCloud for AWSTonbo {
 impl From<grpc::ScanRequest> for ScanRequest {
     fn from(g: grpc::ScanRequest) -> Self {
         // helper to map one side
-        fn map_bound(
-            opt: Option<grpc::BoundValue>
-        ) -> Bound<Value> {
+        fn map_bound(opt: Option<grpc::BoundValue>) -> Bound<Value> {
             match opt {
                 Some(bv) => match bv.kind {
                     Some(grpc::bound_value::Kind::Inclusive(v)) => Bound::Included(Value::from(v)),
@@ -291,12 +277,12 @@ impl From<grpc::Value> for Value {
 
             Some(grpc::value::Kind::Boolean(b)) => Value::Boolean(b),
 
-            Some(grpc::value::Kind::Int8(i))  => Value::Int8(i as i8),
+            Some(grpc::value::Kind::Int8(i)) => Value::Int8(i as i8),
             Some(grpc::value::Kind::Int16(i)) => Value::Int16(i as i16),
             Some(grpc::value::Kind::Int32(i)) => Value::Int32(i),
             Some(grpc::value::Kind::Int64(i)) => Value::Int64(i),
 
-            Some(grpc::value::Kind::Uint8(u))  => Value::UInt8(u as u8),
+            Some(grpc::value::Kind::Uint8(u)) => Value::UInt8(u as u8),
             Some(grpc::value::Kind::Uint16(u)) => Value::UInt16(u as u16),
             Some(grpc::value::Kind::Uint32(u)) => Value::UInt32(u),
             Some(grpc::value::Kind::Uint64(u)) => Value::UInt64(u),
@@ -305,7 +291,7 @@ impl From<grpc::Value> for Value {
             Some(grpc::value::Kind::Float64(f)) => Value::Float64(f),
 
             Some(grpc::value::Kind::StringValue(s)) => Value::String(s),
-            Some(grpc::value::Kind::Binary(b))      => Value::Binary(b),
+            Some(grpc::value::Kind::Binary(b)) => Value::Binary(b),
 
             Some(grpc::value::Kind::FixedSizeBinary(fsb)) => {
                 // see if this is right
@@ -315,15 +301,15 @@ impl From<grpc::Value> for Value {
             Some(grpc::value::Kind::Date32(d)) => Value::Date32(d),
             Some(grpc::value::Kind::Date64(d)) => Value::Date64(d),
 
-            Some(grpc::value::Kind::Time32(t)) => {
+            Some(grpc::value::Kind::Time32(_t)) => {
                 todo!()
             }
 
-            Some(grpc::value::Kind::Time64(t)) => {
+            Some(grpc::value::Kind::Time64(_t)) => {
                 todo!()
             }
 
-            Some(grpc::value::Kind::Timestamp(ts)) => {
+            Some(grpc::value::Kind::Timestamp(_ts)) => {
                 todo!()
             }
         }

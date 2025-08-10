@@ -1,10 +1,10 @@
-use std::{future::Future, net::SocketAddr, ops::Bound, pin::Pin};
+use std::{net::SocketAddr, ops::Bound, pin::Pin};
 
 use async_trait::async_trait;
 use futures_core::Stream;
 use tonbo::{
     parquet::errors::ParquetError,
-    record::{dynamic::Value, DynRecord, Key, Record, Schema, TimeUnit},
+    record::{dynamic::Value, DynRecord, Record},
     transaction::Transaction,
     Entry,
 };
@@ -35,7 +35,7 @@ pub trait TonboCloud {
     >;
 
     /// Listens to new read requests from connections
-    async fn listen(self, addr: SocketAddr) -> impl Future<Output = std::io::Result<()>> + 'static;
+    async fn listen(self, addr: SocketAddr) -> std::io::Result<()>;
 
     // Updates metadata
     fn update_metadata();
@@ -44,7 +44,8 @@ pub trait TonboCloud {
     fn flush();
 }
 
-// Readers will send a scan request to Tonbo Cloud
+/// Readers will send a scan request to Tonbo Cloud
+/// This can be sent for a metadata or data request
 pub struct ScanRequest {
     lower: Bound<Value>,
     upper: Bound<Value>,
