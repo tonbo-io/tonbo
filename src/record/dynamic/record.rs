@@ -22,12 +22,13 @@ impl DynRecord {
 
     // Used for converting `DynRecord`s to `RecordBatches`
     pub fn schema(&self, primary_index: usize) -> DynSchema {
+        let mut dyn_fields = Vec::with_capacity(self.values.len());
         let fields = self
             .values
             .iter()
-            .map(|value| DynamicField::new("".to_string(), value.data_type(), false))
-            .collect();
-        DynSchema::new(fields, primary_index)
+            .map(|value| dyn_fields.push(DynamicField::new("".to_string(), value.data_type(), false)));
+        
+        DynSchema::new(dyn_fields.as_slice(), primary_index)
     }
 
     /// Create a new DynRecord with validation.
