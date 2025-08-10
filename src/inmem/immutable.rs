@@ -237,23 +237,31 @@ pub(crate) mod tests {
             &SCHEMA
         }
 
-        fn primary_key_index(&self) -> usize {
-            2
+        fn primary_key_indices(&self) -> &[usize] {
+            const INDICES: [usize; 1] = [2];
+            &INDICES
         }
 
-        fn primary_key_path(
+        fn primary_key_paths_and_sorting(
             &self,
         ) -> (
-            parquet::schema::types::ColumnPath,
-            Vec<parquet::format::SortingColumn>,
+            &[parquet::schema::types::ColumnPath],
+            &[parquet::format::SortingColumn],
         ) {
-            (
-                ColumnPath::new(vec![magic::TS.to_string(), "vstring".to_string()]),
+            use once_cell::sync::Lazy;
+            static PATHS: Lazy<Vec<ColumnPath>> = Lazy::new(|| {
+                vec![ColumnPath::new(vec![
+                    magic::TS.to_string(),
+                    "vstring".to_string(),
+                ])]
+            });
+            static SORTING: Lazy<Vec<SortingColumn>> = Lazy::new(|| {
                 vec![
                     SortingColumn::new(1, true, true),
                     SortingColumn::new(2, false, true),
-                ],
-            )
+                ]
+            });
+            (&PATHS[..], &SORTING[..])
         }
     }
 

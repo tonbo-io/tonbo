@@ -50,16 +50,18 @@ mod tests {
 
         assert_eq!(user.key(), "cat");
         assert_eq!(user.size(), 24);
-        assert_eq!(UserSchema {}.primary_key_index(), 4);
+        assert_eq!(UserSchema {}.primary_key_indices()[0], 4);
+        let (paths, sorting) = UserSchema {}.primary_key_paths_and_sorting();
         assert_eq!(
-            UserSchema {}.primary_key_path(),
-            (
-                ColumnPath::new(vec![TS.to_string(), "name".to_string()]),
-                vec![
-                    SortingColumn::new(1, true, true),
-                    SortingColumn::new(4, false, true),
-                ],
-            )
+            paths,
+            &[ColumnPath::new(vec![TS.to_string(), "name".to_string()])]
+        );
+        assert_eq!(
+            sorting,
+            &[
+                SortingColumn::new(1, true, true),
+                SortingColumn::new(4, false, true)
+            ]
         );
     }
 

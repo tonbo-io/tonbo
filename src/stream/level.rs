@@ -66,7 +66,6 @@ impl<'level, R> LevelStream<'level, R>
 where
     R: Record,
 {
-    // Kould: only used by Compaction now, and the start and end of the sstables range are known
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         version: &Version<R>,
@@ -80,6 +79,7 @@ where
         ts: Timestamp,
         limit: Option<usize>,
         projection_mask: ProjectionMask,
+        // TODO: Refactor some top level components to a context structure.
         fs: Arc<dyn DynFs>,
         parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
         order: Option<Order>,

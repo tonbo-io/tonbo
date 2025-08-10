@@ -59,13 +59,21 @@ pub trait Schema: Debug + Send + Sync {
     /// **Note**: The first column should be `_null`, and the second column should be `_ts`.
     fn arrow_schema(&self) -> &Arc<ArrowSchema>;
 
-    /// Returns the index of the primary key column.
-    fn primary_key_index(&self) -> usize;
+    /// Returns all primary key column paths and the row-group sorting configuration.
+    ///
+    /// The returned slices should reference stable storage: either static data or internal fields
+    /// owned by the schema. The `ColumnPath` slice should list Parquet paths for each PK column.
+    /// The `SortingColumn` slice defines the row-group sort order, typically `_ts` followed by PKs.
+    fn primary_key_paths_and_sorting(&self) -> (&[ColumnPath], &[SortingColumn]);
 
-    /// Returns the ([`ColumnPath`], [`Vec<SortingColumn>`]) of the primary key column, representing
-    /// the location of the primary key column in the parquet schema and the sort order within a
-    /// RowGroup of a leaf column
-    fn primary_key_path(&self) -> (ColumnPath, Vec<SortingColumn>);
+    /// Returns all primary key column indices.
+    ///
+    /// For single-column primary keys this should return a one-element slice containing the same
+    /// index that would have been returned by the legacy single-index API.
+    fn primary_key_indices(&self) -> &[usize];
+
+    // Note: Implementations should ensure parity with `primary_key_indices()` for included
+    // columns, and include `_ts` in sorting columns.
 }
 
 pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
@@ -97,7 +105,7 @@ pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
 
     /// Do projection on the record. Only keep the columns specified in the projection mask.
     ///
-    /// **Note**: Primary key column are always kept.
+    /// Note: Primary key column(s) are always kept.
     fn projection(&mut self, projection_mask: &ProjectionMask);
 
     /// Get the [`RecordRef`] from the [`RecordBatch`] at the given offset.
