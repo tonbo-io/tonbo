@@ -1,10 +1,10 @@
 use std::{collections::Bound, sync::Arc};
 
-use async_lock::RwLockReadGuard;
 use parquet::arrow::ProjectionMask;
 
 use crate::{
     context::Context,
+    executor::{Executor, RwLock},
     option::Order,
     record::{Record, Schema as RecordSchema},
     stream::{self, ScanStream},
@@ -12,19 +12,25 @@ use crate::{
     DbError, DbStorage, Projection, Scan,
 };
 
-pub struct Snapshot<'s, R>
+pub struct Snapshot<'s, R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: Executor,
+    E::RwLock<DbStorage<R>>: 's,
 {
     ts: Timestamp,
-    share: RwLockReadGuard<'s, DbStorage<R>>,
+    share: <E::RwLock<DbStorage<R>> as RwLock<DbStorage<R>>>::ReadGuard<'s>,
     version: VersionRef<R>,
     ctx: Arc<Context<R>>,
 }
 
-impl<'s, R> Snapshot<'s, R>
+impl<'s, R, E> Snapshot<'s, R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: Executor,
+    E::RwLock<DbStorage<R>>: 's,
 {
     pub async fn get<'get>(
         &'get self,
@@ -62,7 +68,7 @@ where
     }
 
     pub(crate) fn new(
-        share: RwLockReadGuard<'s, DbStorage<R>>,
+        share: <E::RwLock<DbStorage<R>> as RwLock<DbStorage<R>>>::ReadGuard<'s>,
         version: VersionRef<R>,
         ctx: Arc<Context<R>>,
     ) -> Self {
@@ -151,10 +157,10 @@ mod tests {
         let (schema, compaction_rx) = build_schema(option.clone(), manager.base_fs())
             .await
             .unwrap();
-        let db = build_db(
+        let db = build_db::<_, TokioExecutor>(
             option,
             compaction_rx,
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             schema,
             Arc::new(TestSchema),
             version,

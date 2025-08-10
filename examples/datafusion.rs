@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
         &MusicSchema,
     );
 
-    let db = DB::new(options, TokioExecutor::current(), MusicSchema)
+    let db = DB::new(options, TokioExecutor::default(), MusicSchema)
         .await
         .unwrap();
     for (id, name, like) in [

@@ -48,7 +48,7 @@
 //!         &UserSchema,
 //!     );
 //!     // pluggable async runtime and I/O
-//!     let db = DB::new(options, TokioExecutor::current(), UserSchema)
+//!     let db = DB::new(options, TokioExecutor::default(), UserSchema)
 //!         .await
 //!         .unwrap();
 //!     // insert with owned value
@@ -109,6 +109,7 @@
 mod compaction;
 mod context;
 pub mod executor;
+use executor::RwLock;
 pub(crate) mod fs;
 pub(crate) mod inmem;
 pub(crate) mod magic;
@@ -127,7 +128,6 @@ mod wal;
 use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
 
 pub use arrow;
-use async_lock::RwLock;
 use async_stream::stream;
 use compaction::leveled::LeveledCompactor;
 use context::Context;
@@ -135,6 +135,7 @@ use flume::{bounded, Sender};
 use fs::FileId;
 pub use fusio::{SeqRead, Write};
 pub use fusio_log::{Decode, Encode};
+use futures::channel::oneshot;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use inmem::{
@@ -143,7 +144,7 @@ use inmem::{
 };
 use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
-use manifest::ManifestStorageError;
+use manifest::{ManifestStorage, ManifestStorageError};
 pub use once_cell;
 pub use parquet;
 use parquet::{
@@ -153,7 +154,6 @@ use parquet::{
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
 use thiserror::Error;
-use tokio::sync::oneshot;
 pub use tonbo_macros::{KeyAttributes, Record};
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
@@ -178,7 +178,7 @@ use crate::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, ScanStream,
     },
     trigger::TriggerFactory,
-    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, TransactionTs, Version},
+    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version},
     wal::{log::LogType, RecoverError, WalFile},
 };
 pub use crate::{option::*, stream::Entry};
@@ -187,9 +187,10 @@ pub use crate::{option::*, stream::Entry};
 pub struct DB<R, E>
 where
     R: Record,
+    <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor,
 {
-    mem_storage: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<E::RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     lock_map: LockMap<<R::Schema as Schema>::Key>,
     _p: PhantomData<E>,
@@ -200,6 +201,7 @@ where
     R: Record + Send + Sync,
     <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
+    DbStorage<R>: fusio::MaybeSend + fusio::MaybeSync,
 {
     /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
     /// path specified in [`DbOption`] (if it does not exist before) and run it
@@ -222,6 +224,7 @@ where
     R: Record + Send + Sync,
     <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
+    DbStorage<R>: fusio::MaybeSend + fusio::MaybeSync,
 {
     async fn build(
         option: Arc<DbOption>,
@@ -263,15 +266,15 @@ where
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
         let manifest = Box::new(
-            VersionSet::new(clean_sender, option.clone(), manager.clone())
+            VersionSet::<R, E>::new(clean_sender, option.clone(), manager.clone())
                 .await
                 .map_err(ManifestStorageError::Version)?,
         );
-        let mem_storage = Arc::new(RwLock::new(
+        let mem_storage = Arc::new(E::rw_lock(
             DbStorage::new(
                 option.clone(),
                 task_tx,
-                &manifest,
+                manifest.as_ref(),
                 record_schema.clone(),
                 &manager,
             )
@@ -286,7 +289,7 @@ where
         ));
 
         let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
                 mem_storage.clone(),
                 record_schema,
                 option.clone(),
@@ -356,12 +359,12 @@ where
     ///
     /// txn.commit().await.unwrap();
     /// ```
-    pub async fn transaction(&self) -> Transaction<'_, R> {
+    pub async fn transaction(&self) -> Transaction<'_, R, E> {
         Transaction::new(self.snapshot().await, self.lock_map.clone())
     }
 
     /// Returns a snapshot of the database
-    pub async fn snapshot(&self) -> Snapshot<'_, R> {
+    pub async fn snapshot(&self) -> Snapshot<'_, R, E> {
         Snapshot::new(
             self.mem_storage.read().await,
             self.ctx.manifest().current().await,
@@ -531,12 +534,12 @@ where
 }
 
 /// DbStorage state for coordinating in-memory + on-disk operations
-pub(crate) struct DbStorage<R>
+pub struct DbStorage<R>
 where
     R: Record,
 {
-    pub mutable: MutableMemTable<R>,
-    pub immutables: Vec<(
+    pub(crate) mutable: MutableMemTable<R>,
+    pub(crate) immutables: Vec<(
         Option<FileId>,
         ImmutableMemTable<<R::Schema as Schema>::Columns>,
     )>,
@@ -556,7 +559,7 @@ where
     async fn new(
         option: Arc<DbOption>,
         compaction_tx: Sender<CompactTask>,
-        manifest: &VersionSet<R>,
+        manifest: &dyn ManifestStorage<R>,
         record_schema: Arc<R::Schema>,
         manager: &StoreManager,
     ) -> Result<Self, DbError> {
@@ -782,25 +785,34 @@ where
     }
 }
 
-/// Scan configuration intermediate structure
+/// Scan configuration intermediate structure. Calling `take` will execute a scan on
+/// the memtable, immutable memtables, and SSTables on disk in that order.
+///
+/// To initialize you can call `DB.transaction().scan()` using your `DB` instance.
+/// For more information on how to use refer to the doc in [`DB::transaction()`]
 pub struct Scan<'scan, 'range, R>
 where
     R: Record,
     'range: 'scan,
 {
+    // Storage to scan
     mem_storage: &'scan DbStorage<R>,
+    // Lower and upper bound for the scan
     lower: Bound<&'range <R::Schema as Schema>::Key>,
     upper: Bound<&'range <R::Schema as Schema>::Key>,
+    // Current `Snapshot`'s timestamp
     ts: Timestamp,
-
+    // DB Version that is being scanned
     version: &'scan Version<R>,
+    //
     fn_pre_stream: Box<
         dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
             + Send
             + 'scan,
     >,
-
+    // Row limit for query
     limit: Option<usize>,
+    // Specifies the direction a scan will take
     order: Option<Order>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
@@ -811,6 +823,7 @@ impl<'scan, 'range, R> Scan<'scan, 'range, R>
 where
     R: Record + Send,
 {
+    /// Creates new `Scan`
     fn new(
         mem_storage: &'scan DbStorage<R>,
         (lower, upper): (
@@ -841,7 +854,7 @@ where
         }
     }
 
-    /// limit for the scan
+    /// Limit for the scan (number of rows returned)
     pub fn limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
@@ -878,18 +891,23 @@ where
         }
     }
 
-    /// fields in projection Record by field indices
+    /// Fields in projection `Record` by field indices
     pub fn projection(self, projection: &[&str]) -> Self {
         let schema = self.mem_storage.record_schema.arrow_schema();
+
+        // Gathers all projection indexes in array
         let mut projection = projection
             .iter()
             .map(|name| {
-                schema
-                    .index_of(name)
-                    .unwrap_or_else(|_| panic!("unexpected field {name}"))
+                schema.index_of(name).unwrap_or_else(|_| {
+                    panic!("Field in projection does not exist in schema: {name}")
+                })
             })
             .collect::<Vec<usize>>();
+
         let primary_key_index = self.mem_storage.record_schema.primary_key_index();
+
+        // The scan uses a fixed projection of 0: `_null` field, 1: `_ts` field, 3: primary key
         let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
@@ -906,13 +924,16 @@ where
         }
     }
 
-    /// fields in projection Record by field indices
+    /// Fields in projection Record by field indices
     pub fn projection_with_index(self, mut projection: Vec<usize>) -> Self {
         // skip two columns: _null and _ts
         for p in &mut projection {
             *p += USER_COLUMN_OFFSET;
         }
+
         let primary_key_index = self.mem_storage.record_schema.primary_key_index();
+
+        // The scan uses a fixed projection of 0: `_null` field, 1: `_ts` field, 3: primary key
         let mut fixed_projection = vec![0, 1, primary_key_index];
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
@@ -944,7 +965,7 @@ where
             streams.push(pre_stream);
         }
 
-        // Mutable
+        // In-memory memtable scan
         {
             let mut mutable_scan = self
                 .mem_storage
@@ -957,6 +978,8 @@ where
             }
             streams.push(mutable_scan);
         }
+
+        // Iterates through immutable memtables
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
@@ -969,6 +992,8 @@ where
                     .into(),
             );
         }
+
+        // Scans all SSTables in the coreresponding version
         self.version
             .streams(
                 &self.ctx,
@@ -1005,7 +1030,6 @@ where
             streams.push(pre_stream);
         }
 
-        // Mutable
         {
             let mut mutable_scan = self
                 .mem_storage
@@ -1018,6 +1042,7 @@ where
             }
             streams.push(mutable_scan);
         }
+
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
@@ -1091,25 +1116,18 @@ pub type ParquetLru = Arc<dyn DynLruCache<FileId> + Send + Sync>;
 pub(crate) mod tests {
     use std::{
         collections::{BTreeMap, Bound},
-        mem,
         sync::Arc,
     };
 
-    use arrow::{
-        array::{Array, AsArray, RecordBatch},
-        datatypes::{Schema, UInt32Type},
-    };
-    use async_lock::RwLock;
     use flume::{bounded, Receiver};
-    use fusio::{disk::TokioFs, path::Path, DynFs, SeqRead, Write};
+    use fusio::{disk::TokioFs, path::Path, DynFs};
     use fusio_dispatch::FsOptions;
-    use fusio_log::{Decode, Encode};
     use futures::StreamExt;
-    use parquet::arrow::ProjectionMask;
     use parquet_lru::NoCache;
     use tempfile::TempDir;
     use tracing::error;
 
+    pub use crate::record::test::{Test, TestRef};
     use crate::{
         compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
         context::Context,
@@ -1119,207 +1137,13 @@ pub(crate) mod tests {
         manifest::ManifestStorageError,
         record::{
             dynamic::test::{test_dyn_item_schema, test_dyn_items},
-            option::OptionRecordRef,
-            DynRecord, Key, KeyRef, RecordRef, Schema as RecordSchema, Value, ValueRef,
+            DynRecord, KeyRef, Schema as RecordSchema, Value, ValueRef,
         },
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
         CompactionOption, DbError, DbOption, Projection, Record, DB,
     };
-
-    #[derive(Debug, PartialEq, Eq, Clone)]
-    pub struct Test {
-        pub vstring: String,
-        pub vu32: u32,
-        pub vbool: Option<bool>,
-    }
-
-    impl Decode for Test {
-        async fn decode<R>(reader: &mut R) -> Result<Self, fusio::Error>
-        where
-            R: SeqRead,
-        {
-            let vstring = String::decode(reader).await?;
-            let vu32 = Option::<u32>::decode(reader).await?.unwrap();
-            let vbool = Option::<bool>::decode(reader).await?;
-
-            Ok(Self {
-                vstring,
-                vu32,
-                vbool,
-            })
-        }
-    }
-
-    impl Record for Test {
-        type Schema = TestSchema;
-
-        type Ref<'r>
-            = TestRef<'r>
-        where
-            Self: 'r;
-
-        fn key(&self) -> &str {
-            &self.vstring
-        }
-
-        fn as_record_ref(&self) -> Self::Ref<'_> {
-            TestRef {
-                vstring: &self.vstring,
-                vu32: Some(self.vu32),
-                vbool: self.vbool,
-            }
-        }
-
-        fn size(&self) -> usize {
-            let string_size = self.vstring.len();
-            let u32_size = mem::size_of::<u32>();
-            let bool_size = self.vbool.map_or(0, |_| mem::size_of::<bool>());
-            string_size + u32_size + bool_size
-        }
-    }
-
-    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-    pub struct TestRef<'r> {
-        pub vstring: &'r str,
-        pub vu32: Option<u32>,
-        pub vbool: Option<bool>,
-    }
-
-    impl Encode for TestRef<'_> {
-        async fn encode<W>(&self, writer: &mut W) -> Result<(), fusio::Error>
-        where
-            W: Write,
-        {
-            self.vstring.encode(writer).await?;
-            self.vu32.encode(writer).await?;
-            self.vbool.encode(writer).await?;
-
-            Ok(())
-        }
-
-        fn size(&self) -> usize {
-            self.vstring.size() + self.vu32.size() + self.vbool.size()
-        }
-    }
-
-    impl<'r> RecordRef<'r> for TestRef<'r> {
-        type Record = Test;
-
-        fn key(self) -> <<<Self::Record as Record>::Schema as RecordSchema>::Key as Key>::Ref<'r> {
-            self.vstring
-        }
-
-        fn projection(&mut self, projection_mask: &ProjectionMask) {
-            if !projection_mask.leaf_included(3) {
-                self.vu32 = None;
-            }
-            if !projection_mask.leaf_included(4) {
-                self.vbool = None;
-            }
-        }
-
-        fn from_record_batch(
-            record_batch: &'r RecordBatch,
-            offset: usize,
-            projection_mask: &'r ProjectionMask,
-            _: &Arc<Schema>,
-        ) -> OptionRecordRef<'r, Self> {
-            let mut column_i = 2;
-            let null = record_batch.column(0).as_boolean().value(offset);
-
-            let ts = record_batch
-                .column(1)
-                .as_primitive::<UInt32Type>()
-                .value(offset)
-                .into();
-
-            let vstring = record_batch
-                .column(column_i)
-                .as_string::<i32>()
-                .value(offset);
-            column_i += 1;
-
-            let mut vu32 = None;
-
-            if projection_mask.leaf_included(3) {
-                vu32 = Some(
-                    record_batch
-                        .column(column_i)
-                        .as_primitive::<UInt32Type>()
-                        .value(offset),
-                );
-                column_i += 1;
-            }
-
-            let mut vbool = None;
-
-            if projection_mask.leaf_included(4) {
-                let vbool_array = record_batch.column(column_i).as_boolean();
-
-                if !vbool_array.is_null(offset) {
-                    vbool = Some(vbool_array.value(offset));
-                }
-            }
-
-            let record = TestRef {
-                vstring,
-                vu32,
-                vbool,
-            };
-            OptionRecordRef::new(ts, record, null)
-        }
-    }
-
-    pub(crate) async fn get_test_record_batch<E: Executor + Send + Sync + 'static>(
-        option: DbOption,
-        executor: E,
-    ) -> RecordBatch {
-        let db: DB<Test, E> = DB::new(option.clone(), executor, TestSchema {})
-            .await
-            .unwrap();
-        let base_fs = db.ctx.manager.base_fs();
-
-        db.write(
-            Test {
-                vstring: "hello".to_string(),
-                vu32: 12,
-                vbool: Some(true),
-            },
-            1.into(),
-        )
-        .await
-        .unwrap();
-        db.write(
-            Test {
-                vstring: "world".to_string(),
-                vu32: 12,
-                vbool: None,
-            },
-            1.into(),
-        )
-        .await
-        .unwrap();
-
-        let mut schema = db.mem_storage.write().await;
-
-        let trigger = schema.trigger.clone();
-        let mutable = mem::replace(
-            &mut schema.mutable,
-            MutableMemTable::new(&option, trigger, base_fs.clone(), Arc::new(TestSchema {}))
-                .await
-                .unwrap(),
-        );
-
-        mutable
-            .into_immutable()
-            .await
-            .unwrap()
-            .1
-            .as_record_batch()
-            .clone()
-    }
 
     pub(crate) async fn build_schema(
         option: Arc<DbOption>,
@@ -1438,6 +1262,8 @@ pub(crate) mod tests {
         ))
     }
 
+    use crate::record::test::test_items;
+
     pub(crate) async fn build_db<R, E>(
         option: Arc<DbOption>,
         compaction_rx: Receiver<CompactTask>,
@@ -1459,11 +1285,11 @@ pub(crate) mod tests {
             let _ = base_fs.create_dir_all(&option.version_log_dir_path()).await;
         }
 
-        let mem_storage = Arc::new(RwLock::new(mem_storage));
+        let mem_storage = Arc::new(E::rw_lock(mem_storage));
 
         let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            build_version_set(version, clean_sender, option.clone(), manager.clone())
+            build_version_set::<R, E>(version, clean_sender, option.clone(), manager.clone())
                 .await
                 .map_err(ManifestStorageError::Version)?,
         );
@@ -1474,7 +1300,7 @@ pub(crate) mod tests {
             TestSchema.arrow_schema().clone(),
         ));
         let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R>::new(
+            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
                 mem_storage.clone(),
                 record_schema,
                 option.clone(),
@@ -1516,18 +1342,6 @@ pub(crate) mod tests {
         })
     }
 
-    fn test_items() -> Vec<Test> {
-        let mut items = Vec::new();
-        for i in 0..32 {
-            items.push(Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            });
-        }
-        items
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn read_from_disk() {
         let temp_dir = TempDir::new().unwrap();
@@ -1547,11 +1361,11 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
-        for (i, item) in test_items().into_iter().enumerate() {
+        for (i, item) in test_items(0u32..32).enumerate() {
             db.write(item, 0.into()).await.unwrap();
             if i % 5 == 0 {
                 db.flush().await.unwrap();
@@ -1588,15 +1402,15 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
-        for item in &test_items()[0..10] {
+        for item in test_items(0u32..10) {
             db.write(item.clone(), 0.into()).await.unwrap();
         }
         db.flush().await.unwrap();
-        for item in &test_items()[10..20] {
+        for item in test_items(10u32..20) {
             db.write(item.clone(), 0.into()).await.unwrap();
         }
 
@@ -1646,11 +1460,11 @@ pub(crate) mod tests {
         )
         .base_fs(s3_option.clone());
         {
-            let db = DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+            let db = DB::new(option.clone(), TokioExecutor::default(), TestSchema)
                 .await
                 .unwrap();
 
-            for item in &test_items()[0..10] {
+            for item in test_items(0u32..10) {
                 db.insert(item.clone()).await.unwrap();
             }
             // flush to s3
@@ -1673,11 +1487,11 @@ pub(crate) mod tests {
         // test recover from s3
         {
             let db: DB<Test, TokioExecutor> =
-                DB::new(option.clone(), TokioExecutor::current(), TestSchema)
+                DB::new(option.clone(), TokioExecutor::default(), TestSchema)
                     .await
                     .unwrap();
             let mut sort_items = BTreeMap::new();
-            for item in test_items()[0..10].iter() {
+            for item in test_items(0u32..10) {
                 sort_items.insert(item.vstring.clone(), item.clone());
             }
             let tx = db.transaction().await;
@@ -1724,7 +1538,7 @@ pub(crate) mod tests {
             option: option.clone(),
         };
 
-        for (i, item) in test_items().into_iter().enumerate() {
+        for (i, item) in test_items(0u32..32).enumerate() {
             mem_storage
                 .write(LogType::Full, item, (i as u32).into())
                 .await
@@ -1735,14 +1549,14 @@ pub(crate) mod tests {
 
         let db: DB<Test, TokioExecutor> = DB::new(
             option.as_ref().to_owned(),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             TestSchema,
         )
         .await
         .unwrap();
 
         let mut sort_items = BTreeMap::new();
-        for item in test_items() {
+        for item in test_items(0u32..32) {
             sort_items.insert(item.vstring.clone(), item);
         }
         {
@@ -1815,7 +1629,7 @@ pub(crate) mod tests {
         );
         let dyn_schema = test_dyn_item_schema();
         let db: DB<DynRecord, TokioExecutor> =
-            DB::new(option, TokioExecutor::current(), dyn_schema)
+            DB::new(option, TokioExecutor::default(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -1857,11 +1671,11 @@ pub(crate) mod tests {
         option.major_threshold_with_sst_size = 3;
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
-        for (idx, item) in test_items().into_iter().enumerate() {
+        for (idx, item) in test_items(0u32..32).enumerate() {
             if idx % 2 == 0 {
                 db.write(item, 0.into()).await.unwrap();
             } else {
@@ -1901,7 +1715,7 @@ pub(crate) mod tests {
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<DynRecord, TokioExecutor> =
-            DB::new(option, TokioExecutor::current(), dyn_schema)
+            DB::new(option, TokioExecutor::default(), dyn_schema)
                 .await
                 .unwrap();
 
@@ -2063,15 +1877,15 @@ pub(crate) mod tests {
         option3.trigger_type = TriggerType::Length(5);
 
         let db1: DB<DynRecord, TokioExecutor> =
-            DB::new(option, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option, TokioExecutor::default(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db2: DB<DynRecord, TokioExecutor> =
-            DB::new(option2, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option2, TokioExecutor::default(), test_dyn_item_schema())
                 .await
                 .unwrap();
         let db3: DB<DynRecord, TokioExecutor> =
-            DB::new(option3, TokioExecutor::current(), test_dyn_item_schema())
+            DB::new(option3, TokioExecutor::default(), test_dyn_item_schema())
                 .await
                 .unwrap();
 
@@ -2184,16 +1998,5 @@ pub(crate) mod tests {
                 i += 1
             }
         }
-    }
-
-    #[test]
-    fn build_test() {
-        let t = trybuild::TestCases::new();
-        t.pass("tests/success/*.rs");
-    }
-    #[test]
-    fn fail_build_test() {
-        let t = trybuild::TestCases::new();
-        t.compile_fail("tests/fail/*.rs");
     }
 }

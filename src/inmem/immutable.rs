@@ -206,8 +206,10 @@ pub(crate) mod tests {
 
     use crate::{
         magic,
-        record::{ArrowArrays, ArrowArraysBuilder, Record, Schema},
-        tests::{Test, TestRef},
+        record::{
+            test::{Test, TestRef},
+            ArrowArrays, ArrowArraysBuilder, Record, Schema,
+        },
         version::timestamp::Ts,
     };
 
@@ -523,7 +525,7 @@ pub(crate) mod tests {
                 Ts::new(key.clone(), i.into()),
                 Some(Test {
                     vstring: key,
-                    vu32: i as u32,
+                    vu32: i,
                     vbool: Some(i % 2 == 0),
                 }),
             );

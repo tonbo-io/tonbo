@@ -58,26 +58,32 @@ where
         }
     }
 }
-/// optimistic ACID transaction, open with
+/// Optimistic ACID transaction, open with
 /// [`DB::transaction`](crate::DB::transaction) method
 ///
 /// Transaction will store all mutations in local [`BTreeMap`] and only write to memtable when
 /// committed successfully. Otherwise, all mutations will be rolled back.
-pub struct Transaction<'txn, R>
+pub struct Transaction<'txn, R, E>
 where
     R: Record,
+    <R::Schema as Schema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
+    E::RwLock<crate::DbStorage<R>>: 'txn,
 {
     local: BTreeMap<<R::Schema as Schema>::Key, Option<R>>,
-    snapshot: Snapshot<'txn, R>,
+    snapshot: Snapshot<'txn, R, E>,
     lock_map: LockMap<<R::Schema as Schema>::Key>,
 }
 
-impl<'txn, R> Transaction<'txn, R>
+impl<'txn, R, E> Transaction<'txn, R, E>
 where
     R: Record + Send,
+    <R::Schema as Schema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
+    E::RwLock<crate::DbStorage<R>>: 'txn,
 {
     pub(crate) fn new(
-        snapshot: Snapshot<'txn, R>,
+        snapshot: Snapshot<'txn, R, E>,
         lock_map: LockMap<<R::Schema as Schema>::Key>,
     ) -> Self {
         Self {
@@ -383,7 +389,7 @@ mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &StringSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             StringSchema,
         )
         .await
@@ -441,7 +447,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -517,7 +523,7 @@ mod tests {
                 Path::from_filesystem_path(temp_dir.path()).unwrap(),
                 &StringSchema,
             ),
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             StringSchema,
         )
         .await
@@ -558,7 +564,7 @@ mod tests {
             &StringSchema,
         );
 
-        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::current(), StringSchema)
+        let db = DB::<String, TokioExecutor>::new(option, TokioExecutor::default(), StringSchema)
             .await
             .unwrap();
 
@@ -594,7 +600,7 @@ mod tests {
             &TestSchema,
         );
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -664,7 +670,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -761,7 +767,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -939,7 +945,7 @@ mod tests {
         let db = build_db(
             option,
             compaction_rx,
-            TokioExecutor::current(),
+            TokioExecutor::default(),
             schema,
             Arc::new(TestSchema),
             version,
@@ -984,7 +990,7 @@ mod tests {
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &schema,
         );
-        let db = DB::new(option, TokioExecutor::current(), schema)
+        let db = DB::new(option, TokioExecutor::default(), schema)
             .await
             .unwrap();
 
@@ -1052,7 +1058,7 @@ mod tests {
             &TestSchema,
         );
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1109,7 +1115,7 @@ mod tests {
             &TestSchema,
         );
 
-        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::current(), TestSchema)
+        let db = DB::<Test, TokioExecutor>::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 

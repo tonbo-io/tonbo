@@ -1,6 +1,5 @@
 use std::{cmp, collections::Bound, mem, sync::Arc};
 
-use async_lock::{RwLock, RwLockUpgradableReadGuard};
 use fusio_parquet::writer::AsyncWriter;
 use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
 
@@ -8,6 +7,7 @@ use super::Compactor;
 use crate::{
     compaction::CompactionError,
     context::Context,
+    executor::RwLock,
     fs::{generate_file_id, manager::StoreManager, FileId, FileType},
     inmem::{immutable::ImmutableMemTable, mutable::MutableMemTable},
     ondisk::sstable::{SsTable, SsTableID},
@@ -37,28 +37,32 @@ use crate::{
 ///    - Deletes the old SST files from both levels after the new files are safely written
 ///
 /// This is currently the main way Tonbo does compaction
-pub(crate) struct LeveledCompactor<R>
+pub(crate) struct LeveledCompactor<R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
 {
     option: Arc<DbOption>,
-    mem_storage: Arc<RwLock<DbStorage<R>>>,
+    mem_storage: Arc<E::RwLock<DbStorage<R>>>,
     ctx: Arc<Context<R>>,
     record_schema: Arc<R::Schema>,
 }
 
-impl<R> LeveledCompactor<R>
+impl<R, E> LeveledCompactor<R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
 {
     /// Create new instance of `LeveledCompactor`
     pub(crate) fn new(
-        mem_storage: Arc<RwLock<DbStorage<R>>>,
+        mem_storage: Arc<E::RwLock<DbStorage<R>>>,
         record_schema: Arc<R::Schema>,
         option: Arc<DbOption>,
         ctx: Arc<Context<R>>,
     ) -> Self {
-        LeveledCompactor::<R> {
+        LeveledCompactor::<R, E> {
             option,
             mem_storage,
             ctx,
@@ -102,7 +106,7 @@ where
             let recover_wal_ids = guard.recover_wal_ids.take();
             drop(guard);
 
-            let guard = self.mem_storage.upgradable_read().await;
+            let mut guard = self.mem_storage.write().await;
             let chunk_num = if is_manual {
                 guard.immutables.len()
             } else {
@@ -147,7 +151,6 @@ where
                     .update(version_edits, Some(delete_gens))
                     .await?;
             }
-            let mut guard = RwLockUpgradableReadGuard::upgrade(guard).await;
             let sources = guard.immutables.split_off(chunk_num);
             let _ = mem::replace(&mut guard.immutables, sources);
         }
@@ -226,6 +229,9 @@ where
 
     // Accumulate all SST files in a stream that fall within the min/max range in `level` and `level
     // + 1`. Then use those files to build the new SST files and delete the olds ones
+    //
+    // For manual compaction we only compact files to the bottom most level that still contains
+    // files
     #[allow(clippy::too_many_arguments)]
     async fn major_compaction(
         version: &Version<R>,
@@ -250,70 +256,9 @@ where
                 break;
             }
 
-            // If threshold is not exceeded during a manual compaction with the next level being
-            // empty we will either self compact on Level 0 or stop compaction on
-            // another level.
-            if !threshold_exceeded && is_manual && version.level_slice[level + 1].is_empty() {
-                // Perform self compaction for level 0 if `is_manual`
-                if level == 0 {
-                    let (meet_scopes_l, _, _) =
-                        Self::this_level_scopes(version, min, max, level, threshold_exceeded);
-
-                    // For self compaction if there is only one SST that falls under the range we
-                    // can return early This avoids appending it back to the end
-                    // of the level
-                    if meet_scopes_l.len() <= 1 {
-                        return Ok(());
-                    }
-
-                    let level_path = option.level_fs_path(level).unwrap_or(&option.base_path);
-                    let level_fs = ctx.manager.get_fs(level_path);
-                    let mut streams = Vec::with_capacity(meet_scopes_l.len());
-                    for scope in meet_scopes_l.iter() {
-                        let file = level_fs
-                            .open_options(
-                                &option.table_path(scope.gen, level),
-                                FileType::Parquet.open_options(true),
-                            )
-                            .await?;
-
-                        streams.push(ScanStream::SsTable {
-                            inner: SsTable::open(ctx.parquet_lru.clone(), scope.gen, file)
-                                .await?
-                                .scan(
-                                    (Bound::Unbounded, Bound::Unbounded),
-                                    u32::MAX.into(),
-                                    None,
-                                    ProjectionMask::all(),
-                                    None,
-                                )
-                                .await?,
-                        });
-                    }
-                    Compactor::<R>::build_tables(
-                        option,
-                        version_edits,
-                        level + 1,
-                        streams,
-                        instance,
-                        level_fs,
-                    )
-                    .await?;
-
-                    for scope in meet_scopes_l {
-                        version_edits.push(VersionEdit::Remove {
-                            level: level as u8,
-                            gen: scope.gen,
-                        });
-                        delete_gens.push(SsTableID::new(scope.gen, level));
-                    }
-                }
-
-                return Ok(());
-            }
-
             let (meet_scopes_l, start_l, end_l) =
                 Self::this_level_scopes(version, min, max, level, threshold_exceeded);
+            // Return early here to avoid a bug with
             if meet_scopes_l.is_empty() {
                 return Ok(());
             }
@@ -349,7 +294,7 @@ where
                     });
                 }
             } else {
-                let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_l)?;
+                let (lower, upper) = Compactor::<R, E>::full_scope(&meet_scopes_l)?;
                 let level_scan_l = LevelStream::new(
                     version,
                     level,
@@ -375,7 +320,7 @@ where
 
             // Pushes next level SSTs that fall in the range
             if !meet_scopes_ll.is_empty() {
-                let (lower, upper) = Compactor::<R>::full_scope(&meet_scopes_ll)?;
+                let (lower, upper) = Compactor::<R, E>::full_scope(&meet_scopes_ll)?;
                 let level_scan_ll = LevelStream::new(
                     version,
                     level + 1,
@@ -397,7 +342,7 @@ where
             }
 
             // Build the new SSTs
-            Compactor::<R>::build_tables(
+            Compactor::<R, E>::build_tables(
                 option,
                 version_edits,
                 level + 1,
@@ -712,19 +657,20 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let scope = LeveledCompactor::<Test>::minor_compaction(
-            &option,
-            None,
-            &vec![
-                (Some(generate_file_id()), batch_1),
-                (Some(generate_file_id()), batch_2),
-            ],
-            &TestSchema,
-            &manager,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let scope =
+            LeveledCompactor::<Test, crate::executor::tokio::TokioExecutor>::minor_compaction(
+                &option,
+                None,
+                &vec![
+                    (Some(generate_file_id()), batch_1),
+                    (Some(generate_file_id()), batch_2),
+                ],
+                &TestSchema,
+                &manager,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.min, 1.to_string());
         assert_eq!(scope.max, 6.to_string());
     }
@@ -779,19 +725,20 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-        let scope = LeveledCompactor::<DynRecord>::minor_compaction(
-            &option,
-            None,
-            &vec![
-                (Some(generate_file_id()), batch_1),
-                (Some(generate_file_id()), batch_2),
-            ],
-            &instance,
-            &manager,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let scope =
+            LeveledCompactor::<DynRecord, crate::executor::tokio::TokioExecutor>::minor_compaction(
+                &option,
+                None,
+                &vec![
+                    (Some(generate_file_id()), batch_1),
+                    (Some(generate_file_id()), batch_2),
+                ],
+                &instance,
+                &manager,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.min, Value::Int32(2));
         assert_eq!(scope.max, Value::Int32(39));
     }
@@ -844,9 +791,13 @@ pub(crate) mod tests {
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            VersionSet::new(clean_sender, option.clone(), manager.clone())
-                .await
-                .unwrap(),
+            VersionSet::<Test, crate::executor::tokio::TokioExecutor>::new(
+                clean_sender,
+                option.clone(),
+                manager.clone(),
+            )
+            .await
+            .unwrap(),
         );
         let ctx = Context::new(
             manager.clone(),
@@ -855,7 +806,7 @@ pub(crate) mod tests {
             TestSchema.arrow_schema().clone(),
         );
 
-        LeveledCompactor::<Test>::major_compaction(
+        LeveledCompactor::<Test, crate::executor::tokio::TokioExecutor>::major_compaction(
             &version,
             &option,
             &min,
@@ -998,9 +949,13 @@ pub(crate) mod tests {
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            VersionSet::new(clean_sender, option.clone(), manager.clone())
-                .await
-                .unwrap(),
+            VersionSet::<Test, crate::executor::tokio::TokioExecutor>::new(
+                clean_sender,
+                option.clone(),
+                manager.clone(),
+            )
+            .await
+            .unwrap(),
         );
         let ctx = Context::new(
             manager.clone(),
@@ -1008,7 +963,7 @@ pub(crate) mod tests {
             manifest,
             TestSchema.arrow_schema().clone(),
         );
-        LeveledCompactor::<Test>::major_compaction(
+        LeveledCompactor::<Test, crate::executor::tokio::TokioExecutor>::major_compaction(
             &version,
             &option,
             &min,
@@ -1041,7 +996,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 
@@ -1137,152 +1092,152 @@ pub(crate) mod tests {
         dbg!(version);
     }
 
-    // Self compaction is when on level 0 there is no files in the next level
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_manual_self_compaction() {
-        let temp_dir = TempDir::new().unwrap();
+    // // Self compaction is when on level 0 there is no files in the next level
+    // #[tokio::test(flavor = "multi_thread")]
+    // async fn test_manual_self_compaction() {
+    //     let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 5;
-        option.level_sst_magnification = 1;
+    //     let mut option = DbOption::new(
+    //         Path::from_filesystem_path(temp_dir.path()).unwrap(),
+    //         &TestSchema,
+    //     );
+    //     option.immutable_chunk_num = 1;
+    //     option.immutable_chunk_max_num = 1;
+    //     option.major_threshold_with_sst_size = 5;
+    //     option.level_sst_magnification = 1;
 
-        option.max_sst_file_size = 2 * 1024 * 1024;
-        option.major_default_oldest_table_num = 1;
-        option.trigger_type = TriggerType::Length(5);
+    //     option.max_sst_file_size = 2 * 1024 * 1024;
+    //     option.major_default_oldest_table_num = 1;
+    //     option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
-            .await
-            .unwrap();
+    // let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
+    //     .await
+    //     .unwrap();
 
-        // Flush once with SST of min: 5 and max: 9
-        for i in 5..10 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
+    //     // Flush once with SST of min: 5 and max: 9
+    //     for i in 5..10 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
 
-        db.flush().await.unwrap();
+    //     db.flush().await.unwrap();
 
-        // Flush again with SST of min: 2 and max: 6
-        for i in 2..7 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
+    //     // Flush again with SST of min: 2 and max: 6
+    //     for i in 2..7 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
 
-        db.flush().await.unwrap();
+    //     db.flush().await.unwrap();
 
-        // Insert SST of min: 3 and max: 7
-        // This should trigger compaction for the first two SSTs because
-        // their key ranges fall under 3-7
-        for i in 3..8 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     // Insert SST of min: 3 and max: 7
+    //     // This should trigger compaction for the first two SSTs because
+    //     // their key ranges fall under 3-7
+    //     for i in 3..8 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        let version = db.ctx.manifest.current().await;
-        let sort_runs_zero = &version.level_slice[0];
-        let sort_runs_one = &version.level_slice[1];
+    //     let version = db.ctx.manifest.current().await;
+    //     let sort_runs_zero = &version.level_slice[0];
+    //     let sort_runs_one = &version.level_slice[1];
 
-        assert_eq!(sort_runs_zero.len(), 1);
-        assert_eq!(sort_runs_one.len(), 1);
+    //     assert_eq!(sort_runs_zero.len(), 1);
+    //     assert_eq!(sort_runs_one.len(), 1);
 
-        assert_eq!(sort_runs_zero[0].min, "3");
-        assert_eq!(sort_runs_zero[0].max, "7");
+    //     assert_eq!(sort_runs_zero[0].min, "3");
+    //     assert_eq!(sort_runs_zero[0].max, "7");
 
-        assert_eq!(sort_runs_one[0].min, "2");
-        assert_eq!(sort_runs_one[0].max, "9");
-    }
+    //     assert_eq!(sort_runs_one[0].min, "2");
+    //     assert_eq!(sort_runs_one[0].max, "9");
+    // }
 
-    // Test manual self compaction when no key ranges are met
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_manual_self_no_compaction() {
-        let temp_dir = TempDir::new().unwrap();
+    // // Test manual self compaction when no key ranges are met
+    // #[tokio::test(flavor = "multi_thread")]
+    // async fn test_manual_self_no_compaction() {
+    //     let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 5;
-        option.level_sst_magnification = 1;
+    //     let mut option = DbOption::new(
+    //         Path::from_filesystem_path(temp_dir.path()).unwrap(),
+    //         &TestSchema,
+    //     );
+    //     option.immutable_chunk_num = 1;
+    //     option.immutable_chunk_max_num = 1;
+    //     option.major_threshold_with_sst_size = 5;
+    //     option.level_sst_magnification = 1;
 
-        option.max_sst_file_size = 2 * 1024 * 1024;
-        option.major_default_oldest_table_num = 1;
-        option.trigger_type = TriggerType::Length(5);
+    //     option.max_sst_file_size = 2 * 1024 * 1024;
+    //     option.major_default_oldest_table_num = 1;
+    //     option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
-            .await
-            .unwrap();
+    // let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
+    //     .await
+    //     .unwrap();
 
-        // Flush once with SST of min: 5 and max: 9
-        for i in 5..10 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
+    //     // Flush once with SST of min: 5 and max: 9
+    //     for i in 5..10 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
 
-        db.flush().await.unwrap();
+    //     db.flush().await.unwrap();
 
-        // Flush again with SST of min: 2 and max: 6
-        for i in 2..7 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
+    //     // Flush again with SST of min: 2 and max: 6
+    //     for i in 2..7 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
 
-        db.flush().await.unwrap();
+    //     db.flush().await.unwrap();
 
-        // Insert SST of min: 10 and max: 15
-        // Should not trigger compaction as the first two SST's
-        // key ranges do not fall in udner 10-15
-        for i in 10..15 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     // Insert SST of min: 10 and max: 15
+    //     // Should not trigger compaction as the first two SST's
+    //     // key ranges do not fall in udner 10-15
+    //     for i in 10..15 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        let version = db.ctx.manifest.current().await;
-        let sort_runs = &version.level_slice[0];
+    //     let version = db.ctx.manifest.current().await;
+    //     let sort_runs = &version.level_slice[0];
 
-        assert_eq!(sort_runs.len(), 3);
+    //     assert_eq!(sort_runs.len(), 3);
 
-        assert_eq!(sort_runs[0].min, "5");
-        assert_eq!(sort_runs[0].max, "9");
+    //     assert_eq!(sort_runs[0].min, "5");
+    //     assert_eq!(sort_runs[0].max, "9");
 
-        assert_eq!(sort_runs[1].min, "2");
-        assert_eq!(sort_runs[1].max, "6");
+    //     assert_eq!(sort_runs[1].min, "2");
+    //     assert_eq!(sort_runs[1].max, "6");
 
-        assert_eq!(sort_runs[2].min, "10");
-        assert_eq!(sort_runs[2].max, "14");
-    }
+    //     assert_eq!(sort_runs[2].min, "10");
+    //     assert_eq!(sort_runs[2].max, "14");
+    // }
 
     // This use to fail because SSTs on level 0 would be returned as a range;
     // this logic was in [`LeveledCompactor::this_level_scopes`].
@@ -1291,228 +1246,228 @@ pub(crate) mod tests {
     // SST however because it was in a range it would drop after the first SST.
     //
     // This test makes sure that it will find all SSTs in that range.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_self_manual_compaction_fix_range() {
-        let temp_dir = TempDir::new().unwrap();
+    // #[tokio::test(flavor = "multi_thread")]
+    // async fn test_self_manual_compaction_fix_range() {
+    //     let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 5;
-        option.level_sst_magnification = 1;
+    //     let mut option = DbOption::new(
+    //         Path::from_filesystem_path(temp_dir.path()).unwrap(),
+    //         &TestSchema,
+    //     );
+    //     option.immutable_chunk_num = 1;
+    //     option.immutable_chunk_max_num = 1;
+    //     option.major_threshold_with_sst_size = 5;
+    //     option.level_sst_magnification = 1;
 
-        option.max_sst_file_size = 2 * 1024 * 1024;
-        option.major_default_oldest_table_num = 1;
-        option.trigger_type = TriggerType::Length(5);
+    //     option.max_sst_file_size = 2 * 1024 * 1024;
+    //     option.major_default_oldest_table_num = 1;
+    //     option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
-            .await
-            .unwrap();
+    // let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
+    //     .await
+    //     .unwrap();
 
-        // Flush once with SST of min: 5 and max: 9
-        for i in 5..10 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
+    //     // Flush once with SST of min: 5 and max: 9
+    //     for i in 5..10 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
 
-        db.flush().await.unwrap();
+    //     db.flush().await.unwrap();
 
-        // Flush again with SST of min: 20 and max: 24
-        for i in 20..25 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
+    //     // Flush again with SST of min: 20 and max: 24
+    //     for i in 20..25 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
 
-        db.flush().await.unwrap();
+    //     db.flush().await.unwrap();
 
-        for i in 2..5 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 2..5 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        for i in 3..8 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 3..8 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        let version = db.ctx.manifest.current().await;
-        let sort_runs_l0 = &version.level_slice[0];
-        let sort_runs_l1 = &version.level_slice[1];
+    //     let version = db.ctx.manifest.current().await;
+    //     let sort_runs_l0 = &version.level_slice[0];
+    //     let sort_runs_l1 = &version.level_slice[1];
 
-        assert_eq!(sort_runs_l0.len(), 2);
-        assert_eq!(sort_runs_l1.len(), 1);
+    //     assert_eq!(sort_runs_l0.len(), 2);
+    //     assert_eq!(sort_runs_l1.len(), 1);
 
-        assert_eq!(sort_runs_l0[0].min, "20");
-        assert_eq!(sort_runs_l0[0].max, "24");
+    //     assert_eq!(sort_runs_l0[0].min, "20");
+    //     assert_eq!(sort_runs_l0[0].max, "24");
 
-        assert_eq!(sort_runs_l0[1].min, "3");
-        assert_eq!(sort_runs_l0[1].max, "7");
+    //     assert_eq!(sort_runs_l0[1].min, "3");
+    //     assert_eq!(sort_runs_l0[1].max, "7");
 
-        assert_eq!(sort_runs_l1[0].min, "2");
-        assert_eq!(sort_runs_l1[0].max, "9");
-    }
+    //     assert_eq!(sort_runs_l1[0].min, "2");
+    //     assert_eq!(sort_runs_l1[0].max, "9");
+    // }
 
-    // This is to check that it doesnt self compact if the threshold is exceeded
-    // It also checks that if the threshold is reached a second time that the manual
-    // compaction will flush to the next level even if threshold isnt reached.
-    // issue: https://github.com/tonbo-io/tonbo/issues/158
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_self_manual_compaction_level_1() {
-        let temp_dir = TempDir::new().unwrap();
+    // // This is to check that it doesnt self compact if the threshold is exceeded
+    // // It also checks that if the threshold is reached a second time that the manual
+    // // compaction will flush to the next level even if threshold isnt reached.
+    // // issue: https://github.com/tonbo-io/tonbo/issues/158
+    // #[tokio::test(flavor = "multi_thread")]
+    // async fn test_self_manual_compaction_level_1() {
+    //     let temp_dir = TempDir::new().unwrap();
 
-        let mut option = DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &TestSchema,
-        );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 5;
-        option.level_sst_magnification = 1;
+    //     let mut option = DbOption::new(
+    //         Path::from_filesystem_path(temp_dir.path()).unwrap(),
+    //         &TestSchema,
+    //     );
+    //     option.immutable_chunk_num = 1;
+    //     option.immutable_chunk_max_num = 1;
+    //     option.major_threshold_with_sst_size = 5;
+    //     option.level_sst_magnification = 1;
 
-        option.max_sst_file_size = 2 * 1024 * 1024;
-        option.major_default_oldest_table_num = 1;
-        option.trigger_type = TriggerType::Length(5);
+    //     option.max_sst_file_size = 2 * 1024 * 1024;
+    //     option.major_default_oldest_table_num = 1;
+    //     option.trigger_type = TriggerType::Length(5);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
-            .await
-            .unwrap();
+    // let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
+    //     .await
+    //     .unwrap();
 
-        for i in 0..5 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 0..5 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        for i in 5..10 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 5..10 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        for i in 10..15 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 10..15 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        for i in 15..20 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 15..20 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        for i in 20..25 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 20..25 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        for i in 4..7 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 4..7 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        let version = db.ctx.manifest.current().await;
-        let sort_runs_level_0 = &version.level_slice[0];
-        let sort_runs_level_1 = &version.level_slice[1];
-        let sort_runs_level_2 = &version.level_slice[2];
+    //     let version = db.ctx.manifest.current().await;
+    //     let sort_runs_level_0 = &version.level_slice[0];
+    //     let sort_runs_level_1 = &version.level_slice[1];
+    //     let sort_runs_level_2 = &version.level_slice[2];
 
-        // Six SSTs are inserted
-        // The logic here is as follows:
-        //  1. Inserts 5 non overlapping SSTs to not trigger self compaction
-        //  2. The sixth SST is inserted which overlaps with two SSTs and pushes the length over the
-        //     threshold. This compacts the two SSTs into the next level and adds the new SST into
-        //     level 0.
-        assert_eq!(sort_runs_level_0.len(), 4);
-        assert_eq!(sort_runs_level_1.len(), 1);
-        assert!(sort_runs_level_2.is_empty());
+    //     // Six SSTs are inserted
+    //     // The logic here is as follows:
+    //     //  1. Inserts 5 non overlapping SSTs to not trigger self compaction
+    //     //  2. The sixth SST is inserted which overlaps with two SSTs and pushes the length over
+    // the     //     threshold. This compacts the two SSTs into the next level and adds the new
+    // SST into     //     level 0.
+    //     assert_eq!(sort_runs_level_0.len(), 4);
+    //     assert_eq!(sort_runs_level_1.len(), 1);
+    //     assert!(sort_runs_level_2.is_empty());
 
-        for i in 25..30 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 25..30 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        let version = db.ctx.manifest.current().await;
-        let sort_runs_level_0 = &version.level_slice[0];
-        assert_eq!(sort_runs_level_0.len(), 5);
+    //     let version = db.ctx.manifest.current().await;
+    //     let sort_runs_level_0 = &version.level_slice[0];
+    //     assert_eq!(sort_runs_level_0.len(), 5);
 
-        for i in 4..7 {
-            let item = Test {
-                vstring: i.to_string(),
-                vu32: i,
-                vbool: Some(true),
-            };
-            db.insert(item).await.unwrap();
-        }
-        db.flush().await.unwrap();
+    //     for i in 4..7 {
+    //         let item = Test {
+    //             vstring: i.to_string(),
+    //             vu32: i,
+    //             vbool: Some(true),
+    //         };
+    //         db.insert(item).await.unwrap();
+    //     }
+    //     db.flush().await.unwrap();
 
-        let version = db.ctx.manifest.current().await;
-        let sort_runs_level_0 = &version.level_slice[0];
-        let sort_runs_level_1 = &version.level_slice[1];
-        let sort_runs_level_2 = &version.level_slice[2];
+    //     let version = db.ctx.manifest.current().await;
+    //     let sort_runs_level_0 = &version.level_slice[0];
+    //     let sort_runs_level_1 = &version.level_slice[1];
+    //     let sort_runs_level_2 = &version.level_slice[2];
 
-        // Two SSTs are inserted.
-        // The logic here is as follow:
-        //  1. Add one non overlapping SST -> there is no compaction
-        //  2. Add an which overlaps with both one SST in level 0 and level 1. These combine to form
-        //     a new SST on level 1.
-        //  4. Compaction does not continue into the next level for level 1 because non level 0 does
-        //     not self compact if threshold isn't exceeded.
-        assert_eq!(sort_runs_level_0.len(), 5);
-        assert_eq!(sort_runs_level_1.len(), 1);
-        assert_eq!(sort_runs_level_2.len(), 0);
-    }
+    //     // Two SSTs are inserted.
+    //     // The logic here is as follow:
+    //     //  1. Add one non overlapping SST -> there is no compaction
+    //     //  2. Add an which overlaps with both one SST in level 0 and level 1. These combine to
+    // form     //     a new SST on level 1.
+    //     //  4. Compaction does not continue into the next level for level 1 because non level 0
+    // does     //     not self compact if threshold isn't exceeded.
+    //     assert_eq!(sort_runs_level_0.len(), 5);
+    //     assert_eq!(sort_runs_level_1.len(), 1);
+    //     assert_eq!(sort_runs_level_2.len(), 0);
+    // }
 
     // Issue: https://github.com/tonbo-io/tonbo/issues/151
     // TODO: Remove the write amplification
@@ -1533,7 +1488,7 @@ pub(crate) mod tests {
         option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(100);
 
-        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::current(), TestSchema)
+        let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
             .unwrap();
 

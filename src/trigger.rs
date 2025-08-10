@@ -102,7 +102,7 @@ impl<R: Record> TriggerFactory<R> {
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
     use super::*;
-    use crate::tests::Test;
+    use crate::record::test::Test;
 
     #[tokio::test]
     async fn test_size_of_mem_trigger() {

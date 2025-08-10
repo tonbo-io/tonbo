@@ -1,9 +1,12 @@
 pub(crate) mod array;
+pub(crate) mod builder;
 mod record;
 mod record_ref;
 mod schema;
 pub mod util;
 mod value;
+
+use std::sync::Arc;
 
 pub use array::*;
 use arrow::datatypes::DataType as ArrowDataType;
@@ -14,7 +17,7 @@ pub use value::*;
 
 use crate::record::TimeUnit;
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DataType {
     UInt8,
     UInt16,
@@ -49,6 +52,7 @@ pub enum DataType {
     ///
     /// See [`arrow::datatypes::DataType::Date64`] for more details.
     Date64,
+    List(Arc<DynamicField>),
 }
 
 impl From<&ArrowDataType> for DataType {
@@ -78,7 +82,10 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::LargeBinary => DataType::LargeBinary,
             ArrowDataType::LargeUtf8 => DataType::LargeString,
             ArrowDataType::FixedSizeBinary(w) => DataType::FixedSizeBinary(*w),
-            _ => todo!(),
+            ArrowDataType::List(field) => {
+                DataType::List(Arc::new(DynamicField::from(field.as_ref())))
+            }
+            _ => todo!("datatype: {datatype:?}"),
         }
     }
 }

@@ -3,6 +3,7 @@ use std::{mem::transmute, sync::Arc};
 use futures::StreamExt;
 use js_sys::Object;
 use tonbo::{
+    executor::opfs::OpfsExecutor,
     record::{DynRecord, DynamicField},
     transaction, Projection,
 };
@@ -15,22 +16,22 @@ use crate::{
 
 #[wasm_bindgen]
 pub struct Transaction {
-    txn: Option<transaction::Transaction<'static, DynRecord>>,
+    txn: Option<transaction::Transaction<'static, DynRecord, OpfsExecutor>>,
     desc: Arc<Vec<DynamicField>>,
     primary_key_index: usize,
 }
 
 impl Transaction {
     pub(crate) fn new<'txn>(
-        txn: transaction::Transaction<'txn, DynRecord>,
+        txn: transaction::Transaction<'txn, DynRecord, OpfsExecutor>,
         desc: Arc<Vec<DynamicField>>,
         primary_key_index: usize,
     ) -> Self {
         Transaction {
             txn: Some(unsafe {
                 transmute::<
-                    transaction::Transaction<'txn, DynRecord>,
-                    transaction::Transaction<'static, DynRecord>,
+                    transaction::Transaction<'txn, DynRecord, OpfsExecutor>,
+                    transaction::Transaction<'static, DynRecord, OpfsExecutor>,
                 >(txn)
             }),
             desc,
@@ -123,8 +124,8 @@ impl Transaction {
         let txn = self.txn.as_ref().unwrap();
         let txn = unsafe {
             transmute::<
-                &transaction::Transaction<'_, DynRecord>,
-                &'static transaction::Transaction<'_, DynRecord>,
+                &transaction::Transaction<'_, DynRecord, OpfsExecutor>,
+                &'static transaction::Transaction<'_, DynRecord, OpfsExecutor>,
             >(txn)
         };
         let mut scan = txn

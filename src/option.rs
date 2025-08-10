@@ -46,6 +46,9 @@ pub struct DbOption {
     /// Filesystem options for the base path
     pub(crate) base_fs: FsOptions,
 
+    /// Detailed options governing compaction behavior
+    pub(crate) compaction_option: CompactionOption,
+
     /// Optional custom paths and filesystem options for each level
     pub(crate) level_paths: Vec<Option<(Path, FsOptions)>>,
 
@@ -84,9 +87,6 @@ pub struct DbOption {
 
     /// Parquet writer properties for on-disk SST files
     pub(crate) write_parquet_properties: WriterProperties,
-
-    /// Detailed options governing compaction behavior
-    pub(crate) compaction_option: CompactionOption,
 }
 
 impl DbOption {

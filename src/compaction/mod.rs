@@ -4,10 +4,10 @@ use std::{pin::Pin, sync::Arc};
 
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
+use futures::channel::oneshot;
 use futures_util::StreamExt;
 use leveled::LeveledCompactor;
 use parquet::arrow::AsyncArrowWriter;
-use tokio::sync::oneshot;
 
 use crate::{
     compaction::error::CompactionError,
@@ -19,11 +19,13 @@ use crate::{
     DbOption,
 };
 
-pub(crate) enum Compactor<R>
+pub(crate) enum Compactor<R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
 {
-    Leveled(LeveledCompactor<R>),
+    Leveled(LeveledCompactor<R, E>),
 }
 
 #[derive(Debug)]
@@ -32,9 +34,11 @@ pub enum CompactTask {
     Flush(Option<oneshot::Sender<()>>),
 }
 
-impl<R> Compactor<R>
+impl<R, E> Compactor<R, E>
 where
     R: Record,
+    <R::Schema as RecordSchema>::Columns: Send + Sync,
+    E: crate::executor::Executor,
 {
     pub(crate) async fn check_then_compaction(
         &mut self,
