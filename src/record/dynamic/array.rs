@@ -5,7 +5,7 @@ use arrow::{
         Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, BooleanBuilder,
         Date32Builder, Date64Builder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder,
         GenericBinaryBuilder, Int16Builder, Int32Builder, Int64Builder, Int8Builder,
-        LargeStringBuilder, PrimitiveBuilder, RecordBatch, StringBuilder, Time32MillisecondBuilder,
+        LargeStringBuilder, PrimitiveBuilder, StringBuilder, Time32MillisecondBuilder,
         Time32SecondBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder,
         TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder,
         TimestampSecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
@@ -21,7 +21,7 @@ use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
         builder::NestedBuilder,
-        ArrowArrays, ArrowArraysBuilder, DynSchema, Key, LargeBinary, LargeString, Record, Schema,
+        ArrowArrays, ArrowArraysBuilder, Key, LargeBinary, LargeString, Record, Schema,
         TimeUnit, ValueRef,
     },
     version::timestamp::Ts,

@@ -63,7 +63,7 @@ impl AWSTonbo {
     // Returns number of rows and row size
     async fn parquet_metadata<'a>(
         &self,
-        transaction: &'a Transaction<'_, DynRecord>,
+        transaction: &'a Transaction<'_, DynRecord, TokioExecutor>,
         scan: &'a ScanRequest,
     ) -> Result<(i64, i32), CloudError> {
         let mut row_count = 0;
@@ -147,7 +147,7 @@ impl TonboCloud for AWSTonbo {
         );
 
         let tonbo: DB<DynRecord, TokioExecutor> =
-            DB::new(options, TokioExecutor::current(), schema)
+            DB::new(options, TokioExecutor::default(), schema)
                 .await
                 .unwrap();
 
@@ -167,7 +167,7 @@ impl TonboCloud for AWSTonbo {
 
     async fn read<'a>(
         &'a self,
-        transaction: &'a Transaction<'_, DynRecord>,
+        transaction: &'a Transaction<'_, DynRecord, TokioExecutor>,
         scan: &'a ScanRequest,
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<Entry<'a, DynRecord>, ParquetError>> + Send + 'a>>,
