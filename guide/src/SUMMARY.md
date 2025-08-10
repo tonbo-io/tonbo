@@ -15,6 +15,7 @@
 - [Contribution]()
   - [Building](./contribution/build.md)
   - [Submitting PR](./contribution/pr.md)
+  - [Composite Primary Keys](./contribution/composite_primary_keys.md)
 - [TonboLite](./tonbolite/index.md)
   - [Getting Started](./tonbolite/start.md)
   - [Building and Testing](./tonbolite/build.md)

@@ -1,3 +1,4 @@
+mod composite;
 mod datetime;
 mod list;
 mod num;
@@ -17,9 +18,7 @@ pub use timestamp::*;
 pub trait Key:
     'static + Encode + Decode + Ord + Clone + Send + Sync + Hash + std::fmt::Debug
 {
-    type Ref<'r>: KeyRef<'r, Key = Self>
-    where
-        Self: 'r;
+    type Ref<'r>: KeyRef<'r, Key = Self>;
 
     fn as_key_ref(&self) -> Self::Ref<'_>;
 
