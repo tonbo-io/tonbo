@@ -48,9 +48,10 @@ impl FlightService for TonboFlightSvc {
         &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
+        // Unparse ticket to `ScanRequest`
         let ticket = request.into_inner().ticket;
         let scan_pb = grpc::ScanRequest::decode(ticket.as_ref())
-            .map_err(|e| Status::invalid_argument(format!("bad ticket: {e}")))?;
+            .map_err(|e| Status::invalid_argument(format!("Expected Ticket to be grpc::ScanRequest: {}", e)))?;
         let scan = ScanRequest::from(scan_pb);
 
         let (rb_tx, rb_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(32);
@@ -71,9 +72,10 @@ impl FlightService for TonboFlightSvc {
                 }
             };
 
+            // Retrieve first batch and send schema
             let first_batch = loop {
                 match entries.next().await {
-                    Some(Ok(Entry::RecordBatch(rb))) => break rb.record_batch().clone(),
+                    Some(Ok(Entry::RecordBatch(record_batch))) => break record_batch.record_batch().clone(),
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => {
                         let _ = rb_tx
@@ -96,7 +98,6 @@ impl FlightService for TonboFlightSvc {
             while let Some(item) = entries.next().await {
                 match item {
                     Ok(Entry::RecordBatch(rb)) => {
-                        // clone is shallow (Arc-backed)
                         if rb_tx.send(Ok(rb.record_batch().clone())).await.is_err() {
                             return;
                         }

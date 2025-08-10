@@ -196,52 +196,6 @@ impl TonboCloud for AWSTonbo {
     }
 }
 
-// async fn handle_scan(
-//     path: web::Path<String>,
-//     req: web::Json<ScanRequest>,
-//     data: web::Data<Arc<AWSTonbo>>,
-// ) -> impl Responder
-// {
-//     let table = path.into_inner();
-//     if table != data.name {
-
-//     }
-
-//     let channel = Channel::from_static("http://127.0.0.1:5005")
-//         .connect()
-//         .await
-//         .unwrap();
-//     let mut client = FlightClient::new(channel);
-
-//     let batch_stream = async_stream::stream! {
-//     let db = data.clone();
-
-//     let transaction = db.tonbo.transaction().await;
-//     let mut inner = db
-//         .read(&transaction, &req)
-//         .await
-//         .map_err(ErrorInternalServerError)
-//         .unwrap();
-//     while let Some(res) = inner.next().await {
-//             match res {
-//                 Ok(Entry::RecordBatch(batch_entry)) => {
-//                     let arrow_batch = batch_entry.record_batch();
-//                     yield Ok(arrow_batch);
-//                 }
-//                 Ok(_) => todo!(),
-//                 Err(e) => todo!(),
-//             }
-//         }
-//     };
-
-//     let flight_data_stream = FlightDataEncoderBuilder::new().build(batch_stream);
-
-//     let response_stream = client.do_put(flight_data_stream).await.unwrap();
-//     let results: Vec<_> = response_stream.try_collect().await.unwrap();
-
-//     HttpResponse::Ok().into()
-// }
-
 impl From<grpc::ScanRequest> for ScanRequest {
     fn from(g: grpc::ScanRequest) -> Self {
         // helper to map one side
