@@ -60,6 +60,7 @@ This document outlines a practical, incremental plan to add composite (multi-col
 
 - Extend `DynSchema` to track `primary_indices: Vec<usize>` in metadata (replacing the single `primary_key_index`).
 - Update `DynRecordRef::new` and readers to honor multiple PK indices.
+- Ensure tombstone writes (row == None) still populate all PK columns from `Ts.key` so ordering/lookups remain correct.
 - Define a composite key wrapper for `Value`/`ValueRef` (or generate a per-dyn-schema composite type if feasible). Initially out-of-scope for phase 1.
 
 ## Step-by-Step Plan
@@ -103,7 +104,8 @@ Phase 3: Dynamic records (optional)
 7. `DynSchema` multi-PK
    - Store `primary_indices` metadata; update dynamic arrays/refs to keep all PK columns in projections.
    - Provide a composite `ValueRef` key wrapper for in-memory operations.
-   - Acceptance: dynamic tests mirroring integration scenarios pass.
+   - Ensure tombstones populate PK components from `Ts.key` in builders (e.g., `DynRecordBuilder::push`).
+   - Acceptance: dynamic tests mirroring integration scenarios pass, including tombstone rows retaining all PK components.
 
 ## Code Touchpoints
 
@@ -111,7 +113,7 @@ Phase 3: Dynamic records (optional)
 - Read paths: `src/lib.rs` (get/scan/package), `src/transaction.rs` (get/scan)
 - Macro codegen: `tonbo_macros/src/record.rs`, `tonbo_macros/src/keys.rs`, `tonbo_macros/src/data_type.rs`
 - Key types: `src/record/key/composite/`
-- Dynamic (phase 3): `src/record/dynamic/*`
+- Dynamic (phase 3): `src/record/dynamic/*` (incl. tombstone handling in `DynRecordBuilder::push`)
 
 ## Testing Strategy
 
@@ -125,6 +127,9 @@ Phase 3: Dynamic records (optional)
   - Insert/get/remove by composite key; range scans across composite key ranges; projection keeps PK columns.
   - WAL/compaction unaffected (basic smoke tests).
 - (Optional) Property tests: ordering equivalence vs. native tuple lexicographic ordering when Option B is used.
+
+- Tombstones:
+  - For both single- and multi-column PKs, verify that tombstone rows (row == None) keep all PK column values populated from `Ts.key` in Arrow arrays and through `RecordRef::from_record_batch`.
 
 ## Backward Compatibility & Migration
 
@@ -167,3 +172,4 @@ pub struct User {
 - [ ] Configure Parquet sorting/statistics for all PK components.
 - [ ] Add unit/trybuild/integration tests.
 - [ ] Update user guide (mention composite PK support and examples).
+ - [ ] Ensure tombstone rows keep PK component values (builders/readers), validated by tests.
