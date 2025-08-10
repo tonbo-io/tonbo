@@ -90,16 +90,23 @@ impl FlightService for TonboFlightSvc {
                         if let Some(record) = entry.value() {
                             // use dummy ts as it doesn't matter when converted to `RecordBatch`
                             schema_builder.push((0, (*record).clone()));
-                            break records_to_record_batch(&schema_builder[0].1.schema(0), schema_builder);
+                            break records_to_record_batch(
+                                &schema_builder[0].1.schema(0),
+                                schema_builder,
+                            );
                         }
                     }
                     Some(Ok(Entry::Transaction((_, record)))) => {
                         if let Some(record) = record {
                             // use dummy ts as it doesn't matter when converted to `RecordBatch`
                             schema_builder.push((0, (*record).clone()));
-                            break records_to_record_batch(&schema_builder[0].1.schema(0), schema_builder);
+                            break records_to_record_batch(
+                                &schema_builder[0].1.schema(0),
+                                schema_builder,
+                            );
                         }
                     }
+                    // TODO: deal with projection
                     Some(Ok(Entry::Projection((_record, _projection)))) => {
                         todo!()
                     }

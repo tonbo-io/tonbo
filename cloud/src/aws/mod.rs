@@ -25,7 +25,7 @@ use tonbo::{
     arrow::array::RecordBatch,
     executor::tokio::TokioExecutor,
     parquet::errors::ParquetError,
-    record::{dynamic::Value, DynRecord, DynRecordBuilder, Record},
+    record::{dynamic::Value, util::records_to_record_batch, DynRecord, DynRecordBuilder, Record},
     transaction::Transaction,
     DbOption, Entry, DB,
 };
@@ -75,6 +75,7 @@ impl AWSTonbo {
             .map_err(|e| CloudError::Cloud(e.to_string()))
             .unwrap();
         let mut calculate_size = true;
+        let mut batch_builder: Vec<(u32, DynRecord)> = vec![];
 
         while let Some(res) = inner.next().await {
             match res {
@@ -87,19 +88,31 @@ impl AWSTonbo {
                         calculate_size = false;
                     }
                 }
-                // Ok(Entry::Mutable(entry)) => {
-                //     if let Some(record) = entry.value() {
-                //             DynRecordBuilder
-                //     }
-                // }
-                // Ok(Entry::Projection()) => {
-
-                // }
-                // Ok(Entry::Transaction()) => {
-
-                // }
+                Ok(Entry::Mutable(entry)) => {
+                    if let Some(record) = entry.value() {
+                        batch_builder.push((0, (*record).clone()));
+                    }
+                }
+                Ok(Entry::Transaction((_, record))) => {
+                    if let Some(record) = record {
+                        batch_builder.push((0, (*record).clone()));
+                    }
+                }
+                // TODO: deal with projection
+                Ok(Entry::Projection((_record, _projection))) => {
+                    todo!()
+                }
                 Ok(_) => todo!(),
                 Err(_e) => todo!(),
+            }
+        }
+
+        if !batch_builder.is_empty() {
+            let batch = records_to_record_batch(&batch_builder[0].1.schema(0), batch_builder);
+            row_count += batch.num_rows() as i64;
+            if calculate_size {
+                row_size = (batch.get_array_memory_size() as i64 / batch.num_rows() as i64) as i32;
+                calculate_size = false;
             }
         }
 
