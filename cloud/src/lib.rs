@@ -3,7 +3,11 @@ use std::{net::SocketAddr, ops::Bound, pin::Pin};
 use async_trait::async_trait;
 use futures_core::Stream;
 use tonbo::{
-    executor::tokio::TokioExecutor, parquet::errors::ParquetError, record::{dynamic::Value, DynRecord, Record}, transaction::Transaction, Entry
+    executor::tokio::TokioExecutor,
+    parquet::errors::ParquetError,
+    record::{dynamic::Value, DynRecord, Record},
+    transaction::Transaction,
+    Entry,
 };
 
 use crate::error::CloudError;

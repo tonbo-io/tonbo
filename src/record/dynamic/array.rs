@@ -20,9 +20,8 @@ use super::{record::DynRecord, record_ref::DynRecordRef, AsValue, DataType};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
-        builder::NestedBuilder,
-        ArrowArrays, ArrowArraysBuilder, Key, LargeBinary, LargeString, Record, Schema,
-        TimeUnit, ValueRef,
+        builder::NestedBuilder, ArrowArrays, ArrowArraysBuilder, Key, LargeBinary, LargeString,
+        Record, Schema, TimeUnit, ValueRef,
     },
     version::timestamp::Ts,
 };
