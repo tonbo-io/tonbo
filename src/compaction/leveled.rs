@@ -680,11 +680,11 @@ pub(crate) mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(FsOptions::Local, vec![]).unwrap();
         let schema = DynSchema::new(
-            vec![DynamicField::new(
+            &vec![DynamicField::new(
                 "id".to_owned(),
                 ArrayDataType::Int32,
                 false,
-            )],
+            )][..],
             0,
         );
         let option = DbOption::new(
