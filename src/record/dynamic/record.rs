@@ -2,9 +2,9 @@ use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
 
 use super::{schema::DynSchema, DynRecordRef, Value, ValueError};
-use crate::record::{error::RecordError, Key, Record};
+use crate::record::{error::RecordError, DynamicField, Key, Record};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DynRecord {
     values: Vec<Value>,
     primary_index: usize,
@@ -18,6 +18,15 @@ impl DynRecord {
             values,
             primary_index,
         }
+    }
+
+    // Used for converting `DynRecord`s to `RecordBatches`
+    pub fn schema(&self, primary_index: usize) -> DynSchema {
+        let fields = self.values.iter()
+            .map(|value| 
+                DynamicField::new("".to_string(), value.data_type(), false)
+            ).collect();
+        DynSchema::new(fields, primary_index)
     }
 
     /// Create a new DynRecord with validation.

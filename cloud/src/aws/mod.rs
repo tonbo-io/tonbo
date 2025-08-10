@@ -25,7 +25,7 @@ use tonbo::{
     arrow::array::RecordBatch,
     executor::tokio::TokioExecutor,
     parquet::errors::ParquetError,
-    record::{dynamic::Value, DynRecord, Record},
+    record::{dynamic::Value, DynRecord, DynRecordBuilder, Record},
     transaction::Transaction,
     DbOption, Entry, DB,
 };
@@ -70,24 +70,34 @@ impl AWSTonbo {
         let mut row_size = 0;
 
         let mut inner = self
-            .read(&transaction, &scan)
+            .read(transaction, scan)
             .await
             .map_err(|e| CloudError::Cloud(e.to_string()))
             .unwrap();
+        let mut calculate_size = true;
 
         while let Some(res) = inner.next().await {
             match res {
                 Ok(Entry::RecordBatch(batch_entry)) => {
                     let batch = batch_entry.record_batch();
                     row_count += batch.num_rows() as i64;
-                    row_size =
-                        (batch.get_array_memory_size() as i64 / batch.num_rows() as i64) as i32;
+                    if calculate_size {
+                        row_size =
+                            (batch.get_array_memory_size() as i64 / batch.num_rows() as i64) as i32;
+                            calculate_size = false;
+                    }
                 }
-                Ok(Entry::Mutable(_entry)) => {
-                    // if let Some(batch) = entry.value() {
-                    //     let batch_builder = RecordBatchBuilder
-                    // }
-                }
+                // Ok(Entry::Mutable(entry)) => {
+                //     if let Some(record) = entry.value() {
+                //             DynRecordBuilder
+                //     }
+                // }
+                // Ok(Entry::Projection()) => {
+
+                // }
+                // Ok(Entry::Transaction()) => {
+
+                // }
                 Ok(_) => todo!(),
                 Err(_e) => todo!(),
             }

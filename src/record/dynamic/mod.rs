@@ -3,6 +3,7 @@ mod record;
 mod record_ref;
 mod schema;
 mod value;
+pub mod util;
 
 pub use array::*;
 use arrow::datatypes::DataType as ArrowDataType;

@@ -2,13 +2,7 @@ use std::{mem, sync::Arc};
 
 use arrow::{
     array::{
-        Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, BooleanBuilder,
-        Date32Builder, Date64Builder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder,
-        GenericBinaryBuilder, Int16Builder, Int32Builder, Int64Builder, Int8Builder,
-        LargeStringBuilder, PrimitiveBuilder, StringBuilder, Time32MillisecondBuilder,
-        Time32SecondBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder,
-        TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder,
-        TimestampSecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
+        Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBufferBuilder, BooleanBuilder, Date32Builder, Date64Builder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, GenericBinaryBuilder, Int16Builder, Int32Builder, Int64Builder, Int8Builder, LargeStringBuilder, PrimitiveBuilder, RecordBatch, StringBuilder, Time32MillisecondBuilder, Time32SecondBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder
     },
     datatypes::{
         Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema as ArrowSchema,
@@ -20,8 +14,7 @@ use super::{record::DynRecord, record_ref::DynRecordRef, AsValue, DataType};
 use crate::{
     magic::USER_COLUMN_OFFSET,
     record::{
-        ArrowArrays, ArrowArraysBuilder, Key, LargeBinary, LargeString, Record, Schema, TimeUnit,
-        ValueRef,
+        ArrowArrays, ArrowArraysBuilder, DynSchema, Key, LargeBinary, LargeString, Record, Schema, TimeUnit, ValueRef
     },
     version::timestamp::Ts,
 };

@@ -10,7 +10,7 @@ use futures::{stream::BoxStream, StreamExt};
 use prost::Message;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
-use tonbo::Entry;
+use tonbo::{record::{util::records_to_record_batch, DynRecord, DynRecordBuilder}, Entry};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::{aws::AWSTonbo, gen::grpc, ScanRequest, TonboCloud};
@@ -55,6 +55,7 @@ impl FlightService for TonboFlightSvc {
         })?;
         let scan = ScanRequest::from(scan_pb);
 
+        // Create channel for RecordBatches + schema
         let (rb_tx, rb_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(32);
         let (schema_tx, schema_rx) = oneshot::channel();
 
@@ -77,6 +78,7 @@ impl FlightService for TonboFlightSvc {
             let first_batch = loop {
                 match entries.next().await {
                     Some(Ok(Entry::RecordBatch(record_batch))) => {
+                        // break after finding first batch
                         break record_batch.record_batch().clone()
                     }
                     Some(Ok(_)) => continue,
@@ -98,20 +100,44 @@ impl FlightService for TonboFlightSvc {
                 return;
             }
 
+            let mut batch_builder: Vec<(u32, DynRecord)> = vec![];
+
             while let Some(item) = entries.next().await {
                 match item {
-                    Ok(Entry::RecordBatch(rb)) => {
-                        if rb_tx.send(Ok(rb.record_batch().clone())).await.is_err() {
+                    Ok(Entry::RecordBatch(record_batch)) => {
+                        // Send record batch to channel
+                        if rb_tx.send(Ok(record_batch.record_batch().clone())).await.is_err() {
                             return;
                         }
                     }
-                    Ok(_) => continue,
+                    Ok(Entry::Mutable(entry)) => {
+                        // Send record batch to channel
+                        if let Some(record) = entry.value() {
+                            // use dummy ts as it doesn't matter when converted to `RecordBatch`
+                            batch_builder.push((0, (*record).clone()));
+                        }
+                    }
+                    Ok(Entry::Transaction((_, record))) => {
+                        if let Some(record) = record {
+                            // use dummy ts as it doesn't matter when converted to `RecordBatch`
+                            batch_builder.push((0, (*record).clone()));
+                        }
+                    }
+                    Ok(Entry::Projection((record, projection))) => {
+                        todo!()
+                    }
                     Err(e) => {
                         let _ = rb_tx
                             .send(Err(FlightError::ExternalError(e.to_string().into())))
                             .await;
                         return;
                     }
+                }
+            }
+            if !batch_builder.is_empty() {
+                let build_batch = records_to_record_batch(&batch_builder[0].1.schema(0), batch_builder);
+                if rb_tx.send(Ok(build_batch)).await.is_err() {
+                    return;
                 }
             }
         });
