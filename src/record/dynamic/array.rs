@@ -225,6 +225,16 @@ macro_rules! implement_builder_array {
                         }
                     }
                     None => {
+                        // For tombstones (row == None), ensure the primary key column is still
+                        // populated from the provided key, so ordering and lookups remain correct.
+                        let primary_key_index = self
+                            .schema
+                            .metadata()
+                            .get("primary_key_index")
+                            .expect("primary key index must exist in schema metadata")
+                            .parse::<usize>()
+                            .expect("primary key index must be a valid usize");
+
                         for (idx, (builder, datatype)) in self
                             .builders
                             .iter_mut()
@@ -233,42 +243,95 @@ macro_rules! implement_builder_array {
                         {
                             let field = self.schema.field(idx + USER_COLUMN_OFFSET);
                             let is_nullable = field.is_nullable();
-                            match datatype {
-                                $(
-                                    $primitive_pat => {
-                                        Self::as_builder_mut::<PrimitiveBuilder<$arrow_ty>>(builder.as_mut())
-                                            .append_value(<$primitive_ty>::default());
+
+                            if idx == primary_key_index {
+                                match datatype {
+                                    $(
+                                        $primitive_pat => {
+                                            let bd = Self::as_builder_mut::<PrimitiveBuilder<$arrow_ty>>(builder.as_mut());
+                                            match key.value.$as_primitive_value() {
+                                                Some(value) => bd.append_value(*value),
+                                                None => bd.append_value(Default::default()),
+                                            }
+                                        }
+                                    )*
+                                    DataType::Boolean => {
+                                        let bd = Self::as_builder_mut::<BooleanBuilder>(builder.as_mut());
+                                        match key.value.as_bool_opt() {
+                                            Some(value) => bd.append_value(*value),
+                                            None => bd.append_value(Default::default()),
+                                        }
                                     }
-                                )*
-                                DataType::Boolean => {
-                                    Self::as_builder_mut::<BooleanBuilder>(builder.as_mut())
-                                        .append_value(bool::default());
-                                }
-                                $(
-                                    $alt_variant => {
-                                        Self::as_builder_mut::<$builder_ty>(builder.as_mut())
-                                            .append_value(<$alt_ty>::default());
+                                    $(
+                                        $alt_variant => {
+                                            let bd = Self::as_builder_mut::<$builder_ty>(builder.as_mut());
+                                            match key.value.$as_alt_value() {
+                                                Some(value) => bd.append_value(value),
+                                                None => bd.append_value(<$alt_ty>::default()),
+                                            }
+                                        }
+                                    )*
+                                    $(
+                                        $alt_variant2 => {
+                                            let bd = Self::as_builder_mut::<$builder_ty2>(builder.as_mut());
+                                            match key.value.$as_alt_value2() {
+                                                Some(value) => bd.append_value(*value),
+                                                None => bd.append_value(Default::default()),
+                                            }
+                                        }
+                                    )*
+                                    DataType::FixedSizeBinary(w) => {
+                                        let bd = Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut());
+                                        match key.value.as_bytes_opt() {
+                                            Some(value) => bd.append_value(value).unwrap(),
+                                            None => bd.append_value(vec![0; *w as usize]).unwrap(),
+                                        }
                                     }
-                                )*
-                                $(
-                                    $alt_variant2 => {
-                                        Self::as_builder_mut::<$builder_ty2>(builder.as_mut())
-                                            .append_value(Default::default());
-                                    }
-                                )*
-                                DataType::FixedSizeBinary(w) =>{
-                                    Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut())
-                                        .append_value(vec![0; *w as usize]).unwrap();
-                                }
-                                DataType::List(_field) =>{
-                                    let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
-                                    if is_nullable {
-                                        bd.append_null();
-                                    } else {
+                                    DataType::List(_field) => {
+                                        // Lists are not allowed as primary keys; append default
+                                        let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
                                         bd.append_default();
                                     }
+                                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                                 }
-                                DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
+                            } else {
+                                match datatype {
+                                    $(
+                                        $primitive_pat => {
+                                            Self::as_builder_mut::<PrimitiveBuilder<$arrow_ty>>(builder.as_mut())
+                                                .append_value(<$primitive_ty>::default());
+                                        }
+                                    )*
+                                    DataType::Boolean => {
+                                        Self::as_builder_mut::<BooleanBuilder>(builder.as_mut())
+                                            .append_value(bool::default());
+                                    }
+                                    $(
+                                        $alt_variant => {
+                                            Self::as_builder_mut::<$builder_ty>(builder.as_mut())
+                                                .append_value(<$alt_ty>::default());
+                                        }
+                                    )*
+                                    $(
+                                        $alt_variant2 => {
+                                            Self::as_builder_mut::<$builder_ty2>(builder.as_mut())
+                                                .append_value(Default::default());
+                                        }
+                                    )*
+                                    DataType::FixedSizeBinary(w) =>{
+                                        Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut())
+                                            .append_value(vec![0; *w as usize]).unwrap();
+                                    }
+                                    DataType::List(_field) =>{
+                                        let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
+                                        if is_nullable {
+                                            bd.append_null();
+                                        } else {
+                                            bd.append_default();
+                                        }
+                                    }
+                                    DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
+                                }
                             }
                         }
                     }
@@ -542,6 +605,33 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_tombstone_keeps_primary_key() {
+        use arrow::array::AsArray;
+        // Ensure that when pushing a tombstone (row == None), the primary key column
+        // is still populated from the provided key, so sort/order and lookups work.
+        let schema = dyn_schema!(("id", UInt64, false), 0);
+        let record = DynRecord::new(vec![Value::UInt64(42_u64)], 0);
+        let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 2);
+        let key = crate::version::timestamp::Ts {
+            ts: 0.into(),
+            value: record.key(),
+        };
+
+        // First a normal row, then a tombstone for the same key
+        builder.push(key.clone(), Some(record.as_record_ref()));
+        builder.push(key.clone(), None);
+
+        let arrays = builder.finish(None);
+        let rb = arrays.as_record_batch();
+        // Column 2 is the primary key (after _null and ts)
+        let pk_col = rb.column(2).as_primitive::<arrow::datatypes::UInt64Type>();
+        // Row 1 is the tombstone
+        assert_eq!(pk_col.value(1), 42_u64);
+        // And the tombstone flag is set
+        assert!(rb.column(0).as_boolean().value(1));
     }
 
     #[tokio::test]

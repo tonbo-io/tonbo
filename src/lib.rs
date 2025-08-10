@@ -1703,7 +1703,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[ignore = "hard to reproduce, figure it out later"]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_read_write_dyn() {
         let temp_dir = TempDir::new().unwrap();
@@ -1734,7 +1733,6 @@ pub(crate) mod tests {
             }
         }
 
-        dbg!(db.ctx.manifest.current().await);
         // test get
         {
             let tx = db.transaction().await;
