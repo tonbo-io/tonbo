@@ -232,6 +232,7 @@
 <ul>
 <li>Extend <code>DynSchema</code> to track <code>primary_indices: Vec&lt;usize&gt;</code> in metadata (replacing the single <code>primary_key_index</code>).</li>
 <li>Update <code>DynRecordRef::new</code> and readers to honor multiple PK indices.</li>
+<li>Ensure tombstone writes (row == None) still populate all PK columns from <code>Ts.key</code> so ordering/lookups remain correct.</li>
 <li>Define a composite key wrapper for <code>Value</code>/<code>ValueRef</code> (or generate a per-dyn-schema composite type if feasible). Initially out-of-scope for phase 1.</li>
 </ul>
 <h2 id="step-by-step-plan"><a class="header" href="#step-by-step-plan">Step-by-Step Plan</a></h2>
@@ -298,7 +299,8 @@
 <ul>
 <li>Store <code>primary_indices</code> metadata; update dynamic arrays/refs to keep all PK columns in projections.</li>
 <li>Provide a composite <code>ValueRef</code> key wrapper for in-memory operations.</li>
-<li>Acceptance: dynamic tests mirroring integration scenarios pass.</li>
+<li>Ensure tombstones populate PK components from <code>Ts.key</code> in builders (e.g., <code>DynRecordBuilder::push</code>).</li>
+<li>Acceptance: dynamic tests mirroring integration scenarios pass, including tombstone rows retaining all PK components.</li>
 </ul>
 </li>
 </ol>
@@ -308,29 +310,40 @@
 <li>Read paths: <code>src/lib.rs</code> (get/scan/package), <code>src/transaction.rs</code> (get/scan)</li>
 <li>Macro codegen: <code>tonbo_macros/src/record.rs</code>, <code>tonbo_macros/src/keys.rs</code>, <code>tonbo_macros/src/data_type.rs</code></li>
 <li>Key types: <code>src/record/key/composite/</code></li>
-<li>Dynamic (phase 3): <code>src/record/dynamic/*</code></li>
+<li>Dynamic (phase 3): <code>src/record/dynamic/*</code> (incl. tombstone handling in <code>DynRecordBuilder::push</code>)</li>
 </ul>
 <h2 id="testing-strategy"><a class="header" href="#testing-strategy">Testing Strategy</a></h2>
 <ul>
-<li>Unit tests:
+<li>
+<p>Unit tests:</p>
 <ul>
 <li>Composite key <code>Ord</code>, <code>Eq</code>, <code>Hash</code>, <code>Encode</code>/<code>Decode</code> round-trip.</li>
 <li><code>Schema</code> default impl compatibility.</li>
 </ul>
 </li>
-<li>trybuild tests:
+<li>
+<p>trybuild tests:</p>
 <ul>
 <li>Multiple <code>#[record(primary_key)]</code> in a struct compiles and generates expected APIs.</li>
 <li>Reject nullable PK components.</li>
 </ul>
 </li>
-<li>Integration tests:
+<li>
+<p>Integration tests:</p>
 <ul>
 <li>Insert/get/remove by composite key; range scans across composite key ranges; projection keeps PK columns.</li>
 <li>WAL/compaction unaffected (basic smoke tests).</li>
 </ul>
 </li>
-<li>(Optional) Property tests: ordering equivalence vs. native tuple lexicographic ordering when Option B is used.</li>
+<li>
+<p>(Optional) Property tests: ordering equivalence vs. native tuple lexicographic ordering when Option B is used.</p>
+</li>
+<li>
+<p>Tombstones:</p>
+<ul>
+<li>For both single- and multi-column PKs, verify that tombstone rows (row == None) keep all PK column values populated from <code>Ts.key</code> in Arrow arrays and through <code>RecordRef::from_record_batch</code>.</li>
+</ul>
+</li>
 </ul>
 <h2 id="backward-compatibility--migration"><a class="header" href="#backward-compatibility--migration">Backward Compatibility &amp; Migration</a></h2>
 <ul>
@@ -376,6 +389,8 @@ Configure Parquet sorting/statistics for all PK components.</li>
 Add unit/trybuild/integration tests.</li>
 <li><input disabled="" type="checkbox"/>
 Update user guide (mention composite PK support and examples).</li>
+<li><input disabled="" type="checkbox"/>
+Ensure tombstone rows keep PK component values (builders/readers), validated by tests.</li>
 </ul>
 
                     </main>
