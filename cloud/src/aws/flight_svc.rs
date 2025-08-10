@@ -77,6 +77,7 @@ impl FlightService for TonboFlightSvc {
                 }
             };
 
+            let mut schema_builder: Vec<(u32, DynRecord)> = vec![];
             // Retrieve first batch and send schema
             let first_batch = loop {
                 match entries.next().await {
@@ -84,7 +85,24 @@ impl FlightService for TonboFlightSvc {
                         // break after finding first batch
                         break record_batch.record_batch().clone();
                     }
-                    Some(Ok(_)) => continue,
+                    Some(Ok(Entry::Mutable(entry))) => {
+                        // Send record batch to channel
+                        if let Some(record) = entry.value() {
+                            // use dummy ts as it doesn't matter when converted to `RecordBatch`
+                            schema_builder.push((0, (*record).clone()));
+                            break records_to_record_batch(&schema_builder[0].1.schema(0), schema_builder);
+                        }
+                    }
+                    Some(Ok(Entry::Transaction((_, record)))) => {
+                        if let Some(record) = record {
+                            // use dummy ts as it doesn't matter when converted to `RecordBatch`
+                            schema_builder.push((0, (*record).clone()));
+                            break records_to_record_batch(&schema_builder[0].1.schema(0), schema_builder);
+                        }
+                    }
+                    Some(Ok(Entry::Projection((_record, _projection)))) => {
+                        todo!()
+                    }
                     Some(Err(e)) => {
                         let _ = rb_tx
                             .send(Err(FlightError::ExternalError(e.to_string().into())))
