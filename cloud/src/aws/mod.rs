@@ -84,7 +84,7 @@ impl AWSTonbo {
                     if calculate_size {
                         row_size =
                             (batch.get_array_memory_size() as i64 / batch.num_rows() as i64) as i32;
-                            calculate_size = false;
+                        calculate_size = false;
                     }
                 }
                 // Ok(Entry::Mutable(entry)) => {

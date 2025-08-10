@@ -10,7 +10,10 @@ use futures::{stream::BoxStream, StreamExt};
 use prost::Message;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
-use tonbo::{record::{util::records_to_record_batch, DynRecord, DynRecordBuilder}, Entry};
+use tonbo::{
+    record::{util::records_to_record_batch, DynRecord, DynRecordBuilder},
+    Entry,
+};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::{aws::AWSTonbo, gen::grpc, ScanRequest, TonboCloud};
@@ -79,7 +82,7 @@ impl FlightService for TonboFlightSvc {
                 match entries.next().await {
                     Some(Ok(Entry::RecordBatch(record_batch))) => {
                         // break after finding first batch
-                        break record_batch.record_batch().clone()
+                        break record_batch.record_batch().clone();
                     }
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => {
@@ -106,7 +109,11 @@ impl FlightService for TonboFlightSvc {
                 match item {
                     Ok(Entry::RecordBatch(record_batch)) => {
                         // Send record batch to channel
-                        if rb_tx.send(Ok(record_batch.record_batch().clone())).await.is_err() {
+                        if rb_tx
+                            .send(Ok(record_batch.record_batch().clone()))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -135,7 +142,8 @@ impl FlightService for TonboFlightSvc {
                 }
             }
             if !batch_builder.is_empty() {
-                let build_batch = records_to_record_batch(&batch_builder[0].1.schema(0), batch_builder);
+                let build_batch =
+                    records_to_record_batch(&batch_builder[0].1.schema(0), batch_builder);
                 if rb_tx.send(Ok(build_batch)).await.is_err() {
                     return;
                 }
