@@ -58,7 +58,7 @@ In this test we will randomly read ranges of records from [Tonbo](https://github
 cargo bench --bench read_bench --features=bench
 
 # With data loading (requires load_tbl feature)
-cargo run --bin read_bench --features=bench,load_tbl
+cargo bench --bench read_bench --features=bench,load_tbl
 ```
 
 ```

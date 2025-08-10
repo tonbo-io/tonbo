@@ -13,8 +13,9 @@ Tonbo is an embedded, persistent key-value database written in Rust that uses Lo
 ```bash
 # Code quality checks
 cargo check                    # Check for compilation errors
-cargo clippy                   # Run linter for code improvements
+cargo clippy --workspace -- -D warnings  # Run linter (fail on warnings)
 cargo +nightly fmt             # Format code (must use nightly)
+cargo +nightly fmt -- --check  # Check formatting without changing files
 
 # Building
 cargo build                    # Standard debug build
@@ -54,11 +55,12 @@ cargo build --features datafusion
 cd bindings/python
 maturin develop              # Build and install locally for development
 pytest tests/                 # Run Python tests
+pytest tests/bench/ --benchmark-only  # Run Python benchmarks
 
 # JavaScript/WASM bindings (requires wasm-pack)
 cd bindings/js
 wasm-pack build              # Build WASM module
-wasm-pack test --headless    # Run WASM tests
+wasm-pack test --chrome --headless  # Run WASM tests in Chrome
 ```
 
 ### Code Coverage
@@ -71,14 +73,18 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 The codebase is organized into several key modules:
 
-- **src/compaction/**: LSM tree compaction strategies and implementation
+- **src/compaction/**: LSM tree compaction strategies (leveled compaction implementation)
 - **src/fs/**: File system abstractions supporting multiple backends (local, S3, OPFS)
 - **src/inmem/**: In-memory data structures including mutable and immutable memtables
 - **src/ondisk/**: On-disk storage using SSTable format with Arrow/Parquet
 - **src/record/**: Record types, schemas, and the `#[derive(Record)]` macro system
-- **src/stream/**: Streaming operations for efficient data processing
+  - **dynamic/**: Runtime-defined record schemas with Value enum for flexible typing
+  - **key/**: Type implementations for primary keys (strings, numbers, timestamps, lists)
+- **src/stream/**: Streaming operations for efficient data processing and merging
 - **src/version/**: Version management and multi-version concurrency control
 - **src/wal/**: Write-ahead logging for durability
+- **src/transaction.rs**: Transaction support with optimistic concurrency control
+- **src/manifest.rs**: Database manifest management
 
 The project uses procedural macros (in `tonbo_macros/`) to provide a type-safe API where users define their key-value schema using Rust structs.
 
@@ -89,38 +95,35 @@ The project uses procedural macros (in `tonbo_macros/`) to provide a type-safe A
 2. **Feature Flags**: Important features include:
    - `tokio`: Async filesystem operations (default)
    - `wasm`: WebAssembly support with OPFS backend
-   - `datafusion`: SQL query support
-   - `aws`: S3 storage backend
-   - `bench`: Enables comparison benchmarks
+   - `datafusion`: SQL query support via Apache DataFusion
+   - `aws`: S3 storage backend support
+   - `bench`: Enables comparison benchmarks against RocksDB, Sled, and Redb
+   - `bytes`: Bytes type support (default)
 
-3. **Type System**: Records must derive from `tonbo::Record` trait. The macro generates necessary serialization and Arrow schema implementations.
+3. **Type System**: Records must derive from `tonbo::Record` trait. The macro generates necessary serialization and Arrow schema implementations. Dynamic records are also supported for runtime-defined schemas.
 
-4. **Testing**: Tests should cover both sync and async APIs when applicable. Integration tests go in `tests/` directory.
+4. **Testing**: 
+   - Unit tests use `#[tokio::test]` for async code
+   - Integration tests in `tests/` directory
+   - Macro correctness tests using trybuild in `tests/success/` and `tests/fail/`
+   - WASM-specific tests in `tests/wasm.rs`
 
-5. **Error Handling**: Uses custom error types defined in `src/error.rs`. Always propagate errors appropriately using `?`.
+5. **Error Handling**: Uses custom error types. Always propagate errors appropriately using `?`.
 
 ## Working with the Codebase
 
 1. **Adding New Features**: Check feature flags in `Cargo.toml` and ensure proper conditional compilation with `#[cfg(feature = "...")]`.
 
-2. **Modifying Storage Layer**: Changes to on-disk format should maintain backward compatibility or increment version numbers appropriately.
+2. **Modifying Storage Layer**: Changes to on-disk format should maintain backward compatibility or increment version numbers appropriately. The magic number in `src/magic.rs` helps identify file format versions.
 
-3. **Performance**: Run benchmarks before and after changes that might impact performance. Compare against baseline using `cargo bench`.
+3. **Performance**: Run benchmarks before and after changes that might impact performance. Use `cargo bench --features bench` to compare against other embedded databases.
 
-4. **Documentation**: Update both inline documentation and the guide (in `guide/` directory) for user-facing changes.
-
-5. **Cross-Platform**: Ensure changes work across all supported platforms (Linux, macOS, Windows) and targets (native, WASM).
-
-## Current Development Focus
-
-Based on recent commits, the project is actively developing:
-- Date/time type support (date32/date64/time32/time64)
-- Dynamic record implementation
-- Enhanced type system flexibility
+4. **Cross-Platform**: Ensure changes work across all supported platforms (Linux, macOS, Windows) and targets (native, WASM).
 
 ## Important Notes
 
 - Rust toolchain version is pinned to 1.85 in `rust-toolchain.toml`
-- The project uses specific git revisions for fusio-* dependencies
+- The project uses fusio crates (v0.4.0) for pluggable I/O and storage backends
 - Formatting is strict - always run `cargo +nightly fmt` before committing
 - The project follows semantic versioning (currently at 0.3.2)
+- Default features include: aws, bytes, tokio, tokio-http, async-trait

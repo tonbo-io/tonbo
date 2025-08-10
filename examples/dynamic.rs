@@ -19,7 +19,7 @@ async fn main() {
             .unwrap(),
         &schema,
     );
-    let db = DB::new(options, TokioExecutor::current(), schema)
+    let db = DB::new(options, TokioExecutor::default(), schema)
         .await
         .unwrap();
 

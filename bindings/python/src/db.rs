@@ -58,7 +58,7 @@ impl TonboDB {
         let schema = DynSchema::new(desc, primary_key_index.unwrap());
         let option = option.into_option(&schema);
         let db = get_runtime()
-            .block_on(async { DB::new(option, TokioExecutor::current(), schema).await })
+            .block_on(async { DB::new(option, TokioExecutor::default(), schema).await })
             .unwrap();
         Ok(Self {
             db: Arc::new(db),
