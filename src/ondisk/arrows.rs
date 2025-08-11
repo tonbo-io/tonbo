@@ -2,9 +2,10 @@ use std::ops::Bound;
 
 use arrow::{
     array::{BooleanArray, Datum},
-    buffer::BooleanBuffer,
-    compute::kernels::cmp::{gt, gt_eq, lt_eq},
-    error::ArrowError,
+    compute::kernels::{
+        boolean::{and_kleene, or_kleene},
+        cmp::{eq, gt, gt_eq, lt, lt_eq},
+    },
 };
 use parquet::{
     arrow::{
@@ -19,37 +20,47 @@ use crate::{
     version::timestamp::Timestamp,
 };
 
-unsafe fn get_range_bound_fn<R>(
+enum BoundKind {
+    Lower { inclusive: bool },
+    Upper { inclusive: bool },
+}
+
+unsafe fn get_lower_bound<R>(
     range: Bound<&<R::Schema as Schema>::Key>,
-) -> (
-    Option<&'static <R::Schema as Schema>::Key>,
-    &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync),
-)
+) -> (Option<&'static <R::Schema as Schema>::Key>, BoundKind)
 where
     R: Record,
 {
-    let cmp: &'static (dyn Fn(&dyn Datum, &dyn Datum) -> Result<BooleanArray, ArrowError> + Sync);
-    let key = match range {
-        Bound::Included(key) => {
-            cmp = &gt_eq;
-            Some(&*(key as *const _))
-        }
-        Bound::Excluded(key) => {
-            cmp = &gt;
-            Some(&*(key as *const _))
-        }
-        Bound::Unbounded => {
-            cmp = &|this, _| {
-                let len = this.get().0.len();
-                Ok(BooleanArray::new(
-                    BooleanBuffer::collect_bool(len, |_| true),
-                    None,
-                ))
-            };
-            None
-        }
-    };
-    (key, cmp)
+    match range {
+        Bound::Included(key) => (
+            Some(&*(key as *const _)),
+            BoundKind::Lower { inclusive: true },
+        ),
+        Bound::Excluded(key) => (
+            Some(&*(key as *const _)),
+            BoundKind::Lower { inclusive: false },
+        ),
+        Bound::Unbounded => (None, BoundKind::Lower { inclusive: true }),
+    }
+}
+
+unsafe fn get_upper_bound<R>(
+    range: Bound<&<R::Schema as Schema>::Key>,
+) -> (Option<&'static <R::Schema as Schema>::Key>, BoundKind)
+where
+    R: Record,
+{
+    match range {
+        Bound::Included(key) => (
+            Some(&*(key as *const _)),
+            BoundKind::Upper { inclusive: true },
+        ),
+        Bound::Excluded(key) => (
+            Some(&*(key as *const _)),
+            BoundKind::Upper { inclusive: false },
+        ),
+        Bound::Unbounded => (None, BoundKind::Upper { inclusive: true }),
+    }
 }
 
 pub(crate) unsafe fn get_range_filter<R>(
@@ -59,12 +70,13 @@ pub(crate) unsafe fn get_range_filter<R>(
         Bound<&<R::Schema as Schema>::Key>,
     ),
     ts: Timestamp,
+    pk_indices: &[usize],
 ) -> RowFilter
 where
     R: Record,
 {
-    let (lower_key, lower_cmp) = get_range_bound_fn::<R>(range.0);
-    let (upper_key, upper_cmp) = get_range_bound_fn::<R>(range.1);
+    let (lower_key, lower_kind) = get_lower_bound::<R>(range.0);
+    let (upper_key, upper_kind) = get_upper_bound::<R>(range.1);
 
     let mut predictions: Vec<Box<dyn ArrowPredicate>> = vec![Box::new(ArrowPredicateFn::new(
         ProjectionMask::roots(schema_descriptor, [1]),
@@ -72,17 +84,72 @@ where
     ))];
     if let Some(lower_key) = lower_key {
         predictions.push(Box::new(ArrowPredicateFn::new(
-            ProjectionMask::roots(schema_descriptor, [2]),
+            ProjectionMask::roots(schema_descriptor, pk_indices.to_vec()),
             move |record_batch| {
-                lower_cmp(record_batch.column(0), lower_key.to_arrow_datum().as_ref())
+                let datums = lower_key.to_arrow_datums();
+                let n = datums.len();
+                let mut acc: Option<BooleanArray> = None;
+                for i in 0..n {
+                    let cmp_i = if i == n - 1 {
+                        match lower_kind {
+                            BoundKind::Lower { inclusive: true } => {
+                                gt_eq(record_batch.column(i), datums[i].as_ref())?
+                            }
+                            BoundKind::Lower { inclusive: false } => {
+                                gt(record_batch.column(i), datums[i].as_ref())?
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        gt(record_batch.column(i), datums[i].as_ref())?
+                    };
+                    let mut term = cmp_i;
+                    for (j, d) in datums.iter().enumerate().take(i) {
+                        let eq_j = eq(record_batch.column(j), d.as_ref())?;
+                        term = and_kleene(&term, &eq_j)?;
+                    }
+                    acc = Some(match acc {
+                        None => term,
+                        Some(prev) => or_kleene(&prev, &term)?,
+                    });
+                }
+                Ok(acc.expect("at least one key component"))
             },
         )));
     }
     if let Some(upper_key) = upper_key {
+        let pk_indices = pk_indices.to_vec();
         predictions.push(Box::new(ArrowPredicateFn::new(
-            ProjectionMask::roots(schema_descriptor, [2]),
+            ProjectionMask::roots(schema_descriptor, pk_indices),
             move |record_batch| {
-                upper_cmp(upper_key.to_arrow_datum().as_ref(), record_batch.column(0))
+                let datums = upper_key.to_arrow_datums();
+                let n = datums.len();
+                let mut acc: Option<BooleanArray> = None;
+                for i in 0..n {
+                    let cmp_i = if i == n - 1 {
+                        match upper_kind {
+                            BoundKind::Upper { inclusive: true } => {
+                                lt_eq(record_batch.column(i), datums[i].as_ref())?
+                            }
+                            BoundKind::Upper { inclusive: false } => {
+                                lt(record_batch.column(i), datums[i].as_ref())?
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        lt(record_batch.column(i), datums[i].as_ref())?
+                    };
+                    let mut term = cmp_i;
+                    for (j, d) in datums.iter().enumerate().take(i) {
+                        let eq_j = eq(record_batch.column(j), d.as_ref())?;
+                        term = and_kleene(&term, &eq_j)?;
+                    }
+                    acc = Some(match acc {
+                        None => term,
+                        Some(prev) => or_kleene(&prev, &term)?,
+                    });
+                }
+                Ok(acc.expect("at least one key component"))
             },
         )));
     }

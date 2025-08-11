@@ -127,8 +127,8 @@ impl Key for Value {
         ValueRef::from(self)
     }
 
-    fn to_arrow_datum(&self) -> Arc<dyn arrow::array::Datum> {
-        match self {
+    fn to_arrow_datums(&self) -> Vec<Arc<dyn arrow::array::Datum>> {
+        let datum: Arc<dyn arrow::array::Datum> = match self {
             Value::Null => panic!("Null value cannot be converted to arrow datum"),
             Value::Boolean(v) => Arc::new(arrow::array::BooleanArray::new_scalar(*v)),
             Value::Int8(v) => Arc::new(arrow::array::Int8Array::new_scalar(*v)),
@@ -179,7 +179,8 @@ impl Key for Value {
             Value::List(_, _) => {
                 unreachable!("List value cannot be used as primary key.")
             }
-        }
+        };
+        vec![datum]
     }
 }
 

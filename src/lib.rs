@@ -749,6 +749,7 @@ where
                 TsRef::new(key, ts),
                 projection,
                 ctx.cache().clone(),
+                self.record_schema.primary_key_indices(),
             )
             .await?
             .map(|entry| Entry::RecordBatch(entry)))
@@ -1009,6 +1010,7 @@ where
                 self.limit,
                 self.projection,
                 self.order,
+                self.mem_storage.record_schema.primary_key_indices(),
             )
             .await?;
 
@@ -1070,6 +1072,7 @@ where
                 self.limit,
                 self.projection,
                 self.order,
+                self.mem_storage.record_schema.primary_key_indices(),
             )
             .await?;
         let merge_stream = MergeStream::from_vec(streams, self.ts, self.order).await?;
