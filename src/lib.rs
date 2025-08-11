@@ -454,7 +454,7 @@ where
                         )
                         .await;
 
-                        let result = match batches_and_wal_ids {
+                        match batches_and_wal_ids {
                             Ok(Some((batches, recover_wal_ids))) => {
                                 let batch_len = batches.len();
                                 let compaction_result = compactor
@@ -476,10 +476,7 @@ where
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
-                        };
-
-                        drop(guard);
-                        result
+                        }
                     }
                     CompactTask::Flush(option_tx) => {
                         // Handle manual flush
@@ -574,7 +571,11 @@ where
     /// txn.commit().await.unwrap();
     /// ```
     pub async fn transaction(&self) -> Transaction<'_, R, E> {
-        Transaction::new(self.snapshot().await, self.lock_map.clone())
+        // TODO: Revert to using snapshot()
+        let guard = self.mem_storage.read().await;
+        let version_ref = self.ctx.manifest().current().await;
+        let snapshot: Snapshot<'_, R, E> = Snapshot::new(guard, version_ref, self.ctx.clone());
+        Transaction::new(snapshot, self.lock_map.clone())
     }
 
     /// Returns a snapshot of the database
@@ -1611,7 +1612,7 @@ pub(crate) mod tests {
                         )
                         .await;
 
-                        let result = match batches_and_wal_ids {
+                        match batches_and_wal_ids {
                             Ok(Some((batches, recover_wal_ids))) => {
                                 let batch_len = batches.len();
                                 let compaction_result = compactor
@@ -1633,10 +1634,7 @@ pub(crate) mod tests {
                                 error!("[Minor Flush Error]: {}", e);
                                 Ok(())
                             }
-                        };
-
-                        drop(guard);
-                        result
+                        }
                     }
                     CompactTask::Flush(option_tx) => {
                         // Handle manual flush
