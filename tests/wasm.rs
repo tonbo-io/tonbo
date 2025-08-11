@@ -25,7 +25,7 @@ mod tests {
             DynamicField::new("email".to_string(), DataType::Utf8, true),
             DynamicField::new("bytes".to_string(), DataType::Binary, true),
         ];
-        DynSchema::new(descs, 0)
+        DynSchema::new(&descs, 0)
     }
 
     fn test_dyn_items() -> Vec<DynRecord> {

@@ -918,20 +918,22 @@ where
         ts: Timestamp,
         projection: Projection<'get>,
     ) -> Result<Option<Entry<'get, R>>, DbError> {
-        let primary_key_index = self.record_schema.primary_key_index();
+        let pk_indices = self.record_schema.primary_key_indices();
         let schema = ctx.arrow_schema();
 
         let projection = match projection {
             Projection::All => ProjectionMask::all(),
             Projection::Parts(projection) => {
-                let mut fixed_projection: Vec<usize> = [0, 1, primary_key_index]
-                    .into_iter()
-                    .chain(projection.into_iter().map(|name| {
-                        schema
-                            .index_of(name)
-                            .unwrap_or_else(|_| panic!("unexpected field {name}"))
-                    }))
-                    .collect();
+                let mut fixed_projection: Vec<usize> =
+                    Vec::with_capacity(2 + pk_indices.len() + projection.len());
+                fixed_projection.push(0);
+                fixed_projection.push(1);
+                fixed_projection.extend_from_slice(pk_indices);
+                fixed_projection.extend(projection.into_iter().map(|name| {
+                    schema
+                        .index_of(name)
+                        .unwrap_or_else(|_| panic!("unexpected field {name}"))
+                }));
                 fixed_projection.dedup();
 
                 ProjectionMask::roots(
@@ -1106,8 +1108,13 @@ where
                     .unwrap_or_else(|_| panic!("unexpected field {name}"))
             })
             .collect::<Vec<usize>>();
-        let primary_key_index = self.mem_storage.record_schema.primary_key_index();
-        let mut fixed_projection = vec![0, 1, primary_key_index];
+
+        let pk_indices = self.mem_storage.record_schema.primary_key_indices();
+
+        // The scan uses a fixed projection of 0: `_null` field, 1: `_ts` field, and all primary key
+        // columns
+        let mut fixed_projection = vec![0, 1];
+        fixed_projection.extend_from_slice(pk_indices);
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
 
@@ -1129,8 +1136,13 @@ where
         for p in &mut projection {
             *p += USER_COLUMN_OFFSET;
         }
-        let primary_key_index = self.mem_storage.record_schema.primary_key_index();
-        let mut fixed_projection = vec![0, 1, primary_key_index];
+
+        let pk_indices = self.mem_storage.record_schema.primary_key_indices();
+
+        // The scan uses a fixed projection of 0: `_null` field, 1: `_ts` field, and all primary key
+        // columns
+        let mut fixed_projection = vec![0, 1];
+        fixed_projection.extend_from_slice(pk_indices);
         fixed_projection.append(&mut projection);
         fixed_projection.dedup();
 
@@ -2089,7 +2101,6 @@ pub(crate) mod tests {
             }
         }
 
-        // dbg!(db.ctx.manifest.current().await);
         // test get
         {
             let tx = db.transaction().await;

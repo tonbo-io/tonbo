@@ -54,9 +54,8 @@ where
     {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
 
-        // Kould: is the capacity parameter necessary?
         let mut builder =
-            <R::Schema as RecordSchema>::Columns::builder(schema.arrow_schema().clone(), 8192);
+            <R::Schema as RecordSchema>::Columns::builder(schema.arrow_schema().clone(), 0);
         let mut min = None;
         let mut max = None;
 
