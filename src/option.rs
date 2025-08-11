@@ -121,8 +121,6 @@ impl DbOption {
         DbOption {
             immutable_chunk_num: 3,
             immutable_chunk_max_num: 5,
-            major_threshold_with_sst_size: 4,
-            level_sst_magnification: 10,
             max_sst_file_size: 256 * 1024 * 1024,
             clean_channel_buffer: 10,
             base_path,
@@ -134,9 +132,7 @@ impl DbOption {
             version_log_snapshot_threshold: 200,
             level_paths: vec![None; MAX_LEVEL],
             base_fs: FsOptions::Local,
-            compaction_option,
-            immutable_chunk_num: 3,
-            immutable_chunk_max_num: 10,
+            compaction_option: CompactionOption::Leveled(LeveledOptions::default()),
         }
     }
 }
