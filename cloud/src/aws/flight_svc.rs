@@ -155,7 +155,7 @@ impl FlightService for TonboFlightSvc {
                             batch_builder.push((0, (*record).clone()));
                         }
                     }
-                    Ok(Entry::Projection((record, projection))) => {
+                    Ok(Entry::Projection((_record, _projection))) => {
                         todo!()
                     }
                     Err(e) => {

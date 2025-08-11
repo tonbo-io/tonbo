@@ -23,11 +23,14 @@ impl DynRecord {
     // Used for converting `DynRecord`s to `RecordBatches`
     pub fn schema(&self, primary_index: usize) -> DynSchema {
         let mut dyn_fields = Vec::with_capacity(self.values.len());
-        let fields = self
+        let fields: Vec<_> = self
             .values
             .iter()
-            .map(|value| dyn_fields.push(DynamicField::new("".to_string(), value.data_type(), false)));
-        
+            .map(|value| {
+                dyn_fields.push(DynamicField::new("".to_string(), value.data_type(), false))
+            })
+            .collect();
+
         DynSchema::new(dyn_fields.as_slice(), primary_index)
     }
 
@@ -120,7 +123,7 @@ pub(crate) mod test {
     use super::{DynRecord, DynSchema, Record};
     use crate::{
         make_dyn_schema,
-        record::{DynRecordRef, TimeUnit, Value, ValueRef},
+        record::{DynRecordRef, Schema, TimeUnit, Value, ValueRef},
     };
 
     #[allow(unused)]
@@ -267,5 +270,47 @@ pub(crate) mod test {
         // test primary key index >= values.len()
         let res = DynRecord::try_new(vec![Value::Null], 1);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_schema_conversion_to_dynschema() {
+        use arrow::datatypes::DataType;
+
+        let rec = DynRecord::new(
+            vec![
+                Value::Int64(42),
+                Value::String("tonbo".to_string()),
+                Value::Binary(vec![1, 2, 3]),
+                Value::Float32(3.14),
+            ],
+            1,
+        );
+
+        let schema = rec.schema(1);
+
+        // Add 2 for the two fields before
+        assert_eq!(schema.primary_index(), 3);
+
+        // Inspect Arrow fields for data type, name, and nullability
+        let fields = schema.arrow_schema().fields();
+        let dts: Vec<DataType> = fields.iter().map(|f| f.data_type().clone()).collect();
+        assert_eq!(
+            dts,
+            vec![
+                // Account for the two fields again
+                DataType::Boolean,
+                DataType::UInt32,
+                DataType::Int64,
+                DataType::Utf8,
+                DataType::Binary,
+                DataType::Float32
+            ]
+        );
+
+        // Current schema() builds empty names and nullable = false
+        for i in 2..fields.len() {
+            assert_eq!(fields[i].name(), "");
+            assert!(!fields[i].is_nullable());
+        }
     }
 }
