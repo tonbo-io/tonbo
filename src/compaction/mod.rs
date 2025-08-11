@@ -1,7 +1,7 @@
 pub(crate) mod error;
-pub mod leveled;
+pub(crate) mod leveled;
 
-use std::{pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use fusio::{DynFs, MaybeSend, MaybeSync};
@@ -59,7 +59,7 @@ where
         let mut min = None;
         let mut max = None;
 
-        while let Some(result) = Pin::new(&mut stream).next().await {
+        while let Some(result) = stream.next().await {
             let entry = result?;
             let key = entry.key();
 

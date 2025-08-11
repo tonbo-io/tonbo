@@ -30,7 +30,6 @@ where
     R: Record,
     <R::Schema as RecordSchema>::Columns: Send + Sync,
 {
-    // Reset trigger
     db_storage.trigger.reset();
 
     // Add the mutable memtable into the immutable memtable
@@ -54,6 +53,8 @@ where
         return Ok(None);
     }
 
+    // If manual, we always flush if there are any immutables
+    // If not manual, we flush only if the number of immutables exceeds the limit
     if (is_manual && !db_storage.immutables.is_empty())
         || db_storage.immutables.len() > immutable_chunk_max_num
     {
@@ -62,10 +63,10 @@ where
         let chunk_num = if is_manual {
             db_storage.immutables.len()
         } else {
-            immutable_chunk_num
+            immutable_chunk_num.min(db_storage.immutables.len())
         };
 
-        // Get slice of batches to be flushed (reference from front)
+        // Extract slice of batches to be flushed
         let batches_to_flush = &db_storage.immutables[0..chunk_num];
 
         if !batches_to_flush.is_empty() {

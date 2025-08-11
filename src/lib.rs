@@ -1330,19 +1330,17 @@ pub(crate) mod tests {
     use futures::StreamExt;
     use parquet_lru::NoCache;
     use tempfile::TempDir;
-    use tracing::error;
 
     pub use crate::record::test::{Test, TestRef};
     use crate::{
         compaction::{
-            error::CompactionError,
             leveled::{LeveledCompactor, LeveledOptions},
             CompactTask,
         },
         context::Context,
-        executor::{tokio::TokioExecutor, Executor, RwLock},
+        executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
-        inmem::{flush::minor_flush, immutable::tests::TestSchema, mutable::MutableMemTable},
+        inmem::{immutable::tests::TestSchema, mutable::MutableMemTable},
         manifest::ManifestStorageError,
         record::{
             dynamic::test::{test_dyn_item_schema, test_dyn_items},
@@ -1351,7 +1349,7 @@ pub(crate) mod tests {
         trigger::{TriggerFactory, TriggerType},
         version::{cleaner::Cleaner, set::tests::build_version_set, Version},
         wal::log::LogType,
-        CompactionExecutor, CompactionOption, DbError, DbOption, Projection, Record, DB,
+        CompactionOption, DbError, DbOption, Projection, Record, DB,
     };
 
     pub(crate) async fn build_schema(
@@ -1517,7 +1515,7 @@ pub(crate) mod tests {
                     option.clone(),
                     ctx.clone(),
                 );
-                finish_db_with_compactor(
+                DB::finish_build(
                     executor,
                     mem_storage,
                     ctx,
@@ -1564,141 +1562,6 @@ pub(crate) mod tests {
                * .await
                * } */
         }
-    }
-
-    async fn finish_db_with_compactor<R, E, C>(
-        executor: E,
-        mem_storage: Arc<E::RwLock<crate::DbStorage<R>>>,
-        ctx: Arc<Context<R>>,
-        compactor: C,
-        mut cleaner: Cleaner,
-        compaction_rx: Receiver<CompactTask>,
-    ) -> Result<DB<R, E>, DbError>
-    where
-        R: Record + Send + Sync,
-        <<R as crate::record::Record>::Schema as crate::record::Schema>::Columns: Send + Sync,
-        E: Executor + Send + Sync + 'static,
-        C: CompactionExecutor<R> + Send + Sync + 'static,
-    {
-        executor.spawn(async move {
-            if let Err(err) = cleaner.listen().await {
-                error!("[Cleaner Error]: {}", err)
-            }
-        });
-
-        let mem_storage_task = mem_storage.clone();
-        let ctx_task = ctx.clone();
-        executor.spawn(async move {
-            // Waits to receive compaction task. `CompactTask::Freeze` will perform automatic
-            // compaction and `Compact::Flush` will perform manual compaction
-            while let Ok(task) = compaction_rx.recv_async().await {
-                if let Err(err) = match task {
-                    CompactTask::Freeze => {
-                        // Handle minor flush
-                        let mut guard = mem_storage_task.write().await;
-
-                        // Get compaction options from DbOption
-                        let immutable_chunk_num = guard.option.immutable_chunk_num;
-                        let immutable_chunk_max_num = guard.option.immutable_chunk_max_num;
-
-                        let base_fs = ctx_task.manager.base_fs().clone();
-
-                        let batches_and_wal_ids = minor_flush(
-                            &mut *guard,
-                            base_fs,
-                            immutable_chunk_num,
-                            immutable_chunk_max_num,
-                            false,
-                        )
-                        .await;
-
-                        match batches_and_wal_ids {
-                            Ok(Some((batches, recover_wal_ids))) => {
-                                let batch_len = batches.len();
-                                let compaction_result = compactor
-                                    .check_then_compaction(Some(&batches), recover_wal_ids, false)
-                                    .await;
-
-                                // Only remove immutables if compaction succeeded
-                                if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
-                                }
-
-                                compaction_result
-                            }
-                            Ok(None) => compactor.check_then_compaction(None, None, false).await,
-                            Err(e) => {
-                                error!("[Minor Flush Error]: {}", e);
-                                Ok(())
-                            }
-                        }
-                    }
-                    CompactTask::Flush(option_tx) => {
-                        // Handle manual flush
-                        let mut guard = mem_storage_task.write().await;
-
-                        let immutable_chunk_num = guard.option.immutable_chunk_num;
-                        let immutable_chunk_max_num = guard.option.immutable_chunk_max_num;
-
-                        let base_fs = ctx_task.manager.base_fs().clone();
-
-                        let batches_and_wal_ids = minor_flush(
-                            &mut *guard,
-                            base_fs,
-                            immutable_chunk_num,
-                            immutable_chunk_max_num,
-                            true,
-                        )
-                        .await;
-
-                        let mut res = match batches_and_wal_ids {
-                            Ok(Some((batches, recover_wal_ids))) => {
-                                let batch_len = batches.len();
-                                let compaction_result = compactor
-                                    .check_then_compaction(Some(&batches), recover_wal_ids, true)
-                                    .await;
-
-                                // Only remove immutables if compaction succeeded
-                                if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
-                                }
-
-                                compaction_result
-                            }
-                            Ok(None) => compactor.check_then_compaction(None, None, true).await,
-                            Err(e) => {
-                                error!("[Minor Flush Error]: {}", e);
-                                Ok(())
-                            }
-                        };
-
-                        drop(guard);
-
-                        if let Some(tx) = option_tx {
-                            if res.is_ok() {
-                                res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
-                            }
-                        }
-                        res
-                    }
-                } {
-                    error!("[Compaction Error]: {}", err);
-                }
-            }
-        });
-
-        Ok(DB {
-            mem_storage,
-            lock_map: Arc::new(Default::default()),
-            ctx,
-            _p: Default::default(),
-        })
     }
 
     #[tokio::test(flavor = "multi_thread")]
