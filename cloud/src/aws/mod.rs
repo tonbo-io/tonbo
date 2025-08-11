@@ -25,7 +25,7 @@ use tonbo::{
     arrow::array::RecordBatch,
     executor::tokio::TokioExecutor,
     parquet::errors::ParquetError,
-    record::{dynamic::Value, util::records_to_record_batch, DynRecord, DynRecordBuilder, Record},
+    record::{dynamic::Value, util::records_to_record_batch, DynRecord, Record},
     transaction::Transaction,
     DbOption, Entry, DB,
 };
@@ -102,7 +102,6 @@ impl AWSTonbo {
                 Ok(Entry::Projection((_record, _projection))) => {
                     todo!()
                 }
-                Ok(_) => todo!(),
                 Err(_e) => todo!(),
             }
         }

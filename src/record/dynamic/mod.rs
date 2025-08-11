@@ -4,7 +4,7 @@ mod record;
 mod record_ref;
 mod schema;
 pub mod util;
-mod value;
+pub mod value;
 
 use std::sync::Arc;
 
