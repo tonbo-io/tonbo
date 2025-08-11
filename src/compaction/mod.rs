@@ -1,6 +1,6 @@
 pub(crate) mod error;
 pub(crate) mod leveled;
-use std::{pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 use fusio::DynFs;
 use fusio_parquet::writer::AsyncWriter;
@@ -64,7 +64,7 @@ where
         let mut min = None;
         let mut max = None;
 
-        while let Some(result) = Pin::new(&mut stream).next().await {
+        while let Some(result) = stream.next().await {
             let entry = result?;
             let key = entry.key();
 
