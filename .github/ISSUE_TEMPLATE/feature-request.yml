@@ -4,17 +4,17 @@ labels: enhancement
 body:
   - type: textarea
     attributes:
-      label: What is the current issue?
+      label: What is the current behavior?
     validations:
       required: true
   - type: textarea
     attributes:
-      label: What is your solution?
+      label: What is your expectation?
     validations:
       required: true
   - type: textarea
     attributes:
-      label: What does this improve?
+      label: Why we need this feature?
     validations:
       required: true
   - type: textarea
@@ -24,6 +24,6 @@ body:
       required: false
   - type: textarea
     attributes:
-      label: Does it have a reference?
+      label: What other existing implementations can be used as reference?
     validations:
       required: false
