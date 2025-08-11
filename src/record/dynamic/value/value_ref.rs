@@ -13,7 +13,7 @@ use arrow::{
     },
 };
 
-use crate::record::{split_second_ns, KeyRef, TimeUnit, Value, ValueError};
+use crate::record::{split_second_ns, DictionaryKeyType, Key, KeyRef, TimeUnit, Value, ValueError};
 
 /// A reference type for Value that avoids cloning
 #[derive(Debug)]
@@ -39,6 +39,7 @@ pub enum ValueRef<'a> {
     Time32(i32, TimeUnit),
     Time64(i64, TimeUnit),
     List(&'a DataType, Vec<Arc<Value>>),
+    Dictionary(DictionaryKeyType, Box<ValueRef<'a>>),
 }
 
 impl Clone for ValueRef<'_> {
@@ -65,6 +66,7 @@ impl Clone for ValueRef<'_> {
             ValueRef::Time32(v, u) => ValueRef::Time32(*v, *u),
             ValueRef::Time64(v, u) => ValueRef::Time64(*v, *u),
             ValueRef::List(data_type, v) => ValueRef::List(data_type, v.clone()),
+            ValueRef::Dictionary(key_type, value) => ValueRef::Dictionary(*key_type, value.clone()),
         }
     }
 }
@@ -283,6 +285,55 @@ impl<'a> ValueRef<'a> {
 
                 Ok(ValueRef::List(field.data_type(), values))
             }
+            DataType::Dictionary(key_type, _) => {
+                let value = match key_type.as_ref() {
+                    DataType::Int8 => {
+                        let arr = array.as_dictionary::<Int8Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    DataType::Int16 => {
+                        let arr = array.as_dictionary::<Int16Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    DataType::Int32 => {
+                        let arr = array.as_dictionary::<Int32Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    DataType::Int64 => {
+                        let arr = array.as_dictionary::<Int64Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    DataType::UInt8 => {
+                        let arr = array.as_dictionary::<UInt8Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    DataType::UInt16 => {
+                        let arr = array.as_dictionary::<UInt16Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    DataType::UInt32 => {
+                        let arr = array.as_dictionary::<UInt32Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    DataType::UInt64 => {
+                        let arr = array.as_dictionary::<UInt64Type>();
+                        let key = arr.key(index).unwrap();
+                        ValueRef::from_array_ref(arr.values(), key)?
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(ValueRef::Dictionary(
+                    key_type.as_ref().into(),
+                    Box::new(value),
+                ))
+            }
             _ => Err(ValueError::InvalidConversion(format!(
                 "Unsupported data type: {:?}",
                 array.data_type()
@@ -340,6 +391,9 @@ impl<'a> ValueRef<'a> {
                 (*data_type).clone(),
                 false,
             ))),
+            ValueRef::Dictionary(key_type, value_type) => {
+                DataType::Dictionary(Box::new(key_type.into()), Box::new(value_type.data_type()))
+            }
         }
     }
 
@@ -377,6 +431,9 @@ impl ValueRef<'_> {
                 DataType::List(Arc::new(Field::new("item", (*data_type).clone(), false))),
                 values.clone(),
             ),
+            ValueRef::Dictionary(key_type, value) => {
+                Value::Dictionary(*key_type, Box::new(value.as_ref().to_owned()))
+            }
         }
     }
 }
@@ -405,6 +462,9 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Time32(v, unit) => ValueRef::Time32(*v, *unit),
             Value::Time64(v, unit) => ValueRef::Time64(*v, *unit),
             Value::List(data_type, v) => ValueRef::List(data_type, v.clone()),
+            Value::Dictionary(key_type, value) => {
+                ValueRef::Dictionary(*key_type, Box::new(value.as_key_ref()))
+            }
         }
     }
 }
@@ -458,6 +518,9 @@ impl PartialEq for ValueRef<'_> {
                 s_sec == o_sec && s_nsec == o_nsec
             }
             (ValueRef::List(ty1, a), ValueRef::List(ty2, b)) => ty1.eq(ty2) && a.eq(b),
+            (ValueRef::Dictionary(key_type1, value1), ValueRef::Dictionary(key_type2, value2)) => {
+                key_type1 == key_type2 && value1.eq(value2)
+            }
             _ => false,
         }
     }
@@ -509,6 +572,12 @@ impl Ord for ValueRef<'_> {
                 }
                 a.cmp(b)
             }
+            (
+                ValueRef::Dictionary(_key_type1, _value1),
+                ValueRef::Dictionary(_key_type2, _value2),
+            ) => {
+                unimplemented!("compare operation for dictionary is not supported")
+            }
             _ => {
                 panic!("can not compare different types: {self:?} and {other:?}")
             }
@@ -544,23 +613,26 @@ impl<'a> KeyRef<'a> for ValueRef<'a> {
                 DataType::List(Arc::new(Field::new("item", data_type.clone(), false))),
                 v.clone(),
             ),
+            ValueRef::Dictionary(key_type, value) => {
+                Value::Dictionary(key_type, Box::new(value.as_ref().to_owned()))
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, vec};
 
     use arrow::{
         array::{
-            ArrayRef, BinaryArray, FixedSizeBinaryArray, Int32Array, StringArray,
-            Time32SecondArray, TimestampMillisecondArray,
+            ArrayRef, BinaryArray, DictionaryArray, FixedSizeBinaryArray, Int16Array, Int32Array,
+            Int8Array, StringArray, Time32SecondArray, TimestampMillisecondArray, UInt8Array,
         },
         datatypes::{DataType, Field},
     };
 
-    use crate::record::{AsValue, TimeUnit, Value, ValueRef};
+    use crate::record::{AsValue, DictionaryKeyType, TimeUnit, Value, ValueRef};
 
     #[test]
     fn test_value_ref_basic_types() {
@@ -763,6 +835,43 @@ mod tests {
                 assert_eq!(values[2].as_ref(), &Value::Int32(5));
             }
             _ => panic!("Expected ValueRef::List"),
+        }
+    }
+
+    #[test]
+    fn test_list_value_ref_from_dic_array() {
+        {
+            let values = ["hello", " ", "world"];
+            let keys = UInt8Array::from(vec![0, 1, 2, 1, 0]);
+            let dict_array = DictionaryArray::try_new(
+                keys,
+                Arc::new(StringArray::from_iter_values(values.iter())),
+            )
+            .unwrap();
+            let array = Arc::new(dict_array) as ArrayRef;
+
+            let expected_values = ["hello", " ", "world", " ", "hello"];
+            (0..array.len()).for_each(|i| match ValueRef::from_array_ref(&array, i).unwrap() {
+                ValueRef::Dictionary(key_type, value) => {
+                    assert_eq!(key_type, DictionaryKeyType::UInt8);
+                    assert_eq!(value.as_ref(), &ValueRef::String(expected_values[i]))
+                }
+                _ => panic!("Expected ValueRef::List"),
+            });
+        }
+        {
+            let keys = Int8Array::from(vec![0, 1, 0, 1, 2, 0]);
+            let dict_array = DictionaryArray::new(keys, Arc::new(Int16Array::from(vec![1, 2, 3])));
+            let array = Arc::new(dict_array) as ArrayRef;
+
+            let expected_values = [1, 2, 1, 2, 3, 1];
+            (0..array.len()).for_each(|i| match ValueRef::from_array_ref(&array, i).unwrap() {
+                ValueRef::Dictionary(key_type, value) => {
+                    assert_eq!(key_type, DictionaryKeyType::Int8);
+                    assert_eq!(value.as_ref(), &ValueRef::Int16(expected_values[i]))
+                }
+                _ => panic!("Expected ValueRef::List"),
+            });
         }
     }
 
@@ -983,5 +1092,19 @@ mod tests {
             assert!(l1 > l2);
             assert!(l2 > l3);
         }
+    }
+
+    #[test]
+    fn test_dict_value_ref_eq() {
+        let d1 = ValueRef::Dictionary(DictionaryKeyType::Int8, Box::new(ValueRef::String("hello")));
+        let d2 = ValueRef::Dictionary(DictionaryKeyType::Int8, Box::new(ValueRef::String("hello")));
+        let d3 = ValueRef::Dictionary(DictionaryKeyType::Int8, Box::new(ValueRef::String("world")));
+        let d4 = ValueRef::Dictionary(
+            DictionaryKeyType::UInt32,
+            Box::new(ValueRef::String("world")),
+        );
+        assert!(d1 == d2);
+        assert!(d1 != d3);
+        assert!(d3 != d4);
     }
 }

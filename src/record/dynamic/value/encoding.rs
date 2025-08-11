@@ -94,6 +94,9 @@ impl Value {
                         v.encode_inner(writer).await?;
                     }
                 }
+                Value::Dictionary(_, value) => {
+                    value.encode_inner(writer).await?;
+                }
             }
             Ok(())
         };
@@ -166,6 +169,10 @@ impl Value {
                     }
                     Ok(Value::List(field.data_type().clone(), list))
                 }
+                DataType::Dictionary(key_type, _) => {
+                    let value = Box::new(Value::decode_inner(reader).await?);
+                    Ok(Value::Dictionary(key_type.as_ref().into(), value))
+                }
                 _ => Err(fusio::Error::Other(Box::new(ValueError::InvalidDataType(
                     data_type.to_string(),
                 )))),
@@ -221,6 +228,7 @@ impl Encode for Value {
                         _ => 1,
                     }
             }
+            Value::Dictionary(key_type, value) => 1 + key_type.size() + value.size(),
         }
     }
 }
@@ -345,6 +353,9 @@ impl ValueRef<'_> {
                         v.encode_inner(writer).await?;
                     }
                 }
+                ValueRef::Dictionary(_, value_ref) => {
+                    value_ref.encode_inner(writer).await?;
+                }
             }
             Ok(())
         };
@@ -398,6 +409,7 @@ impl Encode for ValueRef<'_> {
                         _ => 1,
                     }
             }
+            ValueRef::Dictionary(key_type, value_ref) => 1 + key_type.size() + value_ref.size(),
         }
     }
 }
@@ -411,7 +423,7 @@ mod tests {
     use tokio::io::AsyncSeekExt;
 
     use super::*;
-    use crate::record::{encode_arrow_datatype, encode_arrow_timeunit, Key};
+    use crate::record::{encode_arrow_datatype, encode_arrow_timeunit, DictionaryKeyType, Key};
 
     #[tokio::test]
     async fn test_value_ref_encode() {
@@ -574,5 +586,36 @@ mod tests {
 
         let decoded = Value::decode(&mut cursor).await.unwrap();
         assert_eq!(value, decoded.as_key_ref());
+    }
+
+    #[tokio::test]
+    async fn test_dictionary_value_encode_decode() {
+        let value1 = Value::Dictionary(
+            DictionaryKeyType::UInt8,
+            Box::new(Value::String("value".to_string())),
+        );
+        let value2 = Value::Dictionary(DictionaryKeyType::Int64, Box::new(Value::Date64(114)));
+        let value_ref = value1.as_key_ref();
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+
+        value1.encode(&mut cursor).await.unwrap();
+        value_ref.encode(&mut cursor).await.unwrap();
+        value2.encode(&mut cursor).await.unwrap();
+        value2.as_key_ref().encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value1, decoded);
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value_ref, decoded.as_key_ref());
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value2, decoded);
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value2.as_key_ref(), decoded.as_key_ref());
     }
 }

@@ -87,7 +87,7 @@ macro_rules! implement_arrow_array {
                             }
                         )*
                         DataType::FixedSizeBinary(w) => builders.push(Box::new(FixedSizeBinaryBuilder::with_capacity(capacity, *w))),
-                        DataType::List(_field) => builders.push(Box::new(NestedBuilder::with_capacity(field.clone(), capacity))),
+                        DataType::List(_) | DataType::Dictionary(_, _) => builders.push(Box::new(NestedBuilder::with_capacity(field.clone(), capacity))),
                         DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
                     }
                     datatypes.push(datatype);
@@ -215,7 +215,7 @@ macro_rules! implement_builder_array {
                                         None => bd.append_value(vec![0; w as usize]).unwrap(),
                                     }
                                 }
-                                DataType::List(_field) =>{
+                                DataType::List(_) | DataType::Dictionary(_, _) =>{
                                     let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
                                     // TODO: remove this clone
                                     bd.append_value(col.clone())
@@ -287,7 +287,7 @@ macro_rules! implement_builder_array {
                                             None => bd.append_value(vec![0; *w as usize]).unwrap(),
                                         }
                                     }
-                                    DataType::List(_field) => {
+                                    DataType::List(_) | DataType::Dictionary(_, _)=> {
                                         // Lists are not allowed as primary keys; append default
                                         let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
                                         bd.append_default();
@@ -322,7 +322,7 @@ macro_rules! implement_builder_array {
                                         Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder.as_mut())
                                             .append_value(vec![0; *w as usize]).unwrap();
                                     }
-                                    DataType::List(_field) =>{
+                                    DataType::List(_) | DataType::Dictionary(_, _) =>{
                                         let bd = Self::as_builder_mut::<NestedBuilder>(builder.as_mut());
                                         if is_nullable {
                                             bd.append_null();
@@ -370,7 +370,7 @@ macro_rules! implement_builder_array {
                             DataType::FixedSizeBinary(_) => mem::size_of_val(
                                 Self::as_builder::<FixedSizeBinaryBuilder>(builder.as_ref()).values_slice()
                             ),
-                            DataType::List(_) => {
+                            DataType::List(_) | DataType::Dictionary(_, _) => {
                                 Self::as_builder::<NestedBuilder>(builder.as_ref()).bytes_written()
                             },
                             DataType::Time32(_) | DataType::Time64(_) => unreachable!(),
@@ -427,7 +427,7 @@ macro_rules! implement_builder_array {
                             );
                             array_refs.push(array.clone());
                         }
-                        DataType::List(_) => {
+                        DataType::List(_) | DataType::Dictionary(_, _) => {
                             let array = Arc::new(
                                 Self::as_builder_mut::<NestedBuilder>(builder.as_mut())
                                     .finish(),
@@ -541,13 +541,14 @@ mod tests {
     use crate::{
         dyn_schema,
         record::{
-            ArrowArrays, ArrowArraysBuilder, DynRecord, DynRecordImmutableArrays, DynRecordRef,
-            DynSchema, DynamicField, Record, RecordRef, Schema, TimeUnit, Value,
+            ArrowArrays, ArrowArraysBuilder, DictionaryKeyType, DynRecord,
+            DynRecordImmutableArrays, DynRecordRef, DynSchema, DynamicField, Record, RecordRef,
+            Schema, TimeUnit, Value, ValueRef,
         },
     };
 
-    #[tokio::test]
-    async fn test_build_primary_key() {
+    #[test]
+    fn test_build_primary_key() {
         {
             let schema = dyn_schema!(("id", UInt64, false), 0);
             let record = DynRecord::new(vec![Value::UInt64(1_u64)], 0);
@@ -607,8 +608,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_tombstone_keeps_primary_key() {
+    #[test]
+    fn test_tombstone_keeps_primary_key() {
         use arrow::array::AsArray;
         // Ensure that when pushing a tombstone (row == None), the primary key column
         // is still populated from the provided key, so sort/order and lookups work.
@@ -634,8 +635,8 @@ mod tests {
         assert!(rb.column(0).as_boolean().value(1));
     }
 
-    #[tokio::test]
-    async fn test_build_array() {
+    #[test]
+    fn test_build_array() {
         let schema = dyn_schema!(
             ("id", UInt32, false),
             ("bool", Boolean, true),
@@ -689,8 +690,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_build_fixed_size_binary() {
+    #[test]
+    fn test_build_fixed_size_binary() {
         let schema = DynSchema::new(
             &vec![
                 DynamicField::new("four".into(), DataType::FixedSizeBinary(4), false),
@@ -749,8 +750,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_build_list() {
+    #[test]
+    fn test_build_list() {
         let ty1 = DataType::List(Arc::new(Field::new("code", DataType::UInt16, true)));
         let ty2 = DataType::List(Arc::new(Field::new("cofloatde", DataType::Float32, true)));
         let ty3 = DataType::List(Arc::new(Field::new(
@@ -856,6 +857,99 @@ mod tests {
             let cols = res3.unwrap().unwrap().columns;
             for (actual, expected) in cols.iter().zip(record2.as_record_ref().columns.iter()) {
                 assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_dict() {
+        let ty1 = DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8));
+        let ty2 = DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8));
+        let ty3 = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let ty4 = DataType::Dictionary(Box::new(DataType::Int64), Box::new(DataType::Binary));
+        let schema = DynSchema::new(
+            &vec![
+                DynamicField::new("id".into(), DataType::UInt64, false),
+                DynamicField::new("types".into(), ty1.clone(), true),
+                DynamicField::new("countries".into(), ty2.clone(), true),
+                DynamicField::new("cities".into(), ty3.clone(), true),
+                DynamicField::new("bytes".into(), ty4.clone(), true),
+            ],
+            0,
+        );
+
+        let record1 = DynRecord::new(
+            vec![
+                Value::UInt64(1),
+                Value::Dictionary(
+                    DictionaryKeyType::Int8,
+                    Box::new(Value::String("String".to_string())),
+                ),
+                Value::Dictionary(
+                    DictionaryKeyType::Int16,
+                    Box::new(Value::String("China".to_string())),
+                ),
+                Value::Dictionary(
+                    DictionaryKeyType::Int32,
+                    Box::new(Value::String("Shanghai".to_string())),
+                ),
+                Value::Dictionary(
+                    DictionaryKeyType::Int64,
+                    Box::new(Value::Binary(b"tonbo".to_vec())),
+                ),
+            ],
+            0,
+        );
+        let record2 = DynRecord::new(
+            vec![
+                Value::UInt64(1),
+                Value::Dictionary(DictionaryKeyType::Int8, Box::new(Value::Null)),
+                Value::Null,
+                Value::Dictionary(
+                    DictionaryKeyType::Int32,
+                    Box::new(Value::String("Tokyo".to_string())),
+                ),
+                Value::Null,
+            ],
+            0,
+        );
+        let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
+        let key = crate::version::timestamp::Ts {
+            ts: 0.into(),
+            value: record1.key(),
+        };
+        let key2 = crate::version::timestamp::Ts {
+            ts: 0.into(),
+            value: record2.key(),
+        };
+        builder.push(key.clone(), Some(record1.as_record_ref()));
+        builder.push(key, None);
+        builder.push(key2, Some(record2.as_record_ref()));
+        let arrays = builder.finish(None);
+
+        {
+            let res1 = arrays.get(0, &ProjectionMask::all());
+            let cols = res1.unwrap().unwrap().columns;
+            for (actual, expected) in cols.iter().zip(record1.as_record_ref().columns.iter()) {
+                assert_eq!(actual, expected);
+            }
+
+            let res2 = arrays.get(1, &ProjectionMask::all());
+            assert!(res2.unwrap().is_none());
+
+            let res3 = arrays.get(2, &ProjectionMask::all());
+            let cols = res3.unwrap().unwrap().columns;
+            for (actual, expected) in cols.iter().zip(record2.as_record_ref().columns.iter()) {
+                match (actual, expected) {
+                    (ValueRef::Null, ValueRef::Null) => continue,
+                    (ValueRef::Null, ValueRef::Dictionary(_, value)) => {
+                        assert!(value.is_null());
+                    }
+                    (ValueRef::Dictionary(_, value), ValueRef::Null) => {
+                        assert!(value.is_null());
+                    }
+                    _ => assert_eq!(actual, expected),
+                }
             }
         }
     }

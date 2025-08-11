@@ -52,6 +52,7 @@ pub enum DataType {
     /// See [`arrow::datatypes::DataType::Date64`] for more details.
     Date64,
     List(Arc<DynamicField>),
+    Dictionary(Box<DataType>, Box<DataType>),
 }
 
 impl From<&ArrowDataType> for DataType {
@@ -84,6 +85,10 @@ impl From<&ArrowDataType> for DataType {
             ArrowDataType::List(field) => {
                 DataType::List(Arc::new(DynamicField::from(field.as_ref())))
             }
+            ArrowDataType::Dictionary(key_type, value_type) => DataType::Dictionary(
+                Box::new(key_type.as_ref().into()),
+                Box::new(value_type.as_ref().into()),
+            ),
             _ => todo!("datatype: {datatype:?}"),
         }
     }

@@ -1,4 +1,5 @@
 mod cast;
+mod dict;
 mod encoding;
 mod util;
 mod value_ref;
@@ -11,6 +12,7 @@ use std::{
 
 use arrow::datatypes::{DataType, Field};
 pub use cast::*;
+pub use dict::*;
 use thiserror::Error;
 pub(crate) use util::*;
 pub use value_ref::*;
@@ -58,6 +60,7 @@ pub enum Value {
     Timestamp(i64, TimeUnit),
     /// List of values that are of the same type.
     List(DataType, Vec<Arc<Value>>),
+    Dictionary(DictionaryKeyType, Box<Value>),
 }
 
 impl Value {
@@ -111,6 +114,9 @@ impl Value {
                 data_type.clone(),
                 false,
             ))),
+            Value::Dictionary(key_type, value) => {
+                DataType::Dictionary(Box::new(key_type.into()), Box::new(value.data_type()))
+            }
         }
     }
 
@@ -179,6 +185,9 @@ impl Key for Value {
             Value::List(_, _) => {
                 unreachable!("List value cannot be used as primary key.")
             }
+            Value::Dictionary(_key_type, _value) => {
+                unimplemented!("Dictionary value cannot be be used as primary key for now")
+            }
         }
     }
 }
@@ -232,6 +241,9 @@ impl PartialEq for Value {
                 s_sec == o_sec && s_nsec == o_nsec
             }
             (Value::List(ty1, a), Value::List(ty2, b)) => ty1.eq(ty2) && a.eq(b),
+            (Value::Dictionary(key_type1, value1), Value::Dictionary(key_type2, value2)) => {
+                key_type1 == key_type2 && value1.eq(value2)
+            }
             _ => false,
         }
     }
@@ -283,6 +295,9 @@ impl Ord for Value {
                 }
                 a.cmp(b)
             }
+            (Value::Dictionary(_key_type1, _value1), Value::Dictionary(_key_type2, _value2)) => {
+                unimplemented!("compare operation for dictionary is not supported")
+            }
             _ => {
                 panic!("cannot compare different types: {self:?} and {other:?}")
             }
@@ -332,6 +347,10 @@ impl Hash for Value {
                 ty.hash(state);
                 vec.hash(state);
             }
+            Value::Dictionary(key_type, value) => {
+                key_type.hash(state);
+                value.hash(state);
+            }
         }
     }
 }
@@ -368,6 +387,7 @@ impl fmt::Display for Value {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Value::Dictionary(key_type, value) => write!(f, "Dictionary({key_type:?}, {value:?})"),
         }
     }
 }
@@ -378,7 +398,7 @@ mod tests {
 
     use arrow::datatypes::{DataType, Field};
 
-    use crate::record::{AsValue, TimeUnit, Value};
+    use crate::record::{AsValue, DictionaryKeyType, TimeUnit, Value};
 
     #[test]
     fn test_value_basic_types() {
@@ -658,5 +678,23 @@ mod tests {
             assert!(l1 > l2);
             assert!(l2 > l3);
         }
+    }
+
+    #[test]
+    fn test_dict_value_eq() {
+        let d1 = Value::Dictionary(
+            DictionaryKeyType::Int8,
+            Box::new(Value::String("hello".into())),
+        );
+        let d2 = Value::Dictionary(
+            DictionaryKeyType::Int8,
+            Box::new(Value::String("hello".into())),
+        );
+        let d3 = Value::Dictionary(
+            DictionaryKeyType::Int8,
+            Box::new(Value::String("world".into())),
+        );
+        assert!(d1 == d2);
+        assert!(d1 != d3);
     }
 }

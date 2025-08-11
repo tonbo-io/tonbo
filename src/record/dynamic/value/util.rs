@@ -105,6 +105,11 @@ where
                 encode_arrow_datatype(field.data_type(), writer).await?;
                 field.is_nullable().encode(writer).await?;
             }
+            arrow::datatypes::DataType::Dictionary(key_type, value_type) => {
+                31u8.encode(writer).await?;
+                encode_arrow_datatype(key_type, writer).await?;
+                encode_arrow_datatype(value_type, writer).await?;
+            }
             _ => unreachable!(),
         };
         Ok(())
@@ -171,6 +176,14 @@ where
                     data_type,
                     is_nullable,
                 ))))
+            }
+            31 => {
+                let key_type = decode_arrow_datatype(reader).await?;
+                let value_type = decode_arrow_datatype(reader).await?;
+                Ok(arrow::datatypes::DataType::Dictionary(
+                    Box::new(key_type),
+                    Box::new(value_type),
+                ))
             }
 
             _ => unreachable!(),
@@ -253,6 +266,30 @@ mod tests {
     #[tokio::test]
     async fn test_arrow_datatype_encode_decode() {
         {
+            let mut buf = Vec::new();
+            let mut cursor = Cursor::new(&mut buf);
+            let data_types = [
+                DataType::UInt8,
+                DataType::UInt16,
+                DataType::UInt32,
+                DataType::UInt64,
+                DataType::Int8,
+                DataType::Int16,
+                DataType::Int32,
+                DataType::Int64,
+            ];
+            for data_type in data_types.iter() {
+                encode_arrow_datatype(data_type, &mut cursor).await.unwrap();
+            }
+
+            cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+            for data_type in data_types.iter() {
+                let decoded = decode_arrow_datatype(&mut cursor).await.unwrap();
+                assert_eq!(data_type, &decoded);
+            }
+        }
+        {
             let data_type = DataType::Binary;
             let mut buf = Vec::new();
             let mut cursor = Cursor::new(&mut buf);
@@ -280,6 +317,19 @@ mod tests {
             let mut buf = Vec::new();
             let mut cursor = Cursor::new(&mut buf);
             let data_type = DataType::List(Arc::new(Field::new("item", DataType::Int32, false)));
+            encode_arrow_datatype(&data_type, &mut cursor)
+                .await
+                .unwrap();
+
+            cursor.seek(SeekFrom::Start(0)).await.unwrap();
+            let decoded = decode_arrow_datatype(&mut cursor).await.unwrap();
+            assert_eq!(data_type, decoded);
+        }
+        {
+            let mut buf = Vec::new();
+            let mut cursor = Cursor::new(&mut buf);
+            let data_type =
+                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Int16));
             encode_arrow_datatype(&data_type, &mut cursor)
                 .await
                 .unwrap();
