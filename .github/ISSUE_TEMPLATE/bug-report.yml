@@ -4,12 +4,16 @@ labels: bug
 body:
   - type: textarea
     attributes:
-      label: More details about the bug
+      label: What is the current behavior?
     validations:
       required: true
   - type: textarea
     attributes:
       label: What is your expected behavior?
+    validations:
+      required: true
   - type: textarea
     attributes:
-      label: How to reproduce?
+      label: How to reproduce it?
+    validations:
+      required: true
