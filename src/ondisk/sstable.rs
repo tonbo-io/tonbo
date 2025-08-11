@@ -131,9 +131,8 @@ where
         let schema_descriptor = builder.metadata().file_metadata().schema_descr();
         let full_schema = builder.schema().clone();
 
-        // Safety: filter's lifetime relies on range's lifetime, sstable must not live longer than
-        // it
-        let filter = unsafe { get_range_filter::<R>(schema_descriptor, range, ts, pk_indices) };
+        // Build a row filter for ts and primary key range
+        let filter = get_range_filter::<R>(schema_descriptor, range, ts, pk_indices);
 
         Ok(SsTableScan::new(
             builder.with_row_filter(filter).build()?,

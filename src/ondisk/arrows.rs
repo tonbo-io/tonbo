@@ -25,45 +25,33 @@ enum BoundKind {
     Upper { inclusive: bool },
 }
 
-unsafe fn get_lower_bound<R>(
-    range: Bound<&<R::Schema as Schema>::Key>,
-) -> (Option<&'static <R::Schema as Schema>::Key>, BoundKind)
+fn lower_bound_owned<R>(
+    b: Bound<&<R::Schema as Schema>::Key>,
+) -> (Option<<R::Schema as Schema>::Key>, BoundKind)
 where
     R: Record,
 {
-    match range {
-        Bound::Included(key) => (
-            Some(&*(key as *const _)),
-            BoundKind::Lower { inclusive: true },
-        ),
-        Bound::Excluded(key) => (
-            Some(&*(key as *const _)),
-            BoundKind::Lower { inclusive: false },
-        ),
+    match b {
+        Bound::Included(k) => (Some(k.clone()), BoundKind::Lower { inclusive: true }),
+        Bound::Excluded(k) => (Some(k.clone()), BoundKind::Lower { inclusive: false }),
         Bound::Unbounded => (None, BoundKind::Lower { inclusive: true }),
     }
 }
 
-unsafe fn get_upper_bound<R>(
-    range: Bound<&<R::Schema as Schema>::Key>,
-) -> (Option<&'static <R::Schema as Schema>::Key>, BoundKind)
+fn upper_bound_owned<R>(
+    b: Bound<&<R::Schema as Schema>::Key>,
+) -> (Option<<R::Schema as Schema>::Key>, BoundKind)
 where
     R: Record,
 {
-    match range {
-        Bound::Included(key) => (
-            Some(&*(key as *const _)),
-            BoundKind::Upper { inclusive: true },
-        ),
-        Bound::Excluded(key) => (
-            Some(&*(key as *const _)),
-            BoundKind::Upper { inclusive: false },
-        ),
+    match b {
+        Bound::Included(k) => (Some(k.clone()), BoundKind::Upper { inclusive: true }),
+        Bound::Excluded(k) => (Some(k.clone()), BoundKind::Upper { inclusive: false }),
         Bound::Unbounded => (None, BoundKind::Upper { inclusive: true }),
     }
 }
 
-pub(crate) unsafe fn get_range_filter<R>(
+pub(crate) fn get_range_filter<R>(
     schema_descriptor: &SchemaDescriptor,
     range: (
         Bound<&<R::Schema as Schema>::Key>,
@@ -75,18 +63,22 @@ pub(crate) unsafe fn get_range_filter<R>(
 where
     R: Record,
 {
-    let (lower_key, lower_kind) = get_lower_bound::<R>(range.0);
-    let (upper_key, upper_kind) = get_upper_bound::<R>(range.1);
+    let (lower_key, lower_kind) = lower_bound_owned::<R>(range.0);
+    let (upper_key, upper_kind) = upper_bound_owned::<R>(range.1);
 
+    let ts_scalar = ts.to_arrow_scalar();
     let mut predictions: Vec<Box<dyn ArrowPredicate>> = vec![Box::new(ArrowPredicateFn::new(
         ProjectionMask::roots(schema_descriptor, [1]),
-        move |record_batch| lt_eq(record_batch.column(0), &ts.to_arrow_scalar() as &dyn Datum),
+        move |record_batch| lt_eq(record_batch.column(0), &ts_scalar as &dyn Datum),
     ))];
+
     if let Some(lower_key) = lower_key {
+        let pk_len = pk_indices.len();
         predictions.push(Box::new(ArrowPredicateFn::new(
             ProjectionMask::roots(schema_descriptor, pk_indices.to_vec()),
             move |record_batch| {
                 let datums = lower_key.to_arrow_datums();
+                debug_assert_eq!(datums.len(), pk_len);
                 let n = datums.len();
                 let mut acc: Option<BooleanArray> = None;
                 for i in 0..n {
@@ -117,12 +109,14 @@ where
             },
         )));
     }
+
     if let Some(upper_key) = upper_key {
-        let pk_indices = pk_indices.to_vec();
+        let pk_len = pk_indices.len();
         predictions.push(Box::new(ArrowPredicateFn::new(
-            ProjectionMask::roots(schema_descriptor, pk_indices),
+            ProjectionMask::roots(schema_descriptor, pk_indices.to_vec()),
             move |record_batch| {
                 let datums = upper_key.to_arrow_datums();
+                debug_assert_eq!(datums.len(), pk_len);
                 let n = datums.len();
                 let mut acc: Option<BooleanArray> = None;
                 for i in 0..n {
