@@ -46,7 +46,7 @@ impl NestedBuilder {
     /// Create a new [`NestedBuilder``] with the specified field and capacity
     pub fn with_capacity(field: FieldRef, capacity: usize) -> Self {
         // FIXME: make_builder only support limited dictionary type
-        let builder = make_builder(field.data_type(), capacity);
+        let builder = Self::make_builder(field.data_type(), capacity);
         Self {
             builder,
             field,
@@ -223,7 +223,11 @@ impl NestedBuilder {
                                 let bd = NestedBuilder::as_builder_mut::<FixedSizeBinaryDictionaryBuilder<$key_dt>>(
                                     $builder,
                                 );
-                                bd.append_value($opt.as_bytes());
+
+                                match $opt.as_bytes_opt() {
+                                    Some(v) => bd.append_value(v),
+                                    None => bd.append_null()
+                                }
                             }
                             t => unreachable!("Dictionary value type {t:?} is not currently supported"),
                         }
@@ -344,6 +348,113 @@ impl NestedBuilder {
 }
 
 impl NestedBuilder {
+    fn make_builder(data_type: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> {
+        match data_type {
+            t @ DataType::Dictionary(key_type, value_type) => {
+                macro_rules! dict_builder {
+                    ($key_type:ty) => {
+                        match &**value_type {
+                            DataType::Int8 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int8Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Int16 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int16Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Int32 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int32Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Int64 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int64Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt8 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, UInt8Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt16 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<
+                                    $key_type,
+                                    UInt16Type,
+                                > = PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt32 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<
+                                    $key_type,
+                                    UInt32Type,
+                                > = PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt64 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<
+                                    $key_type,
+                                    UInt64Type,
+                                > = PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Utf8 => {
+                                let dict_builder: StringDictionaryBuilder<$key_type> =
+                                    StringDictionaryBuilder::with_capacity(capacity, 256, 1024);
+                                Box::new(dict_builder)
+                            }
+                            DataType::LargeUtf8 => {
+                                let dict_builder: LargeStringDictionaryBuilder<$key_type> =
+                                    LargeStringDictionaryBuilder::with_capacity(
+                                        capacity, 256, 1024,
+                                    );
+                                Box::new(dict_builder)
+                            }
+                            DataType::Binary => {
+                                let dict_builder: BinaryDictionaryBuilder<$key_type> =
+                                    BinaryDictionaryBuilder::with_capacity(capacity, 256, 1024);
+                                Box::new(dict_builder)
+                            }
+                            DataType::FixedSizeBinary(w) => {
+                                let dict_builder: FixedSizeBinaryDictionaryBuilder<$key_type> =
+                                    FixedSizeBinaryDictionaryBuilder::with_capacity(
+                                        capacity, 256, *w as i32,
+                                    );
+                                Box::new(dict_builder)
+                            }
+                            DataType::LargeBinary => {
+                                let dict_builder: LargeBinaryDictionaryBuilder<$key_type> =
+                                    LargeBinaryDictionaryBuilder::with_capacity(
+                                        capacity, 256, 1024,
+                                    );
+                                Box::new(dict_builder)
+                            }
+                            t => panic!("Dictionary value type {t:?} is not currently supported"),
+                        }
+                    };
+                }
+                match &**key_type {
+                    DataType::Int8 => dict_builder!(Int8Type),
+                    DataType::Int16 => dict_builder!(Int16Type),
+                    DataType::Int32 => dict_builder!(Int32Type),
+                    DataType::Int64 => dict_builder!(Int64Type),
+                    DataType::UInt8 => dict_builder!(UInt8Type),
+                    DataType::UInt16 => dict_builder!(UInt16Type),
+                    DataType::UInt32 => dict_builder!(UInt32Type),
+                    DataType::UInt64 => dict_builder!(UInt64Type),
+                    _ => {
+                        panic!(
+                            "Data type {t:?} with key type {key_type:?} is not currently supported"
+                        )
+                    }
+                }
+            }
+            _ => make_builder(data_type, capacity),
+        }
+    }
+
     fn default_value(data_type: &DataType) -> ValueRef<'_> {
         match data_type {
             DataType::Null => ValueRef::Null,
@@ -678,41 +789,81 @@ mod tests {
 
     #[test]
     fn test_dict_append_null_value() {
-        let city_data_type =
-            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Binary));
-        let field = Arc::new(Field::new("countries", city_data_type.clone(), false));
-        let mut builder = NestedBuilder::with_capacity(field, 2);
+        {
+            let city_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Binary));
+            let field = Arc::new(Field::new("countries", city_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
 
-        builder.append_value(ValueRef::Null);
-        builder.append_value(ValueRef::Dictionary(
-            crate::record::DictionaryKeyType::Int8,
-            Box::new(ValueRef::Null),
-        ));
+            builder.append_value(ValueRef::Null);
+            builder.append_value(ValueRef::Dictionary(
+                crate::record::DictionaryKeyType::Int8,
+                Box::new(ValueRef::Null),
+            ));
 
-        let array = builder.finish();
-        assert_eq!(array.len(), 2);
-        assert!(array.is_null(0));
-        assert!(array.is_null(1));
+            let array = builder.finish();
+            assert_eq!(array.len(), 2);
+            assert!(array.is_null(0));
+            assert!(array.is_null(1));
+        }
+        {
+            let dict_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Int64));
+            let field = Arc::new(Field::new("dict_code", dict_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
+
+            builder.append_value(ValueRef::Null);
+            builder.append_value(ValueRef::Dictionary(
+                crate::record::DictionaryKeyType::Int8,
+                Box::new(ValueRef::Null),
+            ));
+
+            let array = builder.finish();
+            assert_eq!(array.len(), 2);
+            assert!(array.is_null(0));
+            assert!(array.is_null(1));
+        }
     }
 
     #[test]
     fn test_dict_append_default_value() {
-        let city_data_type =
-            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::LargeUtf8));
-        let field = Arc::new(Field::new("countries", city_data_type.clone(), false));
-        let mut builder = NestedBuilder::with_capacity(field, 2);
+        {
+            let city_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::LargeUtf8));
+            let field = Arc::new(Field::new("countries", city_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
 
-        builder.append_default();
-        builder.append_default();
+            builder.append_default();
+            builder.append_default();
 
-        let array = builder.finish();
-        let dict_array = array.as_dictionary::<Int8Type>();
-        assert_eq!(dict_array.len(), 2);
-        let values = dict_array.values().as_string::<i64>();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values.value(0), "");
+            let array = builder.finish();
+            let dict_array = array.as_dictionary::<Int8Type>();
+            assert_eq!(dict_array.len(), 2);
+            let values = dict_array.values().as_string::<i64>();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values.value(0), "");
 
-        let keys = dict_array.keys();
-        assert_eq!(keys.values(), &[0, 0]);
+            let keys = dict_array.keys();
+            assert_eq!(keys.values(), &[0, 0]);
+        }
+        {
+            let city_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::UInt64));
+            let field = Arc::new(Field::new("dict_code", city_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
+
+            builder.append_default();
+            builder.append_default();
+
+            let array = builder.finish();
+            let dict_array = array.as_dictionary::<Int8Type>();
+            assert_eq!(dict_array.len(), 2);
+            let values = dict_array.values().as_primitive::<UInt64Type>();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values.value(0), 0);
+
+            let keys = dict_array.keys();
+            assert_eq!(keys.values(), &[0, 0]);
+        }
     }
 }

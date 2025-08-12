@@ -867,6 +867,11 @@ mod tests {
         let ty2 = DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8));
         let ty3 = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
         let ty4 = DataType::Dictionary(Box::new(DataType::Int64), Box::new(DataType::Binary));
+        let ty5 = DataType::Dictionary(
+            Box::new(DataType::UInt16),
+            Box::new(DataType::FixedSizeBinary(16)),
+        );
+        let ty6 = DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::UInt8));
         let schema = DynSchema::new(
             &vec![
                 DynamicField::new("id".into(), DataType::UInt64, false),
@@ -874,6 +879,8 @@ mod tests {
                 DynamicField::new("countries".into(), ty2.clone(), true),
                 DynamicField::new("cities".into(), ty3.clone(), true),
                 DynamicField::new("bytes".into(), ty4.clone(), true),
+                DynamicField::new("span_id".into(), ty5.clone(), true),
+                DynamicField::new("number".into(), ty6.clone(), true),
             ],
             0,
         );
@@ -897,6 +904,11 @@ mod tests {
                     DictionaryKeyType::Int64,
                     Box::new(Value::Binary(b"tonbo".to_vec())),
                 ),
+                Value::Dictionary(
+                    DictionaryKeyType::UInt16,
+                    Box::new(Value::FixedSizeBinary(b"0000000000000001".to_vec(), 16)),
+                ),
+                Value::Dictionary(DictionaryKeyType::UInt8, Box::new(Value::UInt8(1u8))),
             ],
             0,
         );
@@ -909,6 +921,8 @@ mod tests {
                     DictionaryKeyType::Int32,
                     Box::new(Value::String("Tokyo".to_string())),
                 ),
+                Value::Null,
+                Value::Null,
                 Value::Null,
             ],
             0,

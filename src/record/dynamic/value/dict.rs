@@ -53,7 +53,7 @@ impl From<&arrow::datatypes::DataType> for DictionaryKeyType {
             arrow::datatypes::DataType::Int32 => DictionaryKeyType::Int32,
             arrow::datatypes::DataType::Int64 => DictionaryKeyType::Int64,
             arrow::datatypes::DataType::UInt8 => DictionaryKeyType::UInt8,
-            arrow::datatypes::DataType::UInt16 => DictionaryKeyType::Int16,
+            arrow::datatypes::DataType::UInt16 => DictionaryKeyType::UInt16,
             arrow::datatypes::DataType::UInt32 => DictionaryKeyType::UInt32,
             arrow::datatypes::DataType::UInt64 => DictionaryKeyType::UInt64,
             _ => unreachable!("can not convert `{value}` to `DictionaryKeyType`"),
