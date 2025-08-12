@@ -1,5 +1,5 @@
 pub(crate) mod error;
-pub(crate) mod leveled;
+pub mod leveled;
 
 use std::sync::Arc;
 
