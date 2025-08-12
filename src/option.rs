@@ -32,18 +32,12 @@ pub enum Order {
 
 pub enum CompactionOption {
     Leveled(LeveledOptions),
-    // Tiered(TieredOptions),
-    // LazyLeveled(LazyLeveledOptions),
 }
 
 impl std::fmt::Debug for CompactionOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CompactionOption::Leveled(opts) => f.debug_tuple("Leveled").field(opts).finish(),
-            // CompactionOption::Tiered(opts) => f.debug_tuple("Tiered").field(opts).finish(),
-            // CompactionOption::LazyLeveled(opts) => {
-            // f.debug_tuple("LazyLeveled").field(opts).finish()
-            // }
         }
     }
 }
@@ -52,8 +46,6 @@ impl Clone for CompactionOption {
     fn clone(&self) -> Self {
         match self {
             CompactionOption::Leveled(opts) => CompactionOption::Leveled(opts.clone()),
-            // CompactionOption::Tiered(opts) => CompactionOption::Tiered(opts.clone()),
-            // CompactionOption::LazyLeveled(opts) => CompactionOption::LazyLeveled(opts.clone()),
         }
     }
 }
@@ -151,18 +143,6 @@ impl DbOption {
         self.compaction_option = CompactionOption::Leveled(options);
         self
     }
-
-    // /// Configure tiered compaction with custom options
-    // pub fn tiered_compaction(mut self, options: TieredOptions) -> Self {
-    // self.compaction_option = CompactionOption::Tiered(options);
-    // self
-    // }
-    //
-    // Configure lazy leveled compaction with custom options
-    // pub fn lazy_leveled_compaction(mut self, options: LazyLeveledOptions) -> Self {
-    // self.compaction_option = CompactionOption::LazyLeveled(options);
-    // self
-    // }
 
     /// Set maximum SST file size
     pub fn max_sst_file_size(mut self, value: usize) -> Self {

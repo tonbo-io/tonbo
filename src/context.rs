@@ -43,7 +43,7 @@ where
         self.manifest.as_ref()
     }
 
-    pub(crate) fn storage_manager(&self) -> &StoreManager {
+    pub fn storage_manager(&self) -> &StoreManager {
         &self.manager
     }
 
@@ -61,10 +61,6 @@ where
 
     pub(crate) fn increase_ts(&self) -> Timestamp {
         self.manifest.increase_ts()
-    }
-
-    pub fn manager(&self) -> &Arc<StoreManager> {
-        &self.manager
     }
 
     pub async fn current_manifest(&self) -> VersionRef<R> {

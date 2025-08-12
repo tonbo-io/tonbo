@@ -69,7 +69,7 @@ mod test {
                     recover_wal_ids,
                     batches,
                     &self.record_schema,
-                    self.ctx.manager(),
+                    &Arc::new(self.ctx.storage_manager()),
                 )
                 .await?
                 {

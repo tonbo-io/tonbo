@@ -63,7 +63,6 @@ where
 ///
 /// Transaction will store all mutations in local [`BTreeMap`] and only write to memtable when
 /// committed successfully. Otherwise, all mutations will be rolled back.
-#[allow(private_bounds)]
 pub struct Transaction<'txn, R, E>
 where
     R: Record,
@@ -76,7 +75,6 @@ where
     lock_map: LockMap<<R::Schema as Schema>::Key>,
 }
 
-#[allow(private_bounds)]
 impl<'txn, R, E> Transaction<'txn, R, E>
 where
     R: Record + Send,

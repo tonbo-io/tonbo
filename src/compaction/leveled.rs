@@ -1,16 +1,15 @@
-use std::{cmp, ops::Bound, sync::Arc};
+use std::{cmp, future::Future, ops::Bound, sync::Arc};
 
 use async_trait::async_trait;
 use fusio::MaybeSend;
-use fusio_parquet::writer::AsyncWriter;
-use parquet::arrow::{AsyncArrowWriter, ProjectionMask};
+use parquet::arrow::ProjectionMask;
 use ulid::Ulid;
 
 use super::{CompactionError, Compactor};
 use crate::{
     compaction::RecordSchema,
     context::Context,
-    fs::{generate_file_id, manager::StoreManager, FileId, FileType},
+    fs::{FileId, FileType},
     inmem::immutable::ImmutableMemTable,
     ondisk::sstable::{SsTable, SsTableID},
     record::{self, Record},
@@ -24,6 +23,25 @@ pub struct LeveledTask {
     pub input: Vec<(usize, Vec<Ulid>)>,
 }
 
+/// A compactor that enforces a leveled compaction strategy over all SST levels.
+///
+/// The `LeveledCompactor` drives both minor flush‐to‐level‐0 compactions and
+/// multi‐level major compactions, combining SST files up through the levels.
+/// It combines immutable memtables into sorted SSTs (minor compaction), then
+/// repeatedly merges overlapping SSTs across adjacent levels (major compaction):
+///
+/// 1. Minor compaction (level 0):
+///    - Converts the current in‑memory memtable into one or more SST files
+///    - Ensures L0 does not grow unbounded by merging small SSTs once their count exceeds a
+///      configured chunk size
+///
+/// 2. Major compaction (levels ≥ 1):
+///    - Scans all SSTs in level L that overlap a given key range, plus any overlapping SSTs in
+///      level L+1
+///    - Merges and rewrites them into new SSTs in level L+1, bounded by size thresholds
+///    - Deletes the old SST files from both levels after the new files are safely written
+///
+/// This is currently the main way Tonbo does compaction
 pub struct LeveledCompactor<R>
 where
     R: Record,
@@ -109,11 +127,11 @@ where
         &self,
         batches: Option<
             &[(
-                Option<crate::fs::FileId>,
-                crate::inmem::immutable::ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
             )],
         >,
-        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        recover_wal_ids: Option<Vec<FileId>>,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>> {
         // Perform minor compaction if batches are provided
@@ -129,9 +147,8 @@ where
             {
                 // Update manifest with new L0 SST
                 let version_ref = self.ctx.manifest.current().await;
-                let mut version_edits =
-                    vec![crate::version::edit::VersionEdit::Add { level: 0, scope }];
-                version_edits.push(crate::version::edit::VersionEdit::LatestTimeStamp {
+                let mut version_edits = vec![VersionEdit::Add { level: 0, scope }];
+                version_edits.push(VersionEdit::LatestTimeStamp {
                     ts: version_ref.increase_ts(),
                 });
 
@@ -155,20 +172,17 @@ where
     R: Record,
     <R::Schema as record::Schema>::Columns: Send + Sync,
 {
-    #[allow(private_interfaces)]
     fn check_then_compaction<'a>(
         &'a self,
         batches: Option<
             &'a [(
-                Option<crate::fs::FileId>,
-                crate::inmem::immutable::ImmutableMemTable<
-                    <R::Schema as crate::record::Schema>::Columns,
-                >,
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
             )],
         >,
-        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        recover_wal_ids: Option<Vec<FileId>>,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a {
+    ) -> impl Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a {
         <Self as Compactor<R>>::check_then_compaction(self, batches, recover_wal_ids, is_manual)
     }
 }
@@ -178,44 +192,39 @@ where
     R: Record,
     <R::Schema as record::Schema>::Columns: Send + Sync,
 {
-    pub async fn should_major_compact(&self) -> bool {
-        // Check if any level needs major compaction
+    pub async fn should_major_compact(&self) -> Option<usize> {
+        // Check if any level needs major compaction and return the first level that needs it
         let version_ref = self.ctx.manifest.current().await;
-        for level in 0..MAX_LEVEL - 2 {
+        for level in 0..MAX_LEVEL - 1 {
             if Self::is_threshold_exceeded_major(&self.options, &version_ref, level) {
-                return true;
+                return Some(level);
             }
         }
-        false
+        None
     }
 
-    pub async fn plan_major(&self) -> Option<LeveledTask> {
+    pub async fn plan_major(&self, level: usize) -> Option<LeveledTask> {
         let version_ref = self.ctx.manifest.current().await;
 
-        // Find the first level that needs compaction
-        for level in 0..MAX_LEVEL - 2 {
-            if Self::is_threshold_exceeded_major(&self.options, &version_ref, level) {
-                // Collect file IDs from the level that needs compaction
-                let level_files: Vec<Ulid> = version_ref.level_slice[level]
+        // Collect file IDs from the specified level that needs compaction
+        let level_files: Vec<Ulid> = version_ref.level_slice[level]
+            .iter()
+            .map(|scope| scope.gen)
+            .collect();
+
+        if !level_files.is_empty() {
+            let mut input = vec![(level, level_files)];
+            if level + 1 < MAX_LEVEL {
+                let next_level_files: Vec<Ulid> = version_ref.level_slice[level + 1]
                     .iter()
                     .map(|scope| scope.gen)
                     .collect();
 
-                if !level_files.is_empty() {
-                    let mut input = vec![(level, level_files)];
-                    if level + 1 < MAX_LEVEL {
-                        let next_level_files: Vec<Ulid> = version_ref.level_slice[level + 1]
-                            .iter()
-                            .map(|scope| scope.gen)
-                            .collect();
-
-                        if !next_level_files.is_empty() {
-                            input.push((level + 1, next_level_files));
-                        }
-                    }
-                    return Some(LeveledTask { input });
+                if !next_level_files.is_empty() {
+                    input.push((level + 1, next_level_files));
                 }
             }
+            return Some(LeveledTask { input });
         }
         None
     }
@@ -277,8 +286,8 @@ where
     }
 
     async fn major_compaction(&self, is_manual: bool) -> Result<(), CompactionError<R>> {
-        while self.should_major_compact().await {
-            if let Some(task) = self.plan_major().await {
+        while let Some(level) = self.should_major_compact().await {
+            if let Some(task) = self.plan_major(level).await {
                 self.execute_major(task).await?;
             } else {
                 break;
@@ -292,75 +301,11 @@ where
         Ok(())
     }
 
-    // Combine immutable memtables into SST file
-    async fn minor_compaction(
-        option: &DbOption,
-        recover_wal_ids: Option<Vec<FileId>>,
-        batches: &[(
-            Option<FileId>,
-            ImmutableMemTable<<R::Schema as RecordSchema>::Columns>,
-        )],
-        schema: &R::Schema,
-        manager: &StoreManager,
-    ) -> Result<Option<Scope<<R::Schema as RecordSchema>::Key>>, CompactionError<R>> {
-        if !batches.is_empty() {
-            let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
-            let level_0_fs = manager.get_fs(level_0_path);
-
-            let mut min = None;
-            let mut max = None;
-
-            let gen = generate_file_id();
-            let mut wal_ids = Vec::with_capacity(batches.len());
-
-            // Creates writer to write Arrow record batches into parquet
-            let mut writer = AsyncArrowWriter::try_new(
-                AsyncWriter::new(
-                    level_0_fs
-                        .open_options(
-                            &option.table_path(gen, 0),
-                            FileType::Parquet.open_options(false),
-                        )
-                        .await?,
-                ),
-                schema.arrow_schema().clone(),
-                Some(option.write_parquet_properties.clone()),
-            )?;
-
-            // Retrieve WAL ids so recovery is possible if the database crashes before
-            // the SST id is written to the `Version`
-            if let Some(mut recover_wal_ids) = recover_wal_ids {
-                wal_ids.append(&mut recover_wal_ids);
-            }
-            for (file_id, batch) in batches {
-                if let (Some(batch_min), Some(batch_max)) = batch.scope() {
-                    if matches!(min.as_ref().map(|min| min > batch_min), Some(true) | None) {
-                        min = Some(batch_min.clone())
-                    }
-                    if matches!(max.as_ref().map(|max| max < batch_max), Some(true) | None) {
-                        max = Some(batch_max.clone())
-                    }
-                }
-                writer.write(batch.as_record_batch()).await?;
-                if let Some(file_id) = file_id {
-                    wal_ids.push(*file_id);
-                }
-            }
-            let file_size = writer.bytes_written() as u64;
-            writer.close().await?;
-            return Ok(Some(Scope {
-                min: min.ok_or(CompactionError::EmptyLevel)?,
-                max: max.ok_or(CompactionError::EmptyLevel)?,
-                gen,
-                wal_ids: Some(wal_ids),
-                file_size,
-            }));
-        }
-        Ok(None)
-    }
-
     // Accumulate all SST files in a stream that fall within the min/max range in `level` and `level
     // + 1`. Then use those files to build the new SST files and delete the olds ones
+    //
+    // For manual compaction we only compact files to the bottom most level that still contains
+    // files
     #[allow(clippy::too_many_arguments)]
     async fn major_compaction_impl(
         version: &Version<R>,
@@ -608,6 +553,7 @@ pub(crate) mod tests {
         compaction::{
             leveled::{LeveledCompactor, LeveledOptions},
             tests::{build_parquet_table, build_version},
+            Compactor,
         },
         context::Context,
         executor::tokio::TokioExecutor,
@@ -879,13 +825,9 @@ pub(crate) mod tests {
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            VersionSet::<Test, crate::executor::tokio::TokioExecutor>::new(
-                clean_sender,
-                option.clone(),
-                manager.clone(),
-            )
-            .await
-            .unwrap(),
+            VersionSet::<Test, TokioExecutor>::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
         );
         let ctx = Context::new(
             manager.clone(),
@@ -1045,13 +987,9 @@ pub(crate) mod tests {
 
         let (_, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
-            VersionSet::<Test, crate::executor::tokio::TokioExecutor>::new(
-                clean_sender,
-                option.clone(),
-                manager.clone(),
-            )
-            .await
-            .unwrap(),
+            VersionSet::<Test, TokioExecutor>::new(clean_sender, option.clone(), manager.clone())
+                .await
+                .unwrap(),
         );
         let ctx = Context::new(
             manager.clone(),

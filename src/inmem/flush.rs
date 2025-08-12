@@ -30,6 +30,7 @@ where
     R: Record,
     <R::Schema as RecordSchema>::Columns: Send + Sync,
 {
+    // Reset trigger
     db_storage.trigger.reset();
 
     // Add the mutable memtable into the immutable memtable

@@ -12,7 +12,8 @@ use parquet::arrow::AsyncArrowWriter;
 
 use crate::{
     compaction::error::CompactionError,
-    fs::{generate_file_id, FileType},
+    fs::{generate_file_id, manager::StoreManager, FileId, FileType},
+    inmem::immutable::ImmutableMemTable,
     record::{self, ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
@@ -26,30 +27,32 @@ pub trait Compactor<R>: MaybeSend + MaybeSync
 where
     R: Record,
 {
-    /// Orchestrate flush + major compaction.
-    /// This is the only method custom compactors need to implement.
+    /// Call minor caompaction + major compaction.
+    /// This is the only method custom compactors must implement.
     async fn check_then_compaction(
         &self,
         batches: Option<
             &[(
-                Option<crate::fs::FileId>,
-                crate::inmem::immutable::ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
             )],
         >,
-        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        recover_wal_ids: Option<Vec<FileId>>,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>>;
 
     /// Perform minor compaction on immutable memtables to create L0 SST files
+    /// Basically the same for all compction strtegies. Think carefully if want to override this
+    /// method.
     async fn minor_compaction(
         option: &DbOption,
-        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        recover_wal_ids: Option<Vec<FileId>>,
         batches: &[(
-            Option<crate::fs::FileId>,
-            crate::inmem::immutable::ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+            Option<FileId>,
+            ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
         )],
         schema: &R::Schema,
-        manager: &crate::fs::manager::StoreManager,
+        manager: &StoreManager,
     ) -> Result<Option<Scope<<R::Schema as record::Schema>::Key>>, CompactionError<R>>
     where
         Self: Sized,
@@ -57,8 +60,6 @@ where
     {
         use fusio_parquet::writer::AsyncWriter;
         use parquet::arrow::AsyncArrowWriter;
-
-        use crate::fs::{generate_file_id, FileType};
 
         if !batches.is_empty() {
             let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);

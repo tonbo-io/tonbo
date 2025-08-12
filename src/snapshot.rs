@@ -12,7 +12,6 @@ use crate::{
     DbError, DbStorage, Projection, Scan,
 };
 
-#[allow(private_bounds)]
 pub struct Snapshot<'s, R, E>
 where
     R: Record,
@@ -26,7 +25,6 @@ where
     ctx: Arc<Context<R>>,
 }
 
-#[allow(private_bounds)]
 impl<'s, R, E> Snapshot<'s, R, E>
 where
     R: Record,

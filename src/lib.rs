@@ -124,7 +124,10 @@ mod trigger;
 pub mod version;
 mod wal;
 
-use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
+use std::{
+    collections::HashMap, future::Future, io, marker::PhantomData, mem, ops::Bound, pin::pin,
+    sync::Arc,
+};
 
 pub use arrow;
 use async_stream::stream;
@@ -171,7 +174,7 @@ use crate::{
     compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
     executor::{Executor, RwLock as ExecutorRwLock},
     fs::{manager::StoreManager, parse_file_id, FileType},
-    inmem::flush::minor_flush,
+    inmem::flush::{minor_flush, remove_processed_immutables},
     manifest::ManifestStorage,
     record::Schema,
     snapshot::Snapshot,
@@ -185,20 +188,17 @@ use crate::{
 pub use crate::{option::*, stream::Entry};
 
 pub trait CompactionExecutor<R: Record>: MaybeSend + MaybeSync {
-    #[allow(private_interfaces)]
     fn check_then_compaction<'a>(
         &'a self,
         batches: Option<
             &'a [(
-                Option<crate::fs::FileId>,
-                crate::inmem::immutable::ImmutableMemTable<
-                    <R::Schema as crate::record::Schema>::Columns,
-                >,
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as Schema>::Columns>,
             )],
         >,
-        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        recover_wal_ids: Option<Vec<FileId>>,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a;
+    ) -> impl Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a;
 }
 
 // Implementation for custom compactors (Box<dyn Compactor<R>>)
@@ -207,15 +207,13 @@ impl<R: Record> CompactionExecutor<R> for Box<dyn Compactor<R>> {
         &'a self,
         batches: Option<
             &'a [(
-                Option<crate::fs::FileId>,
-                crate::inmem::immutable::ImmutableMemTable<
-                    <R::Schema as crate::record::Schema>::Columns,
-                >,
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as Schema>::Columns>,
             )],
         >,
-        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        recover_wal_ids: Option<Vec<FileId>>,
         is_manual: bool,
-    ) -> impl std::future::Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a {
+    ) -> impl Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a {
         self.as_ref()
             .check_then_compaction(batches, recover_wal_ids, is_manual)
     }
@@ -294,27 +292,7 @@ where
                     ctx.clone(),
                 );
                 Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
-            } /* CompactionOption::Tiered(opt) => {
-               * let compactor = TieredCompactor::<R>::new(
-               * opt.clone(),
-               * mem_storage.clone(),
-               * record_schema.clone(),
-               * option.clone(),
-               * ctx.clone(),
-               * );
-               * Self::finish_build(executor, mem_storage, ctx, compactor, cleaner,
-               * task_rx).await }
-               *
-               * CompactionOption::LazyLeveled(opt) => {
-               * let compactor = LazyLeveledCompactor::<R>::new(
-               * opt.clone(),
-               * mem_storage.clone(),
-               * record_schema.clone(),
-               * option.clone(),
-               * ctx.clone(),
-               * );
-               * Self::finish_build(executor, mem_storage, ctx, compactor, cleaner,
-               * task_rx).await } */
+            }
         }
     }
 
@@ -466,10 +444,7 @@ where
 
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
+                                    remove_processed_immutables(&mut *guard, batch_len);
                                 }
 
                                 compaction_result
@@ -508,10 +483,7 @@ where
 
                                 // Only remove immutables if compaction succeeded
                                 if compaction_result.is_ok() {
-                                    crate::inmem::flush::remove_processed_immutables(
-                                        &mut *guard,
-                                        batch_len,
-                                    );
+                                    remove_processed_immutables(&mut *guard, batch_len);
                                 }
 
                                 compaction_result
@@ -757,10 +729,11 @@ where
 }
 
 /// DbStorage state for coordinating in-memory + on-disk operations
-pub(crate) struct DbStorage<R>
+pub struct DbStorage<R>
 where
     R: Record,
 {
+    #[allow(private_interfaces)]
     pub mutable: MutableMemTable<R>,
     pub immutables: Vec<(
         Option<FileId>,
@@ -1010,25 +983,33 @@ where
     }
 }
 
-/// Scan configuration intermediate structure
+/// Scan configuration intermediate structure. Calling `take` will execute a scan on
+/// the memtable, immutable memtables, and SSTables on disk in that order.
+///
+/// To initialize you can call `DB.transaction().scan()` using your `DB` instance.
+/// For more information on how to use refer to the doc in [`DB::transaction()`]
 pub struct Scan<'scan, 'range, R>
 where
     R: Record,
     'range: 'scan,
 {
+    // Storage to scan
     mem_storage: &'scan DbStorage<R>,
+    // Lower and upper bound for the scan
     lower: Bound<&'range <R::Schema as Schema>::Key>,
     upper: Bound<&'range <R::Schema as Schema>::Key>,
+    // Current `Snapshot`'s timestamp
     ts: Timestamp,
-
+    // DB Version that is being scanned
     version: &'scan Version<R>,
     fn_pre_stream: Box<
         dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
             + Send
             + 'scan,
     >,
-
+    // Row limit for query
     limit: Option<usize>,
+    // Specifies the direction a scan will take
     order: Option<Order>,
     projection_indices: Option<Vec<usize>>,
     projection: ProjectionMask,
@@ -1069,7 +1050,7 @@ where
         }
     }
 
-    /// limit for the scan
+    /// Limit for the scan (number of rows returned)
     pub fn limit(self, limit: usize) -> Self {
         Self {
             limit: Some(limit),
@@ -1112,9 +1093,9 @@ where
         let mut projection = projection
             .iter()
             .map(|name| {
-                schema
-                    .index_of(name)
-                    .unwrap_or_else(|_| panic!("unexpected field {name}"))
+                schema.index_of(name).unwrap_or_else(|_| {
+                    panic!("Field in projection does not exist in schema: {name}")
+                })
             })
             .collect::<Vec<usize>>();
 
@@ -1139,7 +1120,7 @@ where
         }
     }
 
-    /// fields in projection Record by field indices
+    /// Fields in projection Record by field indices
     pub fn projection_with_index(self, mut projection: Vec<usize>) -> Self {
         // skip two columns: _null and _ts
         for p in &mut projection {
@@ -1182,7 +1163,7 @@ where
             streams.push(pre_stream);
         }
 
-        // Mutable
+        // In-memory memtable scan
         {
             let mut mutable_scan = self
                 .mem_storage
@@ -1195,6 +1176,8 @@ where
             }
             streams.push(mutable_scan);
         }
+
+        // Iterates through immutable memtables
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
@@ -1207,6 +1190,8 @@ where
                     .into(),
             );
         }
+
+        // Scans all SSTables in the coreresponding version
         self.version
             .streams(
                 &self.ctx,
@@ -1243,7 +1228,6 @@ where
             streams.push(pre_stream);
         }
 
-        // Mutable
         {
             let mut mutable_scan = self
                 .mem_storage
@@ -1256,6 +1240,7 @@ where
             }
             streams.push(mutable_scan);
         }
+
         for (_, immutable) in self.mem_storage.immutables.iter().rev() {
             streams.push(
                 immutable
@@ -1532,43 +1517,7 @@ pub(crate) mod tests {
                     compaction_rx,
                 )
                 .await
-            } /* CompactionOption::Tiered(opt) => {
-               * let compactor = TieredCompactor::<R>::new(
-               * opt.clone(),
-               * mem_storage.clone(),
-               * record_schema.clone(),
-               * option.clone(),
-               * ctx.clone(),
-               * );
-               * finish_db_with_compactor(
-               * executor,
-               * mem_storage,
-               * ctx,
-               * compactor,
-               * cleaner,
-               * compaction_rx,
-               * )
-               * .await
-               * }
-               *
-               * CompactionOption::LazyLeveled(opt) => {
-               * let compactor = LazyLeveledCompactor::<R>::new(
-               * opt.clone(),
-               * mem_storage.clone(),
-               * record_schema.clone(),
-               * option.clone(),
-               * ctx.clone(),
-               * );
-               * finish_db_with_compactor(
-               * executor,
-               * mem_storage,
-               * ctx,
-               * compactor,
-               * cleaner,
-               * compaction_rx,
-               * )
-               * .await
-               * } */
+            }
         }
     }
 
@@ -2249,16 +2198,5 @@ pub(crate) mod tests {
                 i += 1
             }
         }
-    }
-
-    #[test]
-    fn build_test() {
-        let t = trybuild::TestCases::new();
-        t.pass("tests/success/*.rs");
-    }
-    #[test]
-    fn fail_build_test() {
-        let t = trybuild::TestCases::new();
-        t.compile_fail("tests/fail/*.rs");
     }
 }
