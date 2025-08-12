@@ -289,6 +289,7 @@ where
                                 None,
                                 ProjectionMask::all(),
                                 None, // Default order for compaction
+                                instance.primary_key_indices(),
                             )
                             .await?,
                     });
@@ -307,6 +308,7 @@ where
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
                     None, // Default order for compaction
+                    instance.primary_key_indices(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
@@ -333,6 +335,7 @@ where
                     level_l_fs.clone(),
                     ctx.parquet_lru.clone(),
                     None, // Default order for compaction
+                    instance.primary_key_indices(),
                 )
                 .ok_or(CompactionError::EmptyLevel)?;
 
