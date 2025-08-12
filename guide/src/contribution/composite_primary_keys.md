@@ -2,6 +2,15 @@
 
 This document outlines a practical, incremental plan to add composite (multi-column) primary key support to Tonbo while maintaining backward compatibility. It explains design goals, changes required across the codebase, and a step-by-step implementation and validation plan.
 
+## Current Status (2025-08-11)
+
+- Phase 1: Completed. Plural `Schema` APIs, fixed projections, and Parquet writer configuration are implemented for single-PK schemas.
+  - `Schema` now exposes `primary_key_indices()` and `primary_key_paths_and_sorting()` (src/record/mod.rs). Macro-generated single-PK schemas return one-element slices.
+  - Read paths build fixed projections as `[0, 1] ∪ PKs` using `primary_key_indices()` (src/lib.rs, src/transaction.rs).
+  - `DbOption::new` configures sorting columns (`_ts` then PKs) and enables stats + bloom filters for each PK column path (src/option.rs).
+- Phase 2: Not implemented. Composite key types under `src/record/key/composite/` are placeholders; derive macro still accepts only a single `#[record(primary_key)]` and generates a single-field key. No multi-PK trybuild/integration tests.
+- Phase 3: Not implemented. `DynSchema` remains single-PK (stores one `primary_index_arrow`, one `pk_path`, and sorting with a single PK column).
+
 ## Goals
 
 - Support multi-column primary keys with lexicographic ordering of PK components.
