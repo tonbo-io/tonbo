@@ -4,9 +4,8 @@ pub mod expression;
 
 use arrow::datatypes::FieldRef;
 
-use crate::query::expression::Bound;
 use crate::{
-    query::error::ResolveError,
+    query::{error::ResolveError, expression::Bound},
     record::{Schema, Value},
 };
 
@@ -119,8 +118,7 @@ fn assert_value_type(column: &ResolvedSelector, value: &Value) -> Result<(), Res
 mod tests {
     use arrow::datatypes::DataType;
 
-    use super::expression::*;
-    use super::*;
+    use super::{expression::*, *};
     use crate::record::DynSchema;
 
     fn test_schema() -> DynSchema {

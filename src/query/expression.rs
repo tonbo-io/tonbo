@@ -1,11 +1,12 @@
 use arrow::datatypes::DataType;
 
-use crate::query::error::ResolveError;
-use crate::query::{
-    assert_value_type, derive_binary_prefix_upper, derive_utf8_prefix_upper, ColumnSelector,
-    ResolvedExpr, ResolvedPredicate,
+use crate::{
+    query::{
+        assert_value_type, derive_binary_prefix_upper, derive_utf8_prefix_upper,
+        error::ResolveError, ColumnSelector, ResolvedExpr, ResolvedPredicate,
+    },
+    record::{Schema, Value},
 };
-use crate::record::{Schema, Value};
 
 // Expression trait: resolves to ResolvedExpr
 pub trait Expression {
@@ -262,8 +263,8 @@ impl<C: ColumnSelector> Expression for IsNotNull<C> {
                 selector.field.name().to_string(),
             ));
         }
-        Ok(ResolvedExpr::Pred(ResolvedPredicate::IsNotNull { selector }))
+        Ok(ResolvedExpr::Pred(ResolvedPredicate::IsNotNull {
+            selector,
+        }))
     }
 }
-
- 

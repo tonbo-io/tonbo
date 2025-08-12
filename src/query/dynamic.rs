@@ -1,8 +1,10 @@
 use arrow::datatypes::DataType;
 
-use crate::query::{assert_value_type, derive_binary_prefix_upper, derive_utf8_prefix_upper};
 use crate::{
-    query::{error::ResolveError, Bound, ResolvedExpr, ResolvedPredicate, ResolvedSelector},
+    query::{
+        assert_value_type, derive_binary_prefix_upper, derive_utf8_prefix_upper,
+        error::ResolveError, Bound, ResolvedExpr, ResolvedPredicate, ResolvedSelector,
+    },
     record::{DynSchema, Schema, Value},
 };
 
