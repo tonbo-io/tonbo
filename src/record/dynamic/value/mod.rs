@@ -373,6 +373,97 @@ impl fmt::Display for Value {
     }
 }
 
+// Ergonomic conversions from common Rust types to Value
+impl From<bool> for Value {
+    fn from(v: bool) -> Self {
+        Value::Boolean(v)
+    }
+}
+
+impl From<i8> for Value {
+    fn from(v: i8) -> Self {
+        Value::Int8(v)
+    }
+}
+
+impl From<i16> for Value {
+    fn from(v: i16) -> Self {
+        Value::Int16(v)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(v: i32) -> Self {
+        Value::Int32(v)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(v: i64) -> Self {
+        Value::Int64(v)
+    }
+}
+
+impl From<u8> for Value {
+    fn from(v: u8) -> Self {
+        Value::UInt8(v)
+    }
+}
+
+impl From<u16> for Value {
+    fn from(v: u16) -> Self {
+        Value::UInt16(v)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(v: u32) -> Self {
+        Value::UInt32(v)
+    }
+}
+
+impl From<u64> for Value {
+    fn from(v: u64) -> Self {
+        Value::UInt64(v)
+    }
+}
+
+impl From<f32> for Value {
+    fn from(v: f32) -> Self {
+        Value::Float32(v)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(v: f64) -> Self {
+        Value::Float64(v)
+    }
+}
+
+impl From<String> for Value {
+    fn from(v: String) -> Self {
+        Value::String(v)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(v: &str) -> Self {
+        Value::String(v.to_string())
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(v: Vec<u8>) -> Self {
+        Value::Binary(v)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(v: &[u8]) -> Self {
+        Value::Binary(v.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
