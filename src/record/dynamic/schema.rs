@@ -174,7 +174,9 @@ impl Schema for DynSchema {
 /// //      primary_key_index
 /// // );
 /// use tonbo::dyn_schema;
-///
+/// 
+/// // This will turn into a schema with length 5 and fields of `_deleted`, `_ts`, `foo`, `bar`
+/// // and `baz`
 /// let schema = dyn_schema!(
 ///     ("foo", Utf8, false),
 ///     ("bar", Int32, true),
