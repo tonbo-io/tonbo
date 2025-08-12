@@ -1,4 +1,4 @@
-pub(crate) mod error;
+pub mod error;
 pub mod leveled;
 
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use crate::{
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub(crate) trait Compactor<R>: MaybeSend + MaybeSync
+pub trait Compactor<R>: MaybeSend + MaybeSync
 where
     R: Record,
 {
@@ -39,6 +39,86 @@ where
         recover_wal_ids: Option<Vec<crate::fs::FileId>>,
         is_manual: bool,
     ) -> Result<(), CompactionError<R>>;
+
+    /// Perform minor compaction on immutable memtables to create L0 SST files
+    async fn minor_compaction(
+        option: &DbOption,
+        recover_wal_ids: Option<Vec<crate::fs::FileId>>,
+        batches: &[(
+            Option<crate::fs::FileId>,
+            crate::inmem::immutable::ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+        )],
+        schema: &R::Schema,
+        manager: &crate::fs::manager::StoreManager,
+    ) -> Result<Option<Scope<<R::Schema as record::Schema>::Key>>, CompactionError<R>>
+    where
+        Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
+    {
+        use fusio_parquet::writer::AsyncWriter;
+        use parquet::arrow::AsyncArrowWriter;
+
+        use crate::fs::{generate_file_id, FileType};
+
+        if !batches.is_empty() {
+            let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
+            let level_0_fs = manager.get_fs(level_0_path);
+            let mut min = None;
+            let mut max = None;
+            let gen = generate_file_id();
+            let mut wal_ids = Vec::with_capacity(batches.len());
+
+            let mut writer = AsyncArrowWriter::try_new(
+                AsyncWriter::new(
+                    level_0_fs
+                        .open_options(
+                            &option.table_path(gen, 0),
+                            FileType::Parquet.open_options(false),
+                        )
+                        .await?,
+                ),
+                schema.arrow_schema().clone(),
+                Some(option.write_parquet_properties.clone()),
+            )?;
+
+            if let Some(mut recover_wal_ids) = recover_wal_ids {
+                wal_ids.append(&mut recover_wal_ids);
+            }
+
+            for (file_id, batch) in batches {
+                if let (Some(batch_min), Some(batch_max)) = batch.scope() {
+                    if matches!(min.as_ref().map(|min| min > batch_min), Some(true) | None) {
+                        min = Some(batch_min.clone())
+                    }
+                    if matches!(max.as_ref().map(|max| max < batch_max), Some(true) | None) {
+                        max = Some(batch_max.clone())
+                    }
+                }
+                writer.write(batch.as_record_batch()).await?;
+                if let Some(file_id) = file_id {
+                    wal_ids.push(*file_id);
+                }
+            }
+
+            let file_size = writer.bytes_written() as u64;
+            writer.close().await?;
+
+            if let (Some(min), Some(max)) = (min, max) {
+                return Ok(Some(Scope {
+                    min,
+                    max,
+                    gen,
+                    wal_ids: if wal_ids.is_empty() {
+                        None
+                    } else {
+                        Some(wal_ids)
+                    },
+                    file_size,
+                }));
+            }
+        }
+        Ok(None)
+    }
 
     async fn build_tables<'scan>(
         option: &DbOption,

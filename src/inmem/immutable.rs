@@ -13,7 +13,7 @@ use crate::{
     version::timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };
 
-pub(crate) struct ImmutableMemTable<A>
+pub struct ImmutableMemTable<A>
 where
     A: ArrowArrays,
 {

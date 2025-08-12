@@ -107,21 +107,21 @@
 //! }
 //! ```
 pub mod compaction;
-mod context;
+pub mod context;
 pub mod executor;
-pub(crate) mod fs;
-pub(crate) mod inmem;
+pub mod fs;
+pub mod inmem;
 pub(crate) mod magic;
 mod manifest;
 mod ondisk;
 pub mod option;
 pub mod record;
-mod scope;
+pub mod scope;
 pub(crate) mod snapshot;
 pub mod stream;
 pub mod transaction;
 mod trigger;
-mod version;
+pub mod version;
 mod wal;
 
 use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
@@ -179,7 +179,7 @@ use crate::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, ScanStream,
     },
     trigger::TriggerFactory,
-    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version},
+    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version, VersionRef},
     wal::{log::LogType, RecoverError, WalFile},
 };
 pub use crate::{option::*, stream::Entry};
@@ -255,22 +255,23 @@ where
         .await
     }
 
-    /// Open [`DB`] with a custom compactor. This provides completely static dispatch.
-    pub async fn new_with_compactor<C>(
+    /// Open [`DB`] with a custom compactor factory. This provides completely static dispatch.
+    pub async fn new_with_compactor_factory<C, F>(
         option: DbOption,
         executor: E,
         schema: R::Schema,
-        compactor: C,
+        factory: F,
     ) -> Result<Self, DbError>
     where
         C: CompactionExecutor<R> + Send + Sync + 'static,
+        F: FnOnce(Arc<DbOption>, Arc<R::Schema>, Arc<Context<R>>) -> C,
     {
-        Self::build_with_compactor(
+        Self::build_with_compactor_factory(
             Arc::new(option),
             executor,
             schema,
             Arc::new(NoCache::default()),
-            compactor,
+            factory,
         )
         .await
     }
@@ -317,19 +318,21 @@ where
         }
     }
 
-    async fn build_with_compactor<C>(
+    async fn build_with_compactor_factory<C, F>(
         option: Arc<DbOption>,
         executor: E,
         schema: R::Schema,
         lru_cache: ParquetLru,
-        compactor: C,
+        factory: F,
     ) -> Result<Self, DbError>
     where
         C: CompactionExecutor<R> + Send + Sync + 'static,
+        F: FnOnce(Arc<DbOption>, Arc<R::Schema>, Arc<Context<R>>) -> C,
     {
-        let (_, _, cleaner, task_rx, mem_storage, ctx) =
-            Self::build_common_setup::<E>(option, schema, lru_cache).await?;
+        let (record_schema, _, cleaner, task_rx, mem_storage, ctx) =
+            Self::build_common_setup::<E>(option.clone(), schema, lru_cache).await?;
 
+        let compactor = factory(option, record_schema, ctx.clone());
         Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
     }
 
@@ -541,6 +544,11 @@ where
             ctx,
             _p: Default::default(),
         })
+    }
+
+    /// Returns the current manifest version
+    pub async fn current_manifest(&self) -> VersionRef<R> {
+        self.ctx.current_manifest().await
     }
 
     /// Open an optimistic ACID transaction

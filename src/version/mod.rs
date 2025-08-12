@@ -1,5 +1,5 @@
 pub(crate) mod cleaner;
-pub(crate) mod edit;
+pub mod edit;
 pub(crate) mod error;
 pub(crate) mod set;
 pub(crate) mod timestamp;
@@ -34,11 +34,11 @@ use crate::{
     DbOption, ParquetLru,
 };
 
-pub(crate) const MAX_LEVEL: usize = 7;
+pub const MAX_LEVEL: usize = 7;
 
-pub(crate) type VersionRef<R> = Arc<Version<R>>;
+pub type VersionRef<R> = Arc<Version<R>>;
 
-pub(crate) trait TransactionTs {
+pub trait TransactionTs {
     fn load_ts(&self) -> Timestamp;
 
     fn increase_ts(&self) -> Timestamp;
@@ -46,14 +46,14 @@ pub(crate) trait TransactionTs {
 
 /// Tracks the current metadata of the `DB`
 #[derive(Debug)]
-pub(crate) struct Version<R>
+pub struct Version<R>
 where
     R: Record,
 {
     // Timestamp at creation
     ts: Timestamp,
     // Holds the SSTable file ids and their min/max values for every level
-    pub(crate) level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
+    pub level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
     timestamp: Arc<AtomicU32>,
@@ -221,7 +221,7 @@ where
     }
 
     /// Perform binary search on a level using the key
-    pub(crate) fn scope_search(
+    pub fn scope_search(
         key: &<R::Schema as Schema>::Key,
         level: &[Scope<<R::Schema as Schema>::Key>],
     ) -> usize {
@@ -231,7 +231,7 @@ where
     }
 
     /// Returns the length of a level
-    pub(crate) fn tables_len(&self, level: usize) -> usize {
+    pub fn tables_len(&self, level: usize) -> usize {
         self.level_slice[level].len()
     }
 

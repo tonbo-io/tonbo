@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Flush mutable memtable to immutable and return slice of batches ready for compaction
-pub async fn minor_flush<R>(
+pub(crate) async fn minor_flush<R>(
     db_storage: &mut crate::DbStorage<R>,
     base_fs: Arc<dyn DynFs>,
     immutable_chunk_num: usize,
@@ -78,7 +78,7 @@ where
 }
 
 /// Remove processed immutable memtables after successful compaction
-pub fn remove_processed_immutables<R>(db_storage: &mut crate::DbStorage<R>, batch_len: usize)
+pub(crate) fn remove_processed_immutables<R>(db_storage: &mut crate::DbStorage<R>, batch_len: usize)
 where
     R: Record,
     <R::Schema as RecordSchema>::Columns: Send + Sync,
