@@ -10,24 +10,28 @@ use crate::{
 
 // Dynamic, owned expression AST for FFI/SQL paths
 
+// Enum for pointing at a column. Can use the column name or index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selector {
     Name(String),
     Index(usize),
 }
 
+// Range bound with value, specifies inclusive (>=/<=) or exclusive (>/<)
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundOwned {
     pub inclusive: bool,
     pub value: Value,
 }
 
+// Describes a single predicate node
 #[derive(Debug, Clone, PartialEq)]
 pub enum PredOwned {
     Eq {
         sel: Selector,
         val: Value,
     },
+    // Describes a bound on a column. `None` for bound is [`Bound::Unbounded`]
     Range {
         sel: Selector,
         lower: Option<BoundOwned>,
@@ -49,6 +53,7 @@ pub enum PredOwned {
     },
 }
 
+// Describes AST
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprOwned {
     Pred(PredOwned),
