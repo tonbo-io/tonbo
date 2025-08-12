@@ -1306,6 +1306,18 @@ wasm-pack build --target web
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="rfc-composite-primary-keys"><a class="header" href="#rfc-composite-primary-keys">RFC: Composite Primary Keys</a></h1>
 <p>This document outlines a practical, incremental plan to add composite (multi-column) primary key support to Tonbo while maintaining backward compatibility. It explains design goals, changes required across the codebase, and a step-by-step implementation and validation plan.</p>
+<h2 id="current-status-2025-08-11"><a class="header" href="#current-status-2025-08-11">Current Status (2025-08-11)</a></h2>
+<ul>
+<li>Phase 1: Completed. Plural <code>Schema</code> APIs, fixed projections, and Parquet writer configuration are implemented for single-PK schemas.
+<ul>
+<li><code>Schema</code> now exposes <code>primary_key_indices()</code> and <code>primary_key_paths_and_sorting()</code> (src/record/mod.rs). Macro-generated single-PK schemas return one-element slices.</li>
+<li>Read paths build fixed projections as <code>[0, 1] ∪ PKs</code> using <code>primary_key_indices()</code> (src/lib.rs, src/transaction.rs).</li>
+<li><code>DbOption::new</code> configures sorting columns (<code>_ts</code> then PKs) and enables stats + bloom filters for each PK column path (src/option.rs).</li>
+</ul>
+</li>
+<li>Phase 2: Not implemented. Composite key types under <code>src/record/key/composite/</code> are placeholders; derive macro still accepts only a single <code>#[record(primary_key)]</code> and generates a single-field key. No multi-PK trybuild/integration tests.</li>
+<li>Phase 3: Not implemented. <code>DynSchema</code> remains single-PK (stores one <code>primary_index_arrow</code>, one <code>pk_path</code>, and sorting with a single PK column).</li>
+</ul>
 <h2 id="goals"><a class="header" href="#goals">Goals</a></h2>
 <ul>
 <li>Support multi-column primary keys with lexicographic ordering of PK components.</li>
