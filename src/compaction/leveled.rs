@@ -20,7 +20,7 @@ use crate::{
 };
 
 struct LeveledTask {
-    pub input: Vec<(usize, Vec<Ulid>)>,
+    input: Vec<(usize, Vec<Ulid>)>,
 }
 
 /// A compactor that enforces a leveled compaction strategy over all SST levels.
