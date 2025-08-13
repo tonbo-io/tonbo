@@ -129,7 +129,7 @@ mod test {
             option,
             TokioExecutor::default(),
             schema,
-            |db_option, record_schema, ctx| NoCompactor::new(db_option, record_schema, ctx),
+            NoCompactor::new,
         )
         .await
         .unwrap();

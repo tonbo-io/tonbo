@@ -42,8 +42,8 @@ where
     ) -> Result<(), CompactionError<R>>;
 
     /// Perform minor compaction on immutable memtables to create L0 SST files
-    /// Basically the same for all compaction strategies. Think carefully if you want to override this
-    /// method.
+    /// Basically the same for all compaction strategies. Think carefully if you want to override
+    /// this method.
     async fn minor_compaction(
         option: &DbOption,
         recover_wal_ids: Option<Vec<FileId>>,
@@ -138,7 +138,7 @@ where
         Ok(None)
     }
 
-    async fn build_tables<'scan>(
+    async fn build_tables(
         option: &DbOption,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         level: usize,

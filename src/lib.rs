@@ -125,8 +125,17 @@ pub mod version;
 mod wal;
 
 use std::{
-    collections::HashMap, future::Future, io, marker::PhantomData, mem, ops::Bound, pin::pin,
-    sync::Arc,
+    collections::HashMap,
+    future::Future,
+    io,
+    marker::PhantomData,
+    mem,
+    ops::Bound,
+    pin::pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 pub use arrow;
@@ -162,7 +171,6 @@ use transaction::{CommitError, Transaction, TransactionEntry};
 use trigger::FreezeTrigger;
 use version::timestamp::{Timestamp, TsRef};
 use wal::log::Log;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[doc(hidden)]
 pub use crate::magic::TS;
@@ -437,16 +445,18 @@ where
                         match batches_and_wal_ids {
                             Ok(Some((mut batches, recover_wal_ids))) => {
                                 // Mark compaction window before releasing lock
-                                guard
-                                    .compaction_in_progress
-                                    .store(true, Ordering::Release);
+                                guard.compaction_in_progress.store(true, Ordering::Release);
                                 // Release lock before heavy work
                                 drop(guard);
                                 // Keep a copy for potential rollback
                                 let rollback_wal_ids = recover_wal_ids.clone();
 
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(&batches[..]), recover_wal_ids, false)
+                                    .check_then_compaction(
+                                        Some(&batches[..]),
+                                        recover_wal_ids,
+                                        false,
+                                    )
                                     .await;
 
                                 // Finalize: clear window and possibly rollback
@@ -494,14 +504,16 @@ where
                         let mut res = match batches_and_wal_ids {
                             Ok(Some((mut batches, recover_wal_ids))) => {
                                 // Mark compaction window before releasing lock
-                                guard
-                                    .compaction_in_progress
-                                    .store(true, Ordering::Release);
+                                guard.compaction_in_progress.store(true, Ordering::Release);
                                 // Release lock before heavy work
                                 drop(guard);
                                 let rollback_wal_ids = recover_wal_ids.clone();
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(&batches[..]), recover_wal_ids, true)
+                                    .check_then_compaction(
+                                        Some(&batches[..]),
+                                        recover_wal_ids,
+                                        true,
+                                    )
                                     .await;
                                 let mut g = mem_storage_task.write().await;
                                 if compaction_result.is_err() {
@@ -590,8 +602,7 @@ where
                 continue;
             }
             let version_ref = self.ctx.manifest().current().await;
-            let snapshot: Snapshot<'_, R, E> =
-                Snapshot::new(guard, version_ref, self.ctx.clone());
+            let snapshot: Snapshot<'_, R, E> = Snapshot::new(guard, version_ref, self.ctx.clone());
             break Transaction::new(snapshot, self.lock_map.clone());
         }
     }
@@ -656,24 +667,22 @@ where
                 drop(guard);
                 continue;
             }
-            break Ok(
-                guard
-                    .get(
-                        &self.ctx,
-                        &*self.ctx.manifest().current().await,
-                        key,
-                        self.ctx.load_ts(),
-                        Projection::All,
-                    )
-                    .await?
-                    .and_then(|entry| {
-                        if entry.value().is_none() {
-                            None
-                        } else {
-                            f(TransactionEntry::Stream(entry))
-                        }
-                    }),
-            );
+            break Ok(guard
+                .get(
+                    &self.ctx,
+                    &*self.ctx.manifest().current().await,
+                    key,
+                    self.ctx.load_ts(),
+                    Projection::All,
+                )
+                .await?
+                .and_then(|entry| {
+                    if entry.value().is_none() {
+                        None
+                    } else {
+                        f(TransactionEntry::Stream(entry))
+                    }
+                }));
         }
     }
 
