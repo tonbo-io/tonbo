@@ -60,6 +60,7 @@ where
     path: Option<Path>,
     parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
     order: Option<Order>,
+    pk_indices: &'level [usize],
 }
 
 impl<'level, R> LevelStream<'level, R>
@@ -83,6 +84,7 @@ where
         fs: Arc<dyn DynFs>,
         parquet_lru: Arc<dyn DynLruCache<Ulid> + Send + Sync>,
         order: Option<Order>,
+        pk_indices: &'level [usize],
     ) -> Option<Self> {
         let (lower, upper) = range;
         let mut gens: VecDeque<FileId> = version.level_slice[level][start..end + 1]
@@ -112,6 +114,7 @@ where
             path: None,
             parquet_lru,
             order,
+            pk_indices,
         })
     }
 }
@@ -206,6 +209,7 @@ where
                             self.limit,
                             self.projection_mask.clone(),
                             self.order,
+                            self.pk_indices,
                         )));
                         continue;
                     }
@@ -284,6 +288,7 @@ mod tests {
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
                 None, // Default order for test
+                TestSchema {}.primary_key_indices(),
             )
             .unwrap();
 
@@ -324,6 +329,7 @@ mod tests {
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
                 None, // Default order for test
+                TestSchema {}.primary_key_indices(),
             )
             .unwrap();
 
@@ -364,6 +370,7 @@ mod tests {
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
                 None, // Default order for test
+                TestSchema {}.primary_key_indices(),
             )
             .unwrap();
 
@@ -428,6 +435,7 @@ mod tests {
                 manager.base_fs().clone(),
                 Arc::new(NoCache::default()),
                 Some(Order::Desc),
+                TestSchema {}.primary_key_indices(),
             )
             .unwrap();
             let expected = ["6", "5", "4", "3", "2", "1"];
