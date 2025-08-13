@@ -290,11 +290,9 @@ mod tests {
             region,
         };
 
-        let leveled_options = LeveledOptions {
-            major_threshold_with_sst_size: 3,
-            level_sst_magnification: 1,
-            ..Default::default()
-        };
+        let leveled_options = LeveledOptions::default()
+            .major_threshold_with_sst_size(3)
+            .level_sst_magnification(1);
 
         let option = DbOption::new(Path::from_opfs_path("s3_rw").unwrap(), &schema)
             .level_path(

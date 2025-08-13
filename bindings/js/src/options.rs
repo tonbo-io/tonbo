@@ -65,12 +65,10 @@ impl DbOption {
 
 impl DbOption {
     pub(crate) fn into_option<S: Schema>(self, schema: &S) -> tonbo::DbOption {
-        let leveled_options = tonbo::compaction::leveled::LeveledOptions {
-            level_sst_magnification: self.level_sst_magnification,
-            major_default_oldest_table_num: self.major_default_oldest_table_num,
-            major_threshold_with_sst_size: self.major_threshold_with_sst_size,
-            ..Default::default()
-        };
+        let leveled_options = tonbo::compaction::leveled::LeveledOptions::default()
+            .major_threshold_with_sst_size(self.major_threshold_with_sst_size)
+            .level_sst_magnification(self.level_sst_magnification)
+            .major_default_oldest_table_num(self.major_default_oldest_table_num);
 
         let mut opt = tonbo::DbOption::new(Path::from(self.path), schema)
             .clean_channel_buffer(self.clean_channel_buffer)
