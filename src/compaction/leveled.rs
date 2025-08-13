@@ -56,13 +56,13 @@ where
 #[derive(Clone, Debug)]
 pub struct LeveledOptions {
     /// Size threshold (in bytes) to trigger major compaction relative to SST size
-    pub major_threshold_with_sst_size: usize,
+    major_threshold_with_sst_size: usize,
     /// Magnification factor controlling SST file count per level
-    pub level_sst_magnification: usize,
+    level_sst_magnification: usize,
     /// Default number of oldest tables to include in a major compaction
-    pub major_default_oldest_table_num: usize,
+    major_default_oldest_table_num: usize,
     /// Maximum number of tables to select for major compaction at level L
-    pub major_l_selection_table_max_num: usize,
+    major_l_selection_table_max_num: usize,
 }
 
 impl Default for LeveledOptions {
