@@ -609,11 +609,15 @@ where
 
     /// Returns a snapshot of the database
     pub async fn snapshot(&self) -> Snapshot<'_, R, E> {
-        Snapshot::new(
-            ExecutorRwLock::read(&*self.mem_storage).await,
-            self.ctx.manifest().current().await,
-            self.ctx.clone(),
-        )
+        // Avoid building a snapshot while immutables are drained for compaction
+        loop {
+            let guard = ExecutorRwLock::read(&*self.mem_storage).await;
+            if guard.compaction_in_progress.load(Ordering::Acquire) {
+                drop(guard);
+                continue;
+            }
+            break Snapshot::new(guard, self.ctx.manifest().current().await, self.ctx.clone());
+        }
     }
 
     /// Insert a single tonbo record
@@ -696,7 +700,15 @@ where
         mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
-            let schema = self.mem_storage.read().await;
+            // Delay stream construction while compaction window is active
+            let schema = loop {
+                let guard = self.mem_storage.read().await;
+                if guard.compaction_in_progress.load(Ordering::Acquire) {
+                    drop(guard);
+                    continue;
+                }
+                break guard;
+            };
             let current = self.ctx.manifest().current().await;
             let mut scan = Scan::new(
                 &schema,
