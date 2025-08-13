@@ -501,7 +501,7 @@ where
                         )
                         .await;
 
-                        let mut res = match batches_and_wal_ids {
+                        let res = match batches_and_wal_ids {
                             Ok(Some((mut batches, recover_wal_ids))) => {
                                 // Mark compaction window before releasing lock
                                 guard.compaction_in_progress.store(true, Ordering::Release);
@@ -540,9 +540,8 @@ where
                         };
 
                         if let Some(tx) = option_tx {
-                            if res.is_ok() {
-                                res = tx.send(()).map_err(|_| CompactionError::ChannelClose);
-                            }
+                            // Always notify the caller to avoid hanging flush() even on error
+                            let _ = tx.send(());
                         }
                         res
                     }

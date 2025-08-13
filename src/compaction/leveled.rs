@@ -19,7 +19,7 @@ use crate::{
     CompactionExecutor, DbOption,
 };
 
-pub struct LeveledTask {
+struct LeveledTask {
     pub input: Vec<(usize, Vec<Ulid>)>,
 }
 
@@ -192,7 +192,7 @@ where
     R: Record,
     <R::Schema as record::Schema>::Columns: Send + Sync,
 {
-    pub async fn should_major_compact(&self) -> Option<usize> {
+    async fn should_major_compact(&self) -> Option<usize> {
         // Check if any level needs major compaction and return the first level that needs it
         let version_ref = self.ctx.manifest.current().await;
         for level in 0..MAX_LEVEL - 1 {
@@ -203,7 +203,7 @@ where
         None
     }
 
-    pub async fn plan_major(&self, level: usize) -> Option<LeveledTask> {
+    async fn plan_major(&self, level: usize) -> Option<LeveledTask> {
         let version_ref = self.ctx.manifest.current().await;
 
         // Collect file IDs from the specified level that needs compaction
@@ -229,7 +229,7 @@ where
         None
     }
 
-    pub async fn execute_major(&self, task: LeveledTask) -> Result<(), CompactionError<R>> {
+    async fn execute_major(&self, task: LeveledTask) -> Result<(), CompactionError<R>> {
         let version_ref = self.ctx.manifest.current().await;
         let mut version_edits = vec![];
         let mut delete_gens = vec![];
@@ -295,7 +295,11 @@ where
         }
 
         if is_manual {
-            self.ctx.manifest.rewrite().await.unwrap();
+            self.ctx
+                .manifest
+                .rewrite()
+                .await
+                .map_err(CompactionError::Manifest)?;
         }
 
         Ok(())
@@ -424,6 +428,7 @@ where
             });
             delete_gens.push(SsTableID::new(scope.gen, level));
         }
+
         for scope in meet_scopes_ll {
             version_edits.push(VersionEdit::Remove {
                 level: (level + 1) as u8,
