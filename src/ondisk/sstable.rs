@@ -96,6 +96,7 @@ where
         self,
         key: &TsRef<<R::Schema as Schema>::Key>,
         projection_mask: ProjectionMask,
+        pk_indices: &[usize],
     ) -> ParquetResult<Option<RecordBatchEntry<R>>> {
         self.scan(
             (Bound::Included(key.value()), Bound::Included(key.value())),
@@ -103,6 +104,7 @@ where
             Some(1),
             projection_mask,
             None, // Order doesn't matter for single-key get
+            pk_indices,
         )
         .await?
         .next()
@@ -120,6 +122,7 @@ where
         limit: Option<usize>,
         projection_mask: ProjectionMask,
         order: Option<Order>,
+        pk_indices: &[usize],
     ) -> Result<SsTableScan<'scan, R>, parquet::errors::ParquetError> {
         let builder = self
             .into_parquet_builder(limit, projection_mask.clone())
@@ -128,9 +131,8 @@ where
         let schema_descriptor = builder.metadata().file_metadata().schema_descr();
         let full_schema = builder.schema().clone();
 
-        // Safety: filter's lifetime relies on range's lifetime, sstable must not live longer than
-        // it
-        let filter = unsafe { get_range_filter::<R>(schema_descriptor, range, ts) };
+        // Build a row filter for ts and primary key range
+        let filter = get_range_filter::<R>(schema_descriptor, range, ts, pk_indices);
 
         Ok(SsTableScan::new(
             builder.with_row_filter(filter).build()?,
@@ -252,6 +254,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2, 3],
                     ),
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap()
@@ -271,6 +274,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2, 4],
                     ),
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap()
@@ -290,6 +294,7 @@ pub(crate) mod tests {
                             .unwrap(),
                         [0, 1, 2],
                     ),
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap()
@@ -337,6 +342,7 @@ pub(crate) mod tests {
                         [0, 1, 2, 3],
                     ),
                     None,
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -365,6 +371,7 @@ pub(crate) mod tests {
                         [0, 1, 2, 4],
                     ),
                     None,
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -393,6 +400,7 @@ pub(crate) mod tests {
                         [0, 1, 2],
                     ),
                     None,
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -442,6 +450,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::all(),
                     None, // Forward order (default)
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -466,6 +475,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::all(),
                     Some(Order::Desc), // Reverse order
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -520,6 +530,7 @@ pub(crate) mod tests {
                         [0, 1, 2, 3], // Include vu32, exclude vbool
                     ),
                     Some(Order::Desc),
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -552,6 +563,7 @@ pub(crate) mod tests {
                         [0, 1, 2, 4], // Include vbool, exclude vu32
                     ),
                     Some(Order::Desc),
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -608,6 +620,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::all(),
                     Some(Order::Desc),
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -631,6 +644,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::all(),
                     Some(Order::Desc),
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -678,6 +692,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::all(),
                     None, // Forward order
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();
@@ -698,6 +713,7 @@ pub(crate) mod tests {
                     None,
                     ProjectionMask::all(),
                     Some(Order::Desc), // Reverse order
+                    TestSchema {}.primary_key_indices(),
                 )
                 .await
                 .unwrap();

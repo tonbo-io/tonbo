@@ -135,6 +135,7 @@ where
         key: &TsRef<<R::Schema as Schema>::Key>,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
+        pk_indices: &[usize],
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
         let level_0_path = self
             .option
@@ -155,6 +156,7 @@ where
                     scope.gen,
                     projection_mask.clone(),
                     parquet_lru.clone(),
+                    pk_indices,
                 )
                 .await?
             {
@@ -186,6 +188,7 @@ where
                     sort_runs[index].gen,
                     projection_mask.clone(),
                     parquet_lru.clone(),
+                    pk_indices,
                 )
                 .await?
             {
@@ -197,6 +200,7 @@ where
     }
 
     // Opens the file by `FileId` and does a get operation on the SsTable
+    #[allow(clippy::too_many_arguments)]
     async fn table_query(
         &self,
         store: &Arc<dyn DynFs>,
@@ -205,6 +209,7 @@ where
         gen: FileId,
         projection_mask: ProjectionMask,
         parquet_lru: ParquetLru,
+        pk_indices: &[usize],
     ) -> Result<Option<RecordBatchEntry<R>>, VersionError> {
         let file = store
             .open_options(
@@ -215,7 +220,7 @@ where
             .map_err(VersionError::Fusio)?;
         SsTable::<R>::open(parquet_lru, gen, file)
             .await?
-            .get(key, projection_mask)
+            .get(key, projection_mask, pk_indices)
             .await
             .map_err(VersionError::Parquet)
     }
@@ -249,6 +254,7 @@ where
         limit: Option<usize>,
         projection_mask: ProjectionMask,
         order: Option<Order>,
+        pk_indices: &'streams [usize],
     ) -> Result<(), VersionError> {
         let level_0_path = self
             .option
@@ -271,7 +277,7 @@ where
 
             streams.push(ScanStream::SsTable {
                 inner: table
-                    .scan(range, ts, limit, projection_mask.clone(), order)
+                    .scan(range, ts, limit, projection_mask.clone(), order, pk_indices)
                     .await
                     .map_err(VersionError::Parquet)?,
             })
@@ -315,6 +321,7 @@ where
                     level_fs.clone(),
                     ctx.parquet_lru.clone(),
                     order,
+                    pk_indices,
                 )
                 .unwrap(),
             });
