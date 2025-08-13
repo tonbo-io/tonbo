@@ -162,6 +162,7 @@ use transaction::{CommitError, Transaction, TransactionEntry};
 use trigger::FreezeTrigger;
 use version::timestamp::{Timestamp, TsRef};
 use wal::log::Log;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[doc(hidden)]
 pub use crate::magic::TS;
@@ -174,7 +175,7 @@ use crate::{
     compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
     executor::{Executor, RwLock as ExecutorRwLock},
     fs::{manager::StoreManager, parse_file_id, FileType},
-    inmem::flush::{minor_flush, remove_processed_immutables},
+    inmem::flush::minor_flush,
     manifest::ManifestStorage,
     record::Schema,
     snapshot::Snapshot,
@@ -417,13 +418,11 @@ where
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
                     CompactTask::Freeze => {
-                        // Handle minor flush
+                        // Handle minor flush; drain owned immutables under short lock
                         let mut guard = mem_storage_task.write().await;
 
-                        // Get compaction options from DbOption
                         let immutable_chunk_num = guard.option.immutable_chunk_num;
                         let immutable_chunk_max_num = guard.option.immutable_chunk_max_num;
-
                         let base_fs = ctx_task.manager.base_fs().clone();
 
                         let batches_and_wal_ids = minor_flush(
@@ -436,17 +435,36 @@ where
                         .await;
 
                         match batches_and_wal_ids {
-                            Ok(Some((batches, recover_wal_ids))) => {
-                                let batch_len = batches.len();
+                            Ok(Some((mut batches, recover_wal_ids))) => {
+                                // Mark compaction window before releasing lock
+                                guard
+                                    .compaction_in_progress
+                                    .store(true, Ordering::Release);
+                                // Release lock before heavy work
+                                drop(guard);
+                                // Keep a copy for potential rollback
+                                let rollback_wal_ids = recover_wal_ids.clone();
+
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(batches), recover_wal_ids, false)
+                                    .check_then_compaction(Some(&batches[..]), recover_wal_ids, false)
                                     .await;
 
-                                // Only remove immutables if compaction succeeded
-                                if compaction_result.is_ok() {
-                                    remove_processed_immutables(&mut *guard, batch_len);
+                                // Finalize: clear window and possibly rollback
+                                let mut g = mem_storage_task.write().await;
+                                if compaction_result.is_err() {
+                                    for item in batches.drain(..).rev() {
+                                        g.immutables.insert(0, item);
+                                    }
+                                    if let Some(ids) = rollback_wal_ids {
+                                        if let Some(existing) = &mut g.recover_wal_ids {
+                                            existing.extend(ids);
+                                        } else {
+                                            g.recover_wal_ids = Some(ids);
+                                        }
+                                    }
                                 }
-
+                                g.compaction_in_progress.store(false, Ordering::Release);
+                                drop(g);
                                 compaction_result
                             }
                             Ok(None) => compactor.check_then_compaction(None, None, false).await,
@@ -457,12 +475,11 @@ where
                         }
                     }
                     CompactTask::Flush(option_tx) => {
-                        // Handle manual flush
+                        // Handle manual flush; drain owned immutables under short lock
                         let mut guard = mem_storage_task.write().await;
 
                         let immutable_chunk_num = guard.option.immutable_chunk_num;
                         let immutable_chunk_max_num = guard.option.immutable_chunk_max_num;
-
                         let base_fs = ctx_task.manager.base_fs().clone();
 
                         let batches_and_wal_ids = minor_flush(
@@ -475,17 +492,32 @@ where
                         .await;
 
                         let mut res = match batches_and_wal_ids {
-                            Ok(Some((batches, recover_wal_ids))) => {
-                                let batch_len = batches.len();
+                            Ok(Some((mut batches, recover_wal_ids))) => {
+                                // Mark compaction window before releasing lock
+                                guard
+                                    .compaction_in_progress
+                                    .store(true, Ordering::Release);
+                                // Release lock before heavy work
+                                drop(guard);
+                                let rollback_wal_ids = recover_wal_ids.clone();
                                 let compaction_result = compactor
-                                    .check_then_compaction(Some(batches), recover_wal_ids, true)
+                                    .check_then_compaction(Some(&batches[..]), recover_wal_ids, true)
                                     .await;
-
-                                // Only remove immutables if compaction succeeded
-                                if compaction_result.is_ok() {
-                                    remove_processed_immutables(&mut *guard, batch_len);
+                                let mut g = mem_storage_task.write().await;
+                                if compaction_result.is_err() {
+                                    for item in batches.drain(..).rev() {
+                                        g.immutables.insert(0, item);
+                                    }
+                                    if let Some(ids) = rollback_wal_ids {
+                                        if let Some(existing) = &mut g.recover_wal_ids {
+                                            existing.extend(ids);
+                                        } else {
+                                            g.recover_wal_ids = Some(ids);
+                                        }
+                                    }
                                 }
-
+                                g.compaction_in_progress.store(false, Ordering::Release);
+                                drop(g);
                                 compaction_result
                             }
                             Ok(None) => compactor.check_then_compaction(None, None, true).await,
@@ -494,8 +526,6 @@ where
                                 Ok(())
                             }
                         };
-
-                        drop(guard);
 
                         if let Some(tx) = option_tx {
                             if res.is_ok() {
@@ -551,11 +581,19 @@ where
     /// txn.commit().await.unwrap();
     /// ```
     pub async fn transaction(&self) -> Transaction<'_, R, E> {
-        // TODO: Revert to using snapshot()
-        let guard = self.mem_storage.read().await;
-        let version_ref = self.ctx.manifest().current().await;
-        let snapshot: Snapshot<'_, R, E> = Snapshot::new(guard, version_ref, self.ctx.clone());
-        Transaction::new(snapshot, self.lock_map.clone())
+        // Wait out any compaction window where immutables were drained
+        loop {
+            let guard = self.mem_storage.read().await;
+            if guard.compaction_in_progress.load(Ordering::Acquire) {
+                // Drop guard and retry after compaction finalizes
+                drop(guard);
+                continue;
+            }
+            let version_ref = self.ctx.manifest().current().await;
+            let snapshot: Snapshot<'_, R, E> =
+                Snapshot::new(guard, version_ref, self.ctx.clone());
+            break Transaction::new(snapshot, self.lock_map.clone());
+        }
     }
 
     /// Returns a snapshot of the database
@@ -612,25 +650,31 @@ where
         key: &<R::Schema as Schema>::Key,
         mut f: impl FnMut(TransactionEntry<'_, R>) -> Option<T>,
     ) -> Result<Option<T>, CommitError<R>> {
-        Ok(self
-            .mem_storage
-            .read()
-            .await
-            .get(
-                &self.ctx,
-                &*self.ctx.manifest().current().await,
-                key,
-                self.ctx.load_ts(),
-                Projection::All,
-            )
-            .await?
-            .and_then(|entry| {
-                if entry.value().is_none() {
-                    None
-                } else {
-                    f(TransactionEntry::Stream(entry))
-                }
-            }))
+        loop {
+            let guard = self.mem_storage.read().await;
+            if guard.compaction_in_progress.load(Ordering::Acquire) {
+                drop(guard);
+                continue;
+            }
+            break Ok(
+                guard
+                    .get(
+                        &self.ctx,
+                        &*self.ctx.manifest().current().await,
+                        key,
+                        self.ctx.load_ts(),
+                        Projection::All,
+                    )
+                    .await?
+                    .and_then(|entry| {
+                        if entry.value().is_none() {
+                            None
+                        } else {
+                            f(TransactionEntry::Stream(entry))
+                        }
+                    }),
+            );
+        }
     }
 
     /// Scan records with primary keys in the `range` and process them using closure `f`
@@ -744,6 +788,8 @@ where
     trigger: Arc<dyn FreezeTrigger<R>>,
     record_schema: Arc<R::Schema>,
     option: Arc<DbOption>,
+    // Indicates a compaction window where immutables are drained and not yet visible in manifest
+    compaction_in_progress: AtomicBool,
 }
 
 impl<R> DbStorage<R>
@@ -793,6 +839,7 @@ where
             trigger,
             record_schema,
             option: option.clone(),
+            compaction_in_progress: AtomicBool::new(false),
         };
 
         let mut wal_ids = Vec::new();
@@ -1460,6 +1507,7 @@ pub(crate) mod tests {
                 trigger,
                 record_schema: Arc::new(TestSchema {}),
                 option,
+                compaction_in_progress: std::sync::atomic::AtomicBool::new(false),
             },
             compaction_rx,
         ))
@@ -1725,6 +1773,7 @@ pub(crate) mod tests {
             trigger,
             record_schema: Arc::new(TestSchema),
             option: option.clone(),
+            compaction_in_progress: std::sync::atomic::AtomicBool::new(false),
         };
 
         for (i, item) in test_items(0u32..32).enumerate() {
@@ -1801,6 +1850,7 @@ pub(crate) mod tests {
             trigger,
             record_schema: dyn_schema.clone(),
             option,
+            compaction_in_progress: std::sync::atomic::AtomicBool::new(false),
         };
 
         for item in test_dyn_items().into_iter() {

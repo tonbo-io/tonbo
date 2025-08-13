@@ -27,7 +27,7 @@ pub trait Compactor<R>: MaybeSend + MaybeSync
 where
     R: Record,
 {
-    /// Call minor caompaction + major compaction.
+    /// Call minor compaction + major compaction.
     /// This is the only method custom compactors must implement.
     async fn check_then_compaction(
         &self,
@@ -42,7 +42,7 @@ where
     ) -> Result<(), CompactionError<R>>;
 
     /// Perform minor compaction on immutable memtables to create L0 SST files
-    /// Basically the same for all compction strtegies. Think carefully if want to override this
+    /// Basically the same for all compaction strategies. Think carefully if you want to override this
     /// method.
     async fn minor_compaction(
         option: &DbOption,

@@ -9,7 +9,13 @@ use crate::{
     DbError,
 };
 
-/// Flush mutable memtable to immutable and return slice of batches ready for compaction
+/// Flush mutable memtable to immutable and return owned batches ready for compaction.
+///
+/// This function performs only the minimal critical section work while holding
+/// the `DbStorage` write lock: it converts the current mutable into an
+/// immutable batch if needed, determines how many immutables to flush, then
+/// drains those immutables from storage and returns ownership to the caller.
+/// Heavy I/O and merging should happen after releasing the lock.
 pub(crate) async fn minor_flush<R>(
     db_storage: &mut crate::DbStorage<R>,
     base_fs: Arc<dyn DynFs>,
@@ -18,10 +24,10 @@ pub(crate) async fn minor_flush<R>(
     is_manual: bool,
 ) -> Result<
     Option<(
-        &[(
+        Vec<(
             Option<FileId>,
             ImmutableMemTable<<R::Schema as RecordSchema>::Columns>,
-        )],
+        )>,
         Option<Vec<FileId>>,
     )>,
     DbError,
@@ -67,25 +73,12 @@ where
             immutable_chunk_num.min(db_storage.immutables.len())
         };
 
-        // Extract slice of batches to be flushed
-        let batches_to_flush = &db_storage.immutables[0..chunk_num];
-
-        if !batches_to_flush.is_empty() {
-            return Ok(Some((batches_to_flush, recovered_wal_ids)));
+        if chunk_num > 0 {
+            // Drain owned immutables to be processed outside the lock
+            let drained = db_storage.immutables.drain(..chunk_num).collect();
+            return Ok(Some((drained, recovered_wal_ids)));
         }
     }
 
     Ok(None)
-}
-
-/// Remove processed immutable memtables after successful compaction
-pub(crate) fn remove_processed_immutables<R>(db_storage: &mut crate::DbStorage<R>, batch_len: usize)
-where
-    R: Record,
-    <R::Schema as RecordSchema>::Columns: Send + Sync,
-{
-    // Remove the processed immutables from the front of the vector
-    if batch_len > 0 && db_storage.immutables.len() >= batch_len {
-        db_storage.immutables.drain(..batch_len);
-    }
 }
