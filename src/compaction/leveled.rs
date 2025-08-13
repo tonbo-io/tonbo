@@ -542,10 +542,13 @@ where
 pub(crate) mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
-    use arrow::datatypes::DataType as ArrayDataType;
+    use arrow::{array::Array, datatypes::DataType as ArrayDataType};
     use flume::bounded;
-    use fusio::{path::Path, DynFs};
+    use fusio::{disk::TokioFs, fs::OpenOptions, path::Path, DynFs};
     use fusio_dispatch::FsOptions;
+    use fusio_parquet::reader::AsyncReader;
+    use futures_util::StreamExt;
+    use parquet::arrow::{arrow_reader::ArrowReaderOptions, ParquetRecordBatchStreamBuilder};
     use parquet_lru::NoCache;
     use tempfile::TempDir;
 
@@ -1131,5 +1134,125 @@ pub(crate) mod tests {
             }
         }
         dbg!(version);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_minor_compaction_sorted() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        );
+        let manager =
+            StoreManager::new(option.base_fs.clone(), option.level_paths.clone()).unwrap();
+        manager
+            .base_fs()
+            .create_dir_all(&option.wal_dir_path())
+            .await
+            .unwrap();
+
+        let batch_1 = build_immutable::<Test>(
+            &option,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 3.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 5.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+            ],
+            &Arc::new(TestSchema),
+            manager.base_fs(),
+        )
+        .await
+        .unwrap();
+
+        let batch_2 = build_immutable::<Test>(
+            &option,
+            vec![
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 4.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+                (
+                    LogType::Full,
+                    Test {
+                        vstring: 1.to_string(),
+                        vu32: 0,
+                        vbool: None,
+                    },
+                    0.into(),
+                ),
+            ],
+            &Arc::new(TestSchema),
+            manager.base_fs(),
+        )
+        .await
+        .unwrap();
+
+        let scope = LeveledCompactor::<Test>::minor_compaction(
+            &option,
+            None,
+            &vec![
+                (Some(generate_file_id()), batch_1),
+                (Some(generate_file_id()), batch_2),
+            ],
+            &TestSchema,
+            &manager,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Open and read the file
+        let fs = Arc::new(TokioFs);
+
+        let path = option.table_path(scope.gen, 0);
+        let file = fs
+            .open_options(&path, OpenOptions::default().read(true))
+            .await
+            .unwrap();
+        let size = file.size().await.unwrap();
+        let reader = AsyncReader::new(file, size).await.unwrap();
+
+        let options = ArrowReaderOptions::new().with_page_index(true);
+        let mut reader = ParquetRecordBatchStreamBuilder::new_with_options(reader, options)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        while let Some(batch) = reader.next().await {
+            let batch = batch.unwrap();
+            let key_column = batch.column(2);
+            let string_array = key_column
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap();
+            let keys: Vec<&str> = (0..string_array.len())
+                .map(|i| string_array.value(i))
+                .collect();
+
+            // Original batch: ["3", "5"], ["4", "1"]
+            // Expected sorted order: ["1", "3", "4", "5"]
+            assert_eq!(keys, vec!["1", "3", "4", "5"]);
+        }
     }
 }

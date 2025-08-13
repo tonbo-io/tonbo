@@ -51,18 +51,7 @@ impl<A> ImmutableMemTable<A>
 where
     A: ArrowArrays,
 {
-    pub(crate) fn scope(
-        &self,
-    ) -> (
-        Option<&<<A::Record as Record>::Schema as Schema>::Key>,
-        Option<&<<A::Record as Record>::Schema as Schema>::Key>,
-    ) {
-        (
-            self.index.first_key_value().map(|(key, _)| key.value()),
-            self.index.last_key_value().map(|(key, _)| key.value()),
-        )
-    }
-
+    #[allow(dead_code)]
     pub(crate) fn as_record_batch(&self) -> &RecordBatch {
         self.data.as_record_batch()
     }

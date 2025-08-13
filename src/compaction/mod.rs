@@ -58,64 +58,81 @@ where
         Self: Sized,
         <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
     {
-        use fusio_parquet::writer::AsyncWriter;
-        use parquet::arrow::AsyncArrowWriter;
+        use std::ops::Bound;
+
+        use futures_util::stream;
+        use parquet::arrow::ProjectionMask;
 
         if !batches.is_empty() {
             let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
             let level_0_fs = manager.get_fs(level_0_path);
-            let mut min = None;
-            let mut max = None;
-            let gen = generate_file_id();
             let mut wal_ids = Vec::with_capacity(batches.len());
-
-            let mut writer = AsyncArrowWriter::try_new(
-                AsyncWriter::new(
-                    level_0_fs
-                        .open_options(
-                            &option.table_path(gen, 0),
-                            FileType::Parquet.open_options(false),
-                        )
-                        .await?,
-                ),
-                schema.arrow_schema().clone(),
-                Some(option.write_parquet_properties.clone()),
-            )?;
 
             if let Some(mut recover_wal_ids) = recover_wal_ids {
                 wal_ids.append(&mut recover_wal_ids);
             }
 
+            // Create scan streams from all immutable memtables
+            let mut streams = Vec::with_capacity(batches.len());
             for (file_id, batch) in batches {
-                if let (Some(batch_min), Some(batch_max)) = batch.scope() {
-                    if matches!(min.as_ref().map(|min| min > batch_min), Some(true) | None) {
-                        min = Some(batch_min.clone())
-                    }
-                    if matches!(max.as_ref().map(|max| max < batch_max), Some(true) | None) {
-                        max = Some(batch_max.clone())
-                    }
-                }
-                writer.write(batch.as_record_batch()).await?;
+                streams.push(ScanStream::Immutable {
+                    inner: stream::iter(batch.scan(
+                        (Bound::Unbounded, Bound::Unbounded),
+                        u32::MAX.into(),
+                        ProjectionMask::all(),
+                        None,
+                    )),
+                });
                 if let Some(file_id) = file_id {
                     wal_ids.push(*file_id);
                 }
             }
 
-            let file_size = writer.bytes_written() as u64;
-            writer.close().await?;
+            // Use MergeStream to merge and sort all batches
+            let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
 
+            let mut builder =
+                <R::Schema as RecordSchema>::Columns::builder(schema.arrow_schema().clone(), 0);
+            let mut min = None;
+            let mut max = None;
+
+            // Collect all sorted entries into a single SST
+            while let Some(result) = stream.next().await {
+                let entry = result?;
+                let key = entry.key();
+
+                if min.is_none() {
+                    min = Some(key.value.clone().to_key())
+                }
+                max = Some(key.value.clone().to_key());
+                builder.push(key, entry.value());
+            }
+
+            // Build the single SST file
             if let (Some(min), Some(max)) = (min, max) {
-                return Ok(Some(Scope {
-                    min,
-                    max,
-                    gen,
-                    wal_ids: if wal_ids.is_empty() {
+                let mut version_edits = Vec::new();
+                Self::build_table(
+                    option,
+                    &mut version_edits,
+                    0,
+                    &mut builder,
+                    &mut Some(min),
+                    &mut Some(max),
+                    schema,
+                    level_0_fs,
+                )
+                .await?;
+
+                // Extract the scope from the version edit and add WAL IDs
+                if let Some(VersionEdit::Add { scope, .. }) = version_edits.first() {
+                    let mut result_scope = scope.clone();
+                    result_scope.wal_ids = if wal_ids.is_empty() {
                         None
                     } else {
                         Some(wal_ids)
-                    },
-                    file_size,
-                }));
+                    };
+                    return Ok(Some(result_scope));
+                }
             }
         }
         Ok(None)
