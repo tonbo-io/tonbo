@@ -106,33 +106,44 @@
 //!     }
 //! }
 //! ```
-mod compaction;
-mod context;
+pub mod compaction;
+pub mod context;
 pub mod executor;
-use executor::RwLock;
-pub(crate) mod fs;
-pub(crate) mod inmem;
+pub mod fs;
+pub mod inmem;
 pub(crate) mod magic;
 mod manifest;
 mod ondisk;
 pub mod option;
 pub mod record;
-mod scope;
+pub mod scope;
 pub(crate) mod snapshot;
-pub(crate) mod stream;
+pub mod stream;
 pub mod transaction;
 mod trigger;
-mod version;
+pub mod version;
 mod wal;
 
-use std::{collections::HashMap, io, marker::PhantomData, mem, ops::Bound, pin::pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    io,
+    marker::PhantomData,
+    mem,
+    ops::Bound,
+    pin::pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 pub use arrow;
 use async_stream::stream;
-use compaction::leveled::LeveledCompactor;
 use context::Context;
 use flume::{bounded, Sender};
 use fs::FileId;
+use fusio::{MaybeSend, MaybeSync};
 pub use fusio::{SeqRead, Write};
 pub use fusio_log::{Decode, Encode};
 use futures::channel::oneshot;
@@ -144,7 +155,7 @@ use inmem::{
 };
 use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
-use manifest::{ManifestStorage, ManifestStorageError};
+use manifest::ManifestStorageError;
 pub use once_cell;
 pub use parquet;
 use parquet::{
@@ -169,19 +180,53 @@ pub use crate::record::{ArrowArrays, ArrowArraysBuilder};
 #[doc(hidden)]
 pub use crate::version::timestamp::Ts;
 use crate::{
-    compaction::{error::CompactionError, CompactTask, Compactor},
-    executor::Executor,
+    compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
+    executor::{Executor, RwLock as ExecutorRwLock},
     fs::{manager::StoreManager, parse_file_id, FileType},
+    inmem::flush::minor_flush,
+    manifest::ManifestStorage,
     record::Schema,
     snapshot::Snapshot,
     stream::{
         mem_projection::MemProjectionStream, merge::MergeStream, package::PackageStream, ScanStream,
     },
     trigger::TriggerFactory,
-    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version},
+    version::{cleaner::Cleaner, error::VersionError, set::VersionSet, Version, VersionRef},
     wal::{log::LogType, RecoverError, WalFile},
 };
 pub use crate::{option::*, stream::Entry};
+
+pub trait CompactionExecutor<R: Record>: MaybeSend + MaybeSync {
+    fn check_then_compaction<'a>(
+        &'a self,
+        batches: Option<
+            &'a [(
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as Schema>::Columns>,
+            )],
+        >,
+        recover_wal_ids: Option<Vec<FileId>>,
+        is_manual: bool,
+    ) -> impl Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a;
+}
+
+// Implementation for custom compactors (Box<dyn Compactor<R>>)
+impl<R: Record> CompactionExecutor<R> for Box<dyn Compactor<R>> {
+    fn check_then_compaction<'a>(
+        &'a self,
+        batches: Option<
+            &'a [(
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as Schema>::Columns>,
+            )],
+        >,
+        recover_wal_ids: Option<Vec<FileId>>,
+        is_manual: bool,
+    ) -> impl Future<Output = Result<(), CompactionError<R>>> + MaybeSend + 'a {
+        self.as_ref()
+            .check_then_compaction(batches, recover_wal_ids, is_manual)
+    }
+}
 
 /// Wrapper of [`DbStorage`] for handling concurrent operations
 pub struct DB<R, E>
@@ -201,7 +246,6 @@ where
     R: Record + Send + Sync,
     <R::Schema as Schema>::Columns: Send + Sync,
     E: Executor + Send + Sync + 'static,
-    DbStorage<R>: fusio::MaybeSend + fusio::MaybeSync,
 {
     /// Open [`DB`] with a [`DbOption`]. This will create a new directory at the
     /// path specified in [`DbOption`] (if it does not exist before) and run it
@@ -217,21 +261,86 @@ where
         )
         .await
     }
-}
 
-impl<R, E> DB<R, E>
-where
-    R: Record + Send + Sync,
-    <R::Schema as Schema>::Columns: Send + Sync,
-    E: Executor + Send + Sync + 'static,
-    DbStorage<R>: fusio::MaybeSend + fusio::MaybeSync,
-{
+    /// Open [`DB`] with a custom compactor factory. This provides completely static dispatch.
+    pub async fn new_with_compactor_factory<C, F>(
+        option: DbOption,
+        executor: E,
+        schema: R::Schema,
+        factory: F,
+    ) -> Result<Self, DbError>
+    where
+        C: CompactionExecutor<R> + Send + Sync + 'static,
+        F: FnOnce(Arc<DbOption>, Arc<R::Schema>, Arc<Context<R>>) -> C,
+    {
+        Self::build_with_compactor_factory(
+            Arc::new(option),
+            executor,
+            schema,
+            Arc::new(NoCache::default()),
+            factory,
+        )
+        .await
+    }
+
     async fn build(
         option: Arc<DbOption>,
         executor: E,
         schema: R::Schema,
         lru_cache: ParquetLru,
     ) -> Result<Self, DbError> {
+        let (record_schema, _manager, cleaner, task_rx, mem_storage, ctx) =
+            Self::build_common_setup::<E>(option.clone(), schema, lru_cache).await?;
+
+        match &option.compaction_option {
+            CompactionOption::Leveled(opt) => {
+                let compactor = LeveledCompactor::<R>::new(
+                    opt.clone(),
+                    record_schema.clone(),
+                    option.clone(),
+                    ctx.clone(),
+                );
+                Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
+            }
+        }
+    }
+
+    async fn build_with_compactor_factory<C, F>(
+        option: Arc<DbOption>,
+        executor: E,
+        schema: R::Schema,
+        lru_cache: ParquetLru,
+        factory: F,
+    ) -> Result<Self, DbError>
+    where
+        C: CompactionExecutor<R> + Send + Sync + 'static,
+        F: FnOnce(Arc<DbOption>, Arc<R::Schema>, Arc<Context<R>>) -> C,
+    {
+        let (record_schema, _, cleaner, task_rx, mem_storage, ctx) =
+            Self::build_common_setup::<E>(option.clone(), schema, lru_cache).await?;
+
+        let compactor = factory(option, record_schema, ctx.clone());
+        Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
+    }
+
+    async fn build_common_setup<Ex>(
+        option: Arc<DbOption>,
+        schema: R::Schema,
+        lru_cache: ParquetLru,
+    ) -> Result<
+        (
+            Arc<R::Schema>,
+            Arc<StoreManager>,
+            Cleaner,
+            flume::Receiver<CompactTask>,
+            Arc<Ex::RwLock<DbStorage<R>>>,
+            Arc<Context<R>>,
+        ),
+        DbError,
+    >
+    where
+        Ex: Executor + Send + Sync,
+    {
         let record_schema = Arc::new(schema);
         let manager = Arc::new(StoreManager::new(
             option.base_fs.clone(),
@@ -263,14 +372,14 @@ where
         }
 
         let (task_tx, task_rx) = bounded(1);
-        let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
+        let (cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
 
         let manifest = Box::new(
-            VersionSet::<R, E>::new(clean_sender, option.clone(), manager.clone())
+            VersionSet::<R, Ex>::new(clean_sender, option.clone(), manager.clone())
                 .await
                 .map_err(ManifestStorageError::Version)?,
         );
-        let mem_storage = Arc::new(E::rw_lock(
+        let mem_storage = Arc::new(Ex::rw_lock(
             DbStorage::new(
                 option.clone(),
                 task_tx,
@@ -282,44 +391,162 @@ where
         ));
 
         let ctx = Arc::new(Context::new(
-            manager,
+            manager.clone(),
             lru_cache.clone(),
             manifest,
             record_schema.arrow_schema().clone(),
         ));
 
-        let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
-                mem_storage.clone(),
-                record_schema,
-                option.clone(),
-                ctx.clone(),
-            )),
-        };
+        Ok((record_schema, manager, cleaner, task_rx, mem_storage, ctx))
+    }
 
+    async fn finish_build<C>(
+        executor: E,
+        mem_storage: Arc<E::RwLock<DbStorage<R>>>,
+        ctx: Arc<Context<R>>,
+        compactor: C,
+        mut cleaner: Cleaner,
+        task_rx: flume::Receiver<CompactTask>,
+    ) -> Result<Self, DbError>
+    where
+        C: CompactionExecutor<R> + MaybeSend + MaybeSync + 'static,
+        E: Executor + Send + Sync + 'static,
+    {
         executor.spawn(async move {
             if let Err(err) = cleaner.listen().await {
                 error!("[Cleaner Error]: {}", err)
             }
         });
 
+        let mem_storage_task = mem_storage.clone();
+        let ctx_task = ctx.clone();
         executor.spawn(async move {
             // Waits to receive compaction task. `CompactTask::Freeze` will perform automatic
             // compaction and `Compact::Flush` will perform manual compaction
             while let Ok(task) = task_rx.recv_async().await {
                 if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
-                    CompactTask::Flush(option_tx) => {
-                        let mut result = compactor.check_then_compaction(true).await;
-                        if let Some(tx) = option_tx {
-                            if result.is_ok() {
-                                result = tx.send(()).map_err(|_| CompactionError::ChannelClose);
+                    CompactTask::Freeze => {
+                        // Handle minor flush; drain owned immutables under short lock
+                        let mut guard = mem_storage_task.write().await;
+
+                        let immutable_chunk_num = guard.option.immutable_chunk_num;
+                        let immutable_chunk_max_num = guard.option.immutable_chunk_max_num;
+                        let base_fs = ctx_task.manager.base_fs().clone();
+
+                        let batches_and_wal_ids = minor_flush(
+                            &mut *guard,
+                            base_fs,
+                            immutable_chunk_num,
+                            immutable_chunk_max_num,
+                            false,
+                        )
+                        .await;
+
+                        match batches_and_wal_ids {
+                            Ok(Some((mut batches, recover_wal_ids))) => {
+                                // Mark compaction window before releasing lock
+                                guard.compaction_in_progress.store(true, Ordering::Release);
+                                // Release lock before heavy work
+                                drop(guard);
+                                // Keep a copy for potential rollback
+                                let rollback_wal_ids = recover_wal_ids.clone();
+
+                                let compaction_result = compactor
+                                    .check_then_compaction(
+                                        Some(&batches[..]),
+                                        recover_wal_ids,
+                                        false,
+                                    )
+                                    .await;
+
+                                // Finalize: clear window and possibly rollback
+                                let mut g = mem_storage_task.write().await;
+                                if compaction_result.is_err() {
+                                    for item in batches.drain(..).rev() {
+                                        g.immutables.insert(0, item);
+                                    }
+                                    if let Some(ids) = rollback_wal_ids {
+                                        if let Some(existing) = &mut g.recover_wal_ids {
+                                            existing.extend(ids);
+                                        } else {
+                                            g.recover_wal_ids = Some(ids);
+                                        }
+                                    }
+                                }
+                                g.compaction_in_progress.store(false, Ordering::Release);
+                                drop(g);
+                                compaction_result
+                            }
+                            Ok(None) => compactor.check_then_compaction(None, None, false).await,
+                            Err(e) => {
+                                error!("[Minor Flush Error]: {}", e);
+                                Ok(())
                             }
                         }
-                        result
+                    }
+                    CompactTask::Flush(option_tx) => {
+                        // Handle manual flush; drain owned immutables under short lock
+                        let mut guard = mem_storage_task.write().await;
+
+                        let immutable_chunk_num = guard.option.immutable_chunk_num;
+                        let immutable_chunk_max_num = guard.option.immutable_chunk_max_num;
+                        let base_fs = ctx_task.manager.base_fs().clone();
+
+                        let batches_and_wal_ids = minor_flush(
+                            &mut *guard,
+                            base_fs,
+                            immutable_chunk_num,
+                            immutable_chunk_max_num,
+                            true,
+                        )
+                        .await;
+
+                        let res = match batches_and_wal_ids {
+                            Ok(Some((mut batches, recover_wal_ids))) => {
+                                // Mark compaction window before releasing lock
+                                guard.compaction_in_progress.store(true, Ordering::Release);
+                                // Release lock before heavy work
+                                drop(guard);
+                                let rollback_wal_ids = recover_wal_ids.clone();
+                                let compaction_result = compactor
+                                    .check_then_compaction(
+                                        Some(&batches[..]),
+                                        recover_wal_ids,
+                                        true,
+                                    )
+                                    .await;
+                                let mut g = mem_storage_task.write().await;
+                                if compaction_result.is_err() {
+                                    for item in batches.drain(..).rev() {
+                                        g.immutables.insert(0, item);
+                                    }
+                                    if let Some(ids) = rollback_wal_ids {
+                                        if let Some(existing) = &mut g.recover_wal_ids {
+                                            existing.extend(ids);
+                                        } else {
+                                            g.recover_wal_ids = Some(ids);
+                                        }
+                                    }
+                                }
+                                g.compaction_in_progress.store(false, Ordering::Release);
+                                drop(g);
+                                compaction_result
+                            }
+                            Ok(None) => compactor.check_then_compaction(None, None, true).await,
+                            Err(e) => {
+                                error!("[Minor Flush Error]: {}", e);
+                                Ok(())
+                            }
+                        };
+
+                        if let Some(tx) = option_tx {
+                            // Always notify the caller to avoid hanging flush() even on error
+                            let _ = tx.send(());
+                        }
+                        res
                     }
                 } {
-                    error!("[Compaction Error]: {}", err)
+                    error!("[Compaction Error]: {}", err);
                 }
             }
         });
@@ -330,6 +557,11 @@ where
             ctx,
             _p: Default::default(),
         })
+    }
+
+    /// Returns the current manifest version
+    pub async fn current_manifest(&self) -> VersionRef<R> {
+        self.ctx.current_manifest().await
     }
 
     /// Open an optimistic ACID transaction
@@ -360,16 +592,31 @@ where
     /// txn.commit().await.unwrap();
     /// ```
     pub async fn transaction(&self) -> Transaction<'_, R, E> {
-        Transaction::new(self.snapshot().await, self.lock_map.clone())
+        // Wait out any compaction window where immutables were drained
+        loop {
+            let guard = self.mem_storage.read().await;
+            if guard.compaction_in_progress.load(Ordering::Acquire) {
+                // Drop guard and retry after compaction finalizes
+                drop(guard);
+                continue;
+            }
+            let version_ref = self.ctx.manifest().current().await;
+            let snapshot: Snapshot<'_, R, E> = Snapshot::new(guard, version_ref, self.ctx.clone());
+            break Transaction::new(snapshot, self.lock_map.clone());
+        }
     }
 
     /// Returns a snapshot of the database
     pub async fn snapshot(&self) -> Snapshot<'_, R, E> {
-        Snapshot::new(
-            self.mem_storage.read().await,
-            self.ctx.manifest().current().await,
-            self.ctx.clone(),
-        )
+        // Avoid building a snapshot while immutables are drained for compaction
+        loop {
+            let guard = ExecutorRwLock::read(&*self.mem_storage).await;
+            if guard.compaction_in_progress.load(Ordering::Acquire) {
+                drop(guard);
+                continue;
+            }
+            break Snapshot::new(guard, self.ctx.manifest().current().await, self.ctx.clone());
+        }
     }
 
     /// Insert a single tonbo record
@@ -417,25 +664,29 @@ where
         key: &<R::Schema as Schema>::Key,
         mut f: impl FnMut(TransactionEntry<'_, R>) -> Option<T>,
     ) -> Result<Option<T>, CommitError<R>> {
-        Ok(self
-            .mem_storage
-            .read()
-            .await
-            .get(
-                &self.ctx,
-                &*self.ctx.manifest().current().await,
-                key,
-                self.ctx.load_ts(),
-                Projection::All,
-            )
-            .await?
-            .and_then(|entry| {
-                if entry.value().is_none() {
-                    None
-                } else {
-                    f(TransactionEntry::Stream(entry))
-                }
-            }))
+        loop {
+            let guard = self.mem_storage.read().await;
+            if guard.compaction_in_progress.load(Ordering::Acquire) {
+                drop(guard);
+                continue;
+            }
+            break Ok(guard
+                .get(
+                    &self.ctx,
+                    &*self.ctx.manifest().current().await,
+                    key,
+                    self.ctx.load_ts(),
+                    Projection::All,
+                )
+                .await?
+                .and_then(|entry| {
+                    if entry.value().is_none() {
+                        None
+                    } else {
+                        f(TransactionEntry::Stream(entry))
+                    }
+                }));
+        }
     }
 
     /// Scan records with primary keys in the `range` and process them using closure `f`
@@ -448,7 +699,15 @@ where
         mut f: impl FnMut(TransactionEntry<'_, R>) -> T + 'scan,
     ) -> impl Stream<Item = Result<T, CommitError<R>>> + 'scan {
         stream! {
-            let schema = self.mem_storage.read().await;
+            // Delay stream construction while compaction window is active
+            let schema = loop {
+                let guard = self.mem_storage.read().await;
+                if guard.compaction_in_progress.load(Ordering::Acquire) {
+                    drop(guard);
+                    continue;
+                }
+                break guard;
+            };
             let current = self.ctx.manifest().current().await;
             let mut scan = Scan::new(
                 &schema,
@@ -538,8 +797,9 @@ pub struct DbStorage<R>
 where
     R: Record,
 {
-    pub(crate) mutable: MutableMemTable<R>,
-    pub(crate) immutables: Vec<(
+    #[allow(private_interfaces)]
+    pub mutable: MutableMemTable<R>,
+    pub immutables: Vec<(
         Option<FileId>,
         ImmutableMemTable<<R::Schema as Schema>::Columns>,
     )>,
@@ -548,6 +808,8 @@ where
     trigger: Arc<dyn FreezeTrigger<R>>,
     record_schema: Arc<R::Schema>,
     option: Arc<DbOption>,
+    // Indicates a compaction window where immutables are drained and not yet visible in manifest
+    compaction_in_progress: AtomicBool,
 }
 
 impl<R> DbStorage<R>
@@ -597,6 +859,7 @@ where
             trigger,
             record_schema,
             option: option.clone(),
+            compaction_in_progress: AtomicBool::new(false),
         };
 
         let mut wal_ids = Vec::new();
@@ -807,7 +1070,6 @@ where
     ts: Timestamp,
     // DB Version that is being scanned
     version: &'scan Version<R>,
-    //
     fn_pre_stream: Box<
         dyn FnOnce(Option<ProjectionMask>, Option<Order>) -> Option<ScanStream<'scan, R>>
             + Send
@@ -826,7 +1088,6 @@ impl<'scan, 'range, R> Scan<'scan, 'range, R>
 where
     R: Record + Send,
 {
-    /// Creates new `Scan`
     fn new(
         mem_storage: &'scan DbStorage<R>,
         (lower, upper): (
@@ -894,11 +1155,9 @@ where
         }
     }
 
-    /// Fields in projection `Record` by field indices
+    /// fields in projection Record by field indices
     pub fn projection(self, projection: &[&str]) -> Self {
         let schema = self.mem_storage.record_schema.arrow_schema();
-
-        // Gathers all projection indexes in array
         let mut projection = projection
             .iter()
             .map(|name| {
@@ -1134,11 +1393,13 @@ pub(crate) mod tests {
     use futures::StreamExt;
     use parquet_lru::NoCache;
     use tempfile::TempDir;
-    use tracing::error;
 
     pub use crate::record::test::{Test, TestRef};
     use crate::{
-        compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
+        compaction::{
+            leveled::{LeveledCompactor, LeveledOptions},
+            CompactTask,
+        },
         context::Context,
         executor::{tokio::TokioExecutor, Executor},
         fs::{generate_file_id, manager::StoreManager},
@@ -1266,6 +1527,7 @@ pub(crate) mod tests {
                 trigger,
                 record_schema: Arc::new(TestSchema {}),
                 option,
+                compaction_in_progress: std::sync::atomic::AtomicBool::new(false),
             },
             compaction_rx,
         ))
@@ -1296,7 +1558,7 @@ pub(crate) mod tests {
 
         let mem_storage = Arc::new(E::rw_lock(mem_storage));
 
-        let (mut cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
+        let (cleaner, clean_sender) = Cleaner::new(option.clone(), manager.clone());
         let manifest = Box::new(
             build_version_set::<R, E>(version, clean_sender, option.clone(), manager.clone())
                 .await
@@ -1308,47 +1570,26 @@ pub(crate) mod tests {
             manifest,
             TestSchema.arrow_schema().clone(),
         ));
-        let mut compactor = match option.compaction_option {
-            CompactionOption::Leveled => Compactor::Leveled(LeveledCompactor::<R, E>::new(
-                mem_storage.clone(),
-                record_schema,
-                option.clone(),
-                ctx.clone(),
-            )),
-        };
-
-        executor.spawn(async move {
-            if let Err(err) = cleaner.listen().await {
-                error!("[Cleaner Error]: {}", err)
+        // Create built-in compactor for tests
+        match &option.compaction_option {
+            CompactionOption::Leveled(opt) => {
+                let compactor = LeveledCompactor::<R>::new(
+                    opt.clone(),
+                    record_schema.clone(),
+                    option.clone(),
+                    ctx.clone(),
+                );
+                DB::finish_build(
+                    executor,
+                    mem_storage,
+                    ctx,
+                    compactor,
+                    cleaner,
+                    compaction_rx,
+                )
+                .await
             }
-        });
-        executor.spawn(async move {
-            while let Ok(task) = compaction_rx.recv_async().await {
-                if let Err(err) = match task {
-                    CompactTask::Freeze => compactor.check_then_compaction(false).await,
-                    CompactTask::Flush(option_tx) => {
-                        let mut result = compactor.check_then_compaction(true).await;
-                        if let Some(tx) = option_tx {
-                            let channel_result =
-                                tx.send(()).map_err(|_| CompactionError::ChannelClose);
-                            if result.is_ok() {
-                                result = channel_result;
-                            }
-                        }
-                        result
-                    }
-                } {
-                    error!("[Compaction Error]: {}", err)
-                }
-            }
-        });
-
-        Ok(DB {
-            mem_storage,
-            lock_map: Arc::new(Default::default()),
-            ctx,
-            _p: Default::default(),
-        })
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1362,12 +1603,16 @@ pub(crate) mod tests {
         let mut option = DbOption::new(path, &TestSchema)
             .level_path(0, path_l0, FsOptions::Local)
             .unwrap();
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 3;
-        option.level_sst_magnification = 10;
-        option.max_sst_file_size = 2 * 1024 * 1024;
-        option.major_default_oldest_table_num = 1;
+        option = option
+            .immutable_chunk_num(1)
+            .immutable_chunk_max_num(1)
+            .leveled_compaction(
+                LeveledOptions::default()
+                    .major_threshold_with_sst_size(3)
+                    .level_sst_magnification(10)
+                    .major_default_oldest_table_num(1),
+            )
+            .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 5);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
@@ -1402,13 +1647,16 @@ pub(crate) mod tests {
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
-        );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 3;
-        option.level_sst_magnification = 10;
-        option.max_sst_file_size = 2 * 1024 * 1024;
-        option.major_default_oldest_table_num = 1;
+        )
+        .immutable_chunk_num(1)
+        .immutable_chunk_max_num(1)
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .level_sst_magnification(10)
+                .major_default_oldest_table_num(1),
+        )
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(/* max_mutable_len */ 50);
 
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
@@ -1545,6 +1793,7 @@ pub(crate) mod tests {
             trigger,
             record_schema: Arc::new(TestSchema),
             option: option.clone(),
+            compaction_in_progress: std::sync::atomic::AtomicBool::new(false),
         };
 
         for (i, item) in test_items(0u32..32).enumerate() {
@@ -1621,6 +1870,7 @@ pub(crate) mod tests {
             trigger,
             record_schema: dyn_schema.clone(),
             option,
+            compaction_in_progress: std::sync::atomic::AtomicBool::new(false),
         };
 
         for item in test_dyn_items().into_iter() {
@@ -1674,11 +1924,14 @@ pub(crate) mod tests {
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &TestSchema,
+        )
+        .immutable_chunk_num(1)
+        .immutable_chunk_max_num(1)
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .major_default_oldest_table_num(1),
         );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 3;
-        option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
         let db: DB<Test, TokioExecutor> = DB::new(option, TokioExecutor::default(), TestSchema)
             .await
@@ -1714,13 +1967,16 @@ pub(crate) mod tests {
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
             &dyn_schema,
-        );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 3;
-        option.level_sst_magnification = 10;
-        option.max_sst_file_size = 2 * 1024 * 1024;
-        option.major_default_oldest_table_num = 1;
+        )
+        .immutable_chunk_num(1)
+        .immutable_chunk_max_num(1)
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .level_sst_magnification(10)
+                .major_default_oldest_table_num(1),
+        )
+        .max_sst_file_size(2 * 1024 * 1024);
         option.trigger_type = TriggerType::Length(5);
 
         let db: DB<DynRecord, TokioExecutor> =
@@ -1855,33 +2111,42 @@ pub(crate) mod tests {
         let mut option = DbOption::new(
             Path::from_filesystem_path(temp_dir1.path()).unwrap(),
             &dyn_schema,
+        )
+        .immutable_chunk_num(1)
+        .immutable_chunk_max_num(1)
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .major_default_oldest_table_num(1),
         );
-        option.immutable_chunk_num = 1;
-        option.immutable_chunk_max_num = 1;
-        option.major_threshold_with_sst_size = 3;
-        option.major_default_oldest_table_num = 1;
         option.trigger_type = TriggerType::Length(5);
 
         let temp_dir2 = TempDir::with_prefix("db2").unwrap();
         let mut option2 = DbOption::new(
             Path::from_filesystem_path(temp_dir2.path()).unwrap(),
             &dyn_schema,
+        )
+        .immutable_chunk_num(1)
+        .immutable_chunk_max_num(1)
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .major_default_oldest_table_num(1),
         );
-        option2.immutable_chunk_num = 1;
-        option2.immutable_chunk_max_num = 1;
-        option2.major_threshold_with_sst_size = 3;
-        option2.major_default_oldest_table_num = 1;
         option2.trigger_type = TriggerType::Length(5);
 
         let temp_dir3 = TempDir::with_prefix("db3").unwrap();
         let mut option3 = DbOption::new(
             Path::from_filesystem_path(temp_dir3.path()).unwrap(),
             &dyn_schema,
+        )
+        .immutable_chunk_num(1)
+        .immutable_chunk_max_num(1)
+        .leveled_compaction(
+            LeveledOptions::default()
+                .major_threshold_with_sst_size(3)
+                .major_default_oldest_table_num(1),
         );
-        option3.immutable_chunk_num = 1;
-        option3.immutable_chunk_max_num = 1;
-        option3.major_threshold_with_sst_size = 3;
-        option3.major_default_oldest_table_num = 1;
         option3.trigger_type = TriggerType::Length(5);
 
         let db1: DB<DynRecord, TokioExecutor> =

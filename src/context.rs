@@ -3,11 +3,15 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 
 use crate::{
-    fs::manager::StoreManager, manifest::ManifestStorage, record::Record,
-    version::timestamp::Timestamp, ParquetLru,
+    fs::manager::StoreManager,
+    manifest::{ManifestStorage, ManifestStorageError},
+    ondisk::sstable::SsTableID,
+    record::Record,
+    version::{edit::VersionEdit, timestamp::Timestamp, VersionRef},
+    ParquetLru,
 };
 
-pub(crate) struct Context<R: Record> {
+pub struct Context<R: Record> {
     pub(crate) manager: Arc<StoreManager>,
     pub(crate) parquet_lru: ParquetLru,
     // TODO: Use concrete implementation of ManifestStorage.
@@ -39,7 +43,7 @@ where
         self.manifest.as_ref()
     }
 
-    pub(crate) fn storage_manager(&self) -> &StoreManager {
+    pub fn storage_manager(&self) -> &StoreManager {
         &self.manager
     }
 
@@ -57,5 +61,17 @@ where
 
     pub(crate) fn increase_ts(&self) -> Timestamp {
         self.manifest.increase_ts()
+    }
+
+    pub async fn current_manifest(&self) -> VersionRef<R> {
+        self.manifest.current().await
+    }
+
+    pub async fn update_manifest(
+        &self,
+        version_edits: Vec<VersionEdit<<R::Schema as crate::record::Schema>::Key>>,
+        delete_gens: Option<Vec<SsTableID>>,
+    ) -> Result<(), ManifestStorageError> {
+        self.manifest.update(version_edits, delete_gens).await
     }
 }
