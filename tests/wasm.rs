@@ -7,6 +7,7 @@ mod tests {
     use fusio::{path::Path, DynFs};
     use futures::StreamExt;
     use tonbo::{
+        compaction::leveled::LeveledOptions,
         executor::opfs::OpfsExecutor,
         record::{
             AsValue, DynRecord, DynSchema, DynamicField, KeyRef, Record, RecordRef, Schema, Value,
@@ -289,6 +290,10 @@ mod tests {
             region,
         };
 
+        let leveled_options = LeveledOptions::default()
+            .major_threshold_with_sst_size(3)
+            .level_sst_magnification(1);
+
         let option = DbOption::new(Path::from_opfs_path("s3_rw").unwrap(), &schema)
             .level_path(
                 0,
@@ -304,8 +309,7 @@ mod tests {
             .unwrap()
             .level_path(2, Path::from_url_path("tonbo/l2").unwrap(), fs_option)
             .unwrap()
-            .major_threshold_with_sst_size(3)
-            .level_sst_magnification(1)
+            .leveled_compaction(leveled_options)
             .max_sst_file_size(1 * 1024);
 
         let db: DB<DynRecord, OpfsExecutor> =
