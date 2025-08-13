@@ -51,7 +51,7 @@ impl<A> ImmutableMemTable<A>
 where
     A: ArrowArrays,
 {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn as_record_batch(&self) -> &RecordBatch {
         self.data.as_record_batch()
     }
