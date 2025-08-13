@@ -618,4 +618,51 @@ mod tests {
         let decoded = Value::decode(&mut cursor).await.unwrap();
         assert_eq!(value2.as_key_ref(), decoded.as_key_ref());
     }
+
+    // This test demonstrates a bug in size() for Dictionary values:
+    // the encoded output includes the dictionary's value-type header,
+    // but size() does not account for those bytes.
+    #[tokio::test]
+    async fn test_dictionary_size_matches_encoded_len_value() {
+        let value = Value::Dictionary(
+            DictionaryKeyType::UInt8,
+            Box::new(Value::String("a".to_string())),
+        );
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+
+        value.encode(&mut cursor).await.unwrap();
+
+        let encoded_len = buf.len();
+        let reported_size = value.size();
+        // This assertion is expected to fail with current implementation,
+        // proving size() undercounts dictionary-encoded bytes.
+        assert_eq!(
+            encoded_len, reported_size,
+            "encoded length {} differs from size() {} for dictionary value",
+            encoded_len, reported_size
+        );
+    }
+
+    // Same mismatch for ValueRef::Dictionary
+    #[tokio::test]
+    async fn test_dictionary_size_matches_encoded_len_value_ref() {
+        let value = Value::Dictionary(DictionaryKeyType::Int64, Box::new(Value::Date64(114)));
+        let value_ref = value.as_key_ref();
+
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+
+        value_ref.encode(&mut cursor).await.unwrap();
+
+        let encoded_len = buf.len();
+        let reported_size = value_ref.size();
+        // This assertion is expected to fail with current implementation,
+        // proving size() undercounts dictionary-encoded bytes.
+        assert_eq!(
+            encoded_len, reported_size,
+            "encoded length {} differs from size() {} for dictionary value_ref",
+            encoded_len, reported_size
+        );
+    }
 }
