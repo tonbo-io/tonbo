@@ -6,13 +6,13 @@ use fusio_log::{Decode, Encode};
 use crate::{fs::FileId, record::Key};
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct Scope<K: Key> {
-    pub(crate) min: K,
-    pub(crate) max: K,
-    pub(crate) gen: FileId,
-    pub(crate) wal_ids: Option<Vec<FileId>>,
+pub struct Scope<K: Key> {
+    pub min: K,
+    pub max: K,
+    pub gen: FileId,
+    pub wal_ids: Option<Vec<FileId>>,
     /// Approximate file size in bytes
-    pub(crate) file_size: u64,
+    pub file_size: u64,
 }
 
 impl<K> Clone for Scope<K>
@@ -34,16 +34,16 @@ impl<K> Scope<K>
 where
     K: Key,
 {
-    pub(crate) fn contains(&self, key: &K) -> bool {
+    pub fn contains(&self, key: &K) -> bool {
         &self.min <= key && key <= &self.max
     }
 
     #[allow(unused)]
-    pub(crate) fn meets(&self, target: &Self) -> bool {
+    pub fn meets(&self, target: &Self) -> bool {
         self.contains(&target.min) || self.contains(&target.max)
     }
 
-    pub(crate) fn meets_range(&self, range: (Bound<&K>, Bound<&K>)) -> bool {
+    pub fn meets_range(&self, range: (Bound<&K>, Bound<&K>)) -> bool {
         let excluded_contains = |key| -> bool { &self.min < key && key < &self.max };
         let included_by = |min, max| -> bool { min <= &self.min && &self.max <= max };
 
@@ -73,7 +73,7 @@ where
         }
     }
 
-    pub(crate) fn gen(&self) -> FileId {
+    pub fn gen(&self) -> FileId {
         self.gen
     }
 }
