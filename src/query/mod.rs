@@ -53,8 +53,14 @@ pub trait ColumnSelector {
 }
 
 pub struct ColIndex<const I: usize>;
+
 impl<const I: usize> ColumnSelector for ColIndex<I> {
     fn resolve_col<S: Schema>(&self, schema: &S) -> Result<ResolvedSelector, ResolveError> {
+        if I >= schema.arrow_schema().fields().len() {
+            return Err(ResolveError::UnknownColumn(format!(
+                "Column index {I} out of bounds"
+            )));
+        }
         let field: FieldRef = schema.arrow_schema().field(I).clone().into();
         Ok(ResolvedSelector { index: I, field })
     }
