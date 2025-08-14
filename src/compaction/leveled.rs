@@ -1264,3 +1264,53 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "tokio"))]
+pub(crate) mod tests_metric {
+
+    use fusio::path::Path;
+    use tempfile::TempDir;
+
+    use crate::{
+        compaction::{
+            leveled::LeveledOptions,
+            tests_metric::{read_write_amplification_measurement, throughput},
+        },
+        inmem::immutable::tests::TestSchema,
+        trigger::TriggerType,
+        DbOption,
+    };
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn read_write_amplification_measurement_leveled() {
+        let temp_dir = TempDir::new().unwrap();
+        let leveled_options = LeveledOptions {
+            major_threshold_with_sst_size: 3,
+            level_sst_magnification: 4,
+            ..Default::default()
+        };
+        let option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        )
+        .leveled_compaction(leveled_options)
+        .max_sst_file_size(1024); // Small file size to force multiple files
+
+        read_write_amplification_measurement(option).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn throughput_leveled() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut option = DbOption::new(
+            Path::from_filesystem_path(temp_dir.path()).unwrap(),
+            &TestSchema,
+        )
+        .leveled_compaction(LeveledOptions::default());
+        option.trigger_type = TriggerType::SizeOfMem(1 * 1024 * 1024);
+
+        throughput(option).await;
+    }
+}
