@@ -1,11 +1,10 @@
 use fusio::Write;
 use fusio_log::{Decode, Encode};
 
-use crate::record::ValueError;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum DictionaryKeyType {
-    Int8,
+    Int8 = 0,
     Int16,
     Int32,
     Int64,
@@ -13,6 +12,22 @@ pub enum DictionaryKeyType {
     UInt16,
     UInt32,
     UInt64,
+}
+
+impl From<u8> for DictionaryKeyType {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Int8,
+            1 => Self::Int16,
+            2 => Self::Int32,
+            3 => Self::Int64,
+            4 => Self::UInt8,
+            5 => Self::UInt16,
+            6 => Self::UInt32,
+            7 => Self::UInt64,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl From<DictionaryKeyType> for arrow::datatypes::DataType {
@@ -66,16 +81,7 @@ impl Encode for DictionaryKeyType {
     where
         W: Write,
     {
-        match self {
-            DictionaryKeyType::Int8 => 0u8.encode(writer).await,
-            DictionaryKeyType::Int16 => 1u8.encode(writer).await,
-            DictionaryKeyType::Int32 => 2u8.encode(writer).await,
-            DictionaryKeyType::Int64 => 3u8.encode(writer).await,
-            DictionaryKeyType::UInt8 => 4u8.encode(writer).await,
-            DictionaryKeyType::UInt16 => 5u8.encode(writer).await,
-            DictionaryKeyType::UInt32 => 6u8.encode(writer).await,
-            DictionaryKeyType::UInt64 => 7u8.encode(writer).await,
-        }
+        (*self as u8).encode(writer).await
     }
 
     fn size(&self) -> usize {
@@ -88,20 +94,7 @@ impl Decode for DictionaryKeyType {
     where
         R: fusio::SeqRead,
     {
-        let value = u8::decode(reader).await?;
-        match value {
-            0 => Ok(DictionaryKeyType::Int8),
-            1 => Ok(DictionaryKeyType::Int16),
-            2 => Ok(DictionaryKeyType::Int32),
-            3 => Ok(DictionaryKeyType::Int64),
-            4 => Ok(DictionaryKeyType::UInt8),
-            5 => Ok(DictionaryKeyType::UInt16),
-            6 => Ok(DictionaryKeyType::UInt32),
-            7 => Ok(DictionaryKeyType::UInt64),
-            _ => Err(fusio::Error::Other(Box::new(ValueError::InvalidDataType(
-                "invalid dictionary key type".to_string(),
-            )))),
-        }
+        Ok(u8::decode(reader).await?.into())
     }
 }
 

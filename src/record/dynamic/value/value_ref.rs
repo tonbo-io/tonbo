@@ -253,7 +253,7 @@ impl<'a> ValueRef<'a> {
                         .ok_or_else(|| {
                             ValueError::InvalidConversion("Time64Microsecond cast failed".into())
                         })?;
-                    Ok(ValueRef::Time64(arr.value(index), TimeUnit::Second))
+                    Ok(ValueRef::Time64(arr.value(index), TimeUnit::Microsecond))
                 }
                 ArrowTimeUnit::Nanosecond => {
                     let arr = array
@@ -262,7 +262,7 @@ impl<'a> ValueRef<'a> {
                         .ok_or_else(|| {
                             ValueError::InvalidConversion("Time64Nanosecond cast failed".into())
                         })?;
-                    Ok(ValueRef::Time64(arr.value(index), TimeUnit::Millisecond))
+                    Ok(ValueRef::Time64(arr.value(index), TimeUnit::Nanosecond))
                 }
                 _ => unreachable!("Time64 only supports microsecond and nanosecond"),
             },
