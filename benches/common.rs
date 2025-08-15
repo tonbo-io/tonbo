@@ -347,7 +347,7 @@ impl BenchDatabase for TonboBenchDataBase {
 }
 
 pub struct TonboBenchReadTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer>,
+    txn: tonbo::transaction::Transaction<'a, Customer, TokioExecutor>,
 }
 
 impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
@@ -362,7 +362,7 @@ impl<'db> BenchReadTransaction for TonboBenchReadTransaction<'db> {
 }
 
 pub struct TonboBenchReader<'db, 'txn> {
-    txn: &'txn tonbo::transaction::Transaction<'db, Customer>,
+    txn: &'txn tonbo::transaction::Transaction<'db, Customer, TokioExecutor>,
 }
 
 impl BenchReader for TonboBenchReader<'_, '_> {
@@ -402,7 +402,7 @@ impl BenchReader for TonboBenchReader<'_, '_> {
 }
 
 pub struct TonboBenchWriteTransaction<'a> {
-    txn: tonbo::transaction::Transaction<'a, Customer>,
+    txn: tonbo::transaction::Transaction<'a, Customer, TokioExecutor>,
 }
 
 impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
@@ -421,7 +421,7 @@ impl<'db> BenchWriteTransaction for TonboBenchWriteTransaction<'db> {
 }
 
 pub struct TonboBenchInserter<'db, 'txn> {
-    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer>,
+    txn: &'txn mut tonbo::transaction::Transaction<'db, Customer, TokioExecutor>,
 }
 
 impl BenchInserter for TonboBenchInserter<'_, '_> {
