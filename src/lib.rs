@@ -180,7 +180,10 @@ pub use crate::record::{ArrowArrays, ArrowArraysBuilder};
 #[doc(hidden)]
 pub use crate::version::timestamp::Ts;
 use crate::{
-    compaction::{error::CompactionError, leveled::LeveledCompactor, CompactTask, Compactor},
+    compaction::{
+        error::CompactionError, leveled::LeveledCompactor, tiered::TieredCompactor, CompactTask,
+        Compactor,
+    },
     executor::{Executor, RwLock as ExecutorRwLock},
     fs::{manager::StoreManager, parse_file_id, FileType},
     inmem::flush::minor_flush,
@@ -295,6 +298,15 @@ where
         match &option.compaction_option {
             CompactionOption::Leveled(opt) => {
                 let compactor = LeveledCompactor::<R>::new(
+                    opt.clone(),
+                    record_schema.clone(),
+                    option.clone(),
+                    ctx.clone(),
+                );
+                Self::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
+            }
+            CompactionOption::Tiered(opt) => {
+                let compactor = TieredCompactor::<R>::new(
                     opt.clone(),
                     record_schema.clone(),
                     option.clone(),
@@ -1398,6 +1410,7 @@ pub(crate) mod tests {
     use crate::{
         compaction::{
             leveled::{LeveledCompactor, LeveledOptions},
+            tiered::TieredCompactor,
             CompactTask,
         },
         context::Context,
@@ -1537,7 +1550,7 @@ pub(crate) mod tests {
 
     pub(crate) async fn build_db<R, E>(
         option: Arc<DbOption>,
-        compaction_rx: Receiver<CompactTask>,
+        task_rx: Receiver<CompactTask>,
         executor: E,
         mem_storage: crate::DbStorage<R>,
         record_schema: Arc<R::Schema>,
@@ -1579,15 +1592,16 @@ pub(crate) mod tests {
                     option.clone(),
                     ctx.clone(),
                 );
-                DB::finish_build(
-                    executor,
-                    mem_storage,
-                    ctx,
-                    compactor,
-                    cleaner,
-                    compaction_rx,
-                )
-                .await
+                DB::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
+            }
+            CompactionOption::Tiered(opt) => {
+                let compactor = TieredCompactor::<R>::new(
+                    opt.clone(),
+                    record_schema.clone(),
+                    option.clone(),
+                    ctx.clone(),
+                );
+                DB::finish_build(executor, mem_storage, ctx, compactor, cleaner, task_rx).await
             }
         }
     }
