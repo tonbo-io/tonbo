@@ -3,7 +3,8 @@ pub(crate) mod builder;
 mod record;
 mod record_ref;
 mod schema;
-mod value;
+pub mod util;
+pub mod value;
 
 use std::sync::Arc;
 

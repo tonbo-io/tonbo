@@ -18,7 +18,7 @@ pub struct RecordBatchEntry<R>
 where
     R: Record,
 {
-    _record_batch: RecordBatch,
+    record_batch: RecordBatch,
     record_ref: OptionRecordRef<'static, R::Ref<'static>>,
 }
 
@@ -26,24 +26,38 @@ impl<R> RecordBatchEntry<R>
 where
     R: Record,
 {
+    /// Creates new [`RecordBatchEntry`]
     pub(crate) fn new(
-        _record_batch: RecordBatch,
+        record_batch: RecordBatch,
         record_ref: OptionRecordRef<'static, R::Ref<'static>>,
     ) -> Self {
         Self {
-            _record_batch,
+            record_batch,
             record_ref,
         }
     }
 
-    pub(crate) fn internal_key(&self) -> Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {
+    /// Passes owned record batch
+    pub fn record_batch(self) -> RecordBatch {
+        self.record_batch
+    }
+
+    /// Passes record batch reference
+    pub fn batch_as_ref(&self) -> &RecordBatch {
+        &self.record_batch
+    }
+
+    /// Returns internal key
+    pub fn internal_key(&self) -> Ts<<<R::Schema as RecordSchema>::Key as Key>::Ref<'_>> {
         self.record_ref.key()
     }
 
+    /// Returns key value
     pub fn key(&self) -> <<R::Schema as RecordSchema>::Key as Key>::Ref<'_> {
         self.internal_key().value().clone()
     }
 
+    /// Returns record reference
     pub fn get(&self) -> Option<R::Ref<'_>> {
         // Safety: shorter lifetime of the key must be safe
         unsafe { transmute(self.record_ref.get()) }
