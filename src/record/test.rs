@@ -76,9 +76,15 @@ impl Record for String {
         self
     }
 
+    fn as_owned_value(&self) -> Self {
+        self.clone()
+    }
+
     fn as_record_ref(&self) -> Self::Ref<'_> {
         self
     }
+
+    fn projection(&mut self, _projection_mask: &ProjectionMask) {}
 
     fn size(&self) -> usize {
         self.len()
@@ -244,6 +250,12 @@ impl Record for Test {
     fn key(&self) -> &str {
         &self.vstring
     }
+
+    fn as_owned_value(&self) -> Self {
+        self.clone()
+    }
+
+    fn projection(&mut self, _projection_mask: &ProjectionMask) {}
 
     fn as_record_ref(&self) -> Self::Ref<'_> {
         TestRef {

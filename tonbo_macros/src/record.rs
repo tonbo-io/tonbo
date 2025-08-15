@@ -169,7 +169,10 @@ fn trait_record_codegen(
     let mut to_ref_init_fields: Vec<TokenStream> = Vec::new();
     let mut has_ref = false;
 
-    for field in fields.iter() {
+    let mut owned_init_fields: Vec<TokenStream> = Vec::new();
+    let mut projection_arms: Vec<TokenStream> = Vec::new();
+
+    for (i, field) in fields.iter().enumerate() {
         let field_name = field.ident.as_ref().unwrap();
 
         let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
@@ -205,6 +208,31 @@ fn trait_record_codegen(
                 }
             }
         }
+
+        let owned_expr = if is_nullable {
+            quote!( self.#field_name.clone() )
+        } else {
+            quote!( self.#field_name )
+        };
+        owned_init_fields.push(quote! { #field_name: #owned_expr, });
+
+        if !field.primary_key.unwrap_or_default() {
+            let col_index = i + 2; // keep your +2 convention
+            let clear_stmt = if is_nullable {
+                quote!( self.#field_name = None; )
+            } else if is_string {
+                quote!( self.#field_name.clear(); )
+            } else if is_bytes {
+                quote!( self.#field_name = ::bytes::Bytes::new(); )
+            } else {
+                quote!( self.#field_name = ::core::default::Default::default(); )
+            };
+            projection_arms.push(quote! {
+                if !projection_mask.contains(#col_index) {
+                    #clear_stmt
+                }
+            });
+        }
     }
 
     let struct_ref_name = struct_name.to_ref_ident();
@@ -236,10 +264,20 @@ fn trait_record_codegen(
                 #fn_primary_key
             }
 
+            fn as_owned_value(&self) -> Self {
+                Self {
+                    #(#owned_init_fields)*
+                }
+            }
+
             fn as_record_ref(&self) -> Self::Ref<'_> {
                 #struct_ref_name {
                     #(#to_ref_init_fields)*
                 }
+            }
+
+            fn projection(&mut self, projection_mask: &::tonbo::record::ProjectionMask) {
+                #(#projection_arms)*
             }
 
             fn size(&self) -> usize {

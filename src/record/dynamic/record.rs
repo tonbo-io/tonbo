@@ -1,8 +1,12 @@
 use fusio::SeqRead;
 use fusio_log::{Decode, Encode};
+use parquet::arrow::ProjectionMask;
 
 use super::{schema::DynSchema, DynRecordRef, Value, ValueError};
-use crate::record::{error::RecordError, DynamicField, Key, Record};
+use crate::{
+    magic::USER_COLUMN_OFFSET,
+    record::{error::RecordError, DynamicField, Key, Record},
+};
 
 #[derive(Debug, Clone)]
 pub struct DynRecord {
@@ -18,20 +22,6 @@ impl DynRecord {
             values,
             primary_index,
         }
-    }
-
-    // Used for converting `DynRecord`s to `RecordBatches`
-    pub fn schema(&self, primary_index: usize) -> DynSchema {
-        let mut dyn_fields = Vec::with_capacity(self.values.len());
-        let fields: Vec<_> = self
-            .values
-            .iter()
-            .map(|value| {
-                dyn_fields.push(DynamicField::new("".to_string(), value.data_type(), false))
-            })
-            .collect();
-
-        DynSchema::new(dyn_fields.as_slice(), primary_index)
     }
 
     /// Create a new DynRecord with validation.
@@ -72,6 +62,20 @@ impl DynRecord {
             primary_index,
         })
     }
+
+    // Used for converting `DynRecord`s to `RecordBatches`
+    pub fn schema(&self, primary_index: usize) -> DynSchema {
+        let mut dyn_fields = Vec::with_capacity(self.values.len());
+        let fields: Vec<_> = self
+            .values
+            .iter()
+            .map(|value| {
+                dyn_fields.push(DynamicField::new("".to_string(), value.data_type(), false))
+            })
+            .collect();
+
+        DynSchema::new(dyn_fields.as_slice(), primary_index)
+    }
 }
 
 impl Decode for DynRecord {
@@ -105,6 +109,19 @@ impl Record for DynRecord {
             columns.push(col.as_key_ref());
         }
         DynRecordRef::new(columns, self.primary_index)
+    }
+
+    fn as_owned_value(&self) -> Self {
+        self.clone()
+    }
+
+    fn projection(&mut self, projection_mask: &ProjectionMask) {
+        for (idx, col) in self.values.iter_mut().enumerate() {
+            if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
+            {
+                *col = Value::Null;
+            }
+        }
     }
 
     fn size(&self) -> usize {

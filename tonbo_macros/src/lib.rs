@@ -12,7 +12,7 @@ use syn::{parse_macro_input, DeriveInput};
 
 use crate::data_type::DataType;
 
-/// used to define the structure of Record,
+/// Used to define the structure of Record,
 /// will generate the implementation required in Tonbo, allowing derive expansion.
 ///
 /// # Example

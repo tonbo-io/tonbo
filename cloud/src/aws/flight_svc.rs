@@ -11,7 +11,10 @@ use prost::Message;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonbo::{
-    record::{util::records_to_record_batch, DynRecord, DynRecordBuilder},
+    record::{
+        util::records_to_record_batch, ArrowArrays, ArrowArraysBuilder, DynRecord,
+        DynRecordImmutableArrays, Record, RecordRef,
+    },
     Entry,
 };
 use tonic::{Request, Response, Status, Streaming};
@@ -155,8 +158,34 @@ impl FlightService for TonboFlightSvc {
                             batch_builder.push((0, (*record).clone()));
                         }
                     }
-                    Ok(Entry::Projection((_record, _projection))) => {
-                        todo!()
+                    Ok(Entry::Projection((record, projection))) => {
+                        match *record {
+                            // TODO: Make more efficient by batching build batch tranformation
+                            Entry::RecordBatch(entry) => {
+                                let schema = entry.batch_as_ref().schema();
+                                let value = entry.get();
+                                if let Some(mut value) = value {
+                                    let mut dyn_record_builder =
+                                        DynRecordImmutableArrays::builder(schema, 1);
+
+                                    // Apply projection
+                                    value.projection(&projection);
+                                    dyn_record_builder.push(entry.internal_key(), Some(value));
+                                    let dyn_record_array = dyn_record_builder.finish(None);
+                                    let record_batch = dyn_record_array.as_record_batch();
+
+                                    rb_tx.send(Ok(record_batch.clone())).await.unwrap();
+                                }
+                            }
+                            _ => {
+                                let dyn_record = record.owned_value();
+
+                                if let Some(mut dyn_record) = dyn_record {
+                                    dyn_record.projection(&projection);
+                                    batch_builder.push((0, dyn_record));
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         let _ = rb_tx
@@ -169,9 +198,7 @@ impl FlightService for TonboFlightSvc {
             if !batch_builder.is_empty() {
                 let build_batch =
                     records_to_record_batch(&batch_builder[0].1.schema(0), batch_builder);
-                if rb_tx.send(Ok(build_batch)).await.is_err() {
-                    return;
-                }
+                rb_tx.send(Ok(build_batch)).await.unwrap();
             }
         });
 

@@ -89,8 +89,14 @@ pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
         self.as_record_ref().key()
     }
 
+    /// Returns owned value of record (self)
+    fn as_owned_value(&self) -> Self;
+
     /// Returns a reference to the record.
     fn as_record_ref(&self) -> Self::Ref<'_>;
+
+    /// Applies projection mask
+    fn projection(&mut self, projection_mask: &ProjectionMask);
 
     /// Returns the size of the record in bytes.
     fn size(&self) -> usize;

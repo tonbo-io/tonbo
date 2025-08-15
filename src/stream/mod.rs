@@ -77,6 +77,21 @@ where
             }),
         }
     }
+
+    pub fn owned_value(&self) -> Option<R> {
+        match self {
+            Entry::Transaction((_, value)) => value.as_ref().map(R::as_owned_value),
+            Entry::Mutable(entry) => entry.value().as_ref().map(R::as_owned_value),
+            // Currently does not support returning, as we just return the record batch itself
+            Entry::RecordBatch(_entry) => todo!(),
+            Entry::Projection((entry, projection_mask)) => {
+                entry.owned_value().map(|mut val_ref| {
+                    val_ref.projection(projection_mask);
+                    val_ref
+                })
+            }
+        }
+    }
 }
 
 impl<R> fmt::Debug for Entry<'_, R>

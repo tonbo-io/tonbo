@@ -25,7 +25,10 @@ use tonbo::{
     arrow::array::RecordBatch,
     executor::tokio::TokioExecutor,
     parquet::errors::ParquetError,
-    record::{dynamic::Value, util::records_to_record_batch, DynRecord, Record},
+    record::{
+        dynamic::Value, util::records_to_record_batch, ArrowArrays, ArrowArraysBuilder, DynRecord,
+        DynRecordImmutableArrays, Record, RecordRef,
+    },
     transaction::Transaction,
     DbOption, Entry, DB,
 };
@@ -98,11 +101,47 @@ impl AWSTonbo {
                         batch_builder.push((0, (*record).clone()));
                     }
                 }
-                // TODO: deal with projection
-                Ok(Entry::Projection((_record, _projection))) => {
-                    todo!()
+                Ok(Entry::Projection((record, projection))) => {
+                    match *record {
+                        // TODO: Make more efficient by batching build batch tranformation
+                        Entry::RecordBatch(entry) => {
+                            let schema = entry.batch_as_ref().schema();
+                            let value = entry.get();
+                            if let Some(mut value) = value {
+                                let mut dyn_record_builder =
+                                    DynRecordImmutableArrays::builder(schema, 1);
+
+                                // Apply projection
+                                value.projection(&projection);
+                                dyn_record_builder.push(entry.internal_key(), Some(value));
+                                let dyn_record_array = dyn_record_builder.finish(None);
+                                let batch = dyn_record_array.as_record_batch();
+
+                                row_count += batch.num_rows() as i64;
+                                if calculate_size {
+                                    row_size = (batch.get_array_memory_size() as i64
+                                        / batch.num_rows() as i64)
+                                        as i32;
+                                    calculate_size = false;
+                                }
+                            }
+                        }
+                        _ => {
+                            let dyn_record = record.owned_value();
+
+                            if let Some(mut dyn_record) = dyn_record {
+                                dyn_record.projection(&projection);
+                                batch_builder.push((0, dyn_record));
+                            }
+                        }
+                    }
                 }
-                Err(_e) => todo!(),
+                Err(e) => {
+                    return Err(CloudError::Cloud(format!(
+                        "Error occured while converting `Entry`s to `RecordBatches`: {}",
+                        e
+                    )))
+                }
             }
         }
 
@@ -111,7 +150,6 @@ impl AWSTonbo {
             row_count += batch.num_rows() as i64;
             if calculate_size {
                 row_size = (batch.get_array_memory_size() as i64 / batch.num_rows() as i64) as i32;
-                calculate_size = false;
             }
         }
 
