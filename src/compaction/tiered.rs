@@ -19,19 +19,19 @@ use crate::{
     CompactionExecutor, DbOption,
 };
 
-pub struct TieredTask {
-    pub input: Vec<(usize, Vec<Ulid>)>,
-    pub target_tier: usize,
+struct TieredTask {
+    input: Vec<(usize, Vec<Ulid>)>,
+    target_tier: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct TieredOptions {
     /// Maximum number of tiers
-    pub max_tiers: usize,
+    max_tiers: usize,
     /// Base capacity for tier 0
-    pub tier_base_capacity: usize,
+    tier_base_capacity: usize,
     /// Growth factor between tiers
-    pub tier_growth_factor: usize,
+    tier_growth_factor: usize,
 }
 
 impl Default for TieredOptions {
@@ -183,7 +183,7 @@ where
         Ok(())
     }
 
-    pub async fn should_major_compact(&self) -> Option<usize> {
+    async fn should_major_compact(&self) -> Option<usize> {
         let version_ref = self.ctx.manifest.current().await;
         for tier in 0..MAX_LEVEL - 1 {
             if Self::is_tier_full(&self.options, &version_ref, tier) {
@@ -193,7 +193,7 @@ where
         None
     }
 
-    pub async fn plan_major(&self, tier: usize) -> Option<TieredTask> {
+    async fn plan_major(&self, tier: usize) -> Option<TieredTask> {
         let version_ref = self.ctx.manifest.current().await;
         let tier_files: Vec<Ulid> = version_ref.level_slice[tier]
             .iter()
@@ -209,7 +209,7 @@ where
         None
     }
 
-    pub async fn execute_major(&self, task: TieredTask) -> Result<(), CompactionError<R>> {
+    async fn execute_major(&self, task: TieredTask) -> Result<(), CompactionError<R>> {
         let version_ref = self.ctx.manifest.current().await;
         let mut version_edits = vec![];
         let mut delete_gens = vec![];
@@ -353,7 +353,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn is_tier_full(options: &TieredOptions, version: &Version<R>, tier: usize) -> bool {
+    fn is_tier_full(options: &TieredOptions, version: &Version<R>, tier: usize) -> bool {
         let max_tiers = options.max_tiers;
         if tier >= max_tiers || tier >= MAX_LEVEL {
             return false;
