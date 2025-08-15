@@ -115,6 +115,7 @@ pub(crate) mod magic;
 mod manifest;
 mod ondisk;
 pub mod option;
+pub mod query;
 pub mod record;
 pub mod scope;
 pub(crate) mod snapshot;
