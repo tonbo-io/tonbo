@@ -781,8 +781,8 @@ pub(crate) mod tests_metric {
     pub(crate) async fn throughput(option: DbOption) {
         use std::time::Instant;
 
+        use fastrand::{seed, shuffle};
         use futures_util::StreamExt;
-        use rand::{seq::SliceRandom, SeedableRng};
 
         // Create DB with EcoTune compactor using the standard open method
         let db: DB<Test, TokioExecutor> =
@@ -851,8 +851,8 @@ pub(crate) mod tests_metric {
         }
 
         // Shuffle operations to create mixed workload
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42); // Fixed seed for reproducibility
-        operations.shuffle(&mut rng);
+        seed(42); // Fixed seed for reproducibility
+        shuffle(&mut operations);
 
         // Execute mixed workload
         let mixed_start = Instant::now();
