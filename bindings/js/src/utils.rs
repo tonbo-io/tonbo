@@ -77,7 +77,8 @@ pub(crate) fn to_record(schema: &[DynamicField], cols: &[Value]) -> JsValue {
             | Value::List(_, _)
             | Value::Time32(_, _)
             | Value::Time64(_, _)
-            | Value::Timestamp(_, _) => unimplemented!(),
+            | Value::Timestamp(_, _)
+            | Value::Dictionary(_, _) => unimplemented!(),
         };
         Reflect::set(&obj, &field.name.as_str().into(), &value).unwrap();
     }
@@ -109,7 +110,8 @@ pub(crate) fn to_record_ref(schema: &[DynamicField], cols: &[ValueRef]) -> JsVal
             | ValueRef::List(_, _)
             | ValueRef::Time32(_, _)
             | ValueRef::Time64(_, _)
-            | ValueRef::Timestamp(_, _) => unimplemented!(),
+            | ValueRef::Timestamp(_, _)
+            | ValueRef::Dictionary(_, _) => unimplemented!(),
         };
         Reflect::set(&obj, &field.name.as_str().into(), &value).unwrap();
     }

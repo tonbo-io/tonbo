@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::datatypes::Field;
+use arrow::datatypes::{DataType, Field};
 use fusio_log::{Decode, Encode};
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
@@ -105,6 +105,11 @@ where
                 encode_arrow_datatype(field.data_type(), writer).await?;
                 field.is_nullable().encode(writer).await?;
             }
+            arrow::datatypes::DataType::Dictionary(key_type, value_type) => {
+                31u8.encode(writer).await?;
+                encode_arrow_datatype(key_type, writer).await?;
+                encode_arrow_datatype(value_type, writer).await?;
+            }
             _ => unreachable!(),
         };
         Ok(())
@@ -172,6 +177,14 @@ where
                     is_nullable,
                 ))))
             }
+            31 => {
+                let key_type = decode_arrow_datatype(reader).await?;
+                let value_type = decode_arrow_datatype(reader).await?;
+                Ok(arrow::datatypes::DataType::Dictionary(
+                    Box::new(key_type),
+                    Box::new(value_type),
+                ))
+            }
 
             _ => unreachable!(),
         }
@@ -184,6 +197,42 @@ where
     #[cfg(target_arch = "wasm32")]
     {
         fut.boxed_local()
+    }
+}
+
+pub(crate) fn size_of_arrow_datatype(data_type: &arrow::datatypes::DataType) -> usize {
+    match data_type {
+        DataType::Null
+        | DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Float16
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Date32
+        | DataType::Date64
+        | DataType::Binary
+        | DataType::Utf8
+        | DataType::LargeBinary
+        | DataType::LargeUtf8 => 1,
+        DataType::FixedSizeBinary(w) => 1 + w.size(),
+        DataType::Time32(_) | DataType::Time64(_) => 2,
+        DataType::Timestamp(_, _) => 2,
+        DataType::List(field) => {
+            1 + field.name().size()
+                + size_of_arrow_datatype(field.data_type())
+                + field.is_nullable().size()
+        }
+        DataType::Dictionary(key_type, value_type) => {
+            1 + size_of_arrow_datatype(key_type) + size_of_arrow_datatype(value_type)
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -253,6 +302,30 @@ mod tests {
     #[tokio::test]
     async fn test_arrow_datatype_encode_decode() {
         {
+            let mut buf = Vec::new();
+            let mut cursor = Cursor::new(&mut buf);
+            let data_types = [
+                DataType::UInt8,
+                DataType::UInt16,
+                DataType::UInt32,
+                DataType::UInt64,
+                DataType::Int8,
+                DataType::Int16,
+                DataType::Int32,
+                DataType::Int64,
+            ];
+            for data_type in data_types.iter() {
+                encode_arrow_datatype(data_type, &mut cursor).await.unwrap();
+            }
+
+            cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+            for data_type in data_types.iter() {
+                let decoded = decode_arrow_datatype(&mut cursor).await.unwrap();
+                assert_eq!(data_type, &decoded);
+            }
+        }
+        {
             let data_type = DataType::Binary;
             let mut buf = Vec::new();
             let mut cursor = Cursor::new(&mut buf);
@@ -287,6 +360,67 @@ mod tests {
             cursor.seek(SeekFrom::Start(0)).await.unwrap();
             let decoded = decode_arrow_datatype(&mut cursor).await.unwrap();
             assert_eq!(data_type, decoded);
+        }
+        {
+            let mut buf = Vec::new();
+            let mut cursor = Cursor::new(&mut buf);
+            let data_type =
+                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Int16));
+            encode_arrow_datatype(&data_type, &mut cursor)
+                .await
+                .unwrap();
+
+            cursor.seek(SeekFrom::Start(0)).await.unwrap();
+            let decoded = decode_arrow_datatype(&mut cursor).await.unwrap();
+            assert_eq!(data_type, decoded);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_size_of_arrow_datatype() {
+        let data_types = [
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Binary,
+            DataType::Utf8,
+            DataType::LargeBinary,
+            DataType::LargeUtf8,
+            DataType::FixedSizeBinary(4),
+            DataType::Time32(arrow::datatypes::TimeUnit::Second),
+            DataType::Time64(arrow::datatypes::TimeUnit::Second),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Second, None),
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+            DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Int16)),
+            DataType::List(Arc::new(Field::new(
+                "times",
+                DataType::List(Arc::new(Field::new(
+                    "timestamps",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ))),
+                false,
+            ))),
+        ];
+
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+
+        for data_type in data_types.iter() {
+            let before = cursor.position();
+            encode_arrow_datatype(data_type, &mut cursor).await.unwrap();
+            let after = cursor.position();
+
+            assert_eq!(size_of_arrow_datatype(data_type), (after - before) as usize);
         }
     }
 }

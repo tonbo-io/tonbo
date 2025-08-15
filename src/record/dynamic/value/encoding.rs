@@ -10,7 +10,9 @@ use futures_util::future::LocalBoxFuture;
 use futures_util::FutureExt;
 
 use super::{TimeUnit, Value};
-use crate::record::{decode_arrow_datatype, encode_arrow_datatype, ValueError, ValueRef};
+use crate::record::{
+    decode_arrow_datatype, encode_arrow_datatype, size_of_arrow_datatype, ValueError, ValueRef,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 type BoxedFuture<'a, T> = BoxFuture<'a, T>;
@@ -94,6 +96,9 @@ impl Value {
                         v.encode_inner(writer).await?;
                     }
                 }
+                Value::Dictionary(_, value) => {
+                    value.encode_inner(writer).await?;
+                }
             }
             Ok(())
         };
@@ -166,6 +171,10 @@ impl Value {
                     }
                     Ok(Value::List(field.data_type().clone(), list))
                 }
+                DataType::Dictionary(key_type, _) => {
+                    let value = Box::new(Value::decode_inner(reader).await?);
+                    Ok(Value::Dictionary(key_type.as_ref().into(), value))
+                }
                 _ => Err(fusio::Error::Other(Box::new(ValueError::InvalidDataType(
                     data_type.to_string(),
                 )))),
@@ -191,37 +200,31 @@ impl Encode for Value {
     }
 
     fn size(&self) -> usize {
-        match self {
-            Value::Null => 1,
-            Value::Boolean(v) => 1 + v.size(),
-            Value::Int8(v) => 1 + v.size(),
-            Value::Int16(v) => 1 + v.size(),
-            Value::Int32(v) => 1 + v.size(),
-            Value::Int64(v) => 1 + v.size(),
-            Value::UInt8(v) => 1 + v.size(),
-            Value::UInt16(v) => 1 + v.size(),
-            Value::UInt32(v) => 1 + v.size(),
-            Value::UInt64(v) => 1 + v.size(),
-            Value::Float32(v) => 1 + v.size(),
-            Value::Float64(v) => 1 + v.size(),
-            Value::String(v) => 1 + v.size(),
-            Value::Binary(v) => 1 + v.size(),
-            Value::FixedSizeBinary(v, _) => 1 + v.size(),
-            Value::Date32(v) => 1 + v.size(),
-            Value::Date64(v) => 1 + v.size(),
-            Value::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
-            Value::Time32(v, time_unit) => 1 + v.size() + time_unit.size(),
-            Value::Time64(v, time_unit) => 1 + v.size() + time_unit.size(),
-            Value::List(data_type, vec) => {
-                vec.iter().map(|v| v.size()).sum::<usize>()
-                    + match data_type {
-                        DataType::Timestamp(_, _) => 2,
-                        DataType::Time32(_) | DataType::Time64(_) => 2,
-                        DataType::List(field) => 1 + field.size(),
-                        _ => 1,
-                    }
+        size_of_arrow_datatype(&self.data_type())
+            + match self {
+                Value::Null => 0,
+                Value::Boolean(v) => v.size(),
+                Value::Int8(v) => v.size(),
+                Value::Int16(v) => v.size(),
+                Value::Int32(v) => v.size(),
+                Value::Int64(v) => v.size(),
+                Value::UInt8(v) => v.size(),
+                Value::UInt16(v) => v.size(),
+                Value::UInt32(v) => v.size(),
+                Value::UInt64(v) => v.size(),
+                Value::Float32(v) => v.size(),
+                Value::Float64(v) => v.size(),
+                Value::String(v) => v.size(),
+                Value::Binary(v) => v.size(),
+                Value::FixedSizeBinary(v, _) => v.size(),
+                Value::Date32(v) => v.size(),
+                Value::Date64(v) => v.size(),
+                Value::Timestamp(v, _) => v.size(),
+                Value::Time32(v, _) => v.size(),
+                Value::Time64(v, _) => v.size(),
+                Value::List(_, vec) => vec.size(),
+                Value::Dictionary(_, value) => value.size(),
             }
-        }
     }
 }
 
@@ -345,6 +348,9 @@ impl ValueRef<'_> {
                         v.encode_inner(writer).await?;
                     }
                 }
+                ValueRef::Dictionary(_, value_ref) => {
+                    value_ref.encode_inner(writer).await?;
+                }
             }
             Ok(())
         };
@@ -368,37 +374,31 @@ impl Encode for ValueRef<'_> {
     }
 
     fn size(&self) -> usize {
-        match self {
-            ValueRef::Null => 1,
-            ValueRef::Boolean(v) => 1 + v.size(),
-            ValueRef::Int8(v) => 1 + v.size(),
-            ValueRef::Int16(v) => 1 + v.size(),
-            ValueRef::Int32(v) => 1 + v.size(),
-            ValueRef::Int64(v) => 1 + v.size(),
-            ValueRef::UInt8(v) => 1 + v.size(),
-            ValueRef::UInt16(v) => 1 + v.size(),
-            ValueRef::UInt32(v) => 1 + v.size(),
-            ValueRef::UInt64(v) => 1 + v.size(),
-            ValueRef::Float32(v) => 1 + v.size(),
-            ValueRef::Float64(v) => 1 + v.size(),
-            ValueRef::String(v) => 1 + v.size(),
-            ValueRef::Binary(v) => 1 + v.size(),
-            ValueRef::FixedSizeBinary(v, _) => 1 + v.size(),
-            ValueRef::Date32(v) => 1 + v.size(),
-            ValueRef::Date64(v) => 1 + v.size(),
-            ValueRef::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
-            ValueRef::Time32(v, time_unit) => 1 + v.size() + time_unit.size(),
-            ValueRef::Time64(v, time_unit) => 1 + v.size() + time_unit.size(),
-            ValueRef::List(data_type, vec) => {
-                vec.iter().map(|v| v.size()).sum::<usize>()
-                    + match data_type {
-                        DataType::Timestamp(_, _) => 2,
-                        DataType::Time32(_) | DataType::Time64(_) => 2,
-                        DataType::List(field) => 1 + field.size(),
-                        _ => 1,
-                    }
+        size_of_arrow_datatype(&self.data_type())
+            + match self {
+                ValueRef::Null => 0,
+                ValueRef::Boolean(v) => v.size(),
+                ValueRef::Int8(v) => v.size(),
+                ValueRef::Int16(v) => v.size(),
+                ValueRef::Int32(v) => v.size(),
+                ValueRef::Int64(v) => v.size(),
+                ValueRef::UInt8(v) => v.size(),
+                ValueRef::UInt16(v) => v.size(),
+                ValueRef::UInt32(v) => v.size(),
+                ValueRef::UInt64(v) => v.size(),
+                ValueRef::Float32(v) => v.size(),
+                ValueRef::Float64(v) => v.size(),
+                ValueRef::String(v) => v.size(),
+                ValueRef::Binary(v) => (v.len() as u32).size() + v.size(),
+                ValueRef::FixedSizeBinary(v, _) => 4 + v.size(),
+                ValueRef::Date32(v) => v.size(),
+                ValueRef::Date64(v) => v.size(),
+                ValueRef::Timestamp(v, _) => v.size(),
+                ValueRef::Time32(v, _) => v.size(),
+                ValueRef::Time64(v, _) => v.size(),
+                ValueRef::List(_, vec) => vec.size(),
+                ValueRef::Dictionary(_, value_ref) => value_ref.size(),
             }
-        }
     }
 }
 
@@ -411,7 +411,7 @@ mod tests {
     use tokio::io::AsyncSeekExt;
 
     use super::*;
-    use crate::record::{encode_arrow_datatype, encode_arrow_timeunit, Key};
+    use crate::record::{encode_arrow_datatype, encode_arrow_timeunit, DictionaryKeyType, Key};
 
     #[tokio::test]
     async fn test_value_ref_encode() {
@@ -574,5 +574,172 @@ mod tests {
 
         let decoded = Value::decode(&mut cursor).await.unwrap();
         assert_eq!(value, decoded.as_key_ref());
+    }
+
+    #[tokio::test]
+    async fn test_dictionary_value_encode_decode() {
+        let value1 = Value::Dictionary(
+            DictionaryKeyType::UInt8,
+            Box::new(Value::String("value".to_string())),
+        );
+        let value2 = Value::Dictionary(DictionaryKeyType::Int64, Box::new(Value::Date64(114)));
+        let value_ref = value1.as_key_ref();
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+
+        value1.encode(&mut cursor).await.unwrap();
+        value_ref.encode(&mut cursor).await.unwrap();
+        value2.encode(&mut cursor).await.unwrap();
+        value2.as_key_ref().encode(&mut cursor).await.unwrap();
+
+        cursor.seek(SeekFrom::Start(0)).await.unwrap();
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value1, decoded);
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value_ref, decoded.as_key_ref());
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value2, decoded);
+
+        let decoded = Value::decode(&mut cursor).await.unwrap();
+        assert_eq!(value2.as_key_ref(), decoded.as_key_ref());
+    }
+
+    #[tokio::test]
+    async fn test_size_matches_encoded_len_value() {
+        let values = [
+            Value::Null,
+            Value::UInt8(1),
+            Value::UInt16(1),
+            Value::UInt32(1),
+            Value::UInt64(1),
+            Value::Int8(1),
+            Value::Int16(1),
+            Value::Int32(1),
+            Value::Int64(1),
+            Value::Float32(1.0),
+            Value::Float64(1.0),
+            Value::String("tonbo".to_string()),
+            Value::Binary(b"tonbo".to_vec()),
+            Value::FixedSizeBinary(b"tonbo".to_vec(), 5),
+            Value::Date32(1),
+            Value::Date64(1),
+            Value::Timestamp(1, TimeUnit::Millisecond),
+            Value::Time32(1, TimeUnit::Millisecond),
+            Value::Time64(1, TimeUnit::Nanosecond),
+            Value::List(
+                DataType::List(Arc::new(Field::new(
+                    "timestamp",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ))),
+                vec![Arc::new(Value::Timestamp(
+                    1732838400,
+                    TimeUnit::Millisecond,
+                ))],
+            ),
+            Value::Dictionary(DictionaryKeyType::Int64, Box::new(Value::Date64(114))),
+            Value::Dictionary(
+                DictionaryKeyType::UInt8,
+                Box::new(Value::String("fusio".to_string())),
+            ),
+            Value::Dictionary(
+                DictionaryKeyType::Int32,
+                Box::new(Value::Binary(b"tonbo".to_vec())),
+            ),
+            Value::Dictionary(
+                DictionaryKeyType::UInt8,
+                Box::new(Value::FixedSizeBinary(b"tonbo".to_vec(), 5)),
+            ),
+        ];
+
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+
+        for value in values.iter() {
+            let before = cursor.position();
+            value.encode(&mut cursor).await.unwrap();
+            let after = cursor.position();
+
+            assert_eq!(
+                value.size(),
+                (after - before) as usize,
+                "encoded length {} differs from size() {} for dictionary value. value: {:?}",
+                after - before,
+                value.size(),
+                value
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_size_matches_encoded_len_value_ref() {
+        let values = [
+            Value::Null,
+            Value::UInt8(1),
+            Value::UInt16(1),
+            Value::UInt32(1),
+            Value::UInt64(1),
+            Value::Int8(1),
+            Value::Int16(1),
+            Value::Int32(1),
+            Value::Int64(1),
+            Value::Float32(1.0),
+            Value::Float64(1.0),
+            Value::String("fusio".to_string()),
+            Value::Binary(b"fusio".to_vec()),
+            Value::FixedSizeBinary(b"fusio".to_vec(), 5),
+            Value::Date32(1),
+            Value::Date64(1),
+            Value::Timestamp(1, TimeUnit::Millisecond),
+            Value::Time32(1, TimeUnit::Millisecond),
+            Value::Time64(1, TimeUnit::Nanosecond),
+            Value::List(
+                DataType::List(Arc::new(Field::new(
+                    "timestamp",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ))),
+                vec![Arc::new(Value::Timestamp(
+                    1732838400,
+                    TimeUnit::Millisecond,
+                ))],
+            ),
+            Value::Dictionary(DictionaryKeyType::Int64, Box::new(Value::Date64(114))),
+            Value::Dictionary(
+                DictionaryKeyType::UInt8,
+                Box::new(Value::String("fusio".to_string())),
+            ),
+            Value::Dictionary(
+                DictionaryKeyType::Int32,
+                Box::new(Value::Binary(b"tonbo".to_vec())),
+            ),
+            Value::Dictionary(
+                DictionaryKeyType::UInt8,
+                Box::new(Value::FixedSizeBinary(b"tonbo".to_vec(), 5)),
+            ),
+        ];
+
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+
+        for value in values.iter() {
+            let before = cursor.position();
+            let value_ref = value.as_key_ref();
+            value_ref.encode(&mut cursor).await.unwrap();
+            let after = cursor.position();
+
+            assert_eq!(
+                value_ref.size(),
+                (after - before) as usize,
+                "encoded length {} differs from size() {} for dictionary value_ref. value_ref: \
+                 {:?}",
+                after - before,
+                value_ref.size(),
+                value_ref
+            );
+        }
     }
 }
