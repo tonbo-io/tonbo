@@ -81,7 +81,7 @@ path = "benches/criterion/writes.rs"
 required-features = ["sled"]
 
 [dependencies]
-arrow = "55.2.0"
+arrow = "56.0.0"
 async-lock = "3"
 async-stream = "0.3"
 async-trait = { version = "0.1", optional = true }
@@ -93,19 +93,19 @@ crc32fast = "1.5.0"
 crossbeam-skiplist = "0.1"
 datafusion = { version = "47", optional = true }
 flume = { version = "0.11", features = ["async"] }
-fusio = { version = "0.4.0", features = ["dyn", "fs"] }
-fusio-dispatch = { version = "0.4.0" }
-fusio-log = { version = "0.4.0", default-features = false, features = [
+fusio = { version = "0.4.1", features = ["dyn", "fs"] }
+fusio-dispatch = { version = "0.4.1" }
+fusio-log = { version = "0.4.1", default-features = false, features = [
     "bytes",
 ] }
-fusio-parquet = { version = "0.4.0" }
+fusio-parquet = { version = "0.4.1" }
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 itertools = { version = "0.14.0" }
 lockable = "0.2.0"
 once_cell = "1"
-parquet = { version = "55", default-features = false, features = [
+parquet = { version = "56.0.0", default-features = false, features = [
     "async",
     "base64",
     "brotli",
