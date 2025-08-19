@@ -109,7 +109,7 @@ parquet = { version = "56.0.0", default-features = false, features = [
     "async",
     "base64",
     "brotli",
-    "flate2",
+    "flate2-rust_backend",
     "lz4",
     "snap",
 ] }
