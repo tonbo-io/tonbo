@@ -91,7 +91,7 @@ chrono = { version = "0.4.41", default-features = false, features = [
 ] }
 crc32fast = "1.5.0"
 crossbeam-skiplist = "0.1"
-datafusion = { version = "47", optional = true }
+datafusion = { version = "49", optional = true }
 flume = { version = "0.11", features = ["async"] }
 fusio = { version = "0.4.1", features = ["dyn", "fs"] }
 fusio-dispatch = { version = "0.4.1" }
