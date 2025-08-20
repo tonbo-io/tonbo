@@ -1,120 +1,38 @@
-pub mod dynamic;
-pub mod error;
-pub mod key;
-pub mod option;
-#[cfg(test)]
-pub(crate) mod test;
+//! Record abstractions for typed-arrow backed rows using a unified key type.
 
-use std::{fmt::Debug, sync::Arc};
+use typed_arrow::schema::{BuildRows, RowBuilder, SchemaMeta};
 
-use arrow::{array::RecordBatch, datatypes::Schema as ArrowSchema};
-pub use dynamic::*;
-use fusio_log::{Decode, Encode};
-pub use key::*;
-use option::OptionRecordRef;
-use parquet::{arrow::ProjectionMask, format::SortingColumn, schema::types::ColumnPath};
+// Compile extension macros for typed-arrow derive so they are available when
+// consumers use `#[record(...)]` hooks.
+mod ext_macros;
+pub mod extract;
 
-use crate::version::timestamp::Ts;
+/// A typed record that defines its logical key and how to derive
+/// keys directly from typed-arrow arrays.
+pub trait Record: SchemaMeta + BuildRows + 'static {
+    /// Logical key type. For string/binary keys this is an owning, zero-copy
+    /// handle (e.g., `StrKey`, `BinKey`) that can also be compared against
+    /// borrowed forms via `Borrow`.
+    type Key: Ord + Clone;
 
-pub trait ArrowArrays: Sized {
-    type Record: Record;
+    /// Payload stored alongside the key in the mutable memtable.
+    /// Defaults to the whole record in macro-generated impls.
+    type Payload;
 
-    type Builder: ArrowArraysBuilder<Self>;
+    /// Compute the owned logical key from a row.
+    fn key(&self) -> Self::Key;
 
-    fn builder(schema: Arc<ArrowSchema>, capacity: usize) -> Self::Builder;
+    /// Consume `self` into `(Key, Payload)` for storage in the mutable memtable.
+    fn split(self) -> (Self::Key, Self::Payload);
 
-    fn get(
-        &self,
-        offset: u32,
-        projection_mask: &ProjectionMask,
-    ) -> Option<Option<<Self::Record as Record>::Ref<'_>>>;
+    /// Reconstruct a full record from `(Key, Payload)`.
+    fn join(key: Self::Key, payload: Self::Payload) -> Self;
 
-    fn as_record_batch(&self) -> &RecordBatch;
-}
-
-pub trait ArrowArraysBuilder<S>: Send
-where
-    S: ArrowArrays,
-{
-    fn push(
-        &mut self,
-        key: Ts<<<<S::Record as Record>::Schema as Schema>::Key as Key>::Ref<'_>>,
-        row: Option<<S::Record as Record>::Ref<'_>>,
-    );
-
-    fn written_size(&self) -> usize;
-
-    fn finish(&mut self, indices: Option<&[usize]>) -> S;
-}
-
-pub trait Schema: Debug + Send + Sync {
-    type Record: Record<Schema = Self>;
-
-    type Columns: ArrowArrays<Record = Self::Record>;
-
-    type Key: Key;
-
-    /// Returns the [`arrow::datatypes::Schema`] of the record.
-    ///
-    /// **Note**: The first column should be `_null`, and the second column should be `_ts`.
-    fn arrow_schema(&self) -> &Arc<ArrowSchema>;
-
-    /// Returns all primary key column paths and the row-group sorting configuration.
-    ///
-    /// The returned slices should reference stable storage: either static data or internal fields
-    /// owned by the schema. The `ColumnPath` slice should list Parquet paths for each PK column.
-    /// The `SortingColumn` slice defines the row-group sort order, typically `_ts` followed by PKs.
-    fn primary_key_paths_and_sorting(&self) -> (&[ColumnPath], &[SortingColumn]);
-
-    /// Returns all primary key column indices.
-    ///
-    /// For single-column primary keys this should return a one-element slice containing the same
-    /// index that would have been returned by the legacy single-index API.
-    fn primary_key_indices(&self) -> &[usize];
-
-    // Note: Implementations should ensure parity with `primary_key_indices()` for included
-    // columns, and include `_ts` in sorting columns.
-}
-
-pub trait Record: 'static + Sized + Decode + Debug + Send + Sync {
-    type Schema: Schema<Record = Self>;
-
-    type Ref<'r>: RecordRef<'r, Record = Self>
-    where
-        Self: 'r;
-
-    /// Returns the primary key of the record. This should be the type defined in the
-    /// [`Schema`].
-    fn key(&self) -> <<<Self as Record>::Schema as Schema>::Key as Key>::Ref<'_> {
-        self.as_record_ref().key()
-    }
-
-    /// Returns a reference to the record.
-    fn as_record_ref(&self) -> Self::Ref<'_>;
-
-    /// Returns the size of the record in bytes.
-    fn size(&self) -> usize;
-}
-
-pub trait RecordRef<'r>: Clone + Sized + Encode + Send + Sync {
-    type Record: Record;
-
-    /// Returns the primary key of the record. This should be the type that defined in the
-    /// [`Schema`].
-    fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r>;
-
-    /// Do projection on the record. Only keep the columns specified in the projection mask.
-    ///
-    /// Note: Primary key column(s) are always kept.
-    fn projection(&mut self, projection_mask: &ProjectionMask);
-
-    /// Get the [`RecordRef`] from the [`RecordBatch`] at the given offset.
-    ///
-    /// `full_schema` is the combination of `_null`, `_ts` and all fields defined in the [`Schema`].
-    fn from_record_batch(
-        record_batch: &'r RecordBatch,
-        offset: usize,
-        projection_mask: &'r ProjectionMask,
-        full_schema: &'r Arc<ArrowSchema>,
-    ) -> OptionRecordRef<'r, Self>;
+    /// Produce a key for the given `row` by borrowing from the typed arrays.
+    /// For primitive types this reads the value; for string/binary types this
+    /// creates a zero-copy key that references the underlying Arrow buffers.
+    fn key_at(
+        arrays: &<<Self as BuildRows>::Builders as RowBuilder<Self>>::Arrays,
+        row: usize,
+    ) -> Self::Key;
 }
