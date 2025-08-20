@@ -389,8 +389,8 @@ impl Encode for ValueRef<'_> {
                 ValueRef::Float32(v) => v.size(),
                 ValueRef::Float64(v) => v.size(),
                 ValueRef::String(v) => v.size(),
-                ValueRef::Binary(v) => (v.len() as u32).size() + v.size(),
-                ValueRef::FixedSizeBinary(v, _) => 4 + v.size(),
+                ValueRef::Binary(v) => v.size(),
+                ValueRef::FixedSizeBinary(v, _) => v.size(),
                 ValueRef::Date32(v) => v.size(),
                 ValueRef::Date64(v) => v.size(),
                 ValueRef::Timestamp(v, _) => v.size(),
@@ -666,9 +666,10 @@ mod tests {
             assert_eq!(
                 value.size(),
                 (after - before) as usize,
-                "encoded length {} differs from size() {} for dictionary value. value: {:?}",
+                "encoded length {} differs from size() {} for {} value. value: {:?}",
                 after - before,
                 value.size(),
+                value.data_type(),
                 value
             );
         }
@@ -734,10 +735,10 @@ mod tests {
             assert_eq!(
                 value_ref.size(),
                 (after - before) as usize,
-                "encoded length {} differs from size() {} for dictionary value_ref. value_ref: \
-                 {:?}",
+                "encoded length {} differs from size() {} for {} value_ref. value_ref: {:?}",
                 after - before,
                 value_ref.size(),
+                value_ref.data_type(),
                 value_ref
             );
         }

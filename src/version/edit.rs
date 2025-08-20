@@ -7,7 +7,7 @@ use futures_util::TryStreamExt;
 use crate::{fs::FileId, record::Key, scope::Scope, version::timestamp::Timestamp};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum VersionEdit<K: Key> {
+pub enum VersionEdit<K: Key> {
     Add { level: u8, scope: Scope<K> },
     Remove { level: u8, gen: FileId },
     LatestTimeStamp { ts: Timestamp },

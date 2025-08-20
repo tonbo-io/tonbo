@@ -13,7 +13,7 @@ use crate::{
     version::timestamp::{Timestamp, Ts, TsRef, EPOCH},
 };
 
-pub(crate) struct ImmutableMemTable<A>
+pub struct ImmutableMemTable<A>
 where
     A: ArrowArrays,
 {
@@ -51,18 +51,7 @@ impl<A> ImmutableMemTable<A>
 where
     A: ArrowArrays,
 {
-    pub(crate) fn scope(
-        &self,
-    ) -> (
-        Option<&<<A::Record as Record>::Schema as Schema>::Key>,
-        Option<&<<A::Record as Record>::Schema as Schema>::Key>,
-    ) {
-        (
-            self.index.first_key_value().map(|(key, _)| key.value()),
-            self.index.last_key_value().map(|(key, _)| key.value()),
-        )
-    }
-
+    #[cfg(test)]
     pub(crate) fn as_record_batch(&self) -> &RecordBatch {
         self.data.as_record_batch()
     }

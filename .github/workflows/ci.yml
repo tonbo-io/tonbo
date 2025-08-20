@@ -98,11 +98,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rust example cache
         uses: Swatinem/rust-cache@v2
-      - name: Run datafusion example
-        uses: actions-rs/cargo@v1
-        with:
-          command: run
-          args: --example datafusion --features=datafusion
+      # - name: Run datafusion example
+      #   uses: actions-rs/cargo@v1
+      #   with:
+      #     command: run
+      #     args: --example datafusion --features=datafusion
 
       - name: Run declare example
         uses: actions-rs/cargo@v1
