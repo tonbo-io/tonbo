@@ -1,0 +1,9 @@
+[package]
+name = "tonbo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+typed-arrow = { path = "../arrow-native", features = ["ext-hooks"] }
+typed-arrow-dyn = { path = "../arrow-native/typed-arrow-dyn" }
+typed-arrow-unified = { path = "../arrow-native/typed-arrow-unified" }
