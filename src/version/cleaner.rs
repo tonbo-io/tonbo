@@ -83,7 +83,10 @@ impl Cleaner {
 
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use fusio::path::{path_to_local, Path};
     use fusio_dispatch::FsOptions;
@@ -93,12 +96,33 @@ pub(crate) mod tests {
 
     use crate::{
         executor::{tokio::TokioExecutor, Executor},
-        fs::{generate_file_id, manager::StoreManager, FileType},
+        fs::{generate_file_id, manager::StoreManager, FileId, FileType},
         inmem::immutable::tests::TestSchema,
         ondisk::sstable::SsTableID,
         version::cleaner::{CleanTag, Cleaner},
         DbOption,
     };
+
+    async fn wait_removed(option: &DbOption, gen: FileId, level: usize, timeout_ms: u64) {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let exists = path_to_local(&option.table_path(gen, level))
+                .unwrap()
+                .exists();
+            if !exists {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "timeout waiting for removal: {}",
+                    path_to_local(&option.table_path(gen, level))
+                        .unwrap()
+                        .display()
+                );
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
 
     #[tokio::test]
     async fn test_cleaner() {
@@ -194,10 +218,8 @@ pub(crate) mod tests {
         tx.send_async(CleanTag::Clean { ts: 0.into() })
             .await
             .unwrap();
-        sleep(Duration::from_millis(50)).await;
-        assert!(!path_to_local(&option.table_path(gen_0, 0))
-            .unwrap()
-            .exists());
+        // Wait for gen_0 to be removed deterministically.
+        wait_removed(&option, gen_0, 0, 2_000).await;
         assert!(path_to_local(&option.table_path(gen_1, 0))
             .unwrap()
             .exists());
@@ -211,13 +233,9 @@ pub(crate) mod tests {
         tx.send_async(CleanTag::Clean { ts: 1.into() })
             .await
             .unwrap();
-        sleep(Duration::from_millis(50)).await;
-        assert!(!path_to_local(&option.table_path(gen_1, 0))
-            .unwrap()
-            .exists());
-        assert!(!path_to_local(&option.table_path(gen_2, 0))
-            .unwrap()
-            .exists());
+        // Wait for gen_1 and gen_2 to be removed deterministically.
+        wait_removed(&option, gen_1, 0, 2_000).await;
+        wait_removed(&option, gen_2, 0, 2_000).await;
         assert!(path_to_local(&option.table_path(gen_3, 0))
             .unwrap()
             .exists());
@@ -228,9 +246,7 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        sleep(Duration::from_millis(50)).await;
-        assert!(!path_to_local(&option.table_path(gen_3, 0))
-            .unwrap()
-            .exists());
+        // Wait for gen_3 to be removed deterministically.
+        wait_removed(&option, gen_3, 0, 2_000).await;
     }
 }

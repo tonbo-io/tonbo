@@ -90,12 +90,16 @@ impl Key for Timestamp {
         *self
     }
 
-    fn to_arrow_datum(&self) -> std::sync::Arc<dyn arrow::array::Datum> {
+    fn to_arrow_datums(&self) -> Vec<std::sync::Arc<dyn arrow::array::Datum>> {
         match self.unit {
-            TimeUnit::Second => Arc::new(TimestampSecondArray::new_scalar(self.ts)),
-            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::new_scalar(self.ts)),
-            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::new_scalar(self.ts)),
-            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::new_scalar(self.ts)),
+            TimeUnit::Second => vec![Arc::new(TimestampSecondArray::new_scalar(self.ts))
+                as std::sync::Arc<dyn arrow::array::Datum>],
+            TimeUnit::Millisecond => vec![Arc::new(TimestampMillisecondArray::new_scalar(self.ts))
+                as std::sync::Arc<dyn arrow::array::Datum>],
+            TimeUnit::Microsecond => vec![Arc::new(TimestampMicrosecondArray::new_scalar(self.ts))
+                as std::sync::Arc<dyn arrow::array::Datum>],
+            TimeUnit::Nanosecond => vec![Arc::new(TimestampNanosecondArray::new_scalar(self.ts))
+                as std::sync::Arc<dyn arrow::array::Datum>],
         }
     }
 }

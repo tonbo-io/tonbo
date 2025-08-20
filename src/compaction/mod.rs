@@ -1,52 +1,141 @@
-pub(crate) mod error;
-pub(crate) mod leveled;
-use std::{pin::Pin, sync::Arc};
+pub mod error;
+pub mod leveled;
 
-use fusio::DynFs;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use fusio::{DynFs, MaybeSend, MaybeSync};
 use fusio_parquet::writer::AsyncWriter;
 use futures::channel::oneshot;
 use futures_util::StreamExt;
-use leveled::LeveledCompactor;
 use parquet::arrow::AsyncArrowWriter;
 
 use crate::{
     compaction::error::CompactionError,
-    fs::{generate_file_id, FileType},
-    record::{ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
+    fs::{generate_file_id, manager::StoreManager, FileId, FileType},
+    inmem::immutable::ImmutableMemTable,
+    record::{self, ArrowArrays, ArrowArraysBuilder, KeyRef, Record, Schema as RecordSchema},
     scope::Scope,
     stream::{merge::MergeStream, ScanStream},
     version::edit::VersionEdit,
     DbOption,
 };
 
-pub(crate) enum Compactor<R, E>
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait Compactor<R>: MaybeSend + MaybeSync
 where
     R: Record,
-    <R::Schema as RecordSchema>::Columns: Send + Sync,
-    E: crate::executor::Executor,
 {
-    Leveled(LeveledCompactor<R, E>),
-}
-
-#[derive(Debug)]
-pub enum CompactTask {
-    Freeze,
-    Flush(Option<oneshot::Sender<()>>),
-}
-
-impl<R, E> Compactor<R, E>
-where
-    R: Record,
-    <R::Schema as RecordSchema>::Columns: Send + Sync,
-    E: crate::executor::Executor,
-{
-    pub(crate) async fn check_then_compaction(
-        &mut self,
+    /// Call minor compaction + major compaction.
+    /// This is the only method custom compactors must implement.
+    async fn check_then_compaction(
+        &self,
+        batches: Option<
+            &[(
+                Option<FileId>,
+                ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+            )],
+        >,
+        recover_wal_ids: Option<Vec<FileId>>,
         is_manual: bool,
-    ) -> Result<(), CompactionError<R>> {
-        match self {
-            Compactor::Leveled(leveled) => leveled.check_then_compaction(is_manual).await,
+    ) -> Result<(), CompactionError<R>>;
+
+    /// Perform minor compaction on immutable memtables to create L0 SST files
+    /// Basically the same for all compaction strategies. Think carefully if you want to override
+    /// this method.
+    async fn minor_compaction(
+        option: &DbOption,
+        recover_wal_ids: Option<Vec<FileId>>,
+        batches: &[(
+            Option<FileId>,
+            ImmutableMemTable<<R::Schema as record::Schema>::Columns>,
+        )],
+        schema: &R::Schema,
+        manager: &StoreManager,
+    ) -> Result<Option<Scope<<R::Schema as record::Schema>::Key>>, CompactionError<R>>
+    where
+        Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
+    {
+        use std::ops::Bound;
+
+        use futures_util::stream;
+        use parquet::arrow::ProjectionMask;
+
+        if !batches.is_empty() {
+            let level_0_path = option.level_fs_path(0).unwrap_or(&option.base_path);
+            let level_0_fs = manager.get_fs(level_0_path);
+            let mut wal_ids = Vec::with_capacity(batches.len());
+
+            if let Some(mut recover_wal_ids) = recover_wal_ids {
+                wal_ids.append(&mut recover_wal_ids);
+            }
+
+            // Create scan streams from all immutable memtables
+            let mut streams = Vec::with_capacity(batches.len());
+            for (file_id, batch) in batches {
+                streams.push(ScanStream::Immutable {
+                    inner: stream::iter(batch.scan(
+                        (Bound::Unbounded, Bound::Unbounded),
+                        u32::MAX.into(),
+                        ProjectionMask::all(),
+                        None,
+                    )),
+                });
+                if let Some(file_id) = file_id {
+                    wal_ids.push(*file_id);
+                }
+            }
+
+            // Use MergeStream to merge and sort all batches
+            let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
+
+            let mut builder =
+                <R::Schema as RecordSchema>::Columns::builder(schema.arrow_schema().clone(), 0);
+            let mut min = None;
+            let mut max = None;
+
+            // Collect all sorted entries into a single SST
+            while let Some(result) = stream.next().await {
+                let entry = result?;
+                let key = entry.key();
+
+                if min.is_none() {
+                    min = Some(key.value.clone().to_key())
+                }
+                max = Some(key.value.clone().to_key());
+                builder.push(key, entry.value());
+            }
+
+            // Build the single SST file
+            if let (Some(min), Some(max)) = (min, max) {
+                let mut version_edits = Vec::new();
+                Self::build_table(
+                    option,
+                    &mut version_edits,
+                    0,
+                    &mut builder,
+                    &mut Some(min),
+                    &mut Some(max),
+                    schema,
+                    level_0_fs,
+                )
+                .await?;
+
+                // Extract the scope from the version edit and add WAL IDs
+                if let Some(VersionEdit::Add { scope, .. }) = version_edits.first() {
+                    let mut result_scope = scope.clone();
+                    result_scope.wal_ids = if wal_ids.is_empty() {
+                        None
+                    } else {
+                        Some(wal_ids)
+                    };
+                    return Ok(Some(result_scope));
+                }
+            }
         }
+        Ok(None)
     }
 
     async fn build_tables(
@@ -56,7 +145,11 @@ where
         streams: Vec<ScanStream<'_, R>>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError<R>>
+    where
+        Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
+    {
         let mut stream = MergeStream::<R>::from_vec(streams, u32::MAX.into(), None).await?;
 
         let mut builder =
@@ -64,7 +157,7 @@ where
         let mut min = None;
         let mut max = None;
 
-        while let Some(result) = Pin::new(&mut stream).next().await {
+        while let Some(result) = stream.next().await {
             let entry = result?;
             let key = entry.key();
 
@@ -112,7 +205,10 @@ where
             &'a <R::Schema as RecordSchema>::Key,
         ),
         CompactionError<R>,
-    > {
+    >
+    where
+        Self: Sized,
+    {
         let lower = &meet_scopes.first().ok_or(CompactionError::EmptyLevel)?.min;
         let upper = &meet_scopes.last().ok_or(CompactionError::EmptyLevel)?.max;
         Ok((lower, upper))
@@ -128,7 +224,11 @@ where
         max: &mut Option<<R::Schema as RecordSchema>::Key>,
         schema: &R::Schema,
         fs: &Arc<dyn DynFs>,
-    ) -> Result<(), CompactionError<R>> {
+    ) -> Result<(), CompactionError<R>>
+    where
+        Self: Sized,
+        <<R as record::Record>::Schema as record::Schema>::Columns: MaybeSend + MaybeSync,
+    {
         debug_assert!(min.is_some());
         debug_assert!(max.is_some());
 
@@ -161,6 +261,12 @@ where
         });
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub enum CompactTask {
+    Freeze,
+    Flush(Option<oneshot::Sender<()>>),
 }
 
 #[cfg(all(test, feature = "tokio"))]

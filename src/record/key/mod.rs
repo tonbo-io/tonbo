@@ -22,7 +22,11 @@ pub trait Key:
 
     fn as_key_ref(&self) -> Self::Ref<'_>;
 
-    fn to_arrow_datum(&self) -> Arc<dyn Datum>;
+    /// Returns Arrow scalar Datums corresponding to the primary key columns.
+    ///
+    /// For single-column primary keys, this will return a single-element vector. For composite
+    /// keys, it returns a vector with one Datum per component in lexicographic order.
+    fn to_arrow_datums(&self) -> Vec<Arc<dyn Datum>>;
 }
 
 pub trait KeyRef<'r>: Clone + Encode + Send + Sync + Ord + std::fmt::Debug {
