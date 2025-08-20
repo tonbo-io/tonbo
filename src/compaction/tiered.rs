@@ -185,7 +185,7 @@ where
 
     async fn should_major_compact(&self) -> Option<usize> {
         let version_ref = self.ctx.manifest.current().await;
-        for tier in 0..MAX_LEVEL - 1 {
+        for tier in 0..self.options.max_tiers - 1 {
             if Self::is_tier_full(&self.options, &version_ref, tier) {
                 return Some(tier);
             }
@@ -225,13 +225,9 @@ where
             if tier_scopes.is_empty() {
                 continue;
             }
-            let min = tier_scopes.iter().map(|scope| &scope.min).min().unwrap();
-            let max = tier_scopes.iter().map(|scope| &scope.max).max().unwrap();
             Self::tier_compaction(
                 &version_ref,
                 &self.db_option,
-                min,
-                max,
                 &mut version_edits,
                 &mut delete_gens,
                 &self.record_schema,
@@ -261,8 +257,6 @@ where
     async fn tier_compaction(
         version: &Version<R>,
         option: &DbOption,
-        _min: &<R::Schema as RecordSchema>::Key,
-        _max: &<R::Schema as RecordSchema>::Key,
         version_edits: &mut Vec<VersionEdit<<R::Schema as RecordSchema>::Key>>,
         delete_gens: &mut Vec<SsTableID>,
         instance: &R::Schema,
@@ -745,8 +739,6 @@ pub(crate) mod tests {
         });
 
         // Test tier compaction
-        let min = "1".to_string();
-        let max = "8".to_string();
         let mut version_edits = Vec::new();
         let mut delete_gens = Vec::new();
 
@@ -765,8 +757,6 @@ pub(crate) mod tests {
         TieredCompactor::<Test>::tier_compaction(
             &version,
             &option,
-            &min,
-            &max,
             &mut version_edits,
             &mut delete_gens,
             &TestSchema,
