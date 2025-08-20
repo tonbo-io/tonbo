@@ -2,22 +2,40 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        make_builder, ArrayBuilder, ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder,
-        Date64Builder, FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int16Builder,
-        Int32Builder, Int64Builder, Int8Builder, LargeBinaryBuilder, LargeStringBuilder,
-        ListBuilder, StringBuilder, Time32MillisecondBuilder, Time32SecondBuilder,
+        make_builder, ArrayBuilder, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder,
+        BooleanBuilder, Date32Builder, Date64Builder, FixedSizeBinaryBuilder,
+        FixedSizeBinaryDictionaryBuilder, Float32Builder, Float64Builder, Int16Builder,
+        Int32Builder, Int64Builder, Int8Builder, LargeBinaryBuilder, LargeBinaryDictionaryBuilder,
+        LargeStringBuilder, LargeStringDictionaryBuilder, ListBuilder, PrimitiveDictionaryBuilder,
+        StringBuilder, StringDictionaryBuilder, Time32MillisecondBuilder, Time32SecondBuilder,
         Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampMicrosecondBuilder,
         TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
         UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
     },
-    datatypes::{DataType, Field, FieldRef, TimeUnit},
+    datatypes::{
+        DataType, Field, FieldRef, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
+        Int8Type, TimeUnit, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    },
 };
 use fusio_log::Encode;
 
 use super::ValueRef;
-use crate::record::{AsValue, Key};
+use crate::record::{AsValue, DictionaryKeyType, Key};
 
-/// Array builder for nested types
+macro_rules! append_opt {
+    ($builder:expr, $builder_ty:ty, $opt:expr) => {{
+        let bd = NestedBuilder::as_builder_mut::<$builder_ty>($builder);
+        bd.append_option($opt);
+    }};
+}
+macro_rules! append_val {
+    ($builder:expr, $builder_ty:ty, $val:expr) => {{
+        let bd = NestedBuilder::as_builder_mut::<$builder_ty>($builder);
+        bd.append_value($val).unwrap();
+    }};
+}
+
+// Array builder for nested types
 pub struct NestedBuilder {
     builder: Box<dyn ArrayBuilder>,
     field: FieldRef,
@@ -27,7 +45,8 @@ pub struct NestedBuilder {
 impl NestedBuilder {
     /// Create a new [`NestedBuilder``] with the specified field and capacity
     pub fn with_capacity(field: FieldRef, capacity: usize) -> Self {
-        let builder = make_builder(field.data_type(), capacity);
+        // FIXME: make_builder only support limited dictionary type
+        let builder = Self::make_builder(field.data_type(), capacity);
         Self {
             builder,
             field,
@@ -50,120 +69,80 @@ impl NestedBuilder {
         value: ValueRef,
     ) {
         match data_type {
-            DataType::Boolean => {
-                let bd = Self::as_builder_mut::<BooleanBuilder>(builder);
-                bd.append_option(value.as_bool_opt().copied());
-            }
-            DataType::Int8 => {
-                let bd = Self::as_builder_mut::<Int8Builder>(builder);
-                bd.append_option(value.as_i8_opt().copied());
-            }
-            DataType::Int16 => {
-                let bd = Self::as_builder_mut::<Int16Builder>(builder);
-                bd.append_option(value.as_i16_opt().copied());
-            }
-            DataType::Int32 => {
-                let bd = Self::as_builder_mut::<Int32Builder>(builder);
-                bd.append_option(value.as_i32_opt().copied());
-            }
-            DataType::Int64 => {
-                let bd = Self::as_builder_mut::<Int64Builder>(builder);
-                bd.append_option(value.as_i64_opt().copied());
-            }
-            DataType::UInt8 => {
-                let bd = Self::as_builder_mut::<UInt8Builder>(builder);
-                bd.append_option(value.as_u8_opt().copied());
-            }
-            DataType::UInt16 => {
-                let bd = Self::as_builder_mut::<UInt16Builder>(builder);
-                bd.append_option(value.as_u16_opt().copied());
-            }
-            DataType::UInt32 => {
-                let bd = Self::as_builder_mut::<UInt32Builder>(builder);
-                bd.append_option(value.as_u32_opt().copied());
-            }
-            DataType::UInt64 => {
-                let bd = Self::as_builder_mut::<UInt64Builder>(builder);
-                bd.append_option(value.as_u64_opt().copied());
-            }
-            DataType::Float32 => {
-                let bd = Self::as_builder_mut::<Float32Builder>(builder);
-                bd.append_option(value.as_f32_opt().copied());
-            }
-            DataType::Float64 => {
-                let bd = Self::as_builder_mut::<Float64Builder>(builder);
-                bd.append_option(value.as_f64_opt().copied());
-            }
+            DataType::Boolean => append_opt!(builder, BooleanBuilder, value.as_bool_opt().copied()),
+            DataType::Int8 => append_opt!(builder, Int8Builder, value.as_i8_opt().copied()),
+            DataType::Int16 => append_opt!(builder, Int16Builder, value.as_i16_opt().copied()),
+            DataType::Int32 => append_opt!(builder, Int32Builder, value.as_i32_opt().copied()),
+            DataType::Int64 => append_opt!(builder, Int64Builder, value.as_i64_opt().copied()),
+            DataType::UInt8 => append_opt!(builder, UInt8Builder, value.as_u8_opt().copied()),
+            DataType::UInt16 => append_opt!(builder, UInt16Builder, value.as_u16_opt().copied()),
+            DataType::UInt32 => append_opt!(builder, UInt32Builder, value.as_u32_opt().copied()),
+            DataType::UInt64 => append_opt!(builder, UInt64Builder, value.as_u64_opt().copied()),
+            DataType::Float32 => append_opt!(builder, Float32Builder, value.as_f32_opt().copied()),
+            DataType::Float64 => append_opt!(builder, Float64Builder, value.as_f64_opt().copied()),
             DataType::Timestamp(time_unit, _) => {
                 match time_unit {
                     TimeUnit::Second => {
-                        let bd = Self::as_builder_mut::<TimestampSecondBuilder>(builder);
-                        bd.append_option(value.as_i64_opt().copied());
+                        append_opt!(builder, TimestampSecondBuilder, value.as_i64_opt().copied())
                     }
-                    TimeUnit::Millisecond => {
-                        let bd = Self::as_builder_mut::<TimestampMillisecondBuilder>(builder);
-                        bd.append_option(value.as_i64_opt().copied());
-                    }
-                    TimeUnit::Microsecond => {
-                        let bd = Self::as_builder_mut::<TimestampMicrosecondBuilder>(builder);
-                        bd.append_option(value.as_i64_opt().copied());
-                    }
-                    TimeUnit::Nanosecond => {
-                        let bd = Self::as_builder_mut::<TimestampNanosecondBuilder>(builder);
-                        bd.append_option(value.as_i64_opt().copied());
-                    }
+                    TimeUnit::Millisecond => append_opt!(
+                        builder,
+                        TimestampMillisecondBuilder,
+                        value.as_i64_opt().copied()
+                    ),
+                    TimeUnit::Microsecond => append_opt!(
+                        builder,
+                        TimestampMicrosecondBuilder,
+                        value.as_i64_opt().copied()
+                    ),
+                    TimeUnit::Nanosecond => append_opt!(
+                        builder,
+                        TimestampNanosecondBuilder,
+                        value.as_i64_opt().copied()
+                    ),
                 };
             }
-            DataType::Date32 => {
-                let bd = Self::as_builder_mut::<Date32Builder>(builder);
-                bd.append_option(value.as_i32_opt().copied());
-            }
-            DataType::Date64 => {
-                let bd = Self::as_builder_mut::<Date64Builder>(builder);
-                bd.append_option(value.as_i64_opt().copied());
-            }
+            DataType::Date32 => append_opt!(builder, Date32Builder, value.as_i32_opt().copied()),
+            DataType::Date64 => append_opt!(builder, Date64Builder, value.as_i64_opt().copied()),
             DataType::Time32(time_unit) => match time_unit {
                 TimeUnit::Second => {
-                    let bd = Self::as_builder_mut::<Time32SecondBuilder>(builder);
-                    bd.append_option(value.as_i32_opt().copied());
+                    append_opt!(builder, Time32SecondBuilder, value.as_i32_opt().copied())
                 }
-                TimeUnit::Millisecond => {
-                    let bd = Self::as_builder_mut::<Time32MillisecondBuilder>(builder);
-                    bd.append_option(value.as_i32_opt().copied());
-                }
+                TimeUnit::Millisecond => append_opt!(
+                    builder,
+                    Time32MillisecondBuilder,
+                    value.as_i32_opt().copied()
+                ),
                 _ => unreachable!(),
             },
             DataType::Time64(time_unit) => match time_unit {
-                TimeUnit::Microsecond => {
-                    let bd = Self::as_builder_mut::<Time64MicrosecondBuilder>(builder);
-                    bd.append_option(value.as_i64_opt().copied());
-                }
-                TimeUnit::Nanosecond => {
-                    let bd = Self::as_builder_mut::<Time64NanosecondBuilder>(builder);
-                    bd.append_option(value.as_i64_opt().copied());
-                }
+                TimeUnit::Microsecond => append_opt!(
+                    builder,
+                    Time64MicrosecondBuilder,
+                    value.as_i64_opt().copied()
+                ),
+                TimeUnit::Nanosecond => append_opt!(
+                    builder,
+                    Time64NanosecondBuilder,
+                    value.as_i64_opt().copied()
+                ),
                 _ => unreachable!(),
             },
-            DataType::Binary => {
-                let bd = Self::as_builder_mut::<BinaryBuilder>(builder);
-                bd.append_option(value.as_bytes_opt());
-            }
+            DataType::Binary => append_opt!(builder, BinaryBuilder, value.as_bytes_opt()),
             DataType::FixedSizeBinary(_) => {
-                let bd = Self::as_builder_mut::<FixedSizeBinaryBuilder>(builder);
-                bd.append_value(value.as_bytes()).unwrap();
+                append_val!(builder, FixedSizeBinaryBuilder, value.as_bytes())
             }
-            DataType::LargeBinary => {
-                let bd = Self::as_builder_mut::<LargeBinaryBuilder>(builder);
-                bd.append_option(value.as_bytes_opt());
-            }
-            DataType::Utf8 => {
-                let bd = Self::as_builder_mut::<StringBuilder>(builder);
-                bd.append_option(value.as_string_opt().map(|v| v.to_string()));
-            }
-            DataType::LargeUtf8 => {
-                let bd = Self::as_builder_mut::<LargeStringBuilder>(builder);
-                bd.append_option(value.as_string_opt().map(|v| v.to_string()));
-            }
+            DataType::LargeBinary => append_opt!(builder, LargeBinaryBuilder, value.as_bytes_opt()),
+            DataType::Utf8 => append_opt!(
+                builder,
+                StringBuilder,
+                value.as_string_opt().map(|v| v.to_string())
+            ),
+            DataType::LargeUtf8 => append_opt!(
+                builder,
+                LargeStringBuilder,
+                value.as_string_opt().map(|v| v.to_string())
+            ),
             DataType::List(field) => {
                 let bd = Self::as_builder_mut::<ListBuilder<Box<dyn ArrayBuilder>>>(builder);
 
@@ -176,6 +155,159 @@ impl NestedBuilder {
                         bd.append(true);
                     }
                     _ => unreachable!(),
+                }
+            }
+            DataType::Dictionary(key_type, value_type) => {
+                macro_rules! append_dict {
+                    ($builder:expr, $key_dt:ty, $val_ty:expr, $opt:expr) => {{
+                        match $val_ty.as_ref() {
+                            DataType::Int8 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, Int8Type>, $opt.as_i8_opt().copied());
+                            }
+                            DataType::Int16 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, Int16Type>, $opt.as_i16_opt().copied());
+                            }
+                            DataType::Int32 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, Int32Type>, $opt.as_i32_opt().copied());
+                            }
+                            DataType::Int64 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, Int64Type>, $opt.as_i64_opt().copied());
+                            }
+                            DataType::UInt8 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, UInt8Type>, $opt.as_u8_opt().copied());
+                            }
+                            DataType::UInt16 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, UInt16Type>, $opt.as_u16_opt().copied());
+                            }
+                            DataType::UInt32 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, UInt32Type>, $opt.as_u32_opt().copied());
+                            }
+                            DataType::UInt64 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, UInt64Type>, $opt.as_u64_opt().copied());
+                            }
+                            DataType::Float32 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, Float32Type>, $opt.as_f32_opt().copied());
+                            }
+                            DataType::Float64 => {
+                                append_opt!($builder, PrimitiveDictionaryBuilder<$key_dt, Float64Type>, $opt.as_f64_opt().copied());
+                            }
+                            DataType::Utf8 => {
+                                append_opt!(
+                                    $builder,
+                                    StringDictionaryBuilder<$key_dt>,
+                                    $opt.as_string_opt().map(|v| v.to_string())
+                                );
+                            }
+                            DataType::LargeUtf8 => {
+                                append_opt!(
+                                    $builder,
+                                    LargeStringDictionaryBuilder<$key_dt>,
+                                    $opt.as_string_opt().map(|v| v.to_string())
+                                );
+                            }
+                            DataType::Binary => {
+                                append_opt!(
+                                    $builder,
+                                    BinaryDictionaryBuilder<$key_dt>,
+                                    $opt.as_bytes_opt()
+                                );
+                            }
+                            DataType::LargeBinary => {
+                                append_opt!(
+                                    $builder,
+                                    LargeBinaryDictionaryBuilder<$key_dt>,
+                                    $opt.as_bytes_opt()
+                                );
+                            }
+                            DataType::FixedSizeBinary(_) => {
+                                let bd = NestedBuilder::as_builder_mut::<FixedSizeBinaryDictionaryBuilder<$key_dt>>(
+                                    $builder,
+                                );
+
+                                match $opt.as_bytes_opt() {
+                                    Some(v) => bd.append_value(v),
+                                    None => bd.append_null()
+                                }
+                            }
+                            t => unreachable!("Dictionary value type {t:?} is not currently supported"),
+                        }
+                    }};
+                }
+
+                match key_type.as_ref() {
+                    DataType::Int8 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, Int8Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, Int8Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    DataType::Int16 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, Int16Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, Int16Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    DataType::Int32 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, Int32Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, Int32Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    DataType::Int64 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, Int64Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, Int64Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    DataType::UInt8 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, UInt8Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, UInt8Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    DataType::UInt16 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, UInt16Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, UInt16Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    DataType::UInt32 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, UInt32Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, UInt32Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    DataType::UInt64 => match value {
+                        ValueRef::Null => {
+                            append_dict!(builder, UInt64Type, value_type, value);
+                        }
+                        ValueRef::Dictionary(_, value) => {
+                            append_dict!(builder, UInt64Type, value_type, value)
+                        }
+                        _ => unreachable!("Unsupported value type: {value:?}"),
+                    },
+                    _ => unreachable!("Unsupported key type: {key_type:?}"),
                 }
             }
             DataType::Struct(_) => todo!(),
@@ -199,7 +331,132 @@ impl NestedBuilder {
     /// Append a default value to this [`NestedBuilder`]
     pub fn append_default(&mut self) {
         let data_type = self.field.data_type().clone();
-        let value = match &data_type {
+        let value = Self::default_value(&data_type);
+        self.append_value(value);
+    }
+
+    #[allow(unused)]
+    /// Get the field associated with this builder
+    pub fn field(&self) -> &Field {
+        &self.field
+    }
+
+    /// Return the number of bytes written to the builder
+    pub fn bytes_written(&self) -> usize {
+        self.bytes_written
+    }
+}
+
+impl NestedBuilder {
+    fn make_builder(data_type: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> {
+        match data_type {
+            t @ DataType::Dictionary(key_type, value_type) => {
+                macro_rules! dict_builder {
+                    ($key_type:ty) => {
+                        match &**value_type {
+                            DataType::Int8 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int8Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Int16 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int16Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Int32 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int32Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Int64 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, Int64Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt8 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<$key_type, UInt8Type> =
+                                    PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt16 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<
+                                    $key_type,
+                                    UInt16Type,
+                                > = PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt32 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<
+                                    $key_type,
+                                    UInt32Type,
+                                > = PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::UInt64 => {
+                                let dict_builder: PrimitiveDictionaryBuilder<
+                                    $key_type,
+                                    UInt64Type,
+                                > = PrimitiveDictionaryBuilder::with_capacity(capacity, capacity);
+                                Box::new(dict_builder)
+                            }
+                            DataType::Utf8 => {
+                                let dict_builder: StringDictionaryBuilder<$key_type> =
+                                    StringDictionaryBuilder::with_capacity(capacity, 256, 1024);
+                                Box::new(dict_builder)
+                            }
+                            DataType::LargeUtf8 => {
+                                let dict_builder: LargeStringDictionaryBuilder<$key_type> =
+                                    LargeStringDictionaryBuilder::with_capacity(
+                                        capacity, 256, 1024,
+                                    );
+                                Box::new(dict_builder)
+                            }
+                            DataType::Binary => {
+                                let dict_builder: BinaryDictionaryBuilder<$key_type> =
+                                    BinaryDictionaryBuilder::with_capacity(capacity, 256, 1024);
+                                Box::new(dict_builder)
+                            }
+                            DataType::FixedSizeBinary(w) => {
+                                let dict_builder: FixedSizeBinaryDictionaryBuilder<$key_type> =
+                                    FixedSizeBinaryDictionaryBuilder::with_capacity(
+                                        capacity, 256, *w as i32,
+                                    );
+                                Box::new(dict_builder)
+                            }
+                            DataType::LargeBinary => {
+                                let dict_builder: LargeBinaryDictionaryBuilder<$key_type> =
+                                    LargeBinaryDictionaryBuilder::with_capacity(
+                                        capacity, 256, 1024,
+                                    );
+                                Box::new(dict_builder)
+                            }
+                            t => panic!("Dictionary value type {t:?} is not currently supported"),
+                        }
+                    };
+                }
+                match &**key_type {
+                    DataType::Int8 => dict_builder!(Int8Type),
+                    DataType::Int16 => dict_builder!(Int16Type),
+                    DataType::Int32 => dict_builder!(Int32Type),
+                    DataType::Int64 => dict_builder!(Int64Type),
+                    DataType::UInt8 => dict_builder!(UInt8Type),
+                    DataType::UInt16 => dict_builder!(UInt16Type),
+                    DataType::UInt32 => dict_builder!(UInt32Type),
+                    DataType::UInt64 => dict_builder!(UInt64Type),
+                    _ => {
+                        panic!(
+                            "Data type {t:?} with key type {key_type:?} is not currently supported"
+                        )
+                    }
+                }
+            }
+            _ => make_builder(data_type, capacity),
+        }
+    }
+
+    fn default_value(data_type: &DataType) -> ValueRef<'_> {
+        match data_type {
             DataType::Null => ValueRef::Null,
             DataType::Boolean => ValueRef::Boolean(bool::default()),
             DataType::Int8 => ValueRef::Int8(i8::default()),
@@ -219,24 +476,42 @@ impl NestedBuilder {
             DataType::Date64 => ValueRef::Date64(i64::default()),
             DataType::Time32(time_unit) => ValueRef::Time32(i32::default(), (*time_unit).into()),
             DataType::Time64(time_unit) => ValueRef::Time64(i64::default(), (*time_unit).into()),
-            DataType::Binary => ValueRef::Binary(&[]),
+            DataType::Binary | DataType::LargeBinary => ValueRef::Binary(&[]),
             DataType::FixedSizeBinary(w) => ValueRef::FixedSizeBinary(&[], *w as u32),
-            DataType::Utf8 => ValueRef::String(""),
+            DataType::Utf8 | DataType::LargeUtf8 => ValueRef::String(""),
             DataType::List(field) => ValueRef::List(field.data_type(), vec![]),
-            _ => unreachable!(),
-        };
-        self.append_value(value);
-    }
-
-    #[allow(unused)]
-    /// Get the field associated with this builder
-    pub fn field(&self) -> &Field {
-        &self.field
-    }
-
-    /// Return the number of bytes written to the builder
-    pub fn bytes_written(&self) -> usize {
-        self.bytes_written
+            DataType::Dictionary(key_type, value_type) => {
+                let value = Self::default_value(value_type.as_ref());
+                match key_type.as_ref() {
+                    DataType::Int8 => {
+                        ValueRef::Dictionary(DictionaryKeyType::Int8, Box::new(value))
+                    }
+                    DataType::Int16 => {
+                        ValueRef::Dictionary(DictionaryKeyType::Int16, Box::new(value))
+                    }
+                    DataType::Int32 => {
+                        ValueRef::Dictionary(DictionaryKeyType::Int32, Box::new(value))
+                    }
+                    DataType::Int64 => {
+                        ValueRef::Dictionary(DictionaryKeyType::Int64, Box::new(value))
+                    }
+                    DataType::UInt8 => {
+                        ValueRef::Dictionary(DictionaryKeyType::UInt8, Box::new(value))
+                    }
+                    DataType::UInt16 => {
+                        ValueRef::Dictionary(DictionaryKeyType::UInt16, Box::new(value))
+                    }
+                    DataType::UInt32 => {
+                        ValueRef::Dictionary(DictionaryKeyType::UInt32, Box::new(value))
+                    }
+                    DataType::UInt64 => {
+                        ValueRef::Dictionary(DictionaryKeyType::UInt64, Box::new(value))
+                    }
+                    _ => unreachable!("Unsupported key type: {key_type:?}"),
+                }
+            }
+            _ => unreachable!("Unsupported data type: {data_type:?}"),
+        }
     }
 }
 
@@ -475,5 +750,120 @@ mod tests {
         assert_eq!(city_array.value(0), "Wuhan");
         assert!(city_array.is_null(1));
         assert_eq!(city_array.value(2), "Yichang");
+    }
+
+    #[test]
+    fn test_dict_append_value() {
+        let city_data_type =
+            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8));
+        let field = Arc::new(Field::new("countries", city_data_type.clone(), false));
+        let mut builder = NestedBuilder::with_capacity(field, 2);
+
+        builder.append_value(ValueRef::Dictionary(
+            crate::record::DictionaryKeyType::Int8,
+            Box::new(ValueRef::String("America")),
+        ));
+        builder.append_value(ValueRef::Dictionary(
+            crate::record::DictionaryKeyType::Int8,
+            Box::new(ValueRef::String("Canada")),
+        ));
+        builder.append_value(ValueRef::Dictionary(
+            crate::record::DictionaryKeyType::Int8,
+            Box::new(ValueRef::String("America")),
+        ));
+        builder.append_value(ValueRef::Dictionary(
+            crate::record::DictionaryKeyType::Int8,
+            Box::new(ValueRef::String("America")),
+        ));
+        let array = builder.finish();
+        let dict_array = array.as_dictionary::<Int8Type>();
+        assert_eq!(dict_array.len(), 4);
+        let values = dict_array.values().as_string::<i32>();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.value(0), "America");
+        assert_eq!(values.value(1), "Canada");
+
+        let keys = dict_array.keys();
+        assert_eq!(keys.values(), &[0, 1, 0, 0]);
+    }
+
+    #[test]
+    fn test_dict_append_null_value() {
+        {
+            let city_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Binary));
+            let field = Arc::new(Field::new("countries", city_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
+
+            builder.append_value(ValueRef::Null);
+            builder.append_value(ValueRef::Dictionary(
+                crate::record::DictionaryKeyType::Int8,
+                Box::new(ValueRef::Null),
+            ));
+
+            let array = builder.finish();
+            assert_eq!(array.len(), 2);
+            assert!(array.is_null(0));
+            assert!(array.is_null(1));
+        }
+        {
+            let dict_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Int64));
+            let field = Arc::new(Field::new("dict_code", dict_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
+
+            builder.append_value(ValueRef::Null);
+            builder.append_value(ValueRef::Dictionary(
+                crate::record::DictionaryKeyType::Int8,
+                Box::new(ValueRef::Null),
+            ));
+
+            let array = builder.finish();
+            assert_eq!(array.len(), 2);
+            assert!(array.is_null(0));
+            assert!(array.is_null(1));
+        }
+    }
+
+    #[test]
+    fn test_dict_append_default_value() {
+        {
+            let city_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::LargeUtf8));
+            let field = Arc::new(Field::new("countries", city_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
+
+            builder.append_default();
+            builder.append_default();
+
+            let array = builder.finish();
+            let dict_array = array.as_dictionary::<Int8Type>();
+            assert_eq!(dict_array.len(), 2);
+            let values = dict_array.values().as_string::<i64>();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values.value(0), "");
+
+            let keys = dict_array.keys();
+            assert_eq!(keys.values(), &[0, 0]);
+        }
+        {
+            let city_data_type =
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::UInt64));
+            let field = Arc::new(Field::new("dict_code", city_data_type.clone(), false));
+            let mut builder = NestedBuilder::with_capacity(field, 2);
+
+            builder.append_default();
+            builder.append_default();
+
+            let array = builder.finish();
+            let dict_array = array.as_dictionary::<Int8Type>();
+            assert_eq!(dict_array.len(), 2);
+            let values = dict_array.values().as_primitive::<UInt64Type>();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values.value(0), 0);
+
+            let keys = dict_array.keys();
+            assert_eq!(keys.values(), &[0, 0]);
+        }
     }
 }

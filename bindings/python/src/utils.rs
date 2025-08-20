@@ -38,7 +38,8 @@ pub(crate) fn to_dict(
             | Value::List(_, _)
             | Value::Timestamp(_, _)
             | Value::Time32(_, _)
-            | Value::Time64(_, _) => unimplemented!(),
+            | Value::Time64(_, _)
+            | Value::Dictionary(_, _) => unimplemented!(),
         }
     }
 
@@ -75,7 +76,8 @@ pub(crate) fn to_dict_ref<'py, 'r>(
             | ValueRef::List(_, _)
             | ValueRef::Timestamp(_, _)
             | ValueRef::Time32(_, _)
-            | ValueRef::Time64(_, _) => unimplemented!(),
+            | ValueRef::Time64(_, _)
+            | ValueRef::Dictionary(_, _) => unimplemented!(),
         }
     }
     Ok(dict)
