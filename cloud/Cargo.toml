@@ -5,14 +5,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arrow = { version = "55.2.0", features = ["ipc"] }
-arrow-array = "55.2.0"
-arrow-flight = { version = "55.2.0", features = ["flight-sql"] }
+arrow = { version = "56.0.0", features = ["ipc"] }
+arrow-array = "56.0.0"
+arrow-flight = { version = "56.0.0", features = ["flight-sql"] }
 async-trait = "0.1"
 async-stream = "0.3"
 bytes = "1"
 flume = { version = "0.11", features = ["async"] }
-fusio = "0.4.0"
+fusio = "0.4.1"
 futures = "0.3"
 futures-util = "0.3"
 futures-core = "0.3"
@@ -24,8 +24,11 @@ thiserror = "2.0.3"
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"], default-features = false }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tonbo = { path = ".." }
-tonic = "0.12.3"
+tonic = "0.13"
 ulid = { version = "1", features = ["serde"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
-tonic-build = "0.12.3"
+tonic-build = "0.13"

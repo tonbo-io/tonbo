@@ -62,6 +62,11 @@ pub struct AWSTonbo {
 }
 
 impl AWSTonbo {
+    #[cfg(test)]
+    pub fn tonbo(&self) -> &DB<DynRecord, TokioExecutor> {
+        &self.tonbo
+    }
+
     // todo: Separate the data
     // Returns number of rows and row size
     async fn parquet_metadata<'a>(
@@ -176,13 +181,17 @@ impl TonboCloud for AWSTonbo {
                 .build(),
         );
 
-        let _ = create_dir_all("./db_path/users").await;
+        let db_root = std::env::var("TONBO_DB_DIR").unwrap_or_else(|_| "./db_path/users".into());
+
+        let _ = create_dir_all(&db_root).await;
+
+        let abs = std::fs::canonicalize(&db_root).expect("canonicalize TONBO_DB_DIR");
 
         let options = DbOption::new(
-            TonboPath::from_filesystem_path("./db_path/users").unwrap(),
+            TonboPath::from_filesystem_path(abs.as_path())
+                .expect("valid filesystem path for Tonbo"),
             &schema,
         );
-
         let tonbo: DB<DynRecord, TokioExecutor> =
             DB::new(options, TokioExecutor::default(), schema)
                 .await
@@ -331,4 +340,131 @@ impl From<grpc::Value> for Value {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use arrow::datatypes::DataType;
+    use arrow_array::{Array, Int64Array, Int8Array, StringArray};
+    use arrow_flight::{
+        flight_service_server::FlightService, utils::flight_data_to_batches, Ticket,
+    };
+    use prost::Message;
+    use tempfile::TempDir;
+    use tokio::fs;
+    use tonbo::record::{DynSchema, DynamicField};
+    use tonic::Request;
+
+    use super::*;
+
+    // Full end to end test
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ete_aws_tonbo() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        let _ = fs::remove_dir_all("./db_path/users").await;
+
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("TONBO_DB_DIR", tmp.path());
+
+        let schema = DynSchema::new(
+            &[
+                DynamicField::new("id".to_string(), DataType::Int64, false),
+                DynamicField::new("age".to_string(), DataType::Int8, true),
+                DynamicField::new("name".to_string(), DataType::Utf8, false),
+            ],
+            0,
+        );
+
+        let tonbo_cloud = Arc::new(AWSTonbo::new("Tonbo".to_string(), schema).await);
+        let flight_svc = TonboFlightSvc::new(tonbo_cloud.clone());
+
+        let r1 = DynRecord::try_new(
+            vec![
+                Value::Int64(1),
+                Value::Int8(23),
+                Value::String("Ava".into()),
+            ],
+            0,
+        )
+        .unwrap();
+        tonbo_cloud.tonbo().insert(r1).await.unwrap();
+
+        // This is an example of what the scan request looks like
+        let _scan_request = ScanRequest::new(
+            Bound::Included(Value::Int64(0)),
+            Bound::Included(Value::Int64(1)),
+            vec!["id".to_string(), "age".to_string(), "name".to_string()],
+        );
+
+        // Create mock grpc::ScanRequest for sending to the `AWSTonbo`` instance to work with
+        let scan_pb = grpc::ScanRequest {
+            lower: Some(grpc::BoundValue {
+                kind: Some(grpc::bound_value::Kind::Inclusive(grpc::Value {
+                    kind: Some(grpc::value::Kind::Int64(0)),
+                })),
+            }),
+            upper: Some(grpc::BoundValue {
+                kind: Some(grpc::bound_value::Kind::Inclusive(grpc::Value {
+                    kind: Some(grpc::value::Kind::Int64(1)),
+                })),
+            }),
+            projection: vec!["id".into(), "age".into(), "name".into()],
+        };
+
+        let mut buf = Vec::with_capacity(scan_pb.encoded_len());
+        scan_pb.encode(&mut buf).unwrap();
+        let ticket = Ticket { ticket: buf.into() };
+
+        let resp = flight_svc.do_get(Request::new(ticket)).await.unwrap();
+        let mut stream = resp.into_inner();
+
+        let mut all_msgs = Vec::new();
+        while let Some(msg) = stream.next().await {
+            all_msgs.push(msg.unwrap());
+        }
+
+        let batches = flight_data_to_batches(&all_msgs).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ete_aws_tonbo_empty_scan_errors() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("TONBO_DB_DIR", tmp.path());
+
+        let schema = DynSchema::new(
+            &[
+                DynamicField::new("id".to_string(), DataType::Int64, false),
+                DynamicField::new("age".to_string(), DataType::Int8, true),
+                DynamicField::new("name".to_string(), DataType::Utf8, false),
+            ],
+            0,
+        );
+
+        let tonbo_cloud = Arc::new(AWSTonbo::new("Tonbo".to_string(), schema).await);
+        let flight_svc = TonboFlightSvc::new(tonbo_cloud.clone());
+
+        let scan_pb = grpc::ScanRequest {
+            lower: Some(grpc::BoundValue {
+                kind: Some(grpc::bound_value::Kind::Inclusive(grpc::Value {
+                    kind: Some(grpc::value::Kind::Int64(10)),
+                })),
+            }),
+            upper: Some(grpc::BoundValue {
+                kind: Some(grpc::bound_value::Kind::Inclusive(grpc::Value {
+                    kind: Some(grpc::value::Kind::Int64(20)),
+                })),
+            }),
+            projection: vec!["id".into()],
+        };
+
+        let mut buf = Vec::with_capacity(scan_pb.encoded_len());
+        scan_pb.encode(&mut buf).unwrap();
+        let ticket = Ticket { ticket: buf.into() };
+
+        // Expect an error due to missing schema
+        let resp = flight_svc.do_get(Request::new(ticket)).await;
+        assert!(resp.is_err());
+    }
+}

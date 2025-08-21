@@ -110,8 +110,38 @@ impl FlightService for TonboFlightSvc {
                         }
                     }
                     // TODO: deal with projection
-                    Some(Ok(Entry::Projection((_record, _projection)))) => {
-                        todo!()
+                    Some(Ok(Entry::Projection((record, projection)))) => {
+                        match *record {
+                            // TODO: Make more efficient by batching build batch tranformation
+                            Entry::RecordBatch(entry) => {
+                                let schema = entry.batch_as_ref().schema();
+                                let value = entry.get();
+                                if let Some(mut value) = value {
+                                    let mut dyn_record_builder =
+                                        DynRecordImmutableArrays::builder(schema, 1);
+
+                                    // Apply projection
+                                    value.projection(&projection);
+                                    dyn_record_builder.push(entry.internal_key(), Some(value));
+                                    let dyn_record_array = dyn_record_builder.finish(None);
+                                    let record_batch = dyn_record_array.as_record_batch();
+
+                                    break record_batch.clone();
+                                }
+                            }
+                            _ => {
+                                let dyn_record = record.owned_value();
+
+                                if let Some(mut dyn_record) = dyn_record {
+                                    dyn_record.projection(&projection);
+                                    schema_builder.push((0, dyn_record.clone()));
+                                    break records_to_record_batch(
+                                        &schema_builder[0].1.schema(0),
+                                        schema_builder,
+                                    );
+                                }
+                            }
+                        }
                     }
                     Some(Err(e)) => {
                         let _ = rb_tx

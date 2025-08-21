@@ -3,6 +3,7 @@ use std::{ops::Bound, path::PathBuf};
 use bytes::Bytes;
 use fusio::path::Path;
 use futures_util::stream::StreamExt;
+use parquet::arrow::ProjectionMask;
 use tokio::fs;
 use tonbo::{executor::tokio::TokioExecutor, record::F32, DbOption, Projection, Record, DB};
 

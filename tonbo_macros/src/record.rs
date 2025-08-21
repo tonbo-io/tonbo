@@ -209,11 +209,7 @@ fn trait_record_codegen(
             }
         }
 
-        let owned_expr = if is_nullable {
-            quote!( self.#field_name.clone() )
-        } else {
-            quote!( self.#field_name )
-        };
+        let owned_expr = quote!( self.#field_name.clone() );
         owned_init_fields.push(quote! { #field_name: #owned_expr, });
 
         if !field.primary_key.unwrap_or_default() {
@@ -228,7 +224,7 @@ fn trait_record_codegen(
                 quote!( self.#field_name = ::core::default::Default::default(); )
             };
             projection_arms.push(quote! {
-                if !projection_mask.contains(#col_index) {
+                if !projection_mask.leaf_included(#col_index) {
                     #clear_stmt
                 }
             });
@@ -276,7 +272,7 @@ fn trait_record_codegen(
                 }
             }
 
-            fn projection(&mut self, projection_mask: &::tonbo::record::ProjectionMask) {
+            fn projection(&mut self, projection_mask: &::tonbo::parquet::arrow::ProjectionMask) {
                 #(#projection_arms)*
             }
 

@@ -52,3 +52,14 @@ pub struct ScanRequest {
     upper: Bound<Value>,
     projection: Vec<String>,
 }
+
+impl ScanRequest {
+    /// Constructs new `ScanRequest` to be able to send to Tonbo cloud
+    pub fn new(lower: Bound<Value>, upper: Bound<Value>, projection: Vec<String>) -> Self {
+        Self {
+            lower,
+            upper,
+            projection,
+        }
+    }
+}
