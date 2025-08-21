@@ -1,5 +1,5 @@
 use proc_macro2::Ident;
-use quote::quote;
+use quote::{quote, ToTokens};
 
 pub(crate) enum DataType {
     UInt8,
@@ -41,12 +41,39 @@ impl DataType {
             DataType::Boolean
         } else if path.is_ident("Bytes") {
             DataType::Bytes
-        } else if path.is_ident("F32") {
+        } else if path.is_ident("F32") || path.is_ident("f32") {
             DataType::Float32
-        } else if path.is_ident("F64") {
+        } else if path.is_ident("F64") || path.is_ident("f64") {
             DataType::Float64
+        } else if let Some(seg) = path.segments.last() {
+            // Support Vec<u8>
+            if seg.ident == "Vec" {
+                if let syn::PathArguments::AngleBracketed(ref generic_args) = seg.arguments {
+                    if generic_args.args.len() == 1 {
+                        if let syn::GenericArgument::Type(syn::Type::Path(tp)) =
+                            &generic_args.args[0]
+                        {
+                            if tp.path.is_ident("u8") {
+                                return DataType::Bytes;
+                            } else {
+                                panic!("unsupported Vec<T> element type: {}", tp.to_token_stream());
+                            }
+                        }
+                    }
+                    panic!(
+                        "unsupported Vec<T> generic args: {}",
+                        generic_args.to_token_stream()
+                    );
+                }
+                panic!(
+                    "unsupported Vec<T> arguments: {}",
+                    seg.arguments.to_token_stream()
+                )
+            } else {
+                panic!("unsupported field type path: {}", path.to_token_stream())
+            }
         } else {
-            todo!()
+            panic!("unsupported field type path: {}", path.to_token_stream())
         }
     }
 
@@ -83,105 +110,13 @@ impl DataType {
                 quote!(bool)
             }
             DataType::Bytes => {
-                quote!(bytes::Bytes)
+                quote!(Vec<u8>)
             }
             DataType::Float32 => {
-                quote!(::tonbo::record::F32)
+                quote!(f32)
             }
             DataType::Float64 => {
-                quote!(::tonbo::record::F64)
-            }
-        }
-    }
-
-    pub(crate) fn to_mapped_type(&self) -> proc_macro2::TokenStream {
-        match self {
-            DataType::UInt8 => {
-                quote!(::tonbo::arrow::datatypes::DataType::UInt8)
-            }
-            DataType::UInt16 => {
-                quote!(::tonbo::arrow::datatypes::DataType::UInt16)
-            }
-            DataType::UInt32 => {
-                quote!(::tonbo::arrow::datatypes::DataType::UInt32)
-            }
-            DataType::UInt64 => {
-                quote!(::tonbo::arrow::datatypes::DataType::UInt64)
-            }
-            DataType::Int8 => {
-                quote!(::tonbo::arrow::datatypes::DataType::Int8)
-            }
-            DataType::Int16 => {
-                quote!(::tonbo::arrow::datatypes::DataType::Int16)
-            }
-            DataType::Int32 => {
-                quote!(::tonbo::arrow::datatypes::DataType::Int32)
-            }
-            DataType::Int64 => {
-                quote!(::tonbo::arrow::datatypes::DataType::Int64)
-            }
-            DataType::String => {
-                quote!(::tonbo::arrow::datatypes::DataType::Utf8)
-            }
-            DataType::Boolean => {
-                quote!(::tonbo::arrow::datatypes::DataType::Boolean)
-            }
-            DataType::Bytes => {
-                quote!(::tonbo::arrow::datatypes::DataType::Binary)
-            }
-            DataType::Float32 => {
-                quote!(::tonbo::arrow::datatypes::DataType::Float32)
-            }
-            DataType::Float64 => {
-                quote!(::tonbo::arrow::datatypes::DataType::Float64)
-            }
-        }
-    }
-
-    pub(crate) fn to_array_ty(&self) -> proc_macro2::TokenStream {
-        match self {
-            DataType::UInt8 => {
-                quote!(::tonbo::arrow::array::UInt8Array)
-            }
-            DataType::UInt16 => {
-                quote!(::tonbo::arrow::array::UInt16Array)
-            }
-            DataType::UInt32 => {
-                quote!(::tonbo::arrow::array::UInt32Array)
-            }
-            DataType::UInt64 => {
-                quote!(::tonbo::arrow::array::UInt64Array)
-            }
-            DataType::Int8 => {
-                quote!(::tonbo::arrow::array::Int8Array)
-            }
-            DataType::Int16 => {
-                quote!(::tonbo::arrow::array::Int16Array)
-            }
-            DataType::Int32 => {
-                quote!(::tonbo::arrow::array::Int32Array)
-            }
-            DataType::Int64 => {
-                quote!(::tonbo::arrow::array::Int64Array)
-            }
-            DataType::String => {
-                quote!(::tonbo::arrow::array::StringArray)
-            }
-            DataType::Boolean => {
-                quote!(::tonbo::arrow::array::BooleanArray)
-            }
-            DataType::Bytes => {
-                quote!(
-                    ::tonbo::arrow::array::GenericByteArray::<
-                        ::tonbo::arrow::datatypes::GenericBinaryType<i32>,
-                    >
-                )
-            }
-            DataType::Float32 => {
-                quote!(::tonbo::arrow::array::Float32Array)
-            }
-            DataType::Float64 => {
-                quote!(::tonbo::arrow::array::Float64Array)
+                quote!(f64)
             }
         }
     }
@@ -230,206 +165,6 @@ impl DataType {
         }
     }
 
-    pub(crate) fn to_builder_with_capacity_method(&self) -> proc_macro2::TokenStream {
-        match self {
-            DataType::UInt8 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt8Type,
-                >::with_capacity(capacity))
-            }
-            DataType::UInt16 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt16Type,
-                >::with_capacity(capacity))
-            }
-            DataType::UInt32 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt32Type,
-                >::with_capacity(capacity))
-            }
-            DataType::UInt64 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::UInt64Type,
-                >::with_capacity(capacity))
-            }
-            DataType::Int8 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int8Type,
-                >::with_capacity(capacity))
-            }
-            DataType::Int16 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int16Type,
-                >::with_capacity(capacity))
-            }
-            DataType::Int32 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int32Type,
-                >::with_capacity(capacity))
-            }
-            DataType::Int64 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Int64Type,
-                >::with_capacity(capacity))
-            }
-            DataType::String => {
-                quote!(::tonbo::arrow::array::StringBuilder::with_capacity(
-                    capacity, 0
-                ))
-            }
-            DataType::Boolean => {
-                quote!(::tonbo::arrow::array::BooleanBuilder::with_capacity(
-                    capacity
-                ))
-            }
-            DataType::Bytes => {
-                quote!(::tonbo::arrow::array::GenericByteBuilder::<
-                    ::tonbo::arrow::datatypes::GenericBinaryType<i32>,
-                >::with_capacity(capacity, 0))
-            }
-            DataType::Float32 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Float32Type,
-                >::with_capacity(capacity))
-            }
-            DataType::Float64 => {
-                quote!(::tonbo::arrow::array::PrimitiveBuilder::<
-                    ::tonbo::arrow::datatypes::Float64Type,
-                >::with_capacity(capacity))
-            }
-        }
-    }
-
-    pub(crate) fn to_builder(&self) -> proc_macro2::TokenStream {
-        match self {
-            DataType::UInt8 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt8Type,
-                    >
-                )
-            }
-            DataType::UInt16 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt16Type,
-                    >
-                )
-            }
-            DataType::UInt32 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt32Type,
-                    >
-                )
-            }
-            DataType::UInt64 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::UInt64Type,
-                    >
-                )
-            }
-            DataType::Int8 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int8Type,
-                    >
-                )
-            }
-            DataType::Int16 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int16Type,
-                    >
-                )
-            }
-            DataType::Int32 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int32Type,
-                    >
-                )
-            }
-            DataType::Int64 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Int64Type,
-                    >
-                )
-            }
-            DataType::String => {
-                quote!(::tonbo::arrow::array::StringBuilder)
-            }
-            DataType::Boolean => {
-                quote!(::tonbo::arrow::array::BooleanBuilder)
-            }
-            DataType::Bytes => {
-                quote!(
-                    ::tonbo::arrow::array::GenericByteBuilder::<
-                        ::tonbo::arrow::datatypes::GenericBinaryType<i32>,
-                    >
-                )
-            }
-            DataType::Float32 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Float32Type,
-                    >
-                )
-            }
-            DataType::Float64 => {
-                quote!(
-                    ::tonbo::arrow::array::PrimitiveBuilder<
-                        ::tonbo::arrow::datatypes::Float64Type,
-                    >
-                )
-            }
-        }
-    }
-    pub(crate) fn to_size_method(&self, field_name: &Ident) -> proc_macro2::TokenStream {
-        match self {
-            DataType::UInt8 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::UInt16 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::UInt32 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::UInt64 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::Int8 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::Int16 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::Int32 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::Int64 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::String => {
-                quote!(self.#field_name.values_slice().len())
-            }
-            DataType::Boolean => {
-                quote!(self.#field_name.values_slice().len())
-            }
-            DataType::Bytes => {
-                quote!(self.#field_name.values_slice().len())
-            }
-            DataType::Float32 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-            DataType::Float64 => {
-                quote!(std::mem::size_of_val(self.#field_name.values_slice()))
-            }
-        }
-    }
     pub(crate) fn to_size_field(
         &self,
         field_name: &Ident,
@@ -478,10 +213,10 @@ impl DataType {
                 }
             }
             DataType::Float32 => {
-                quote! {std::mem::size_of::<::tonbo::record::F32>()}
+                quote! {std::mem::size_of::<f32>()}
             }
             DataType::Float64 => {
-                quote! {std::mem::size_of::<::tonbo::record::F64>()}
+                quote! {std::mem::size_of::<f64>()}
             }
         }
     }

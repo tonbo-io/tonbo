@@ -12,12 +12,13 @@ mod test {
         inmem::immutable::ImmutableMemTable,
         record,
         record::Record,
+        typed as t,
         version::{edit::VersionEdit, TransactionTs},
         CompactionExecutor, DbOption, Path, DB,
     };
-    use tonbo_macros::Record;
 
-    #[derive(Record, Debug, PartialEq, Eq, Clone)]
+    #[t::record]
+    #[derive(Debug, PartialEq, Eq, Clone, Default)]
     pub struct TestRecord {
         #[record(primary_key)]
         pub vstring: String,
@@ -118,7 +119,7 @@ mod test {
     async fn test_no_compactor() {
         let temp_dir = TempDir::new().unwrap();
 
-        let schema = TestRecordSchema;
+        let schema: TestRecordSchema = Default::default();
 
         // Create DB with NoCompactor (plugin)
         let option = DbOption::new(Path::new(temp_dir.path()).unwrap(), &schema);

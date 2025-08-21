@@ -215,7 +215,7 @@ pub(crate) mod tests {
         fn arrow_schema(&self) -> &Arc<ArrowSchema> {
             static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
                 Arc::new(ArrowSchema::new(vec![
-                    Field::new("_null", DataType::Boolean, false),
+                    Field::new(magic::NULL, DataType::Boolean, false),
                     Field::new(magic::TS, DataType::UInt32, false),
                     Field::new("vstring", DataType::Utf8, false),
                     Field::new("vu32", DataType::UInt32, false),

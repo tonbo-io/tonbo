@@ -30,10 +30,12 @@ use fusio::path::Path;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::fs;
-use tonbo::{executor::tokio::TokioExecutor, record::Schema, ArrowArrays, DbOption, DB};
-use tonbo_macros::Record;
+use tonbo::{
+    executor::tokio::TokioExecutor, record::Schema, typed as t, ArrowArrays, DbOption, DB,
+};
 
-#[derive(Record, Debug)]
+#[t::record]
+#[derive(Debug)]
 pub struct Music {
     #[record(primary_key)]
     id: u64,
@@ -75,7 +77,7 @@ impl TableProvider for MusicProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        MusicSchema {}.arrow_schema().clone()
+        music_schema().arrow_schema().clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -108,7 +110,7 @@ impl TableProvider for MusicProvider {
 
 impl MusicExec {
     fn new(db: Arc<DB<Music, TokioExecutor>>, projection: Option<&Vec<usize>>) -> Self {
-        let schema = MusicSchema {}.arrow_schema();
+        let schema = music_schema().arrow_schema();
         let schema = if let Some(projection) = &projection {
             Arc::new(schema.project(projection).unwrap())
         } else {
@@ -140,7 +142,7 @@ impl Stream for MusicStream {
 
 impl RecordBatchStream for MusicStream {
     fn schema(&self) -> SchemaRef {
-        MusicSchema {}.arrow_schema().clone()
+        music_schema().arrow_schema().clone()
     }
 }
 
@@ -228,6 +230,7 @@ async fn main() -> Result<()> {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/music").await;
 
+    let schema: MusicSchema = Default::default();
     let options = DbOption::new(
         Path::from_filesystem_path(
             fs::canonicalize(PathBuf::from("./db_path/music"))
@@ -235,10 +238,10 @@ async fn main() -> Result<()> {
                 .unwrap(),
         )
         .unwrap(),
-        &MusicSchema,
+        &schema,
     );
 
-    let db = DB::new(options, TokioExecutor::default(), MusicSchema)
+    let db = DB::new(options, TokioExecutor::default(), schema)
         .await
         .unwrap();
     for (id, name, like) in [
@@ -294,4 +297,8 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn music_schema() -> MusicSchema {
+    Default::default()
 }

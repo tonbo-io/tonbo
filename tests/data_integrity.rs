@@ -5,12 +5,13 @@ mod tests {
     use fusio::path::Path;
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
+    use tonbo::{executor::tokio::TokioExecutor, typed as t, DbOption, DB};
 
     const WRITE_TIMES: usize = 500_000;
     const STRING_SIZE: usize = 50;
 
-    #[derive(Record, Debug)]
+    #[t::record]
+    #[derive(Debug, Default)]
     pub struct Customer {
         #[record(primary_key)]
         pub c_custkey: i32,
@@ -70,15 +71,15 @@ mod tests {
         let mut write_hasher = crc32fast::Hasher::new();
 
         let temp_dir = TempDir::new().unwrap();
+        let schema: CustomerSchema = Default::default();
         let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &CustomerSchema,
+            &schema,
         );
 
-        let db: DB<Customer, TokioExecutor> =
-            DB::new(option, TokioExecutor::default(), CustomerSchema)
-                .await
-                .unwrap();
+        let db: DB<Customer, TokioExecutor> = DB::new(option, TokioExecutor::default(), schema)
+            .await
+            .unwrap();
 
         for _ in 0..WRITE_TIMES {
             let customer = gen_record(&mut rng, &mut primary_key_count);

@@ -1,6 +1,7 @@
-use tonbo_macros::Record;
+use tonbo::typed as t;
 
-#[derive(Record, Debug)]
+#[t::record]
+#[derive(Debug, Default)]
 pub struct User {
     #[record(primary_key)]
     name: String,

@@ -32,7 +32,7 @@ impl Schema for StringSchema {
     fn arrow_schema(&self) -> &Arc<ArrowSchema> {
         static SCHEMA: Lazy<Arc<ArrowSchema>> = Lazy::new(|| {
             Arc::new(ArrowSchema::new(vec![
-                Field::new("_null", DataType::Boolean, false),
+                Field::new(magic::NULL, DataType::Boolean, false),
                 Field::new(magic::TS, DataType::UInt32, false),
                 Field::new(PRIMARY_FIELD_NAME, DataType::Utf8, false),
             ]))

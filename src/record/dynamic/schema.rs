@@ -70,7 +70,7 @@ impl DynSchema {
         metadata.insert("primary_key_index".to_string(), primary_index.to_string());
         let arrow_schema = Arc::new(ArrowSchema::new_with_metadata(
             [
-                Field::new("_null", DataType::Boolean, false),
+                Field::new(magic::NULL, DataType::Boolean, false),
                 Field::new(magic::TS, DataType::UInt32, false),
             ]
             .into_iter()
@@ -106,7 +106,7 @@ impl DynSchema {
         let arrow_schema = ArrowSchema::try_merge(vec![
             ArrowSchema::new_with_metadata(
                 vec![
-                    Field::new("_null", DataType::Boolean, false),
+                    Field::new(magic::NULL, DataType::Boolean, false),
                     Field::new(magic::TS, DataType::UInt32, false),
                 ],
                 metadata,
