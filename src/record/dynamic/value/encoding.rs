@@ -10,7 +10,7 @@ use futures_util::future::LocalBoxFuture;
 use futures_util::FutureExt;
 
 use super::{TimeUnit, Value};
-use crate::record::{decode_arrow_datatype, encode_arrow_datatype, ValueError, ValueRef};
+use crate::record::{decode_arrow_datatype, encode_arrow_datatype, Key, ValueError, ValueRef};
 
 #[cfg(not(target_arch = "wasm32"))]
 type BoxedFuture<'a, T> = BoxFuture<'a, T>;
@@ -18,95 +18,6 @@ type BoxedFuture<'a, T> = BoxFuture<'a, T>;
 type BoxedFuture<'a, T> = LocalBoxFuture<'a, T>;
 
 impl Value {
-    fn encode_inner<'a, 'b, W>(
-        &'a self,
-        writer: &'b mut W,
-    ) -> BoxedFuture<'a, Result<(), fusio::Error>>
-    where
-        W: Write,
-        'b: 'a,
-    {
-        let fut = async move {
-            encode_arrow_datatype(&self.data_type(), writer).await?;
-            match self {
-                Value::Null => (),
-                Value::Boolean(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Int8(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Int16(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Int32(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Int64(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::UInt8(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::UInt16(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::UInt32(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::UInt64(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Float32(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Float64(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::String(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Binary(items) => {
-                    items.encode(writer).await?;
-                }
-                Value::Date32(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Date64(v) => {
-                    v.encode(writer).await?;
-                }
-                Value::Timestamp(v, _) => {
-                    v.encode(writer).await?;
-                }
-                Value::Time32(v, _) => {
-                    v.encode(writer).await?;
-                }
-                Value::Time64(v, _) => {
-                    v.encode(writer).await?;
-                }
-                Value::FixedSizeBinary(v, _) => {
-                    v.encode(writer).await?;
-                }
-                Value::List(_, vec) => {
-                    let len = vec.len() as u32;
-                    len.encode(writer).await?;
-                    for v in vec.iter() {
-                        v.encode_inner(writer).await?;
-                    }
-                }
-            }
-            Ok(())
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            fut.boxed()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            fut.boxed_local()
-        }
-    }
-
     fn decode_inner<R>(reader: &mut R) -> BoxedFuture<'_, Result<Self, fusio::Error>>
     where
         R: fusio::SeqRead,
@@ -187,41 +98,11 @@ impl Encode for Value {
     where
         W: Write,
     {
-        self.encode_inner(writer).await
+        self.as_key_ref().encode(writer).await
     }
 
     fn size(&self) -> usize {
-        match self {
-            Value::Null => 1,
-            Value::Boolean(v) => 1 + v.size(),
-            Value::Int8(v) => 1 + v.size(),
-            Value::Int16(v) => 1 + v.size(),
-            Value::Int32(v) => 1 + v.size(),
-            Value::Int64(v) => 1 + v.size(),
-            Value::UInt8(v) => 1 + v.size(),
-            Value::UInt16(v) => 1 + v.size(),
-            Value::UInt32(v) => 1 + v.size(),
-            Value::UInt64(v) => 1 + v.size(),
-            Value::Float32(v) => 1 + v.size(),
-            Value::Float64(v) => 1 + v.size(),
-            Value::String(v) => 1 + v.size(),
-            Value::Binary(v) => 1 + v.size(),
-            Value::FixedSizeBinary(v, _) => 1 + v.size(),
-            Value::Date32(v) => 1 + v.size(),
-            Value::Date64(v) => 1 + v.size(),
-            Value::Timestamp(v, time_unit) => 1 + v.size() + time_unit.size(),
-            Value::Time32(v, time_unit) => 1 + v.size() + time_unit.size(),
-            Value::Time64(v, time_unit) => 1 + v.size() + time_unit.size(),
-            Value::List(data_type, vec) => {
-                vec.iter().map(|v| v.size()).sum::<usize>()
-                    + match data_type {
-                        DataType::Timestamp(_, _) => 2,
-                        DataType::Time32(_) | DataType::Time64(_) => 2,
-                        DataType::List(field) => 1 + field.size(),
-                        _ => 1,
-                    }
-            }
-        }
+        self.as_key_ref().size()
     }
 }
 
@@ -342,7 +223,7 @@ impl ValueRef<'_> {
                     let len = vec.len() as u32;
                     len.encode(writer).await?;
                     for v in vec.iter() {
-                        v.encode_inner(writer).await?;
+                        v.as_key_ref().encode_inner(writer).await?;
                     }
                 }
             }
