@@ -132,7 +132,14 @@ where
         }
 
         // Perform major compaction
-        self.major_compaction(is_manual).await?;
+        Self::major_compaction(
+            &self.ctx,
+            &self.options,
+            &self.db_option,
+            &self.record_schema,
+            is_manual,
+        )
+        .await?;
 
         Ok(())
     }
@@ -163,18 +170,23 @@ where
     R: Record,
     <<R as Record>::Schema as RecordSchema>::Columns: Send + Sync,
 {
-    async fn major_compaction(&self, is_manual: bool) -> Result<(), CompactionError<R>> {
-        while let Some(tier) = self.should_major_compact().await {
-            if let Some(task) = self.plan_major(tier).await {
-                self.execute_major(task).await?;
+    pub async fn major_compaction(
+        ctx: &Context<R>,
+        options: &TieredOptions,
+        db_option: &DbOption,
+        record_schema: &R::Schema,
+        is_manual: bool,
+    ) -> Result<(), CompactionError<R>> {
+        while let Some(tier) = Self::should_major_compact(ctx, options).await {
+            if let Some(task) = Self::plan_major(ctx, tier).await {
+                Self::execute_major(ctx, db_option, record_schema, task).await?;
             } else {
                 break;
             }
         }
 
         if is_manual {
-            self.ctx
-                .manifest
+            ctx.manifest
                 .rewrite()
                 .await
                 .map_err(CompactionError::Manifest)?;
@@ -183,18 +195,18 @@ where
         Ok(())
     }
 
-    async fn should_major_compact(&self) -> Option<usize> {
-        let version_ref = self.ctx.manifest.current().await;
-        for tier in 0..self.options.max_tiers - 1 {
-            if Self::is_tier_full(&self.options, &version_ref, tier) {
+    async fn should_major_compact(ctx: &Context<R>, options: &TieredOptions) -> Option<usize> {
+        let version_ref = ctx.manifest.current().await;
+        for tier in 0..options.max_tiers - 1 {
+            if Self::is_tier_full(options, &version_ref, tier) {
                 return Some(tier);
             }
         }
         None
     }
 
-    async fn plan_major(&self, tier: usize) -> Option<TieredTask> {
-        let version_ref = self.ctx.manifest.current().await;
+    async fn plan_major(ctx: &Context<R>, tier: usize) -> Option<TieredTask> {
+        let version_ref = ctx.manifest.current().await;
         let tier_files: Vec<Ulid> = version_ref.level_slice[tier]
             .iter()
             .map(|scope| scope.gen)
@@ -209,8 +221,13 @@ where
         None
     }
 
-    async fn execute_major(&self, task: TieredTask) -> Result<(), CompactionError<R>> {
-        let version_ref = self.ctx.manifest.current().await;
+    async fn execute_major(
+        ctx: &Context<R>,
+        db_option: &DbOption,
+        record_schema: &R::Schema,
+        task: TieredTask,
+    ) -> Result<(), CompactionError<R>> {
+        let version_ref = ctx.manifest.current().await;
         let mut version_edits = vec![];
         let mut delete_gens = vec![];
         for (source_tier, file_gens) in &task.input {
@@ -227,11 +244,11 @@ where
             }
             Self::tier_compaction(
                 &version_ref,
-                &self.db_option,
+                db_option,
                 &mut version_edits,
                 &mut delete_gens,
-                &self.record_schema,
-                &self.ctx,
+                record_schema,
+                ctx,
                 *source_tier,
                 task.target_tier,
             )
@@ -244,8 +261,7 @@ where
                 ts: version_ref.increase_ts(),
             });
 
-            self.ctx
-                .manifest
+            ctx.manifest
                 .update(version_edits, Some(delete_gens))
                 .await?;
         }
@@ -349,6 +365,7 @@ where
 
     fn is_tier_full(options: &TieredOptions, version: &Version<R>, tier: usize) -> bool {
         let max_tiers = options.max_tiers;
+        // TODO: Move MAX_LEVEL out of Version
         if tier >= max_tiers || tier >= MAX_LEVEL {
             return false;
         }
