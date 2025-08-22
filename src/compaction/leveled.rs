@@ -771,7 +771,7 @@ pub(crate) mod tests {
         let scope = LeveledCompactor::<DynRecord>::minor_compaction(
             &option,
             None,
-            &vec![
+            &[
                 (Some(generate_file_id()), batch_1),
                 (Some(generate_file_id()), batch_2),
             ],

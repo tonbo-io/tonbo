@@ -123,9 +123,9 @@ tonbo_macros = { version = "0.3.1", path = "tonbo_macros" }
 tracing = "0.1"
 ulid = { version = "1", features = ["serde"] }
 
-typed-arrow = { version = "0.2.0", features = ["derive"] }
-typed-arrow-dyn = { version = "0.0.0-alpha0" }
-typed-arrow-unified = { version = "0.0.0-alpha0" }
+typed-arrow = { version = "0.2.0" }
+typed-arrow-dyn = { version = "0.0.0-alpha1" }
+typed-arrow-unified = { version = "0.0.0-alpha1" }
 
 # Only used for benchmarks
 log = "0.4.22"

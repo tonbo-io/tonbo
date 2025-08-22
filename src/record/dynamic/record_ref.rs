@@ -71,11 +71,17 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         let null = record_batch.column(0).as_boolean().value(offset);
         let metadata = full_schema.metadata();
 
+        // Prefer new key (CSV of user indices), fallback to legacy single-index key.
         let primary_index = metadata
-            .get("primary_key_index")
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
+            .get(crate::typed::meta::PK_USER_INDICES)
+            .and_then(|csv| csv.split(',').next())
+            .and_then(|s| s.parse::<usize>().ok())
+            .or_else(|| {
+                metadata
+                    .get("primary_key_index")
+                    .and_then(|s| s.parse::<usize>().ok())
+            })
+            .expect("primary key user index must exist in schema metadata");
         let ts = record_batch
             .column(1)
             .as_primitive::<arrow::datatypes::UInt32Type>()

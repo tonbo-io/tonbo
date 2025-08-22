@@ -1,13 +1,14 @@
-pub(crate) mod array;
-pub(crate) mod builder;
+// Switch dynamic arrays to typed-arrow-dyn backed implementation.
+pub(crate) mod array_ta;
 mod record;
 mod record_ref;
 mod schema;
+mod ta_adapter;
 mod value;
 
 use std::sync::Arc;
 
-pub use array::*;
+pub use array_ta::*;
 use arrow::datatypes::DataType as ArrowDataType;
 pub use record::*;
 pub use record_ref::*;
