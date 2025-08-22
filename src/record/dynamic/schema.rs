@@ -7,7 +7,7 @@ use arrow::{
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
 use thiserror::Error;
 
-use super::{array::DynRecordImmutableArrays, DynRecord, Value};
+use super::{DynRecord, DynRecordImmutableArrays, Value};
 use crate::{magic, record::Schema};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -67,7 +67,20 @@ pub enum SchemaError {
 impl DynSchema {
     pub fn new(schema: &[DynamicField], primary_index: usize) -> Self {
         let mut metadata = HashMap::new();
+        // Legacy key (single PK user index)
         metadata.insert("primary_key_index".to_string(), primary_index.to_string());
+        // New keys for PK user indices and sorting columns
+        metadata.insert(
+            crate::typed::meta::PK_USER_INDICES.to_string(),
+            primary_index.to_string(),
+        );
+        // Sorting columns string: "1:desc:1;<full_pk_idx>:asc:1"
+        let sorting_str = format!(
+            "1:desc:1;{}:asc:1",
+            primary_index + crate::magic::USER_COLUMN_OFFSET
+        );
+        metadata.insert("tonbo.sorting_columns".to_string(), sorting_str);
+
         let arrow_schema = Arc::new(ArrowSchema::new_with_metadata(
             [
                 Field::new(magic::NULL, DataType::Boolean, false),
@@ -101,7 +114,18 @@ impl DynSchema {
         primary_index: usize,
     ) -> Result<Self, SchemaError> {
         let mut metadata = HashMap::new();
+        // Legacy key (single PK user index)
         metadata.insert("primary_key_index".to_string(), primary_index.to_string());
+        // New keys for PK user indices and sorting columns
+        metadata.insert(
+            crate::typed::meta::PK_USER_INDICES.to_string(),
+            primary_index.to_string(),
+        );
+        let sorting_str = format!(
+            "1:desc:1;{}:asc:1",
+            primary_index + crate::magic::USER_COLUMN_OFFSET
+        );
+        metadata.insert("tonbo.sorting_columns".to_string(), sorting_str);
 
         let arrow_schema = ArrowSchema::try_merge(vec![
             ArrowSchema::new_with_metadata(
@@ -244,7 +268,17 @@ mod tests {
         // sufficient.
 
         let metadata = dyn_schema.arrow_schema.metadata();
+        // Legacy key still present
         let primary_key_index = metadata.get("primary_key_index");
         assert_eq!(primary_key_index, Some(&"0".into()));
+        // New keys present
+        assert_eq!(
+            metadata.get(crate::typed::meta::PK_USER_INDICES),
+            Some(&"0".into())
+        );
+        assert_eq!(
+            metadata.get("tonbo.sorting_columns"),
+            Some(&"1:desc:1;2:asc:1".into())
+        );
     }
 }
