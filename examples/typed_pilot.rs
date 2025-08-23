@@ -45,7 +45,10 @@ async fn main() {
     // Get by primary key
     {
         let txn = db.transaction().await;
-        let got = txn.get(&1i64, Projection::All).await.unwrap();
+        let got = txn
+            .get(&PersonKey { id: 1 }, Projection::All)
+            .await
+            .unwrap();
         println!("get(1): {:?}", got.as_ref().map(|e| e.get()));
     }
 
@@ -64,5 +67,5 @@ async fn main() {
     }
 
     // Remove a row
-    db.remove(2i64).await.unwrap();
+    db.remove(PersonKey { id: 2 }).await.unwrap();
 }

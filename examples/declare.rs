@@ -54,7 +54,9 @@ async fn main() {
         let txn = db.transaction().await;
 
         // get from primary key
-        let name = "Alice".into();
+        let name = UserKey {
+            name: "Alice".into(),
+        };
 
         // get the zero-copy reference of record without any allocations.
         let user = txn
@@ -69,7 +71,9 @@ async fn main() {
         assert_eq!(user.unwrap().get().age, Some(22));
 
         {
-            let upper = "Blob".into();
+            let upper = UserKey {
+                name: "Blob".into(),
+            };
             // range scan of user
             let mut scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))
@@ -95,7 +99,9 @@ async fn main() {
         }
 
         {
-            let upper = "Blob".into();
+            let upper = UserKey {
+                name: "Blob".into(),
+            };
             // reverse scan of user (descending order)
             let mut reverse_scan = txn
                 .scan((Bound::Included(&name), Bound::Excluded(&upper)))

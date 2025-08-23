@@ -46,6 +46,73 @@ impl RecordStructFieldOpt {
     }
 }
 
+pub(crate) fn struct_key_codegen(
+    struct_name: &Ident,
+    fields: &[RecordStructFieldOpt],
+) -> TokenStream {
+    let struct_key_name = struct_name.to_key_ident();
+    let mut pk_fields: Vec<TokenStream> = Vec::new();
+
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, _is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let field_ty = data_type.to_field_ty();
+
+        if field.primary_key.unwrap_or_default() {
+            pk_fields.push(quote! { pub #field_name: #field_ty, });
+        }
+    }
+
+    quote! {
+        #[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord, Hash)]
+        pub struct #struct_key_name { #(#pk_fields)* }
+    }
+}
+
+pub(crate) fn struct_key_ref_codegen(
+    struct_name: &Ident,
+    fields: &[RecordStructFieldOpt],
+) -> TokenStream {
+    let struct_key_name = struct_name.to_key_ref_ident();
+    let mut ref_fields: Vec<TokenStream> = Vec::new();
+
+    let mut has_ref = false;
+    for field in fields.iter() {
+        let field_name = field.ident.as_ref().unwrap();
+
+        let (data_type, _is_nullable) = field.to_data_type().expect("unreachable code");
+
+        let is_string = matches!(data_type, DataType::String);
+        let is_bytes = matches!(data_type, DataType::Bytes);
+        let field_ty = data_type.to_field_ty();
+
+        if field.primary_key.unwrap_or_default() {
+            has_ref = has_ref || is_string || is_bytes;
+            if is_string {
+                ref_fields.push(quote! { pub #field_name: &'r str, });
+            } else if is_bytes {
+                ref_fields.push(quote! { pub #field_name: &'r [u8], });
+            } else {
+                ref_fields.push(quote! { pub #field_name: #field_ty, });
+            }
+        }
+    }
+
+    if has_ref {
+        quote! {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct #struct_key_name<'r> { #(#ref_fields)* }
+        }
+    } else {
+        quote! {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct #struct_key_name { #(#ref_fields)* }
+        }
+    }
+}
+
 pub(crate) fn trait_decode_codegen(
     struct_name: &Ident,
     fields: &[RecordStructFieldOpt],
@@ -140,18 +207,21 @@ pub(crate) fn struct_ref_codegen(
 
 pub(crate) fn trait_decode_ref_codegen(
     struct_name: &&Ident,
-    primary_key_name: &Ident,
     fields: &[RecordStructFieldOpt],
 ) -> TokenStream {
     let mut ref_projection_fields: Vec<TokenStream> = Vec::new();
     let mut from_record_batch_fields: Vec<TokenStream> = Vec::new();
     let mut field_names: Vec<TokenStream> = Vec::new();
     let mut has_ref = false;
+    let mut primary_key_names = Vec::new();
 
     for (i, field) in fields.iter().enumerate() {
         let field_name = field.ident.as_ref().unwrap();
         let field_array_name = field.to_array_ident();
         let field_index = i + 2;
+        if field.primary_key.unwrap_or_default() {
+            primary_key_names.push(quote!(#field_name: self.#field_name,));
+        }
 
         let (data_type, is_nullable) = field.to_data_type().expect("unreachable code");
         if matches!(data_type, DataType::String | DataType::Bytes) {
@@ -197,13 +267,14 @@ pub(crate) fn trait_decode_ref_codegen(
     } else {
         quote!(#struct_ref_name)
     };
+    let key_ref_name = struct_name.to_key_ref_ident();
 
     quote! {
         impl<'r> ::tonbo::record::RecordRef<'r> for #struct_ref_type {
             type Record = #struct_name;
 
             fn key(self) -> <<<<#struct_ref_type as ::tonbo::record::RecordRef<'r>>::Record as ::tonbo::record::Record>::Schema as ::tonbo::record::Schema>::Key as ::tonbo::record::Key>::Ref<'r> {
-                self.#primary_key_name
+                #key_ref_name { #(#primary_key_names)* }
             }
 
             fn projection(&mut self, projection_mask: &::tonbo::parquet::arrow::ProjectionMask) {

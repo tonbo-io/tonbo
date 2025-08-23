@@ -38,7 +38,7 @@ mod tests {
         ArrowArrays, ArrowArraysBuilder, Ts, TS,
     };
 
-    use crate::{Point, User, UserImmutableArrays, UserRef, UserSchema};
+    use crate::{Point, User, UserImmutableArrays, UserKeyRef, UserRef, UserSchema};
 
     #[tokio::test]
     async fn test_record_info() {
@@ -49,7 +49,7 @@ mod tests {
             grade: 92.9,
         };
 
-        assert_eq!(user.key(), "cat");
+        assert_eq!(user.key(), UserKeyRef { name: "cat" });
         assert_eq!(user.size(), 24);
         let schema: UserSchema = Default::default();
         assert_eq!(schema.primary_key_indices()[0], 4);
@@ -166,7 +166,7 @@ mod tests {
                 record_ref.key(),
                 Ts {
                     ts: 9.into(),
-                    value: "cat",
+                    value: UserKeyRef { name: "cat" },
                 }
             );
             if let Some(user_ref) = record_ref.get() {
@@ -204,7 +204,7 @@ mod tests {
                 record_ref.key(),
                 Ts {
                     ts: 9.into(),
-                    value: "cat",
+                    value: UserKeyRef { name: "cat" },
                 }
             );
             if let Some(user_ref) = record_ref.get() {
@@ -259,21 +259,21 @@ mod tests {
         builder.push(
             Ts {
                 ts: 0.into(),
-                value: "cat",
+                value: UserKeyRef { name: "cat" },
             },
             Some(cat.as_record_ref()),
         );
         builder.push(
             Ts {
                 ts: 1.into(),
-                value: "dog",
+                value: UserKeyRef { name: "dog" },
             },
             Some(dog.as_record_ref()),
         );
         builder.push(
             Ts {
                 ts: 2.into(),
-                value: "human",
+                value: UserKeyRef { name: "human" },
             },
             None,
         );
@@ -324,21 +324,21 @@ mod tests {
         builder.push(
             Ts {
                 ts: 0.into(),
-                value: "cat",
+                value: UserKeyRef { name: "cat" },
             },
             Some(cat.as_record_ref()),
         );
         builder.push(
             Ts {
                 ts: 1.into(),
-                value: "dog",
+                value: UserKeyRef { name: "dog" },
             },
             Some(dog.as_record_ref()),
         );
         builder.push(
             Ts {
                 ts: 2.into(),
-                value: "human",
+                value: UserKeyRef { name: "human" },
             },
             None,
         );

@@ -31,7 +31,7 @@ use syn::DeriveInput;
 /// #[derive(tonbo::typed::Record, Debug)]
 /// struct MyRow { ... }
 #[proc_macro_attribute]
-pub fn typed_record(_args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn typed_record(args: TokenStream, input: TokenStream) -> TokenStream {
     // Keep a DeriveInput copy for generating Tonbo DB interop code via the existing
     // `tonbo_macros::Record` implementation machinery.
     let derive_input = match syn::parse::<DeriveInput>(input.clone()) {
@@ -45,8 +45,9 @@ pub fn typed_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    let mut pk_names = std::collections::HashMap::<String, usize>::new();
+
     // find primary key field index (for typed schema metadata)
-    let mut pk_index: Option<usize> = None;
     for (i, field) in item.fields.iter_mut().enumerate() {
         let mut remove_idx: Option<usize> = None;
         for (ai, a) in field.attrs.iter().enumerate() {
@@ -59,7 +60,20 @@ pub fn typed_record(_args: TokenStream, input: TokenStream) -> TokenStream {
                     Ok(())
                 });
                 if has_pk {
-                    pk_index = Some(i);
+                    match field.ident.as_ref() {
+                        Some(ident) => {
+                            pk_names.insert(ident.to_string(), i);
+                        }
+                        None => {
+                            return syn::Error::new_spanned(
+                                &item.ident,
+                                "tuple struct can not be primary key",
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                    }
+
                     // Remove the attribute only from the typed-arrow view.
                     // The copied `DeriveInput` above still contains the attribute and is used
                     // to generate Tonbo's DB interop code (Schema/Record/Arrays/Builder).
@@ -73,7 +87,7 @@ pub fn typed_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         }
     }
 
-    let Some(idx) = pk_index else {
+    if pk_names.is_empty() {
         return syn::Error::new_spanned(
             &item.ident,
             "missing primary key field, use #[record(primary_key)] to define one",
@@ -81,6 +95,39 @@ pub fn typed_record(_args: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     };
+
+    let mut order = vec![];
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("key") {
+            meta.parse_nested_meta(|m| match m.path.get_ident() {
+                Some(ident) => {
+                    let ident = ident.to_string();
+                    if let Some(idx) = pk_names.get(&ident) {
+                        order.push(*idx);
+                    }
+                    Ok(())
+                }
+                None => Err(m.error(format!("unexpected key {:?}", m.path))),
+            })
+        } else {
+            Ok(())
+        }
+    });
+    syn::parse_macro_input!(args with parser);
+
+    if order.is_empty() {
+        if pk_names.len() == 1 {
+            // if key attribute is not specified, use the only primary key index
+            order.push(*pk_names.values().next().unwrap());
+        } else {
+            return syn::Error::new_spanned(
+                &item.ident,
+                "ambiguous primary key order, use #[record(order(...))] to define order",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
 
     // Gather and normalize derives: remove any existing `Record` (qualified or not),
     // then prepend `typed_arrow::Record` to ensure it exists exactly once.
@@ -120,7 +167,11 @@ pub fn typed_record(_args: TokenStream, input: TokenStream) -> TokenStream {
     let new_derive: Attribute = syn::parse_quote! { #[derive(#derive_items)] };
 
     // inject schema_metadata attribute at the struct level
-    let idx_str = idx.to_string();
+    let idx_str = order
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let meta_attr: syn::Attribute = syn::parse_quote! {
         #[schema_metadata(k = "tonbo.primary_key_user_indices", v = #idx_str )]
     };
