@@ -535,6 +535,10 @@ fn trait_pk_array_codegen(
     let struct_key_name = struct_name.to_key_ident();
     let mut rewrite_fields = Vec::new();
     let mut rewrite_field_ty = Vec::new();
+    let mut first_pk_ty = None;
+    let mut first_pk_name = None;
+    // let mut key_fields = Vec::new();
+    let mut first_pk = None;
     for field in fields.iter() {
         if field.primary_key.unwrap_or_default() {
             let field_name = field.ident.as_ref().unwrap();
@@ -543,9 +547,17 @@ fn trait_pk_array_codegen(
             let field_ty = data_type.to_field_ty();
             rewrite_field_ty
                 .push(quote! { #field_ty::rewrite_pk_column(column, nulls, tombstones, keys), });
+            if first_pk.is_none() {
+                first_pk = Some(field);
+                first_pk_ty = Some(field_ty);
+                first_pk_name = Some(field_name);
+                // key_fields.push(quote! { keys.iter() });
+            }
         }
     }
 
+    let first_pk_name = first_pk_name.expect("expect at least one primary key field");
+    let first_pk_ty = first_pk_ty.expect("expect at least one primary key field");
     // TODO: handle multiple primary keys
 
     // For now, implement a simple version that delegates to individual field types
@@ -558,7 +570,9 @@ fn trait_pk_array_codegen(
                 tombstones: &[bool],
                 keys: &[Self],
             ) -> ::tonbo::arrow::array::ArrayRef {
-                todo!()
+
+                let ks=keys.iter().map(|key| key.#first_pk_name.clone()).collect::<Vec<_>>();
+                #first_pk_ty::rewrite_pk_column(column, nulls, tombstones, ks.as_slice())
             }
         }
     }
