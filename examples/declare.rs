@@ -1,21 +1,21 @@
 use std::{ops::Bound, path::PathBuf};
 
-use bytes::Bytes;
 use fusio::path::Path;
 use futures_util::stream::StreamExt;
 use tokio::fs;
-use tonbo::{executor::tokio::TokioExecutor, record::F32, DbOption, Projection, Record, DB};
+use tonbo::{executor::tokio::TokioExecutor, typed as t, DbOption, Projection, DB};
 
 /// Use macro to define schema of column family just like ORM
 /// It provides type-safe read & write API
-#[derive(Record, Debug)]
+#[t::record]
+#[derive(Debug, Default)]
 pub struct User {
     #[record(primary_key)]
     name: String,
     email: Option<String>,
     age: u8,
-    bytes: Bytes,
-    grade: F32,
+    bytes: Vec<u8>,
+    grade: f32,
 }
 
 #[tokio::main]
@@ -23,6 +23,7 @@ async fn main() {
     // make sure the path exists
     let _ = fs::create_dir_all("./db_path/users").await;
 
+    let schema: UserSchema = Default::default();
     let options = DbOption::new(
         Path::from_filesystem_path(
             fs::canonicalize(PathBuf::from("./db_path/users"))
@@ -30,10 +31,10 @@ async fn main() {
                 .unwrap(),
         )
         .unwrap(),
-        &UserSchema,
+        &schema,
     );
     // pluggable async runtime and I/O
-    let db = DB::new(options, TokioExecutor::default(), UserSchema)
+    let db = DB::new(options, TokioExecutor::default(), schema)
         .await
         .unwrap();
 
@@ -42,8 +43,8 @@ async fn main() {
         name: "Alice".into(),
         email: Some("alice@gmail.com".into()),
         age: 22,
-        bytes: Bytes::from(vec![0, 1, 2]),
-        grade: 96.5.into(),
+        bytes: vec![0, 1, 2],
+        grade: 96.5,
     })
     .await
     .unwrap();
@@ -87,7 +88,7 @@ async fn main() {
                         email: Some("alice@gmail.com"),
                         age: None,
                         bytes: Some(&[0, 1, 2]),
-                        grade: Some(96.5.into()),
+                        grade: Some(96.5),
                     })
                 );
             }
