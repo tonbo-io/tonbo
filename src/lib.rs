@@ -157,8 +157,8 @@ use lockable::LockableHashMap;
 use magic::USER_COLUMN_OFFSET;
 use manifest::ManifestStorageError;
 pub use once_cell;
-pub use parquet;
-use parquet::{
+pub use parquet::{
+    self,
     arrow::{ArrowSchemaConverter, ProjectionMask},
     errors::ParquetError,
 };
