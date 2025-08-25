@@ -4,6 +4,7 @@ pub mod key;
 pub mod option;
 #[cfg(test)]
 pub(crate) mod test;
+pub mod typed;
 
 use std::{fmt::Debug, sync::Arc};
 
