@@ -11,7 +11,7 @@ use parquet::{
 use thiserror::Error;
 
 use crate::{
-    compaction::leveled::LeveledOptions,
+    compaction::{leveled::LeveledOptions, tiered::TieredOptions},
     fs::{FileId, FileType},
     record::Schema,
     trigger::TriggerType,
@@ -32,12 +32,14 @@ pub enum Order {
 
 pub enum CompactionOption {
     Leveled(LeveledOptions),
+    Tiered(TieredOptions),
 }
 
 impl std::fmt::Debug for CompactionOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CompactionOption::Leveled(opts) => f.debug_tuple("Leveled").field(opts).finish(),
+            CompactionOption::Tiered(opts) => f.debug_tuple("Tiered").field(opts).finish(),
         }
     }
 }
@@ -46,6 +48,7 @@ impl Clone for CompactionOption {
     fn clone(&self) -> Self {
         match self {
             CompactionOption::Leveled(opts) => CompactionOption::Leveled(opts.clone()),
+            CompactionOption::Tiered(opts) => CompactionOption::Tiered(opts.clone()),
         }
     }
 }
@@ -141,6 +144,11 @@ impl DbOption {
     /// Configure leveled compaction with custom options
     pub fn leveled_compaction(mut self, options: LeveledOptions) -> Self {
         self.compaction_option = CompactionOption::Leveled(options);
+        self
+    }
+
+    pub fn tiered_compaction(mut self, options: TieredOptions) -> Self {
+        self.compaction_option = CompactionOption::Tiered(options);
         self
     }
 
