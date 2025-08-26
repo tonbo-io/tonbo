@@ -22,14 +22,14 @@ type JsExecutor = OpfsExecutor;
 #[wasm_bindgen]
 pub struct TonboDB {
     desc: Arc<Vec<DynamicField>>,
-    primary_key_index: usize,
+    primary_key_indices: Arc<Vec<usize>>,
     db: Arc<DB<DynRecord, JsExecutor>>,
 }
 
 impl TonboDB {
-    fn parse_schema(schema: Object) -> (Vec<DynamicField>, usize) {
+    fn parse_schema(schema: Object) -> (Vec<DynamicField>, Vec<usize>) {
         let mut desc = vec![];
-        let mut primary_index = None;
+        let mut primary_indices = vec![];
 
         for (i, entry) in Object::entries(&schema).iter().enumerate() {
             let pair = entry
@@ -56,10 +56,7 @@ impl TonboDB {
                 .unwrap_or(false);
 
             if primary {
-                if primary_index.is_some() {
-                    panic!("multiply primary keys are not supported!");
-                }
-                primary_index = Some(i);
+                primary_indices.push(i);
             }
             desc.push(DynamicField::new(
                 name.into(),
@@ -67,9 +64,8 @@ impl TonboDB {
                 nullable,
             ));
         }
-        let primary_key_index = primary_index.expect_throw("expected to have one primary key");
 
-        (desc, primary_key_index)
+        (desc, primary_indices)
     }
 }
 
@@ -77,8 +73,8 @@ impl TonboDB {
 impl TonboDB {
     #[wasm_bindgen(constructor)]
     pub async fn new(option: DbOption, schema: Object) -> Self {
-        let (desc, primary_key_index) = Self::parse_schema(schema);
-        let schema = DynSchema::new(&desc, primary_key_index);
+        let (desc, primary_key_indices) = Self::parse_schema(schema);
+        let schema = DynSchema::new(&desc, primary_key_indices.as_slice());
 
         let db = DB::new(option.into_option(&schema), JsExecutor::new(), schema)
             .await
@@ -86,14 +82,21 @@ impl TonboDB {
 
         Self {
             desc: Arc::new(desc),
-            primary_key_index,
+            primary_key_indices: Arc::new(primary_key_indices),
             db: Arc::new(db),
         }
     }
 
     /// get the record with `key` as the primary key and process it using closure `cb`
     pub async fn get(&self, key: JsValue, cb: Function) -> Result<JsValue, JsValue> {
-        let key = parse_key(self.desc.get(self.primary_key_index).unwrap(), key, true)?;
+        // TODO: handle multiple primary keys
+        let key = parse_key(
+            self.desc
+                .get(*self.primary_key_indices.get(0).unwrap())
+                .unwrap(),
+            key,
+            true,
+        )?;
         let this = JsValue::null();
         let schema = self.desc.clone();
 
@@ -120,7 +123,7 @@ impl TonboDB {
 
     /// insert a single tonbo record
     pub async fn insert(&self, record: Object) -> Result<(), JsValue> {
-        let record = parse_record(&record, &self.desc, self.primary_key_index)?;
+        let record = parse_record(&record, &self.desc, &self.primary_key_indices)?;
         self.db
             .insert(record)
             .await
@@ -133,7 +136,7 @@ impl TonboDB {
     pub async fn insert_batch(&self, records: Vec<Object>) -> Result<(), JsValue> {
         let records = records
             .iter()
-            .map(|record| parse_record(&record, &self.desc, self.primary_key_index).unwrap());
+            .map(|record| parse_record(&record, &self.desc, &self.primary_key_indices).unwrap());
 
         self.db
             .insert_batch(records.into_iter())
@@ -144,7 +147,14 @@ impl TonboDB {
 
     /// delete the record with the primary key as the `key`
     pub async fn remove(&self, key: JsValue) -> Result<(), JsValue> {
-        let key = parse_key(self.desc.get(self.primary_key_index).unwrap(), key, true)?;
+        // TODO: handle multiple primary keys
+        let key = parse_key(
+            self.desc
+                .get(*self.primary_key_indices.get(0).unwrap())
+                .unwrap(),
+            key,
+            true,
+        )?;
         self.db
             .remove(key)
             .await
@@ -158,7 +168,11 @@ impl TonboDB {
         high: Bound,
     ) -> Result<wasm_streams::readable::sys::ReadableStream, JsValue> {
         let schema = self.desc.clone();
-        let desc = self.desc.get(self.primary_key_index).unwrap();
+        // TODO: handle multiple primary keys
+        let desc = self
+            .desc
+            .get(*self.primary_key_indices.get(0).unwrap())
+            .unwrap();
         let lower = lower.into_bound(desc)?;
         let high = high.into_bound(desc)?;
 
@@ -197,7 +211,7 @@ impl TonboDB {
         let txn = self.db.transaction().await;
 
         let this = JsValue::null();
-        let txn = Transaction::new(txn, self.desc.clone(), self.primary_key_index);
+        let txn = Transaction::new(txn, self.desc.clone(), self.primary_key_indices.clone());
 
         {
             let js_txn = JsValue::from(txn);

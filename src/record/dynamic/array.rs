@@ -117,11 +117,15 @@ macro_rules! implement_arrow_array {
 
                 let schema = self.record_batch.schema();
                 let metadata = schema.metadata();
-                let primary_key_index = metadata
-                    .get("primary_key_index")
-                    .unwrap()
-                    .parse::<usize>()
-                    .unwrap();
+                let primary_key_indices: Vec<usize> = metadata
+                    .get(crate::magic::PK_USER_INDICES)
+                    .map(|s| {
+                        s.split(',')
+                            .filter(|p| !p.is_empty())
+                            .filter_map(|p| p.parse::<usize>().ok())
+                            .collect()
+                    })
+                    .expect("primary key user index must exist in schema metadata");
                 let mut columns = vec![];
                 for (idx, array) in self.arrays.iter().enumerate() {
                     if projection_mask.leaf_included(idx + USER_COLUMN_OFFSET) {
@@ -131,7 +135,7 @@ macro_rules! implement_arrow_array {
                         columns.push(ValueRef::Null);
                     }
                 }
-                Some(Some(DynRecordRef::new(columns, primary_key_index)))
+                Some(Some(DynRecordRef::new(columns, primary_key_indices)))
             }
 
             fn as_record_batch(&self) -> &arrow::array::RecordBatch {
@@ -227,13 +231,17 @@ macro_rules! implement_builder_array {
                     None => {
                         // For tombstones (row == None), ensure the primary key column is still
                         // populated from the provided key, so ordering and lookups remain correct.
-                        let primary_key_index = self
+                        let primary_key_indices: Vec<usize> = self
                             .schema
                             .metadata()
-                            .get("primary_key_index")
-                            .expect("primary key index must exist in schema metadata")
-                            .parse::<usize>()
-                            .expect("primary key index must be a valid usize");
+                            .get(crate::magic::PK_USER_INDICES)
+                            .map(|s| {
+                                s.split(',')
+                                    .filter(|p| !p.is_empty())
+                                    .filter_map(|p| p.parse::<usize>().ok())
+                                    .collect()
+                            })
+                            .expect("primary key user index must exist in schema metadata");
 
                         for (idx, (builder, datatype)) in self
                             .builders
@@ -244,7 +252,7 @@ macro_rules! implement_builder_array {
                             let field = self.schema.field(idx + USER_COLUMN_OFFSET);
                             let is_nullable = field.is_nullable();
 
-                            if idx == primary_key_index {
+                            if primary_key_indices.contains(&idx) {
                                 match datatype {
                                     $(
                                         $primitive_pat => {
@@ -549,8 +557,8 @@ mod tests {
     #[tokio::test]
     async fn test_build_primary_key() {
         {
-            let schema = dyn_schema!(("id", UInt64, false), 0);
-            let record = DynRecord::new(vec![Value::UInt64(1_u64)], 0);
+            let schema = dyn_schema!(("id", UInt64, false), [0]);
+            let record = DynRecord::new(vec![Value::UInt64(1_u64)], vec![0]);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::version::timestamp::Ts {
                 ts: 0.into(),
@@ -568,8 +576,8 @@ mod tests {
             }
         }
         {
-            let schema = dyn_schema!(("id", Utf8, false), 0);
-            let record = DynRecord::new(vec![Value::String("abc".to_string())], 0);
+            let schema = dyn_schema!(("id", Utf8, false), [0]);
+            let record = DynRecord::new(vec![Value::String("abc".to_string())], vec![0]);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::version::timestamp::Ts {
                 ts: 0.into(),
@@ -587,8 +595,8 @@ mod tests {
             }
         }
         {
-            let schema = dyn_schema!(("id", Float32, false), 0);
-            let record = DynRecord::new(vec![Value::Float32(3.2324)], 0);
+            let schema = dyn_schema!(("id", Float32, false), [0]);
+            let record = DynRecord::new(vec![Value::Float32(3.2324)], vec![0]);
             let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
             let key = crate::version::timestamp::Ts {
                 ts: 0.into(),
@@ -612,8 +620,8 @@ mod tests {
         use arrow::array::AsArray;
         // Ensure that when pushing a tombstone (row == None), the primary key column
         // is still populated from the provided key, so sort/order and lookups work.
-        let schema = dyn_schema!(("id", UInt64, false), 0);
-        let record = DynRecord::new(vec![Value::UInt64(42_u64)], 0);
+        let schema = dyn_schema!(("id", UInt64, false), [0]);
+        let record = DynRecord::new(vec![Value::UInt64(42_u64)], vec![0]);
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 2);
         let key = crate::version::timestamp::Ts {
             ts: 0.into(),
@@ -644,7 +652,7 @@ mod tests {
             ("str", Utf8, false),
             ("float32", Float32, false),
             ("float64", Float64, true),
-            0
+            [0]
         );
 
         let record = DynRecord::new(
@@ -657,7 +665,7 @@ mod tests {
                 Value::Float32(1.09_f32),
                 Value::Float64(3.09_f64),
             ],
-            0,
+            vec![0],
         );
 
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
@@ -697,7 +705,7 @@ mod tests {
                 DynamicField::new("five".into(), DataType::FixedSizeBinary(5), true),
                 DynamicField::new("three".into(), DataType::FixedSizeBinary(3), false),
             ][..],
-            0,
+            &[0],
         );
 
         let record1 = DynRecord::new(
@@ -706,7 +714,7 @@ mod tests {
                 Value::FixedSizeBinary(vec![1, 2, 3, 4, 5], 5),
                 Value::FixedSizeBinary(vec![1, 2, 3], 3),
             ],
-            0,
+            vec![0],
         );
         let record2 = DynRecord::new(
             vec![
@@ -714,7 +722,7 @@ mod tests {
                 Value::Null,
                 Value::FixedSizeBinary(vec![2, 3, 7], 3),
             ],
-            0,
+            vec![0],
         );
 
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
@@ -765,7 +773,7 @@ mod tests {
                 DynamicField::new("vector".into(), ty2.clone(), true),
                 DynamicField::new("schedules".into(), ty3.clone(), true),
             ],
-            0,
+            &[0],
         );
 
         let record1 = DynRecord::new(
@@ -799,7 +807,7 @@ mod tests {
                     ],
                 ),
             ],
-            0,
+            vec![0],
         );
 
         let record2 = DynRecord::new(
@@ -825,7 +833,7 @@ mod tests {
                 ),
                 Value::Null,
             ],
-            0,
+            vec![0],
         );
 
         let mut builder = DynRecordImmutableArrays::builder(schema.arrow_schema().clone(), 5);
