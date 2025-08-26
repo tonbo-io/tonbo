@@ -18,14 +18,14 @@ use crate::{
 pub struct Transaction {
     txn: Option<transaction::Transaction<'static, DynRecord, OpfsExecutor>>,
     desc: Arc<Vec<DynamicField>>,
-    primary_key_index: usize,
+    primary_key_indices: Arc<Vec<usize>>,
 }
 
 impl Transaction {
     pub(crate) fn new<'txn>(
         txn: transaction::Transaction<'txn, DynRecord, OpfsExecutor>,
         desc: Arc<Vec<DynamicField>>,
-        primary_key_index: usize,
+        primary_key_indices: Arc<Vec<usize>>,
     ) -> Self {
         Transaction {
             txn: Some(unsafe {
@@ -35,7 +35,7 @@ impl Transaction {
                 >(txn)
             }),
             desc,
-            primary_key_index,
+            primary_key_indices,
         }
     }
 
@@ -60,7 +60,14 @@ impl Transaction {
             return Err("Can not operate a committed transaction".into());
         }
 
-        let key = parse_key(self.desc.get(self.primary_key_index).unwrap(), key, true)?;
+        // TODO: handle multiple primary keys
+        let key = parse_key(
+            self.desc
+                .get(*self.primary_key_indices.get(0).unwrap())
+                .unwrap(),
+            key,
+            true,
+        )?;
         let projection = if projection.contains(&"*".to_string()) {
             Projection::All
         } else {
@@ -89,7 +96,7 @@ impl Transaction {
             return Err("Can not operate a committed transaction".into());
         }
 
-        let record = parse_record(&record, &self.desc, self.primary_key_index)?;
+        let record = parse_record(&record, &self.desc, &self.primary_key_indices)?;
         self.txn.as_mut().unwrap().insert(record);
         Ok(())
     }
@@ -99,7 +106,14 @@ impl Transaction {
             return Err("Can not operate a committed transaction".into());
         }
 
-        let key = parse_key(self.desc.get(self.primary_key_index).unwrap(), key, true)?;
+        // TODO: handle multiple primary keys
+        let key = parse_key(
+            self.desc
+                .get(*self.primary_key_indices.get(0).unwrap())
+                .unwrap(),
+            key,
+            true,
+        )?;
         self.txn.as_mut().unwrap().remove(key);
         Ok(())
     }
@@ -116,7 +130,11 @@ impl Transaction {
         }
 
         let projection = self.projection(projection);
-        let desc = self.desc.get(self.primary_key_index).unwrap();
+        // TODO: handle multiple primary keys
+        let desc = self
+            .desc
+            .get(*self.primary_key_indices.get(0).unwrap())
+            .unwrap();
         let lower = lower.into_bound(desc)?;
         let high = high.into_bound(desc)?;
 

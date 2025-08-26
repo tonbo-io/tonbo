@@ -7,16 +7,16 @@ use crate::record::{error::RecordError, Key, Record};
 #[derive(Debug)]
 pub struct DynRecord {
     values: Vec<Value>,
-    primary_index: usize,
+    primary_indices: Vec<usize>,
 }
 
 #[allow(unused)]
 impl DynRecord {
     /// Create a new DynRecord without validation.
-    pub fn new(values: Vec<Value>, primary_index: usize) -> Self {
+    pub fn new(values: Vec<Value>, primary_indices: Vec<usize>) -> Self {
         Self {
             values,
-            primary_index,
+            primary_indices,
         }
     }
 
@@ -25,17 +25,17 @@ impl DynRecord {
     /// # Errors
     ///
     /// Returns an error if the validation failed.
-    pub fn try_new(values: Vec<Value>, primary_index: usize) -> Result<Self, RecordError> {
-        if primary_index >= values.len() {
+    pub fn try_new(values: Vec<Value>, primary_indices: Vec<usize>) -> Result<Self, RecordError> {
+        if primary_indices.iter().any(|i| *i >= values.len()) {
             return Err(RecordError::InvalidArgumentError(format!(
-                "primary key index {} can not great or equal than value length {}",
-                primary_index,
+                "primary key index {:?} can not great or equal than value length {}",
+                primary_indices,
                 values.len()
             )));
         }
         for (idx, value) in values.iter().enumerate() {
             match value {
-                Value::Null if idx == primary_index => {
+                Value::Null if primary_indices.contains(&idx) => {
                     return Err(RecordError::NullNotAllowed(
                         "Primary can not be null".into(),
                     ))
@@ -54,7 +54,7 @@ impl DynRecord {
 
         Ok(Self {
             values,
-            primary_index,
+            primary_indices,
         })
     }
 }
@@ -65,7 +65,11 @@ impl Decode for DynRecord {
         R: SeqRead,
     {
         let len = u32::decode(reader).await? as usize;
-        let primary_index = u32::decode(reader).await? as usize;
+        let pk_len = u32::decode(reader).await? as usize;
+        let mut primary_indices = Vec::with_capacity(pk_len);
+        for _ in 0..pk_len {
+            primary_indices.push(u32::decode(reader).await? as usize);
+        }
         let mut values = Vec::with_capacity(len);
         for _ in 0..len {
             let col = Value::decode(reader).await?;
@@ -74,7 +78,7 @@ impl Decode for DynRecord {
 
         Ok(DynRecord {
             values,
-            primary_index,
+            primary_indices,
         })
     }
 }
@@ -89,7 +93,7 @@ impl Record for DynRecord {
         for col in self.values.iter() {
             columns.push(col.as_key_ref());
         }
-        DynRecordRef::new(columns, self.primary_index)
+        DynRecordRef::new(columns, self.primary_indices.clone())
     }
 
     fn size(&self) -> usize {
@@ -129,7 +133,7 @@ pub(crate) mod test {
                 DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                 true
             ),
-            0
+            [0]
         )
     }
 
@@ -150,7 +154,7 @@ pub(crate) mod test {
                 Value::Float64(i as f64 * 1.01),
                 Value::Timestamp(i as i64, TimeUnit::Millisecond),
             ];
-            let mut record = DynRecord::new(values, 0);
+            let mut record = DynRecord::new(values, vec![0]);
 
             if i >= 45 {
                 record.values[2] = Value::Null;
@@ -175,7 +179,7 @@ pub(crate) mod test {
             Value::Float64(1.01),
             Value::Timestamp(1717507203412, TimeUnit::Millisecond),
         ];
-        DynRecord::new(values, 0)
+        DynRecord::new(values, vec![0])
     }
 
     #[test]
@@ -196,7 +200,7 @@ pub(crate) mod test {
                 ValueRef::Float64(1.01),
                 ValueRef::Timestamp(1717507203412, TimeUnit::Millisecond),
             ],
-            0,
+            vec![0],
         );
 
         for (actual, expected) in record_ref.columns.iter().zip(expected.columns) {
@@ -231,7 +235,7 @@ pub(crate) mod test {
                 Value::Null,
                 Value::FixedSizeBinary(vec![1, 2, 3], 3),
             ],
-            0,
+            vec![0],
         );
         assert!(res.is_ok());
 
@@ -245,15 +249,15 @@ pub(crate) mod test {
     #[test]
     fn test_create_record_err() {
         // test FixedSizeBinary width not match
-        let res = DynRecord::try_new(vec![Value::FixedSizeBinary(vec![1, 2, 3], 4)], 0);
+        let res = DynRecord::try_new(vec![Value::FixedSizeBinary(vec![1, 2, 3], 4)], vec![0]);
         assert!(res.is_err());
 
         // test primary key is null
-        let res = DynRecord::try_new(vec![Value::Null], 0);
+        let res = DynRecord::try_new(vec![Value::Null], vec![0]);
         assert!(res.is_err());
 
         // test primary key index >= values.len()
-        let res = DynRecord::try_new(vec![Value::Null], 1);
+        let res = DynRecord::try_new(vec![Value::Null], vec![1]);
         assert!(res.is_err());
     }
 }

@@ -27,7 +27,7 @@ type PyExecutor = TokioExecutor;
 #[pyclass]
 pub struct TonboDB {
     desc: Arc<Vec<Column>>,
-    primary_key_index: usize,
+    primary_key_indices: Arc<Vec<usize>>,
     db: Arc<DB<DynRecord, PyExecutor>>,
 }
 
@@ -39,23 +39,20 @@ impl TonboDB {
         let values = dict.downcast_bound::<PyMapping>(py)?.values()?;
         let mut desc = vec![];
         let mut cols = vec![];
-        let mut primary_key_index = None;
+        let mut primary_key_indices = vec![];
 
         for i in 0..values.len() {
             let value = values.get_item(i)?;
             if let Ok(bound_col) = value.downcast::<Column>() {
                 let col = bound_col.extract::<Column>()?;
                 if col.primary_key {
-                    if primary_key_index.is_some() {
-                        panic!("Multiple primary keys is not allowed!")
-                    }
-                    primary_key_index = Some(desc.len());
+                    primary_key_indices.push(desc.len());
                 }
                 cols.push(col.clone());
                 desc.push(DynamicField::from(col));
             }
         }
-        let schema = DynSchema::new(&desc, primary_key_index.unwrap());
+        let schema = DynSchema::new(&desc, primary_key_indices.as_slice());
         let option = option.into_option(&schema);
         let db = get_runtime()
             .block_on(async { DB::new(option, TokioExecutor::default(), schema).await })
@@ -63,7 +60,7 @@ impl TonboDB {
         Ok(Self {
             db: Arc::new(db),
             desc: Arc::new(cols),
-            primary_key_index: primary_key_index.expect("Primary key not found"),
+            primary_key_indices: Arc::new(primary_key_indices),
         })
     }
 
@@ -84,10 +81,10 @@ impl TonboDB {
         }
 
         let db = self.db.clone();
-        let primary_key_index = self.primary_key_index;
+        let primary_key_indices = self.primary_key_indices.clone();
 
         future_into_py(py, async move {
-            db.insert(DynRecord::new(cols, primary_key_index))
+            db.insert(DynRecord::new(cols, primary_key_indices.as_ref().to_vec()))
                 .await
                 .map_err(CommitError::from)?;
             Python::with_gil(|py| PyDict::new(py).into_py_any(py))
@@ -114,7 +111,11 @@ impl TonboDB {
     ///
     /// * `key`: Primary key of record
     fn get<'py>(&'py self, py: Python<'py>, key: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let col_desc = self.desc.get(self.primary_key_index).unwrap();
+        // TODO: handle multiple primary keys
+        let col_desc = self
+            .desc
+            .get(*self.primary_key_indices.get(0).unwrap())
+            .unwrap();
         let col = to_col(py, col_desc, key);
         let db = self.db.clone();
         let schema = self.desc.clone();
@@ -143,7 +144,11 @@ impl TonboDB {
     ///
     /// * `key`: Primary key of record that is to be removed
     fn remove<'py>(&'py self, py: Python<'py>, key: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let col_desc = self.desc.get(self.primary_key_index).unwrap();
+        // TODO: handle multiple primary keys
+        let col_desc = self
+            .desc
+            .get(*self.primary_key_indices.get(0).unwrap())
+            .unwrap();
         let col = to_col(py, col_desc, key);
         let db = self.db.clone();
         future_into_py(py, async move {

@@ -14,6 +14,7 @@ pub enum Bound {
 
 impl Bound {
     pub(crate) fn to_bound(&self, py: Python, col: &Column) -> ops::Bound<Value> {
+        // TODO: handle multiple primary keys
         match self {
             Bound::Included { key } => ops::Bound::Included(to_col(py, col, key.clone_ref(py))),
             Bound::Excluded { key } => ops::Bound::Excluded(to_col(py, col, key.clone_ref(py))),

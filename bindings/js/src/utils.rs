@@ -1,4 +1,5 @@
 use js_sys::{Object, Reflect, Uint8Array};
+use std::sync::Arc;
 use tonbo::{
     arrow::datatypes::DataType,
     record::{DynRecord, DynamicField, Value, ValueRef},
@@ -41,15 +42,19 @@ pub(crate) fn parse_key(
 pub(crate) fn parse_record(
     record: &Object,
     schema: &Vec<DynamicField>,
-    primary_key_index: usize,
+    primary_key_indices: &[usize],
 ) -> Result<DynRecord, JsValue> {
     let mut cols = Vec::with_capacity(schema.len());
     for (idx, col_desc) in schema.iter().enumerate() {
         let name = col_desc.name.as_str();
         let js_val = Reflect::get(record, &name.into())?;
-        cols.push(parse_key(col_desc, js_val, primary_key_index == idx)?);
+        cols.push(parse_key(
+            col_desc,
+            js_val,
+            primary_key_indices.contains(&idx),
+        )?);
     }
-    Ok(DynRecord::new(cols, primary_key_index))
+    Ok(DynRecord::new(cols, primary_key_indices.to_vec()))
 }
 
 /// convert a collection of [`Value`] to `JsValue`

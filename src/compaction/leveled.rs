@@ -728,7 +728,7 @@ pub(crate) mod tests {
                 ArrayDataType::Int32,
                 false,
             )][..],
-            0,
+            &[0],
         );
         let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -750,9 +750,9 @@ pub(crate) mod tests {
                 continue;
             }
             if i < 35 && (i % 2 == 0 || i % 5 == 0) {
-                batch1_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+                batch1_data.push((LogType::Full, DynRecord::new(vec![col], vec![0]), 0.into()));
             } else if i >= 7 {
-                batch2_data.push((LogType::Full, DynRecord::new(vec![col], 0), 0.into()));
+                batch2_data.push((LogType::Full, DynRecord::new(vec![col], vec![0]), 0.into()));
             }
         }
 
@@ -771,7 +771,7 @@ pub(crate) mod tests {
         let scope = LeveledCompactor::<DynRecord>::minor_compaction(
             &option,
             None,
-            &vec![
+            &[
                 (Some(generate_file_id()), batch_1),
                 (Some(generate_file_id()), batch_2),
             ],

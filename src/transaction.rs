@@ -1001,7 +1001,7 @@ mod tests {
                 Value::Int16(180_i16),
                 Value::Int32(56_i32),
             ],
-            0,
+            vec![0],
         ))
         .await
         .unwrap();
@@ -1033,7 +1033,7 @@ mod tests {
                 .await
                 .unwrap();
             while let Some(entry) = scan.next().await.transpose().unwrap() {
-                assert_eq!(entry.value().unwrap().primary_index, 0);
+                assert_eq!(entry.value().unwrap().primary_indices.as_slice(), &[0]);
                 assert_eq!(entry.value().unwrap().columns.len(), 3);
                 let columns = entry.value().unwrap().columns;
                 dbg!(columns.clone());

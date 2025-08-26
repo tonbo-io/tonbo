@@ -10,21 +10,21 @@ use crate::Column;
 #[derive(Clone)]
 struct Record {
     columns: Vec<Value>,
-    primary_key_index: usize,
+    primary_key_indices: Vec<usize>,
 }
 
 impl Record {
-    fn new(columns: Vec<Value>, primary_key_index: usize) -> Self {
+    fn new(columns: Vec<Value>, primary_key_indices: Vec<usize>) -> Self {
         Self {
             columns,
-            primary_key_index,
+            primary_key_indices,
         }
     }
 }
 
 impl From<Record> for DynRecord {
     fn from(value: Record) -> Self {
-        tonbo::record::DynRecord::new(value.columns, value.primary_key_index)
+        tonbo::record::DynRecord::new(value.columns, value.primary_key_indices)
     }
 }
 
@@ -48,7 +48,7 @@ impl RecordBatch {
         let mut cols = vec![];
         let dict = record.getattr(py, "__dict__")?;
         let values = dict.downcast_bound::<PyMapping>(py)?.values()?;
-        let mut primary_key_index = 0;
+        let mut primary_key_indices = vec![];
         let mut col_idx = 0;
 
         for i in 0..values.len()? {
@@ -56,7 +56,7 @@ impl RecordBatch {
             if let Ok(bound_col) = value.downcast::<Column>() {
                 let col = bound_col.extract::<Column>()?;
                 if col.primary_key {
-                    primary_key_index = col_idx;
+                    primary_key_indices.push(col_idx);
                 }
                 cols.push(col.value);
                 col_idx += 1;
@@ -64,7 +64,7 @@ impl RecordBatch {
         }
 
         self.batch_data
-            .push(Record::new(cols.clone(), primary_key_index));
+            .push(Record::new(cols.clone(), primary_key_indices));
         Ok(())
     }
 }
