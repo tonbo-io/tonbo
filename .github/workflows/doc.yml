@@ -15,7 +15,7 @@ jobs:
       pull-requests: write # To create a PR from that branch
     steps:
       - name: Checkout️
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install and Build
         run: |
