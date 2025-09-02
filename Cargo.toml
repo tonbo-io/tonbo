@@ -115,6 +115,12 @@ parquet = { version = "56.0.0", default-features = false, features = [
 ] }
 parquet-lru = { version = "0.3.0", path = "parquet-lru" }
 pin-project-lite = "0.2"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    # "postgres"
+    # "tls-rustls",
+    # "macros"
+] }
 thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = [
     "io-util",
@@ -138,6 +144,7 @@ wasm-bindgen-futures = { version = "0.4.45", optional = true }
 bincode = "1"
 fastrand = "2"
 futures = { version = "0.3" }
+postgresql_embedded = "0.18"
 serde = "1"
 tempfile = "3"
 trybuild = "1.0"

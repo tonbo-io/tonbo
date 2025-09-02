@@ -113,6 +113,7 @@ pub mod fs;
 pub mod inmem;
 pub(crate) mod magic;
 mod manifest;
+pub mod metadata;
 mod ondisk;
 pub mod option;
 pub mod record;
