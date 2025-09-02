@@ -2,8 +2,14 @@
 name = "tonbo"
 version = "0.1.0"
 edition = "2024"
+resolver = "2"
 
 [dependencies]
-typed-arrow = { path = "../arrow-native", features = ["ext-hooks"] }
-typed-arrow-dyn = { path = "../arrow-native/typed-arrow-dyn" }
-typed-arrow-unified = { path = "../arrow-native/typed-arrow-unified" }
+typed-arrow = { version = "0.3.0", features = [
+    "ext-hooks",
+], path = "../arrow-native" }
+typed-arrow-dyn = { version = "0.0.0-alpha1", path = "../arrow-native/typed-arrow-dyn" }
+thiserror = "2.0.6"
+
+[dev-dependencies]
+typed-arrow-unified = { version = "0.0.0-alpha1", path = "../arrow-native/typed-arrow-unified" }
