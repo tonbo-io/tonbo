@@ -29,6 +29,11 @@ impl Timestamp {
     pub(crate) fn to_arrow_scalar(self) -> Scalar<PrimitiveArray<UInt32Type>> {
         PrimitiveArray::<UInt32Type>::new_scalar(self.0)
     }
+
+    #[allow(unused)]
+    pub(crate) fn inner(self) -> u32 {
+        self.0
+    }
 }
 
 impl Encode for Timestamp {

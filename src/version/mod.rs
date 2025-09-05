@@ -51,13 +51,13 @@ where
     R: Record,
 {
     // Timestamp at creation
-    ts: Timestamp,
+    pub ts: Timestamp,
     // Holds the SSTable file ids and their min/max values for every level
     pub level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
     clean_sender: Sender<CleanTag>,
     option: Arc<DbOption>,
     timestamp: Arc<AtomicU32>,
-    log_length: u32,
+    pub log_length: u32,
 }
 
 impl<R> Version<R>
@@ -79,6 +79,25 @@ where
             option: option.clone(),
             timestamp,
             log_length: 0,
+        }
+    }
+
+    #[allow(unused)]
+    pub(crate) fn new_full(
+        ts: Timestamp,
+        log_length: u32,
+        level_slice: [Vec<Scope<<R::Schema as Schema>::Key>>; MAX_LEVEL],
+        option: Arc<DbOption>,
+        clean_sender: Sender<CleanTag>,
+        timestamp: Arc<AtomicU32>,
+    ) -> Self {
+        Version {
+            ts,
+            level_slice,
+            clean_sender,
+            option: option,
+            timestamp,
+            log_length,
         }
     }
 

@@ -1,8 +1,14 @@
 use thiserror::Error;
 
-/// Errors for `Metadata manifest storage`
+/// Errors for `Metadata service`
 #[derive(Debug, Error)]
-pub enum MetadataError {
-    #[error("database connection error: {0}")]
-    DbConnection(#[from] &'static dyn std::error::Error), // TODO @liguoso: Use sqlx Error
+pub enum MetadataServiceError {
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("ulid decode error: {0}")]
+    Decode(#[from] ulid::DecodeError),
+    #[error("fusio error: {0}")]
+    Fusio(#[from] fusio::Error),
+    #[error("unexpected error: {0}")]
+    Unexpected(String),
 }
