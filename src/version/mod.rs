@@ -95,7 +95,7 @@ where
             ts,
             level_slice,
             clean_sender,
-            option: option,
+            option,
             timestamp,
             log_length,
         }

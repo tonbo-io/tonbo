@@ -144,6 +144,8 @@ bincode = "1"
 fastrand = "2"
 futures = { version = "0.3" }
 postgresql_embedded = {version = "0.18", features = ["tokio"] }
+pg-embed = "0.7"
+testcontainers = "0.25"
 rand = "0.9"
 rstest = "0.26"
 tempfile = "3"

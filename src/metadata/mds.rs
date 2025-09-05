@@ -72,7 +72,7 @@ async fn write_version_snapshot<R: Record>(
 
             let mut max_key_buf: Vec<u8> = Vec::new();
             let mut max_key_cursor = Cursor::new(&mut max_key_buf);
-            scope.min.encode(&mut max_key_cursor).await?;
+            scope.max.encode(&mut max_key_cursor).await?;
 
             let scope_id = sqlx::query(
                 r#"
@@ -143,11 +143,11 @@ where
         )
         .fetch_optional(&mut *tx)
         .await?;
-        tx.commit();
+        tx.commit().await?;
 
-        if let Some(_version_snapshot) = version_snapshot {
-            // There is already a persisted version ref. MetadataManifestStorage is safe to
-            // initialize
+        let mut timestamp = Arc::new(AtomicU32::default());
+        if let Some(version_snapshot) = version_snapshot {
+            timestamp = Arc::new((version_snapshot.timestamp as u32).into());
         } else {
             let new_version = Arc::new(Version::<R>::new_full(
                 Timestamp::from(0),
@@ -164,7 +164,7 @@ where
         Ok(Self {
             pool,
             clean_sender,
-            timestamp: Arc::new(AtomicU32::default()),
+            timestamp,
             option,
             _marker: PhantomData,
         })
@@ -177,7 +177,7 @@ where
             r#"
                 SELECT id, timestamp, log_length
                 FROM version_snapshots 
-                ORDER BY timestamp DESC 
+                ORDER BY created_at DESC 
                 LIMIT 1
             "#,
         )
@@ -274,9 +274,10 @@ where
         let mut deleted_wals: Vec<FileId> = vec![];
         let mut deleted_ssts: Vec<SsTableID> = vec![];
 
-        // Non recovery mode will invoke
+        // Non recovery mode will persist the log length
         if !is_recover {
             version_edits.push(VersionEdit::NewLogLength { len: edit_len });
+            eprint!("I'm here to push: {edit_len}")
         }
 
         for version_edit in version_edits {
@@ -312,6 +313,7 @@ where
                 }
                 VersionEdit::NewLogLength { len } => {
                     new_version_snapshot.log_length = len;
+                    eprint!("I'm here to persist: {len}")
                 }
             }
         }
@@ -407,50 +409,57 @@ where
     }
 }
 
+// NOTE:
+// 1. The tests here are actually integration test that runs against postgres backend. We should
+//    run this test in our CI/CD mechanism
+// 2. To run test you need to have docker daemon installed on your machine. Then you can run `cargo test --
+//    metadata::mds::tests --ignored require-docker`
 #[cfg(test)]
 mod tests {
     use flume::bounded;
-    use fusio_log::{FsOptions, Path};
-    use postgresql_embedded::{PostgreSQL, Settings};
-    use rand::Rng;
+    use fusio_log::Path;
     use rstest::{fixture, rstest};
-    use sqlx::Row;
     use tempfile::TempDir;
+    use testcontainers::{
+        core::{IntoContainerPort, WaitFor},
+        runners::AsyncRunner,
+        ContainerAsync, GenericImage, ImageExt,
+    };
 
     use super::*;
-    use crate::{fs::generate_file_id, record::test::StringSchema, version::MAX_LEVEL};
+    use crate::{fs::generate_file_id, record::test::StringSchema};
 
     #[fixture]
-    async fn local_postgres() -> String {
-        let mut settings = Settings::default();
-        settings.temporary = true;
-        settings.port = rand::rng().random_range(5000..=15000);
-        settings.installation_dir = tempfile::tempdir().unwrap().path().to_path_buf();
-
-        let conn_url = settings.url("test_db");
-
-        // Create an embedded PostgreSQL instance
-        let mut postgresql = PostgreSQL::new(settings);
-        postgresql
-            .setup()
-            .await
-            .expect("Failed to setup PostgreSQL");
-        postgresql
+    async fn postgres_container() -> ContainerAsync<GenericImage> {
+        GenericImage::new("postgres", "14")
+            .with_exposed_port(5432.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "database system is ready to accept connections",
+            ))
+            .with_env_var("POSTGRES_PASSWORD", "password")
+            .with_env_var("POSTGRES_USER", "test_user")
+            .with_env_var("POSTGRES_DB", "test_db")
             .start()
             .await
-            .expect("Failed to start PostgreSQL");
-        postgresql
-            .create_database("test_db")
-            .await
-            .expect("Failed to create database");
-
-        conn_url
+            .unwrap()
     }
 
-    #[fixture]
     async fn string_metadata_service(
-        #[future] local_postgres: String,
+        container: &ContainerAsync<GenericImage>,
     ) -> MetadataManifestStorage<String> {
+        let host = container.get_host().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let connection_url = format!("postgresql://test_user:password@{}:{}/test_db", host, port);
+
+        // Bootstrap script is idempotent so it's safe to execute multiple times
+        let pool = sqlx::PgPool::connect(&connection_url).await.unwrap();
+        let bootstrap_sql = include_str!("bootstrap.sql");
+        sqlx::raw_sql(bootstrap_sql)
+            .execute(&pool)
+            .await
+            .expect("Failed to execute bootstrap script");
+        pool.close().await;
+
         let temp_dir = TempDir::new().unwrap();
         let (sender, _) = bounded(1);
         let option = Arc::new(DbOption::new(
@@ -458,159 +467,262 @@ mod tests {
             &StringSchema,
         ));
 
-        MetadataManifestStorage::<String>::new(
-            &local_postgres.await,
-            sender.clone(),
-            option.clone(),
-        )
-        .await
-        .expect("Failed to create metadata service")
+        MetadataManifestStorage::<String>::new(&connection_url, sender.clone(), option.clone())
+            .await
+            .expect("Failed to create metadata service")
     }
 
     #[rstest]
-    #[tokio::test]
-    async fn mds_initialize_will_create_a_new_version(
-        #[future] string_metadata_service: MetadataManifestStorage<String>,
+    #[ignore = "require-docker"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mds_can_initialize_freshly(
+        #[future] postgres_container: ContainerAsync<GenericImage>,
     ) {
-        let mut settings = Settings::default();
-        settings.temporary = true;
-        settings.port = rand::rng().random_range(5000..=15000);
-        settings.installation_dir = tempfile::tempdir().unwrap().path().to_path_buf();
+        let container = postgres_container.await;
+        let mds = string_metadata_service(&container).await;
 
-        let conn_url = settings.url("test_db");
-        eprintln!("{}", conn_url);
-
-        // Create an embedded PostgreSQL instance
-        let mut postgresql = PostgreSQL::new(settings);
-        postgresql
-            .setup()
-            .await
-            .expect("Failed to setup PostgreSQL");
-        postgresql
-            .start()
-            .await
-            .expect("Failed to start PostgreSQL");
-        postgresql
-            .create_database("test_db")
-            .await
-            .expect("Failed to create database");
-
-        let temp_dir = TempDir::new().unwrap();
-        let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        ));
-
-        let mds =MetadataManifestStorage::<String>::new(
-            &conn_url,
-            sender.clone(),
-            option.clone(),
-        )
-        .await
-        .expect("Failed to create metadata service");
-
-        let new_version = mds.read_current().await.unwrap().unwrap();
-        assert_eq!(new_version.log_length, 0);
-        assert_eq!(new_version.ts.inner(), 0);
-        assert_eq!(new_version.level_slice[0].len(), 0);
-
-        postgresql.stop().await.expect("Failed to stop PostgreSQL");
+        let version = mds.read_current().await.unwrap().unwrap();
+        assert_eq!(version.log_length, 0);
+        assert_eq!(version.ts.inner(), 0);
+        assert_eq!(version.level_slice[0].len(), 0);
     }
 
-    #[tokio::test]
-    async fn test_metadata_manifest_storage_transaction() {
-        // Create an embedded PostgreSQL instance
-        let mut settings = Settings::default();
-        settings.temporary = true;
-        settings.port = 5433;
-        settings.installation_dir = tempfile::tempdir().unwrap().path().to_path_buf();
-        let conn_url = settings.url("test_db");
-        eprintln!("{}", conn_url);
+    #[rstest]
+    #[ignore = "require-docker"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mds_can_persist_timestamp_when_reinitialized(
+        #[future] postgres_container: ContainerAsync<GenericImage>,
+    ) {
+        let container = postgres_container.await;
+        let mds = string_metadata_service(&container).await;
 
-        // Create the database
-        let mut postgresql = PostgreSQL::new(settings);
-        postgresql
-            .setup()
-            .await
-            .expect("Failed to setup PostgreSQL");
-        postgresql
-            .start()
-            .await
-            .expect("Failed to start PostgreSQL");
-        postgresql
-            .create_database("test_db")
-            .await
-            .expect("Failed to create database");
-
-        let temp_dir = TempDir::new().unwrap();
-        let (sender, _) = bounded(1);
-        let option = Arc::new(DbOption::new(
-            Path::from_filesystem_path(temp_dir.path()).unwrap(),
-            &StringSchema,
-        ));
-
-        // Create the storage instance
-        let storage =
-            MetadataManifestStorage::<String>::new(&conn_url, sender.clone(), option.clone())
-                .await
-                .expect("Failed to create storage instance");
-
-        // Read and execute bootstrap script
-        let bootstrap_sql = std::fs::read_to_string("src/metadata/bootstrap.sql")
-            .expect("Failed to read bootstrap.sql");
-        let _result = sqlx::raw_sql(&bootstrap_sql)
-            .execute(storage.pool())
-            .await
-            .expect("Failed to execute bootstrap script");
-
-        // Create a test table for the transaction test
-        let mut tx = storage.pool.begin().await.unwrap();
-        let create_table_result = sqlx::query(
-            "CREATE TABLE IF NOT EXISTS test_transactions (
-                id SERIAL PRIMARY KEY,
-                value TEXT NOT NULL
-            )",
+        mds.apply_edits(
+            vec![VersionEdit::LatestTimeStamp { ts: 20_u32.into() }],
+            None,
+            false,
         )
-        .execute(&mut *tx)
         .await
-        .unwrap()
-        .rows_affected();
-        assert_eq!(create_table_result, 0);
+        .unwrap();
+        drop(mds);
 
-        let insert_result =
-            sqlx::query("INSERT INTO test_transactions (value) VALUES ($1) RETURNING id")
-                .bind("test_value")
-                .fetch_one(&mut *tx)
-                .await;
-        assert!(insert_result.is_ok(), "Failed to insert test data");
-        assert_eq!(insert_result.unwrap().get::<i32, _>(0), 1);
+        let mds = string_metadata_service(&container).await;
+        let version = mds.read_current().await.unwrap().unwrap();
+        assert_eq!(version.ts, 20_u32.into());
+        assert_eq!(mds.load_ts(), 20_u32.into());
+    }
 
-        // Verify the data was committed
-        let verify_result = sqlx::query("SELECT value FROM test_transactions WHERE id = $1")
-            .bind(1)
-            .fetch_one(&mut *tx)
-            .await;
-        assert!(verify_result.is_ok(), "Failed to verify inserted data");
-        assert_eq!(verify_result.unwrap().get::<String, _>(0), "test_value");
+    #[rstest]
+    #[ignore = "require-docker"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mds_can_apply_edits_in_sequential(
+        #[future] postgres_container: ContainerAsync<GenericImage>,
+    ) {
+        let container = postgres_container.await;
+        let mds = string_metadata_service(&container).await;
 
-        // Clean up test table
-        let drop_table_result = sqlx::query("DROP TABLE IF EXISTS test_transactions")
-            .execute(&mut *tx)
-            .await
-            .unwrap()
-            .rows_affected();
-        assert_eq!(drop_table_result, 0);
+        let scope_0 = Scope {
+            min: "0".to_string(),
+            max: "1".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+        let scope_1 = Scope {
+            min: "2".to_string(),
+            max: "3".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+        let scope_2 = Scope {
+            min: "4".to_string(),
+            max: "5".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
 
-        let sstables_exists = sqlx::query("SELECT COUNT(*) FROM sstables")
-            .fetch_one(&mut *tx)
-            .await;
-        assert!(sstables_exists.is_ok(), "sstables table should exist");
-        assert_eq!(sstables_exists.unwrap().get::<i64, _>("count"), 0);
+        mds.apply_edits(
+            vec![VersionEdit::Add {
+                level: 0,
+                scope: scope_0.clone(),
+            }],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
-        let _ = tx.commit().await;
+        mds.apply_edits(
+            vec![VersionEdit::Add {
+                level: 0,
+                scope: scope_1.clone(),
+            }],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        mds.apply_edits(
+            vec![VersionEdit::Add {
+                level: 0,
+                scope: scope_2.clone(),
+            }],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
-        // Stop the embedded PostgreSQL instance
-        postgresql.stop().await.expect("Failed to stop PostgreSQL");
+        let version = mds.read_current().await.unwrap().unwrap();
+        assert_eq!(version.log_length, 3);
+        assert_eq!(version.level_slice[1].len(), 0);
+        assert_eq!(version.level_slice[0], vec![scope_0, scope_1, scope_2])
+    }
+
+    #[rstest]
+    #[ignore = "require-docker"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mds_can_apply_edits_in_batch(
+        #[future] postgres_container: ContainerAsync<GenericImage>,
+    ) {
+        let container = postgres_container.await;
+        let mds = string_metadata_service(&container).await;
+
+        let scope_0 = Scope {
+            min: "2".to_string(),
+            max: "2".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+        let scope_1 = Scope {
+            min: "1".to_string(),
+            max: "1".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+        let scope_2 = Scope {
+            min: "4".to_string(),
+            max: "4".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+
+        mds.apply_edits(
+            vec![
+                VersionEdit::Add {
+                    level: 1,
+                    scope: scope_0.clone(),
+                },
+                VersionEdit::Add {
+                    level: 1,
+                    scope: scope_1.clone(),
+                },
+                VersionEdit::Add {
+                    level: 1,
+                    scope: scope_2.clone(),
+                },
+            ],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let version = mds.read_current().await.unwrap().unwrap();
+        assert_eq!(version.log_length, 3);
+        assert_eq!(version.level_slice[0].len(), 0);
+        assert_eq!(version.level_slice[1], vec![scope_1, scope_0, scope_2]);
+    }
+
+    #[rstest]
+    #[ignore = "require-docker"]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mds_can_apply_edits_in_batch_and_sort_level(
+        #[future] postgres_container: ContainerAsync<GenericImage>,
+    ) {
+        let container = postgres_container.await;
+        let mds = string_metadata_service(&container).await;
+
+        let scope_0 = Scope {
+            min: "4".to_string(),
+            max: "6".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+        let scope_1 = Scope {
+            min: "1".to_string(),
+            max: "3".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+        let scope_2 = Scope {
+            min: "7".to_string(),
+            max: "9".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+        let scope_3 = Scope {
+            min: "0".to_string(),
+            max: "0".to_string(),
+            gen: generate_file_id(),
+            wal_ids: None,
+            file_size: 7,
+        };
+
+        mds.apply_edits(
+            vec![VersionEdit::Add {
+                level: 1,
+                scope: scope_0.clone(),
+            }],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        mds.apply_edits(
+            vec![
+                VersionEdit::Add {
+                    level: 1,
+                    scope: scope_1.clone(),
+                },
+                VersionEdit::Add {
+                    level: 1,
+                    scope: scope_2.clone(),
+                },
+                VersionEdit::Add {
+                    level: 1,
+                    scope: scope_3.clone(),
+                },
+            ],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let version = mds.read_current().await.unwrap().unwrap();
+        assert_eq!(version.log_length, 4);
+        assert_eq!(version.level_slice[0].len(), 0);
+        let min_key_slice = version.level_slice[1]
+            .iter()
+            .map(|scope| scope.min.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            min_key_slice,
+            vec![
+                "0".to_string(),
+                "1".to_string(),
+                "4".to_string(),
+                "7".to_string()
+            ]
+        );
     }
 }

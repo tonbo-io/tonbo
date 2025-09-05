@@ -129,8 +129,8 @@ CREATE TABLE IF NOT EXISTS version_snapshot_leveled_scopes (
     last_modified     TIMESTAMP,
     last_modified_by  TEXT
 );
-CREATE INDEX idx_version_snapshot_leveled_scopes ON version_snapshot_leveled_scopes(scope_id);
-CREATE INDEX idx_version_snapshot_leveled_scopes_position ON version_snapshot_leveled_scopes(version_snapshot_id, row_index, col_index);
+CREATE INDEX IF NOT EXISTS idx_version_snapshot_leveled_scopes ON version_snapshot_leveled_scopes(scope_id);
+CREATE INDEX IF NOT EXISTS idx_version_snapshot_leveled_scopes_position ON version_snapshot_leveled_scopes(version_snapshot_id, row_index, col_index);
 CREATE OR REPLACE TRIGGER audit_version_snapshot_leveled_scopes BEFORE INSERT OR UPDATE OR DELETE ON version_snapshot_leveled_scopes FOR EACH ROW EXECUTE FUNCTION last_modified_audit();
 
 CREATE TABLE IF NOT EXISTS version_snapshot_active_wal_files (
