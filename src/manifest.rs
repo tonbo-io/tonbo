@@ -9,6 +9,7 @@ use fusio::{MaybeSend, MaybeSync};
 use thiserror::Error;
 
 use crate::{
+    metadata::error::MetadataServiceError,
     ondisk::sstable::SsTableID,
     record::{Record, Schema},
     version::{edit::VersionEdit, error::VersionError, TransactionTs, VersionRef},
@@ -18,6 +19,8 @@ use crate::{
 pub enum ManifestStorageError {
     #[error("manifest version error")]
     Version(#[from] VersionError),
+    #[error("metadata service error")]
+    MetadataService(#[from] MetadataServiceError),
 }
 
 /// Trait for storing and managing LSM-tree manifest
