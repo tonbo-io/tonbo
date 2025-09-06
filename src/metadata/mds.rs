@@ -409,11 +409,6 @@ where
     }
 }
 
-// NOTE:
-// 1. The tests here are actually integration test that runs against postgres backend. We should
-//    run this test in our CI/CD mechanism
-// 2. To run test you need to have docker daemon installed on your machine. Then you can run `cargo test --
-//    metadata::mds::tests --ignored require-docker`
 #[cfg(test)]
 mod tests {
     use flume::bounded;
@@ -428,6 +423,12 @@ mod tests {
 
     use super::*;
     use crate::{fs::generate_file_id, record::test::StringSchema};
+
+    // NOTE:
+    // 1. The tests here are actually integration test that runs against postgres backend. We should
+    //    run this test in our CI/CD mechanism
+    // 2. To run test you need to have docker daemon installed on your machine. Then you can run
+    //    `cargo test -- metadata::mds::tests --ignored require-docker`
 
     #[fixture]
     async fn postgres_container() -> ContainerAsync<GenericImage> {
