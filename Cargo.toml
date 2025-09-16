@@ -7,9 +7,9 @@ resolver = "2"
 [dependencies]
 typed-arrow = { version = "0.3.0", features = [
     "ext-hooks",
-], path = "../arrow-native" }
-typed-arrow-dyn = { version = "0.0.0-alpha1", path = "../arrow-native/typed-arrow-dyn" }
+] }
+typed-arrow-dyn = { version = "0.0.0-alpha1" }
 thiserror = "2.0.6"
 
 [dev-dependencies]
-typed-arrow-unified = { version = "0.0.0-alpha1", path = "../arrow-native/typed-arrow-unified" }
+typed-arrow-unified = { version = "0.0.0-alpha1" }

@@ -3,10 +3,10 @@
 use std::{ops::Bound, sync::Arc};
 
 use tonbo::{
-    db::{DB, DynMode},
     query::{Expr, Predicate},
     record::extract::KeyDyn,
     scan::{KeyRange, RangeSet},
+    tonbo::{Tonbo, DynMode},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,
@@ -39,16 +39,16 @@ fn main() {
     ];
     let batch: RecordBatch = schema.build_batch(rows).expect("valid dynamic rows");
 
-    // Create a dynamic DB by specifying the key field name
-    let mut db: DB<DynMode> = DB::new_dyn_with_key_name(schema.clone(), "id").expect("schema ok");
-    db.ingest(batch).expect("insert dynamic batch");
+    // Create a dynamic Tonbo instance by specifying the key field name
+    let mut tonbo: Tonbo<DynMode> = Tonbo::new_dyn_with_key_name(schema.clone(), "id").expect("schema ok");
+    tonbo.ingest(batch).expect("insert dynamic batch");
 
     // Scan for a specific key (id == "carol") using KeyDyn
     let carol = RangeSet::from_ranges(vec![KeyRange::new(
         Bound::Included(KeyDyn::from("carol")),
         Bound::Included(KeyDyn::from("carol")),
     )]);
-    let out: Vec<(String, i32)> = db
+    let out: Vec<(String, i32)> = tonbo
         .scan_mutable_rows(&carol)
         .map(|r| match (&r.0[0], &r.0[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
@@ -62,7 +62,7 @@ fn main() {
         value: KeyDyn::from("dave"),
     });
     let rs = tonbo::query::extract_key_ranges(&expr);
-    let out_q: Vec<(String, i32)> = db
+    let out_q: Vec<(String, i32)> = tonbo
         .scan_mutable_rows(&rs)
         .map(|r| match (&r.0[0], &r.0[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
@@ -73,7 +73,7 @@ fn main() {
 
     // Or scan all dynamic rows
     let all = RangeSet::<KeyDyn>::all();
-    let all_rows: Vec<(String, i32)> = db
+    let all_rows: Vec<(String, i32)> = tonbo
         .scan_mutable_rows(&all)
         .map(|r| match (&r.0[0], &r.0[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),

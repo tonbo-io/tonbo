@@ -3,9 +3,9 @@
 use std::{ops::Bound, sync::Arc};
 
 use tonbo::{
-    db::{DB, DynMode},
     record::extract::KeyDyn,
     scan::{KeyRange, RangeSet},
+    tonbo::{Tonbo, DynMode},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,
@@ -25,8 +25,8 @@ fn main() {
     let f_v = Field::new("v", DataType::Int32, false);
     let schema = Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
 
-    // Create DB from metadata
-    let mut db: DB<DynMode> = DB::new_dyn_from_metadata(schema.clone()).expect("composite ok");
+    // Create Tonbo instance from metadata
+    let mut tonbo: Tonbo<DynMode> = Tonbo::new_dyn_from_metadata(schema.clone()).expect("composite ok");
 
     // Build a batch with three rows
     let rows = vec![
@@ -47,7 +47,7 @@ fn main() {
         ]),
     ];
     let batch: RecordBatch = schema.build_batch(rows).expect("ok");
-    db.ingest(batch).expect("insert");
+    tonbo.ingest(batch).expect("insert");
 
     // Range over composite key: ("a", 5) ..= ("a", 10)
     let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(5i64)]);
@@ -56,7 +56,7 @@ fn main() {
         Bound::Included(lo),
         Bound::Included(hi),
     )]);
-    let got: Vec<(String, i64)> = db
+    let got: Vec<(String, i64)> = tonbo
         .scan_mutable_rows(&rs)
         .map(|r| match (&r.0[0], &r.0[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I64(ts))) => (s.clone(), *ts),
