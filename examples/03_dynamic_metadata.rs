@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use tonbo::{
+    db::{DB, DynMode},
     record::extract::KeyDyn,
     scan::RangeSet,
-    tonbo::{Tonbo, DynMode},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,
@@ -29,13 +29,13 @@ fn main() {
     ];
     let batch: RecordBatch = schema.build_batch(rows).expect("ok");
 
-    // Create Tonbo instance from metadata
-    let mut tonbo: Tonbo<DynMode> = Tonbo::new_dyn_from_metadata(schema.clone()).expect("metadata ok");
-    tonbo.ingest(batch).expect("insert");
+    // Create DB from metadata
+    let mut db: DB<DynMode> = DB::new_dyn_from_metadata(schema.clone()).expect("metadata ok");
+    db.ingest(batch).expect("insert");
 
     // Scan all rows
     let all = RangeSet::<KeyDyn>::all();
-    let rows: Vec<(String, i32)> = tonbo
+    let rows: Vec<(String, i32)> = db
         .scan_mutable_rows(&all)
         .map(|r| match (&r.0[0], &r.0[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),

@@ -12,10 +12,10 @@ pub mod record;
 pub use record::Record;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
-pub use crate::tonbo::Tonbo;
+pub use crate::db::DB;
 
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
-pub mod tonbo;
+pub mod db;
 
 /// Shared scan utilities (key ranges, range sets).
 pub mod scan;

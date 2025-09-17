@@ -1,9 +1,9 @@
 // 01: Typed (compile-time) schema: basic insert, scan, and query
 
 use tonbo::{
+    db::{DB, TypedMode},
     query::{Expr, Predicate, to_range_set},
     scan::RangeSet,
-    tonbo::{Tonbo, TypedMode},
 };
 
 // Define a typed row and mark the key field
@@ -16,16 +16,16 @@ struct User {
 }
 
 fn main() {
-    let mut tonbo: Tonbo<TypedMode<User>> = Tonbo::new_typed();
+    let mut db: DB<TypedMode<User>> = DB::new_typed();
 
     // Insert regular Rust structs
     for (id, score) in [(1u32, 10), (2, 20), (3, 30)] {
-        tonbo.ingest(User { id, score }).unwrap();
+        db.ingest(User { id, score }).unwrap();
     }
 
     // Scan all rows in key order
     let all = RangeSet::all();
-    let rows: Vec<_> = tonbo
+    let rows: Vec<_> = db
         .scan_mutable_rows(&all)
         .map(|r| (r.id, r.score))
         .collect();
@@ -34,7 +34,7 @@ fn main() {
     // Query expression: id IN {1,3}
     let expr = Expr::Pred(Predicate::In { set: vec![1u32, 3] });
     let ranges = to_range_set::<User>(&expr);
-    let qrows: Vec<_> = tonbo
+    let qrows: Vec<_> = db
         .scan_mutable_rows(&ranges)
         .map(|r| (r.id, r.score))
         .collect();

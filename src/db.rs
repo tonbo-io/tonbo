@@ -23,8 +23,8 @@ use crate::{
     scan::RangeSet,
 };
 
-/// A Tonbo instance parametrized by a mode `M` that defines key, payload and insert interface.
-pub struct Tonbo<M: Mode> {
+/// A DB parametrized by a mode `M` that defines key, payload and insert interface.
+pub struct DB<M: Mode> {
     mode: M,
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
@@ -63,7 +63,7 @@ where
     type Mutable = TypedMem<R>;
 }
 
-impl<R: Record> Tonbo<TypedMode<R>>
+impl<R: Record> DB<TypedMode<R>>
 where
     R::Key: KeyHeapSize,
 {
@@ -101,7 +101,7 @@ where
     }
 }
 
-impl<R> Tonbo<TypedMode<R>>
+impl<R> DB<TypedMode<R>>
 where
     R: Record,
     R::Key: KeyHeapSize,
@@ -115,7 +115,7 @@ where
     }
 }
 
-impl<R: Record> Tonbo<TypedMode<R>>
+impl<R: Record> DB<TypedMode<R>>
 where
     R::Key: KeyHeapSize,
 {
@@ -155,7 +155,7 @@ impl Mode for DynMode {
     type Mutable = DynMem;
 }
 
-impl Tonbo<DynMode> {
+impl DB<DynMode> {
     /// Create a DB in dynamic mode from `schema` and a trait-object extractor.
     pub fn new_dyn(
         schema: SchemaRef,
@@ -348,7 +348,7 @@ impl Tonbo<DynMode> {
     }
 }
 
-impl Tonbo<DynMode> {
+impl DB<DynMode> {
     /// Scan the dynamic mutable memtable over key ranges, yielding owned dynamic rows.
     pub fn scan_mutable_rows<'a>(
         &'a self,
@@ -359,7 +359,7 @@ impl Tonbo<DynMode> {
 }
 
 // Methods common to all modes
-impl<M: Mode> Tonbo<M> {
+impl<M: Mode> DB<M> {
     /// Unified ingestion entry point using `Insertable<M>` implementors.
     pub fn ingest<I: Insertable<M>>(&mut self, input: I) -> Result<(), KeyExtractError> {
         input.insert_into(self)
@@ -391,7 +391,7 @@ impl<M: Mode> Tonbo<M> {
 }
 
 // Segment management (generic, zero-cost)
-impl<M: Mode> Tonbo<M> {
+impl<M: Mode> DB<M> {
     #[allow(dead_code)]
     pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
         self.immutables.push(seg);
@@ -414,7 +414,7 @@ pub trait Insertable<M: Mode> {
     ///
     /// Returns `Ok(())` on success, or a `KeyExtractError` for dynamic mode
     /// schema/key extraction issues.
-    fn insert_into(self, db: &mut Tonbo<M>) -> Result<(), KeyExtractError>;
+    fn insert_into(self, db: &mut DB<M>) -> Result<(), KeyExtractError>;
 }
 
 // Typed mode: single row
@@ -423,7 +423,7 @@ where
     R: Record,
     R::Key: KeyHeapSize,
 {
-    fn insert_into(self, db: &mut Tonbo<TypedMode<R>>) -> Result<(), KeyExtractError> {
+    fn insert_into(self, db: &mut DB<TypedMode<R>>) -> Result<(), KeyExtractError> {
         db.insert(self);
         Ok(())
     }
@@ -435,7 +435,7 @@ where
     R: Record,
     R::Key: KeyHeapSize,
 {
-    fn insert_into(self, db: &mut Tonbo<TypedMode<R>>) -> Result<(), KeyExtractError> {
+    fn insert_into(self, db: &mut DB<TypedMode<R>>) -> Result<(), KeyExtractError> {
         for row in self.into_iter() {
             db.mem.insert(row);
         }
@@ -445,7 +445,7 @@ where
 
 // Dynamic mode: single RecordBatch
 impl Insertable<DynMode> for RecordBatch {
-    fn insert_into(self, db: &mut Tonbo<DynMode>) -> Result<(), KeyExtractError> {
+    fn insert_into(self, db: &mut DB<DynMode>) -> Result<(), KeyExtractError> {
         if db.mode.schema.as_ref() != self.schema().as_ref() {
             return Err(KeyExtractError::SchemaMismatch {
                 expected: db.mode.schema.clone(),
@@ -460,7 +460,7 @@ impl Insertable<DynMode> for RecordBatch {
 
 // Dynamic mode: Vec of RecordBatch
 impl Insertable<DynMode> for Vec<RecordBatch> {
-    fn insert_into(self, db: &mut Tonbo<DynMode>) -> Result<(), KeyExtractError> {
+    fn insert_into(self, db: &mut DB<DynMode>) -> Result<(), KeyExtractError> {
         for batch in self.into_iter() {
             if db.mode.schema.as_ref() != batch.schema().as_ref() {
                 return Err(KeyExtractError::SchemaMismatch {
@@ -475,7 +475,7 @@ impl Insertable<DynMode> for Vec<RecordBatch> {
     }
 }
 
-/// Opaque typed mutable store for `Tonbo<TypedMode<R>>`.
+/// Opaque typed mutable store for `DB<TypedMode<R>>`.
 ///
 /// This wraps the internal `TypedLayout<R>` to avoid exposing private types via
 /// the public `Mode` trait while preserving performance and behavior.
@@ -529,7 +529,7 @@ where
     }
 }
 
-/// Opaque dynamic mutable store for `Tonbo<DynMode>`.
+/// Opaque dynamic mutable store for `DB<DynMode>`.
 ///
 /// This wraps the internal `DynLayout` to avoid exposing private types via the
 /// public `Mode` trait while preserving performance and behavior.
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn typed_seal_on_bytes_threshold() {
-        let mut db: Tonbo<TypedMode<RowT>> = Tonbo::new_typed();
+        let mut db: DB<TypedMode<RowT>> = DB::new_typed();
         assert_eq!(db.num_immutable_segments(), 0);
         db.set_seal_policy(Box::new(BytesThreshold { limit: 1 }));
         db.insert(RowT { id: 1, v: 10 });
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn typed_seal_on_open_rows_threshold() {
-        let mut db: Tonbo<TypedMode<RowT>> = Tonbo::new_typed();
+        let mut db: DB<TypedMode<RowT>> = DB::new_typed();
         db.set_seal_policy(Box::new(OpenRowsThreshold { rows: 2 }));
         db.insert(RowT { id: 1, v: 10 });
         assert_eq!(db.num_immutable_segments(), 0);
@@ -612,7 +612,7 @@ mod tests {
 
     #[test]
     fn typed_seal_on_replace_ratio() {
-        let mut db: Tonbo<TypedMode<RowT>> = Tonbo::new_typed();
+        let mut db: DB<TypedMode<RowT>> = DB::new_typed();
         db.set_seal_policy(Box::new(ReplaceRatioPolicy {
             min_ratio: 0.5,
             min_inserts: 1,
@@ -653,7 +653,7 @@ mod tests {
         let f_id = Field::new("id", DataType::Utf8, false).with_metadata(fm);
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]));
-        let mut db = Tonbo::new_dyn_from_metadata(schema.clone()).expect("metadata key");
+        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("metadata key");
 
         // Build one batch and insert to ensure extractor wired
         let rows = vec![
@@ -673,7 +673,7 @@ mod tests {
         let mut sm = HashMap::new();
         sm.insert("tonbo.keys".to_string(), "id".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]).with_metadata(sm));
-        let mut db = Tonbo::new_dyn_from_metadata(schema.clone()).expect("schema metadata key");
+        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("schema metadata key");
 
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))]),
@@ -695,14 +695,14 @@ mod tests {
         let f1 = Field::new("id1", DataType::Utf8, false).with_metadata(fm1);
         let f2 = Field::new("id2", DataType::Utf8, false).with_metadata(fm2);
         let schema_conflict = std::sync::Arc::new(Schema::new(vec![f1, f2]));
-        assert!(Tonbo::new_dyn_from_metadata(schema_conflict).is_err());
+        assert!(DB::new_dyn_from_metadata(schema_conflict).is_err());
 
         // Missing: no markers at field or schema level
         let schema_missing = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        assert!(Tonbo::new_dyn_from_metadata(schema_missing).is_err());
+        assert!(DB::new_dyn_from_metadata(schema_missing).is_err());
     }
 
     #[test]
@@ -717,7 +717,7 @@ mod tests {
         let f_ts = Field::new("ts", DataType::Int64, false).with_metadata(m2);
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
-        let mut db = Tonbo::new_dyn_from_metadata(schema.clone()).expect("composite field metadata");
+        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("composite field metadata");
 
         let rows = vec![
             DynRow(vec![
@@ -768,7 +768,7 @@ mod tests {
         let mut sm = HashMap::new();
         sm.insert("tonbo.keys".to_string(), "[\"id\", \"ts\"]".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]).with_metadata(sm));
-        let mut db = Tonbo::new_dyn_from_metadata(schema.clone()).expect("composite schema metadata");
+        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("composite schema metadata");
 
         let rows = vec![
             DynRow(vec![
