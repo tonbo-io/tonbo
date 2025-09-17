@@ -432,25 +432,53 @@ name = "tonbo"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.16",
- "typed-arrow",
+ "typed-arrow 0.3.0",
  "typed-arrow-dyn",
  "typed-arrow-unified",
 ]
 
 [[package]]
 name = "typed-arrow"
-version = "0.3.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "546b170520edac1b1d7bbbd953103b7d1a13454f5fd14d2cebae68252f2b959c"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
  "half",
- "typed-arrow-derive",
+ "typed-arrow-derive 0.2.0",
+]
+
+[[package]]
+name = "typed-arrow"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a203df9d562ec549f9a95395b07c04b9fdcf3a39fd1217ca34b0cf06cd5e6a8"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+ "half",
+ "typed-arrow-derive 0.3.0",
+]
+
+[[package]]
+name = "typed-arrow-derive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54c3f1ca5d43e67a698e0ddb67e3b3fcfe9f63490a5bc53a639ee12480e3b982"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
 name = "typed-arrow-derive"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f11fe538d0f1003b23ed8df406bd9624e2c2ec2e75b585399cf9f1e32324e9c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -460,21 +488,25 @@ dependencies = [
 [[package]]
 name = "typed-arrow-dyn"
 version = "0.0.0-alpha1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a5664b318292ba50091d921539391fc9afb6c4ab87eb0fa21c08ef6247f3399"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
  "thiserror 1.0.69",
- "typed-arrow",
+ "typed-arrow 0.2.0",
 ]
 
 [[package]]
 name = "typed-arrow-unified"
 version = "0.0.0-alpha1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "487ddbe789719c40b06081b94091574d1920ae219deb4c2fbe53edba513d5212"
 dependencies = [
  "arrow-array",
  "arrow-schema",
- "typed-arrow",
+ "typed-arrow 0.2.0",
  "typed-arrow-dyn",
 ]
 
