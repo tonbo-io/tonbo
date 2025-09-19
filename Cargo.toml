@@ -5,11 +5,11 @@ edition = "2024"
 resolver = "2"
 
 [dependencies]
-typed-arrow = { version = "0.3.0", features = [
+typed-arrow = { version = "0.4.0", features = [
     "ext-hooks",
 ] }
-typed-arrow-dyn = { version = "0.0.0-alpha1" }
+typed-arrow-dyn = { version = "0.0.1" }
 thiserror = "2.0.6"
 
 [dev-dependencies]
-typed-arrow-unified = { version = "0.0.0-alpha1" }
+typed-arrow-unified = { version = "0.0.1" }
