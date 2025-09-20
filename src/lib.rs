@@ -17,8 +17,12 @@ pub use crate::db::DB;
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;
 
+/// File system for Tonbo
+pub mod fs;
+
 /// Shared scan utilities (key ranges, range sets).
 pub mod scan;
 
 /// Minimal key-focused expression tree and helpers.
 pub mod query;
+
