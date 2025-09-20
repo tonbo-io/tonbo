@@ -12,12 +12,12 @@ fusio-log = { version = "0.4.1", default-features = false, features = [
 ] }
 fusio-parquet = { version = "0.4.1" }
 once_cell = "1"
-typed-arrow = { version = "0.3.0", features = [
+typed-arrow = { version = "0.4.0", features = [
     "ext-hooks",
-], path = "../typed-arrow" }
-typed-arrow-dyn = { version = "0.0.0-alpha1", path = "../typed-arrow/typed-arrow-dyn" }
+] }
+typed-arrow-dyn = { version = "0.0.1" }
 thiserror = "2.0.6"
 ulid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
-typed-arrow-unified = { version = "0.0.0-alpha1", path = "../typed-arrow/typed-arrow-unified"  }
+typed-arrow-unified = { version = "0.0.1" }

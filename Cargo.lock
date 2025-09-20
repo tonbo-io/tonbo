@@ -1275,7 +1275,9 @@ checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typed-arrow"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5739f7eb5c8885dc2429e20aa1f08d30173d0085ee6dddf4ba8183c6a88a3"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -1286,7 +1288,9 @@ dependencies = [
 
 [[package]]
 name = "typed-arrow-derive"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "988fa11d760097999a2538dd2d325e3fa9551de91cc6458a69dbbaa88b616c1f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1295,7 +1299,9 @@ dependencies = [
 
 [[package]]
 name = "typed-arrow-dyn"
-version = "0.0.0-alpha1"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d2ac548760fd9804ef95ccae398bb0996eaf915aada4658c22abc6bc25e6834"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -1306,7 +1312,9 @@ dependencies = [
 
 [[package]]
 name = "typed-arrow-unified"
-version = "0.0.0-alpha1"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be20670fec2cdac3ef3bc28da89d9961f318530021ebbdbc330032dfdf7dc4b4"
 dependencies = [
  "arrow-array",
  "arrow-schema",
