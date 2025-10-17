@@ -362,13 +362,14 @@ where
             // Ensure both the WAL and version-log paths exist on the local file system
             // and base (default) file system
             manager
-                .local_fs()
-                .create_dir_all(&option.wal_dir_path())
+                .base_fs()
+                .create_dir_all(&option.base_path)
                 .await
                 .map_err(DbError::Fusio)?;
+
             manager
                 .local_fs()
-                .create_dir_all(&option.version_log_dir_path())
+                .create_dir_all(&option.wal_dir_path())
                 .await
                 .map_err(DbError::Fusio)?;
             manager
@@ -376,11 +377,27 @@ where
                 .create_dir_all(&option.wal_dir_path())
                 .await
                 .map_err(DbError::Fusio)?;
+
             manager
-                .base_fs()
+                .local_fs()
                 .create_dir_all(&option.version_log_dir_path())
                 .await
                 .map_err(DbError::Fusio)?;
+            manager
+                .base_fs() 
+                .create_dir_all(&option.version_log_dir_path())
+                .await
+                .map_err(DbError::Fusio)?;
+
+            for level in 0..option.level_paths.len() {
+                if let Some(path) = option.level_fs_path(level) {
+                    manager
+                        .base_fs()
+                        .create_dir_all(path)
+                        .await
+                        .map_err(DbError::Fusio)?;
+                }
+            }
         }
 
         let (task_tx, task_rx) = bounded(1);
