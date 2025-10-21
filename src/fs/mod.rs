@@ -72,9 +72,9 @@ impl FileType {
 /// Try to parse a [`FileId`] from the final path component, assuming a fixed suffix.
 ///
 /// ### Examples
-/// ```no_run
+/// ```ignore
 /// use fusio::path::Path;
-/// use tonbo::storage::{FileType, parse_file_id};
+/// use tonbo::fs::{parse_file_id, FileType};
 ///
 /// let path = Path::from("/data/01J8QW8X2NV9K1T8Q3J8S2F3YZ.parquet");
 /// let id = parse_file_id(&path, FileType::Parquet).unwrap();

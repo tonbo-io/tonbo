@@ -1,15 +1,13 @@
 #![deny(missing_docs)]
-//! Typed-arrow based, in-memory building blocks for Tonbo.
+//! Arrow-based, in-memory building blocks for Tonbo.
 //!
-//! This crate experiments with a minimal design:
-//! - A `Record` trait that defines the logical key and how to derive keys directly from typed-arrow
-//!   arrays (string/binary keys are zero-copy via buffer-backed key types).
-//! - An in-memory columnar mutable memtable with a last-writer index.
-//! - An `ImmutableMemTable` that indexes with the same key type.
+//! The current focus is the dynamic runtime-schema path: callers work with
+//! Arrow `RecordBatch` values, and the engine derives logical keys at runtime.
+//! The `Mode` trait and surrounding structure keep the door open for
+//! re-introducing compile-time typed dispatch in the future.
 
 mod inmem;
 pub mod record;
-pub use record::Record;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
 pub use crate::db::DB;
@@ -25,4 +23,3 @@ pub mod scan;
 
 /// Minimal key-focused expression tree and helpers.
 pub mod query;
-

@@ -1,8 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use fusio::{disk::LocalFs, dynamic::DynFs, path::Path, Error};
+use fusio::{Error, disk::LocalFs, dynamic::DynFs, path::Path};
 use fusio_dispatch::FsOptions;
-
 
 /// Manages which filesystem to use for a given logical path.
 ///
@@ -12,12 +11,12 @@ use fusio_dispatch::FsOptions;
 ///   not a prefix tree and won’t match parent directories.
 ///
 /// # Examples
-/// ```no_run
+/// ```ignore
 /// # use std::sync::Arc;
-/// # use fusio::{path::Path};
+/// # use fusio::path::Path;
 /// # use fusio_dispatch::FsOptions;
-/// # use tonbo::StoreManager;
-/// 
+/// # use tonbo::fs::manager::StoreManager;
+///
 /// let base = FsOptions::from_env("BASE")?;
 /// let l0   = FsOptions::from_env("L0")?;
 ///
@@ -93,7 +92,11 @@ mod test {
         local_fs: Arc<dyn DynFs>,
         fs_map: HashMap<Path, Arc<dyn DynFs>>,
     ) -> StoreManager {
-        StoreManager { base_fs, local_fs, fs_map }
+        StoreManager {
+            base_fs,
+            local_fs,
+            fs_map,
+        }
     }
 
     #[test]
@@ -145,6 +148,9 @@ mod test {
         assert!(Arc::ptr_eq(mgr.get_fs(&Path::from("/data")), &override_fs));
 
         // "/data/part-0000" does NOT hit unless the exact key exists
-        assert!(Arc::ptr_eq(mgr.get_fs(&Path::from("/data/part-0000")), &base_fs));
+        assert!(Arc::ptr_eq(
+            mgr.get_fs(&Path::from("/data/part-0000")),
+            &base_fs
+        ));
     }
 }

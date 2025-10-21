@@ -8,10 +8,7 @@
 
 // no additional imports required
 
-use crate::{
-    record::Record,
-    scan::{KeyRange, RangeSet},
-};
+use crate::scan::{KeyRange, RangeSet};
 
 /// A single bound in a range over keys.
 #[derive(Debug, Clone, PartialEq)]
@@ -163,9 +160,8 @@ pub fn matches_key<K: Ord>(expr: &Expr<K>, key: &K) -> bool {
     }
 }
 
-/// Build a `ScanSpec` from a resolved expression over keys.
-/// Convenience: convert a resolved expression to a `RangeSet`.
-pub fn to_range_set<R: Record>(expr: &Expr<R::Key>) -> RangeSet<R::Key> {
+/// Convenience: convert a resolved expression to a `RangeSet` for the given key type.
+pub fn to_range_set<K: Ord + Clone>(expr: &Expr<K>) -> RangeSet<K> {
     extract_key_ranges(expr)
 }
 

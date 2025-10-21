@@ -6,12 +6,8 @@ use std::{
 
 use typed_arrow::arrow_array::RecordBatch;
 
-use super::arrays::{ImmutableArrays, ImmutableArraysBuilder};
 use crate::{
-    record::{
-        Record,
-        extract::{DynKeyExtractor, KeyDyn, KeyExtractError, dyn_extractor_for_field},
-    },
+    record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError, dyn_extractor_for_field},
     scan::{KeyRange, RangeSet},
 };
 
@@ -50,53 +46,6 @@ impl<K: Ord, S> ImmutableMemTable<K, S> {
         ImmutableScan::new(&self.index, ranges)
     }
 }
-
-// ---------- Typed helpers ----------
-
-/// Build a typed immutable segment from typed rows.
-pub(crate) fn segment_from_rows<R, I>(
-    rows: I,
-) -> ImmutableMemTable<<R as Record>::Key, ImmutableArrays<R>>
-where
-    R: Record,
-    I: IntoIterator<Item = R>,
-{
-    let iter = rows.into_iter();
-    let (lb, ub) = iter.size_hint();
-    let cap = ub.unwrap_or(lb);
-    let mut builder = ImmutableArraysBuilder::<R>::new(cap);
-    let mut len = 0usize;
-    for row in iter {
-        builder.push_row(row);
-        len += 1;
-    }
-    let arrays = builder.finish();
-
-    let mut index = BTreeMap::new();
-    for i in 0..len {
-        let key = R::key_at(&arrays.arrays, i);
-        index.insert(key, i as u32);
-    }
-    ImmutableMemTable::new(arrays, index, len)
-}
-
-/// Build a typed immutable segment from already-built typed arrays.
-pub(crate) fn segment_from_arrays<R>(
-    arrays: ImmutableArrays<R>,
-) -> ImmutableMemTable<<R as Record>::Key, ImmutableArrays<R>>
-where
-    R: Record,
-{
-    let len = arrays.len();
-    let mut index = BTreeMap::new();
-    for i in 0..len {
-        let key = R::key_at(&arrays.arrays, i);
-        index.insert(key, i as u32);
-    }
-    ImmutableMemTable::new(arrays, index, len)
-}
-
-// ---------- Dynamic helpers ----------
 
 /// Build a dynamic immutable segment from a batch using a provided extractor.
 pub(crate) fn segment_from_batch_with_extractor(
@@ -196,29 +145,6 @@ mod tests {
     use typed_arrow_unified::SchemaLike;
 
     use super::*;
-
-    #[derive(typed_arrow::Record)]
-    #[record(field_macro = crate::key_field)]
-    struct R {
-        #[record(ext(key))]
-        k: i32,
-        v: i32,
-    }
-
-    #[test]
-    fn scan_ranges_typed_inclusive_exclusive() {
-        // Create a small segment with out-of-order keys
-        let seg = segment_from_rows::<R, _>(vec![
-            R { k: 3, v: 1 },
-            R { k: 1, v: 2 },
-            R { k: 5, v: 3 },
-            R { k: 7, v: 4 },
-        ]);
-        use std::ops::Bound as B;
-        let ranges = RangeSet::from_ranges(vec![KeyRange::new(B::Included(3), B::Excluded(7))]);
-        let got: Vec<(i32, u32)> = seg.scan_ranges(&ranges).map(|(k, off)| (*k, off)).collect();
-        assert_eq!(got, vec![(3, 0), (5, 2)]);
-    }
 
     #[test]
     fn scan_ranges_dynamic_key_name() {

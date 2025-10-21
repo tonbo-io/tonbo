@@ -1,25 +1,23 @@
-//! Generic DB that dispatches between compile-time typed and runtime schema modes via types.
+//! Generic DB parametrized by a `Mode` implementation.
+//!
+//! At the moment Tonbo only ships with the dynamic runtime-schema mode. The
+//! trait-driven structure remains so that compile-time typed dispatch can be
+//! reintroduced without reshaping the API.
 
-use std::{collections::HashMap, marker::PhantomData, time::Instant};
+use std::{collections::HashMap, time::Instant};
 
 use typed_arrow::{arrow_array::RecordBatch, arrow_schema::SchemaRef};
 
 use crate::{
     inmem::{
-        immutable::{
-            arrays::{ImmutableArrays, ImmutableArraysBuilder},
-            memtable::{ImmutableMemTable, segment_from_arrays, segment_from_batch_with_extractor},
-        },
+        immutable::memtable::{ImmutableMemTable, segment_from_batch_with_extractor},
         mutable::{
-            KeyHeapSize, MutableLayout,
-            memtable::{DynLayout, DynRowScan, RowScan, TypedLayout},
+            MutableLayout,
+            memtable::{DynLayout, DynRowScan},
         },
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
-    record::{
-        Record,
-        extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
-    },
+    record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
     scan::RangeSet,
 };
 
@@ -48,94 +46,6 @@ pub trait Mode {
 
 /// Convenience alias for the immutable segment type of a `Mode`.
 pub(crate) type Immutable<M> = ImmutableMemTable<<M as Mode>::Key, <M as Mode>::ImmLayout>;
-
-/// Typed mode: `R` is a compile-time record implementing `Record`.
-pub struct TypedMode<R: Record> {
-    _phantom: PhantomData<R>,
-}
-
-impl<R: Record> Mode for TypedMode<R>
-where
-    R::Key: KeyHeapSize,
-{
-    type Key = R::Key;
-    type ImmLayout = ImmutableArrays<R>;
-    type Mutable = TypedMem<R>;
-}
-
-impl<R: Record> DB<TypedMode<R>>
-where
-    R::Key: KeyHeapSize,
-{
-    /// Create a DB in typed mode.
-    pub fn new_typed() -> Self {
-        Self {
-            mem: TypedMem::<R>::new(),
-            mode: TypedMode {
-                _phantom: PhantomData,
-            },
-            immutables: Vec::new(),
-            policy: crate::inmem::policy::default_policy(),
-            last_seal_at: None,
-        }
-    }
-
-    /// Insert a typed record (compile-time schema path).
-    pub fn insert(&mut self, row: R) {
-        self.mem.insert(row);
-        self.maybe_seal_after_insert();
-    }
-
-    /// Seal the open typed buffer and attach it as an immutable segment.
-    #[allow(dead_code)]
-    pub(crate) fn seal_and_attach(&mut self) {
-        if let Some(rows) = self.mem.seal_open() {
-            let mut builder = ImmutableArraysBuilder::<R>::new(rows.len());
-            for row in rows {
-                builder.push_row(row);
-            }
-            let arrays = builder.finish();
-            let seg = segment_from_arrays::<R>(arrays);
-            self.immutables.push(seg);
-        }
-    }
-}
-
-impl<R> DB<TypedMode<R>>
-where
-    R: Record,
-    R::Key: KeyHeapSize,
-{
-    /// Scan the typed mutable memtable over key ranges, yielding latest rows per key.
-    pub fn scan_mutable_rows<'a>(
-        &'a self,
-        ranges: &'a RangeSet<R::Key>,
-    ) -> impl Iterator<Item = &'a R> + 'a {
-        self.mem.scan_rows(ranges)
-    }
-}
-
-impl<R: Record> DB<TypedMode<R>>
-where
-    R::Key: KeyHeapSize,
-{
-    fn maybe_seal_after_insert(&mut self) {
-        let since = self.last_seal_at.map(|t| t.elapsed());
-        let stats = self.mem.build_stats(since);
-        if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
-            if let Some(rows) = self.mem.seal_open() {
-                let mut builder = ImmutableArraysBuilder::<R>::new(rows.len());
-                for row in rows {
-                    builder.push_row(row);
-                }
-                let arrays = builder.finish();
-                let seg = segment_from_arrays::<R>(arrays);
-                self.immutables.push(seg);
-            }
-            self.last_seal_at = Some(Instant::now());
-        }
-    }
-}
 
 /// Dynamic mode: runtime schema + trait-object extractor produce keys and store dynamic rows.
 ///
@@ -397,50 +307,22 @@ impl<M: Mode> DB<M> {
         self.immutables.push(seg);
     }
 
-    // Key-only convenience helpers removed.
-
     /// Set or replace the sealing policy used by this DB.
     pub fn set_seal_policy(&mut self, policy: Box<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
 }
 
-/// A unified ingestion interface implemented for different input types per mode.
+/// A unified ingestion interface implemented per mode.
 ///
-/// - For typed mode, implemented for a single row `R: Record` and for iterators of `R`.
-/// - For dynamic mode, implemented for `RecordBatch` and iterators of `RecordBatch`.
+/// Today only the dynamic mode implements this trait. Typed-mode support can
+/// be added back by implementing `Insertable` for the future typed inputs.
 pub trait Insertable<M: Mode> {
     /// Insert this value into the provided `DB` in mode `M`.
     ///
     /// Returns `Ok(())` on success, or a `KeyExtractError` for dynamic mode
     /// schema/key extraction issues.
     fn insert_into(self, db: &mut DB<M>) -> Result<(), KeyExtractError>;
-}
-
-// Typed mode: single row
-impl<R> Insertable<TypedMode<R>> for R
-where
-    R: Record,
-    R::Key: KeyHeapSize,
-{
-    fn insert_into(self, db: &mut DB<TypedMode<R>>) -> Result<(), KeyExtractError> {
-        db.insert(self);
-        Ok(())
-    }
-}
-
-// Typed mode: Vec of rows
-impl<R> Insertable<TypedMode<R>> for Vec<R>
-where
-    R: Record,
-    R::Key: KeyHeapSize,
-{
-    fn insert_into(self, db: &mut DB<TypedMode<R>>) -> Result<(), KeyExtractError> {
-        for row in self.into_iter() {
-            db.mem.insert(row);
-        }
-        Ok(())
-    }
 }
 
 // Dynamic mode: single RecordBatch
@@ -472,60 +354,6 @@ impl Insertable<DynMode> for Vec<RecordBatch> {
             db.maybe_seal_after_insert()?;
         }
         Ok(())
-    }
-}
-
-/// Opaque typed mutable store for `DB<TypedMode<R>>`.
-///
-/// This wraps the internal `TypedLayout<R>` to avoid exposing private types via
-/// the public `Mode` trait while preserving performance and behavior.
-pub struct TypedMem<R: Record>(pub(crate) TypedLayout<R>);
-
-impl<R> TypedMem<R>
-where
-    R: Record,
-    R::Key: KeyHeapSize,
-{
-    pub(crate) fn new() -> Self {
-        Self(TypedLayout::<R>::new())
-    }
-
-    pub(crate) fn insert(&mut self, row: R) {
-        self.0.insert(row)
-    }
-
-    pub(crate) fn seal_open(&mut self) -> Option<Vec<R>> {
-        self.0.seal_open()
-    }
-
-    pub(crate) fn scan_rows<'t, 's>(&'t self, ranges: &'s RangeSet<R::Key>) -> RowScan<'t, 's, R>
-    where
-        't: 's,
-    {
-        self.0.scan_rows(ranges)
-    }
-}
-
-impl<R> MutableLayout<<R as Record>::Key> for TypedMem<R>
-where
-    R: Record,
-    R::Key: KeyHeapSize,
-{
-    fn approx_bytes(&self) -> usize {
-        self.0.approx_bytes()
-    }
-}
-
-impl<R> StatsProvider for TypedMem<R>
-where
-    R: Record,
-    R::Key: KeyHeapSize,
-{
-    fn build_stats(
-        &self,
-        since_last_seal: Option<std::time::Duration>,
-    ) -> crate::inmem::policy::MemStats {
-        self.0.build_stats(since_last_seal)
     }
 }
 
@@ -579,49 +407,7 @@ mod tests {
     use typed_arrow_unified::SchemaLike;
 
     use super::*;
-    use crate::inmem::policy::{
-        BatchesThreshold, BytesThreshold, OpenRowsThreshold, ReplaceRatioPolicy,
-    };
-
-    #[derive(typed_arrow::Record, Clone, Debug)]
-    #[record(field_macro = crate::key_field)]
-    struct RowT {
-        #[record(ext(key))]
-        id: u32,
-        v: i32,
-    }
-
-    #[test]
-    fn typed_seal_on_bytes_threshold() {
-        let mut db: DB<TypedMode<RowT>> = DB::new_typed();
-        assert_eq!(db.num_immutable_segments(), 0);
-        db.set_seal_policy(Box::new(BytesThreshold { limit: 1 }));
-        db.insert(RowT { id: 1, v: 10 });
-        assert_eq!(db.num_immutable_segments(), 1);
-    }
-
-    #[test]
-    fn typed_seal_on_open_rows_threshold() {
-        let mut db: DB<TypedMode<RowT>> = DB::new_typed();
-        db.set_seal_policy(Box::new(OpenRowsThreshold { rows: 2 }));
-        db.insert(RowT { id: 1, v: 10 });
-        assert_eq!(db.num_immutable_segments(), 0);
-        db.insert(RowT { id: 2, v: 20 });
-        assert_eq!(db.num_immutable_segments(), 1);
-    }
-
-    #[test]
-    fn typed_seal_on_replace_ratio() {
-        let mut db: DB<TypedMode<RowT>> = DB::new_typed();
-        db.set_seal_policy(Box::new(ReplaceRatioPolicy {
-            min_ratio: 0.5,
-            min_inserts: 1,
-        }));
-        db.insert(RowT { id: 42, v: 1 });
-        assert_eq!(db.num_immutable_segments(), 0);
-        db.insert(RowT { id: 42, v: 2 });
-        assert_eq!(db.num_immutable_segments(), 1);
-    }
+    use crate::inmem::policy::BatchesThreshold;
 
     #[test]
     fn dynamic_seal_on_batches_threshold() {
