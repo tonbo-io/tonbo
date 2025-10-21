@@ -3,25 +3,23 @@
 ## Project Structure & Module Organization
 
 - `src/`: Core Rust library.
-  - `db.rs`: Generic `DB<M: Mode>` with typed vs dynamic modes via types.
-    - `TypedMode<R: Record>`: compile‑time schema, `ingest(R)`.
+  - `db.rs`: Generic `DB<M: Mode>`; only the dynamic mode is wired up today.
     - `DynMode`: runtime Arrow schema, `ingest(RecordBatch)`.
-    - Shared: `approx_mutable_bytes` (mutable key memory metrics).
+    - Shared: `approx_mutable_bytes` (mutable key memory metrics). The `Mode`
+      trait sticks around so a future typed mode can plug back in.
   - `inmem/`: In‑memory memtables.
     - `mutable/`
-      - `memtable.rs`: columnar mutable with last‑writer key index (typed and dynamic).
-      - `metrics.rs`, `key_size.rs`: lightweight metrics and key heap‑size estimates.
-      - `mod.rs`: module glue and re‑exports (`KeyHeapSize`).
+      - `memtable.rs`: columnar mutable with last-writer key index (dynamic layout only for now).
+      - `metrics.rs`, `key_size.rs`: lightweight metrics and key heap-size estimates.
+      - `mod.rs`: module glue and re-exports (`KeyHeapSize`).
     - `immutable/`
-      - `memtable.rs`: unified generic `ImmutableMemTable<K, S>` + `ImmutableScan` iterator.
-        - Helpers: `segment_from_rows<R, I>(rows)`; `segment_from_batch_with_*` for dynamic.
-      - `arrays.rs`: typed‑arrow arrays/builder wrapper for typed immutables.
-      - `keys.rs`: zero‑copy owning key types for string/binary (buffer‑backed).
-  - `record/`: Records and batch key extraction.
-    - `mod.rs`: `Record` trait (typed‑arrow schema + key split/join/key_at).
-    - `ext_macros.rs`: derive‑time hooks/macros for ergonomic key definitions.
+      - `memtable.rs`: generic `ImmutableMemTable<K, S>` + `ImmutableScan` iterator.
+        - Helpers: runtime-only `segment_from_batch_with_*` builders.
+      - `keys.rs`: zero-copy owning key types for string/binary (buffer-backed).
+  - `record/`: Runtime batch key extraction.
+    - `mod.rs`: re-exports dynamic extractors (typed record trait removed for now).
     - `extract/`: runtime schema helpers
-      - `mod.rs`: re‑exports public API.
+      - `mod.rs`: re-exports public API.
       - `errors.rs`, `key_dyn.rs`, `traits.rs`, `extractors.rs`.
   - `scan.rs`: key range utilities (`KeyRange`, `RangeSet`).
   - `query/`: resolved key‑only expressions and `to_range_set`.
@@ -47,7 +45,7 @@ Pre-submit routine (every source adjustment):
 
 ## Coding Style & Naming Conventions
 
-- Rust 2024 edition; format with `rustfmt` (via `cargo fmt`).
+- Rust 2024 edition; format with `rustfmt` (via `cargo +nightly fmt`).
 - Names: types/traits CamelCase, functions/variables snake_case, modules snake_case.
 - Visibility: prefer crate‑private; document public APIs. Crate denies `missing_docs`.
 - Keep modules small and cohesive; avoid one‑letter identifiers except indices.
@@ -71,19 +69,19 @@ Pre-submit routine (every source adjustment):
 
 ## Current Architecture Notes
 
-- Unified immutable design:
-  - One generic `ImmutableMemTable<K, S>` used for both typed and dynamic modes.
-  - Typed storage `S = ImmutableArrays<R>`; dynamic storage `S = RecordBatch`.
-  - Builders:
-    - `segment_from_rows<R, I>(rows)` and `segment_from_arrays<R>(arrays)` for typed.
-    - `segment_from_batch_with_extractor/with_key_col/with_key_name` for dynamic.
-- `DB<M: Mode>` unifies typed/dynamic dispatch without feature flags:
-  - Mode associated types include `Key`, `ImmStore`, and `Mutable`.
+- Immutable design:
+  - `ImmutableMemTable<K, S>` stays generic, but today we instantiate it with
+    `RecordBatch` storage via the dynamic helpers. The generic shape is kept so
+    typed storage can return later.
+  - Builders: `segment_from_batch_with_extractor/with_key_col/with_key_name`.
+- `DB<M: Mode>` keeps trait-based dispatch without feature flags:
+  - Only `DynMode` is implemented; Mode associated types (`Key`, `ImmStore`,
+    `Mutable`) remain for future typed modes.
   - Scanning APIs return values (rows), not keys.
 - Dynamic ergonomics:
   - `KeyDyn` supports From conversions (`&str`, `String`, `&[u8]`, `Vec<u8>`, numbers, bool).
   - `DynKeyExtractor` builds keys from `RecordBatch` rows; helpers validate schema/field types.
-- Record extraction is crate‑local; typed‑arrow‑unified stays free of DB key concepts.
+- Record extraction is crate-local; typed-arrow-unified stays free of DB key concepts.
 
 ## Legacy Tonbo Reference
 
@@ -91,22 +89,18 @@ Pre-submit routine (every source adjustment):
   - `/Users/gwo/Idea/seren`
 - Useful when cross‑checking prior designs such as the memtable freeze trigger trait (`FreezeTrigger`) and flush/compaction flows.
 
-## Usage Quick Reference
+-## Usage Quick Reference
 
-- Typed DB:
-  - `let mut db: DB<TypedMode<MyRow>> = DB::new_typed();`
-  - `db.ingest(MyRow { .. })?;`
-  - `let it = db.scan_mutable_rows(&RangeSet::all()); // Iterator<Item=&MyRow>`
 - Dynamic DB:
   - `let mut db: DB<DynMode> = DB::new_dyn_with_key_name(schema, "id")?;`
   - `db.ingest(batch)?;`
   - `let it = db.scan_mutable_rows(&RangeSet::<KeyDyn>::all()); // Iterator<Item=DynRow>`
-- Unified immutable builders:
-  - Typed: `let imm = inmem::immutable::memtable::segment_from_rows::<MyRow,_>(rows);`
+- Immutable builders:
   - Dynamic: `let imm = inmem::immutable::memtable::segment_from_batch_with_key_name(batch, "id")?;`
+  - Typed builders will return once compile-time dispatch is reinstated.
 
 ## Roadmap (high‑level)
 
-- Minor flush from columnar mutable to `ImmutableMemTable` (typed and dynamic paths).
+- Minor flush from columnar mutable to `ImmutableMemTable` (dynamic path today; typed to follow once reinstated).
 - K‑way merged scan across mutable + immutables with last‑writer‑wins and optional policies.
 - WAL + SST layers; versioning; manifest; compaction strategies.
