@@ -3,4 +3,15 @@ Cargo.lock
 .serena
 
 /.idea
-/db_path
+db_path
+guide/book
+
+# python
+__pycache__
+*.so
+
+# node
+node_modules
+dist
+
+.DS_Store
