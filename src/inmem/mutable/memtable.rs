@@ -80,7 +80,7 @@ impl DynLayout {
             let version_loc = VersionLoc::new(batch_id, row_idx, commit_ts, false);
             match self.versions.entry(k) {
                 BTreeEntry::Vacant(v) => {
-                    self.metrics.entries += 1; 
+                    self.metrics.entries += 1;
                     self.metrics.approx_key_bytes += key_size;
                     let chain = vec![version_loc];
                     v.insert(chain);
@@ -150,7 +150,10 @@ impl DynLayout {
             }
             let start = next_key;
             let mut chain_rows = 0u32;
-            for version in chain.iter() {
+            // Versions are appended to each chain in commit order (oldest → newest) as we ingest
+            // into the mutable table. By iterating in reverse we emit newest → oldest so the
+            // immutable run stores rows per key in descending commit timestamp order.
+            for version in chain.iter().rev() {
                 let row_batch = if version.tombstone {
                     if null_row_batch.is_none() {
                         let arrays = schema
@@ -361,6 +364,15 @@ mod tests {
         m.insert_batch(extractor.as_ref(), batch_v2, Timestamp::new(20))
             .expect("insert v2");
 
+        // Third commit overwrites key at ts=30
+        let rows_v3 = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(3)),
+        ])];
+        let batch_v3: RecordBatch = schema.build_batch(rows_v3).expect("batch v3");
+        m.insert_batch(extractor.as_ref(), batch_v3, Timestamp::new(30))
+            .expect("insert v3");
+
         let ranges = RangeSet::all();
 
         // Before the first commit nothing should be visible
@@ -368,25 +380,35 @@ mod tests {
             m.scan_rows_at(&ranges, Timestamp::new(5)).collect();
         assert!(rows_before.is_empty());
 
-        // Between commits the first value is visible
-        let rows_mid: Vec<i32> = m
+        // Between first and second commits the first value is visible
+        let rows_after_first: Vec<i32> = m
             .scan_rows_at(&ranges, Timestamp::new(15))
             .map(|row| match &row.0[1] {
                 Some(DynCell::I32(v)) => *v,
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(rows_mid, vec![1]);
+        assert_eq!(rows_after_first, vec![1]);
 
-        // After the second commit the latest value is visible
-        let rows_latest: Vec<i32> = m
+        // Between second and third commits the second value is visible
+        let rows_after_second: Vec<i32> = m
             .scan_rows_at(&ranges, Timestamp::new(25))
             .map(|row| match &row.0[1] {
                 Some(DynCell::I32(v)) => *v,
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(rows_latest, vec![2]);
+        assert_eq!(rows_after_second, vec![2]);
+
+        // Between third and fourth commits the third value is visible
+        let row_latest: Vec<i32> = m
+            .scan_rows_at(&ranges, Timestamp::new(35))
+            .map(|row| match &row.0[1] {
+                Some(DynCell::I32(v)) => *v,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(row_latest, vec![3]);
     }
 
     #[test]
@@ -399,7 +421,7 @@ mod tests {
         let extractor =
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
 
-        // two versions for the same key
+        // four versions for the same key
         let batch1: RecordBatch = schema
             .clone()
             .build_batch(vec![DynRow(vec![
@@ -422,11 +444,33 @@ mod tests {
             .insert_batch(extractor.as_ref(), batch2, Timestamp::new(20))
             .expect("insert");
 
+        let batch3: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(3)),
+            ])])
+            .expect("batch3");
+        layout
+            .insert_batch(extractor.as_ref(), batch3, Timestamp::new(30))
+            .expect("insert");
+
+        let batch4: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(4)),
+            ])])
+            .expect("batch4");
+        layout
+            .insert_batch(extractor.as_ref(), batch4, Timestamp::new(40))
+            .expect("insert");
+
         let segment = layout
             .seal_into_immutable(&schema)
             .expect("seal ok")
             .expect("segment");
-        assert_eq!(segment.len(), 2);
+        assert_eq!(segment.len(), 4);
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
@@ -434,24 +478,51 @@ mod tests {
             B::Included(KeyDyn::from("k")),
         )]);
 
-        let visible_mid: Vec<u32> = segment
+        let visible_after_first: Vec<u32> = segment
             .scan_visible(&ranges, Timestamp::new(15))
             .map(|(_, row)| row)
             .collect();
-        assert_eq!(visible_mid, vec![0]);
+        assert_eq!(visible_after_first, vec![3]);
 
-        let visible_latest: Vec<u32> = segment
+        let visible_after_second: Vec<u32> = segment
             .scan_visible(&ranges, Timestamp::new(25))
             .map(|(_, row)| row)
             .collect();
-        assert_eq!(visible_latest, vec![1]);
+        assert_eq!(visible_after_second, vec![2]);
+
+        let visible_after_third: Vec<u32> = segment
+            .scan_visible(&ranges, Timestamp::new(35))
+            .map(|(_, row)| row)
+            .collect();
+        assert_eq!(visible_after_third, vec![1]);
+
+        let visible_latest: Vec<u32> = segment
+            .scan_visible(&ranges, Timestamp::new(45))
+            .map(|(_, row)| row)
+            .collect();
+        assert_eq!(visible_latest, vec![0]);
 
         let batch = segment.storage();
-        let row_mid =
-            crate::record::extract::row_from_batch(batch, visible_mid[0] as usize).expect("row");
+        let row_after_first =
+            crate::record::extract::row_from_batch(batch, visible_after_first[0] as usize)
+                .expect("row");
+        let row_after_second =
+            crate::record::extract::row_from_batch(batch, visible_after_second[0] as usize)
+                .expect("row");
+        let row_after_third =
+            crate::record::extract::row_from_batch(batch, visible_after_third[0] as usize)
+                .expect("row");
         let row_latest =
             crate::record::extract::row_from_batch(batch, visible_latest[0] as usize).expect("row");
-        assert_eq!(row_mid.0[1], Some(DynCell::I32(1)));
-        assert_eq!(row_latest.0[1], Some(DynCell::I32(2)));
+
+        let cell_value = |row: &typed_arrow_dyn::DynRow| match &row.0[1] {
+            Some(DynCell::I32(v)) => *v,
+            _ => panic!("unexpected cell"),
+        };
+
+        assert_eq!(cell_value(&row_after_first), 1);
+        assert_eq!(cell_value(&row_after_second), 2);
+        assert_eq!(cell_value(&row_after_third), 3);
+        assert_eq!(cell_value(&row_latest), 4);
     }
 }
