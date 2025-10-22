@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use fusio::executor::BlockingExecutor;
+use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
     record::extract::KeyDyn,
@@ -30,8 +32,10 @@ fn main() {
     let batch: RecordBatch = schema.build_batch(rows).expect("ok");
 
     // Create DB from metadata
-    let mut db: DB<DynMode> = DB::new_dyn_from_metadata(schema.clone()).expect("metadata ok");
-    db.ingest(batch).expect("insert");
+    let mut db: DB<DynMode, BlockingExecutor> =
+        DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
+            .expect("metadata ok");
+    block_on(db.ingest(batch)).expect("insert");
 
     // Scan all rows
     let all = RangeSet::<KeyDyn>::all();

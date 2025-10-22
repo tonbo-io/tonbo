@@ -2,6 +2,8 @@
 
 use std::{ops::Bound, sync::Arc};
 
+use fusio::executor::BlockingExecutor;
+use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
     query::{Expr, Predicate},
@@ -40,8 +42,10 @@ fn main() {
     let batch: RecordBatch = schema.build_batch(rows).expect("valid dynamic rows");
 
     // Create a dynamic DB by specifying the key field name
-    let mut db: DB<DynMode> = DB::new_dyn_with_key_name(schema.clone(), "id").expect("schema ok");
-    db.ingest(batch).expect("insert dynamic batch");
+    let mut db: DB<DynMode, BlockingExecutor> =
+        DB::new_dyn_with_key_name(schema.clone(), "id", Arc::new(BlockingExecutor::default()))
+            .expect("schema ok");
+    block_on(db.ingest(batch)).expect("insert dynamic batch");
 
     // Scan for a specific key (id == "carol") using KeyDyn
     let carol = RangeSet::from_ranges(vec![KeyRange::new(

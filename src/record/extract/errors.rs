@@ -1,5 +1,7 @@
 use typed_arrow::arrow_schema::{DataType, SchemaRef};
 
+use crate::wal::WalError;
+
 /// Error returned when key extraction fails due to type/schema mismatches or out-of-bounds.
 #[derive(Debug, thiserror::Error)]
 pub enum KeyExtractError {
@@ -41,4 +43,7 @@ pub enum KeyExtractError {
         /// The incoming batch schema.
         actual: SchemaRef,
     },
+    /// WAL submission or durability hook failed while ingesting.
+    #[error("wal error: {0}")]
+    Wal(#[from] WalError),
 }
