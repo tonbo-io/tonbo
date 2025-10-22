@@ -28,12 +28,14 @@ use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
 /// let fs = mgr.get_fs(&Path::from("/level-0"));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+#[allow(dead_code)]
 pub struct StoreManager {
     base_fs: Arc<dyn DynFs>,
     local_fs: Arc<dyn DynFs>,
     fs_map: HashMap<Path, Arc<dyn DynFs>>,
 }
 
+#[allow(dead_code)]
 impl StoreManager {
     /// Create a new manager with the provided base filesystem and optional overrides.
     ///

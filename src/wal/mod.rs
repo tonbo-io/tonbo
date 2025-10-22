@@ -6,8 +6,8 @@
 
 use std::{fmt, marker::PhantomData, path::PathBuf, sync::Arc, time::Duration};
 
+use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
-use typed_arrow::arrow_array::RecordBatch;
 
 use crate::db::Mode;
 
@@ -171,6 +171,7 @@ impl<E> WalTicket<E>
 where
     E: Executor + Timer,
 {
+    #[allow(dead_code)]
     pub(crate) fn new(seq: u64) -> Self {
         Self {
             seq,
