@@ -10,8 +10,9 @@ use crate::wal::{WalError, WalResult};
 /// Maximum supported frame version.
 pub const FRAME_VERSION: u16 = 1;
 
-/// Magic constant identifying Tonbo WAL frames (`"TONW"`).
-pub const FRAME_MAGIC: u32 = 0x544F_4E57;
+/// Magic constant identifying Tonbo WAL frames (`"TONQ"`).
+/// ASCII tag stays human-readable while landing on a 32-bit prime for cheap corruption checks.
+pub const FRAME_MAGIC: u32 = 0x544F_4E51;
 
 /// First sequence number written to disk.
 ///
