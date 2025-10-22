@@ -11,7 +11,7 @@ use arrow_schema::SchemaRef;
 
 use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
 use crate::{
-    inmem::immutable::memtable::{ImmutableMemTable, MvccColumns, VersionSlice},
+    inmem::immutable::memtable::{ImmutableMemTable, VersionSlice, attach_mvcc_columns},
     inmem::policy::{MemStats, StatsProvider},
     mvcc::Timestamp,
     record::extract::{DynKeyExtractor, KeyDyn},
@@ -22,9 +22,7 @@ use crate::{
 struct VersionLoc {
     batch_idx: usize,
     row_idx: usize,
-    #[allow(dead_code)]
     commit_ts: Timestamp,
-    #[allow(dead_code)]
     tombstone: bool,
 }
 
@@ -79,17 +77,17 @@ impl DynLayout {
             let key_size = k.key_heap_size();
             self.metrics.inserts += 1;
 
+            let version_loc = VersionLoc::new(batch_id, row_idx, commit_ts, false);
             match self.versions.entry(k) {
                 BTreeEntry::Vacant(v) => {
-                    self.metrics.entries += 1;
+                    self.metrics.entries += 1; 
                     self.metrics.approx_key_bytes += key_size;
-                    let chain = vec![VersionLoc::new(batch_id, row_idx, commit_ts, false)];
+                    let chain = vec![version_loc];
                     v.insert(chain);
                 }
                 BTreeEntry::Occupied(mut o) => {
                     self.metrics.replaces += 1;
-                    o.get_mut()
-                        .push(VersionLoc::new(batch_id, row_idx, commit_ts, false));
+                    o.get_mut().push(version_loc);
                 }
             }
         }
@@ -139,11 +137,10 @@ impl DynLayout {
         use arrow_select::concat::concat_batches;
 
         let mut slices = Vec::new();
-        let mut begin_ts = Vec::new();
-        let mut end_ts = Vec::new();
+        let mut commit_ts = Vec::new();
         let mut tombstone = Vec::new();
         let mut index = BTreeMap::new();
-        let mut next_row: u32 = 0;
+        let mut next_key: u32 = 0;
         let mut null_row_batch: Option<RecordBatch> = None;
 
         let versions = std::mem::take(&mut self.versions);
@@ -151,15 +148,9 @@ impl DynLayout {
             if chain.is_empty() {
                 continue;
             }
-            let start = next_row;
+            let start = next_key;
             let mut chain_rows = 0u32;
-            for (idx, version) in chain.iter().enumerate() {
-                let begin = version.commit_ts;
-                let end = if let Some(next) = chain.get(idx + 1) {
-                    next.commit_ts
-                } else {
-                    Timestamp::MAX
-                };
+            for version in chain.iter() {
                 let row_batch = if version.tombstone {
                     if null_row_batch.is_none() {
                         let arrays = schema
@@ -175,11 +166,10 @@ impl DynLayout {
                     batch.slice(version.row_idx, 1)
                 };
                 slices.push(row_batch);
-                begin_ts.push(begin);
-                end_ts.push(end);
+                commit_ts.push(version.commit_ts);
                 tombstone.push(version.tombstone);
                 chain_rows += 1;
-                next_row += 1;
+                next_key += 1;
             }
             index.insert(key, VersionSlice::new(start, chain_rows));
         }
@@ -191,7 +181,7 @@ impl DynLayout {
         };
 
         let batch = concat_batches(schema, &slices)?;
-        let mvcc = MvccColumns::new(begin_ts, end_ts, tombstone);
+        let (batch, mvcc) = attach_mvcc_columns(batch, commit_ts, tombstone)?;
         Ok(Some(ImmutableMemTable::new(batch, index, mvcc)))
     }
 }

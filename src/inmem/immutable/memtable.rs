@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 use std::collections::{BTreeMap, btree_map::Range as BTreeRange};
+use std::sync::Arc;
 
-use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_schema::{DataType, Field, Schema};
 
 use crate::{
     mvcc::Timestamp,
@@ -26,19 +28,18 @@ impl<K: Ord, S> ImmutableMemTable<K, S> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.mvcc.begin_ts.len()
+        self.mvcc.commit_ts.len()
     }
 
     pub(crate) fn storage(&self) -> &S {
         &self.storage
     }
 
-    fn mvcc_slice(&self, slice: VersionSlice) -> (&[Timestamp], &[Timestamp], &[bool]) {
+    fn mvcc_slice(&self, slice: VersionSlice) -> (&[Timestamp], &[bool]) {
         let start = slice.start as usize;
         let end = start + slice.len as usize;
         (
-            &self.mvcc.begin_ts[start..end],
-            &self.mvcc.end_ts[start..end],
+            &self.mvcc.commit_ts[start..end],
             &self.mvcc.tombstone[start..end],
         )
     }
@@ -83,11 +84,10 @@ pub(crate) fn segment_from_batch_with_extractor(
         let k = extractor.key_at(&batch, row)?;
         index.insert(k, VersionSlice::new(row as u32, 1));
     }
-    let mvcc = MvccColumns::new(
-        vec![Timestamp::MIN; len],
-        vec![Timestamp::MAX; len],
-        vec![false; len],
-    );
+    let commit_ts = vec![Timestamp::MIN; len];
+    let tombstone = vec![false; len];
+    let (batch, mvcc) =
+        attach_mvcc_columns(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
     Ok(ImmutableMemTable::new(batch, index, mvcc))
 }
 
@@ -123,6 +123,28 @@ pub(crate) fn segment_from_batch_with_key_name(
         });
     };
     segment_from_batch_with_key_col(batch, idx)
+}
+
+pub(crate) fn attach_mvcc_columns(
+    batch: RecordBatch,
+    commit_ts: Vec<Timestamp>,
+    tombstone: Vec<bool>,
+) -> Result<(RecordBatch, MvccColumns), arrow_schema::ArrowError> {
+    debug_assert_eq!(commit_ts.len(), tombstone.len());
+    let commit_array = UInt64Array::from_iter_values(commit_ts.iter().map(|ts| ts.get()));
+    let tombstone_array = BooleanArray::from(tombstone.clone());
+    let mut columns: Vec<ArrayRef> = batch.columns().iter().cloned().collect();
+    columns.push(Arc::new(commit_array) as ArrayRef);
+    columns.push(Arc::new(tombstone_array) as ArrayRef);
+
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Field::new("_commit_ts", DataType::UInt64, false).into());
+    fields.push(Field::new("_tombstone", DataType::Boolean, false).into());
+    let schema = Arc::new(Schema::new(fields));
+
+    let batch = RecordBatch::try_new(schema, columns)?;
+    let mvcc = MvccColumns::new(commit_ts, tombstone);
+    Ok((batch, mvcc))
 }
 
 /// Iterator for immutable scans over key ranges.
@@ -209,9 +231,9 @@ impl<'t, 's, K: Ord, S> Iterator for ImmutableVisibleScan<'t, 's, K, S> {
                 while let Some((key, slice)) = cur.next() {
                     let start = slice.start as usize;
                     let len = slice.len as usize;
-                    let (begin, end_ts, tomb) = self.table.mvcc_slice(*slice);
+                    let (commit_ts, tomb) = self.table.mvcc_slice(*slice);
                     for idx in (0..len).rev() {
-                        if begin[idx] <= self.read_ts && self.read_ts < end_ts[idx] && !tomb[idx] {
+                        if commit_ts[idx] <= self.read_ts && !tomb[idx] {
                             return Some((key, (start + idx) as u32));
                         }
                     }
@@ -273,11 +295,12 @@ mod tests {
         let batch: RecordBatch = schema.build_batch(rows).expect("batch");
         let mut index = BTreeMap::new();
         index.insert(KeyDyn::from("k"), VersionSlice::new(0, 2));
-        let mvcc = MvccColumns::new(
+        let (batch, mvcc) = attach_mvcc_columns(
+            batch,
             vec![Timestamp::new(10), Timestamp::new(20)],
-            vec![Timestamp::new(20), Timestamp::MAX],
             vec![false, false],
-        );
+        )
+        .expect("mvcc columns");
         let seg = ImmutableMemTable::new(batch, index, mvcc);
 
         use std::ops::Bound as B;
@@ -300,18 +323,15 @@ mod tests {
     }
 }
 pub(crate) struct MvccColumns {
-    pub begin_ts: Vec<Timestamp>,
-    pub end_ts: Vec<Timestamp>,
+    pub commit_ts: Vec<Timestamp>,
     pub tombstone: Vec<bool>,
 }
 
 impl MvccColumns {
-    pub fn new(begin_ts: Vec<Timestamp>, end_ts: Vec<Timestamp>, tombstone: Vec<bool>) -> Self {
-        debug_assert_eq!(begin_ts.len(), end_ts.len());
-        debug_assert_eq!(begin_ts.len(), tombstone.len());
+    pub fn new(commit_ts: Vec<Timestamp>, tombstone: Vec<bool>) -> Self {
+        debug_assert_eq!(commit_ts.len(), tombstone.len());
         Self {
-            begin_ts,
-            end_ts,
+            commit_ts,
             tombstone,
         }
     }
