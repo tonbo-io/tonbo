@@ -1,6 +1,8 @@
 #![allow(dead_code)]
-use std::collections::{BTreeMap, btree_map::Range as BTreeRange};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, btree_map::Range as BTreeRange},
+    sync::Arc,
+};
 
 use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};

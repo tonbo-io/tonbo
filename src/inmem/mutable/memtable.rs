@@ -11,8 +11,10 @@ use arrow_schema::SchemaRef;
 
 use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
 use crate::{
-    inmem::immutable::memtable::{ImmutableMemTable, VersionSlice, attach_mvcc_columns},
-    inmem::policy::{MemStats, StatsProvider},
+    inmem::{
+        immutable::memtable::{ImmutableMemTable, VersionSlice, attach_mvcc_columns},
+        policy::{MemStats, StatsProvider},
+    },
     mvcc::Timestamp,
     record::extract::{DynKeyExtractor, KeyDyn},
     scan::{KeyRange, RangeSet},
@@ -69,21 +71,34 @@ impl DynLayout {
         batch: RecordBatch,
         commit_ts: Timestamp,
     ) -> Result<(), crate::record::extract::KeyExtractError> {
+        self.insert_batch_with_ts(extractor, batch, commit_ts, |_| false)
+    }
+
+    /// Insert a batch using supplied commit timestamps (replay path).
+    pub(crate) fn insert_batch_with_ts<F>(
+        &mut self,
+        extractor: &dyn DynKeyExtractor,
+        batch: RecordBatch,
+        commit_ts: Timestamp,
+        mut tombstone_at: F,
+    ) -> Result<(), crate::record::extract::KeyExtractError>
+    where
+        F: FnMut(usize) -> bool,
+    {
         extractor.validate_schema(&batch.schema())?;
-        let _ = commit_ts;
         let batch_id = self.batches_attached.len();
         for row_idx in 0..batch.num_rows() {
             let k = extractor.key_at(&batch, row_idx)?;
             let key_size = k.key_heap_size();
             self.metrics.inserts += 1;
 
-            let version_loc = VersionLoc::new(batch_id, row_idx, commit_ts, false);
+            let version_loc = VersionLoc::new(batch_id, row_idx, commit_ts, tombstone_at(row_idx));
+
             match self.versions.entry(k) {
                 BTreeEntry::Vacant(v) => {
                     self.metrics.entries += 1;
                     self.metrics.approx_key_bytes += key_size;
-                    let chain = vec![version_loc];
-                    v.insert(chain);
+                    v.insert(vec![version_loc]);
                 }
                 BTreeEntry::Occupied(mut o) => {
                     self.metrics.replaces += 1;
@@ -93,6 +108,13 @@ impl DynLayout {
         }
         self.batches_attached.push(batch);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inspect_versions(&self, key: &KeyDyn) -> Option<Vec<(Timestamp, bool)>> {
+        self.versions
+            .get(key)
+            .map(|chain| chain.iter().map(|v| (v.commit_ts, v.tombstone)).collect())
     }
 
     // Key-only scan helper removed.
@@ -524,5 +546,50 @@ mod tests {
         assert_eq!(cell_value(&row_after_second), 2);
         assert_eq!(cell_value(&row_after_third), 3);
         assert_eq!(cell_value(&row_latest), 4);
+    }
+
+    #[test]
+    fn insert_batch_with_ts_preserves_metadata() {
+        let mut layout = DynLayout::new();
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+
+        let batch1: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(1)),
+            ])])
+            .expect("batch1");
+        layout
+            .insert_batch_with_ts(extractor.as_ref(), batch1, Timestamp::new(10), |_| false)
+            .expect("insert batch1");
+
+        let batch2: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(2)),
+            ])])
+            .expect("batch2");
+        layout
+            .insert_batch_with_ts(extractor.as_ref(), batch2, Timestamp::new(20), |row| {
+                row == 0
+            })
+            .expect("insert batch2");
+
+        let chain = layout
+            .versions
+            .get(&KeyDyn::from("k"))
+            .expect("version chain");
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].commit_ts, Timestamp::new(10));
+        assert!(!chain[0].tombstone);
+        assert_eq!(chain[1].commit_ts, Timestamp::new(20));
+        assert!(chain[1].tombstone);
     }
 }
