@@ -109,6 +109,8 @@ pub enum WalPayload {
         batch: RecordBatch,
         /// Commit timestamp captured at enqueue.
         commit_ts: Timestamp,
+        /// Optional tombstone bitmap (true marks row deleted).
+        tombstones: Option<Vec<bool>>,
     },
     /// Reserved for typed row append once compile-time dispatch returns.
     #[allow(dead_code)]

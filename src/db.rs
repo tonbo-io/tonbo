@@ -115,27 +115,35 @@ where
         let events = replayer.scan().map_err(KeyExtractError::from)?;
 
         let mut last_commit_ts: Option<Timestamp> = None;
-        let mut pending: HashMap<u64, Vec<RecordBatch>> = HashMap::new();
+        let mut pending: HashMap<u64, Vec<(RecordBatch, Option<Vec<bool>>)>> = HashMap::new();
         for event in events {
             match event {
                 WalEvent::DynAppend {
                     provisional_id,
                     batch,
-                    ..
+                    tombstones,
                 } => {
-                    pending.entry(provisional_id).or_default().push(batch);
+                    pending
+                        .entry(provisional_id)
+                        .or_default()
+                        .push((batch, tombstones));
                 }
                 WalEvent::TxnCommit {
                     provisional_id,
                     commit_ts,
                 } => {
                     if let Some(batches) = pending.remove(&provisional_id) {
-                        for batch in batches {
+                        for (batch, tombstones) in batches {
+                            let rows = batch.num_rows();
+                            let bitmap = tombstones.unwrap_or_else(|| vec![false; rows]);
                             db.mem.insert_batch_with_ts(
                                 db.mode.extractor.as_ref(),
                                 batch,
                                 commit_ts,
-                                |_| false,
+                                {
+                                    let bitmap = bitmap;
+                                    move |row| bitmap[row]
+                                },
                             )?;
                             db.maybe_seal_after_insert()?;
                         }
@@ -490,6 +498,7 @@ where
         let payload = WalPayload::DynBatch {
             batch: batch.clone(),
             commit_ts,
+            tombstones: None,
         };
         // TODO: await the WAL ticket once durability handling lands.
         handle
@@ -867,6 +876,7 @@ mod tests {
         let payload = WalPayload::DynBatch {
             batch: batch.clone(),
             commit_ts: Timestamp::new(42),
+            tombstones: Some(vec![true]),
         };
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
@@ -890,9 +900,19 @@ mod tests {
         ))
         .expect("recover");
 
-        // Replayed version retains commit_ts 42.
+        // Replayed version retains commit_ts 42 and tombstone state.
         let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
-        assert_eq!(chain, vec![(Timestamp::new(42), false)]);
+        assert_eq!(chain, vec![(Timestamp::new(42), true)]);
+
+        use std::ops::Bound as B;
+        let ranges = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
+            B::Included(KeyDyn::from("k")),
+            B::Included(KeyDyn::from("k")),
+        )]);
+        let visible: Vec<_> = db
+            .scan_mutable_rows_at(&ranges, Timestamp::new(50))
+            .collect();
+        assert!(visible.is_empty());
 
         // New ingest should advance to > 42 (next clock tick).
         let new_batch = schema
@@ -907,7 +927,7 @@ mod tests {
         let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
         assert_eq!(
             chain,
-            vec![(Timestamp::new(42), false), (Timestamp::new(43), false)]
+            vec![(Timestamp::new(42), true), (Timestamp::new(43), false)]
         );
 
         fs::remove_dir_all(&wal_dir).expect("cleanup");

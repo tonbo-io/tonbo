@@ -42,7 +42,7 @@ const fn frame_header_size() -> usize {
 /// We reserve 7 bytes following the mode so future metadata (e.g. schema hashes,
 /// compression hints) can slot in without reshaping the layout or bumping the
 /// frame version.
-const TXN_APPEND_PREFIX_SIZE: usize = 8 + 1 + 7;
+const TXN_APPEND_PREFIX_SIZE: usize = 8 + 1 + 7 + 4;
 /// Number of reserved bytes after the mode byte in a `TxnAppend` payload.
 const TXN_APPEND_RESERVED_BYTES: usize = 7;
 /// Discriminant for dynamic-mode appends written in the `TxnAppend` payload.
@@ -270,8 +270,12 @@ impl FrameHeader {
 /// Encode a WAL payload into one or more frames using the provided provisional id.
 pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec<Frame>> {
     match payload {
-        WalPayload::DynBatch { batch, commit_ts } => {
-            let append = encode_txn_append_dyn(provisional_id, batch)?;
+        WalPayload::DynBatch {
+            batch,
+            commit_ts,
+            tombstones,
+        } => {
+            let append = encode_txn_append_dyn(provisional_id, batch, tombstones)?;
             let commit = encode_txn_commit(provisional_id, commit_ts);
             Ok(vec![
                 Frame::new(FrameType::TxnAppend, append),
@@ -283,7 +287,18 @@ pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec
     }
 }
 
-fn encode_txn_append_dyn(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
+fn encode_txn_append_dyn(
+    provisional_id: u64,
+    batch: RecordBatch,
+    tombstones: Option<Vec<bool>>,
+) -> WalResult<Vec<u8>> {
+    if let Some(ref bits) = tombstones {
+        if bits.len() != batch.num_rows() {
+            return Err(WalError::Codec(
+                "tombstone bitmap length mismatch record batch".to_string(),
+            ));
+        }
+    }
     let mut payload = Vec::with_capacity(TXN_APPEND_PREFIX_SIZE);
     payload.extend_from_slice(&provisional_id.to_le_bytes());
     payload.push(APPEND_MODE_DYN);
@@ -299,7 +314,31 @@ fn encode_txn_append_dyn(provisional_id: u64, batch: RecordBatch) -> WalResult<V
         writer.finish().map_err(codec_err)?;
     }
 
+    payload.extend_from_slice(&(ipc_buf.len() as u32).to_le_bytes());
     payload.extend_from_slice(&ipc_buf);
+
+    if let Some(bits) = tombstones {
+        payload.extend_from_slice(&(bits.len() as u32).to_le_bytes());
+        // Pack into bytes (little endian bit order).
+        let mut byte = 0u8;
+        let mut count = 0;
+        for (idx, bit) in bits.into_iter().enumerate() {
+            if bit {
+                byte |= 1 << (idx % 8);
+            }
+            count += 1;
+            if count == 8 {
+                payload.push(byte);
+                byte = 0;
+                count = 0;
+            }
+        }
+        if count > 0 {
+            payload.push(byte);
+        }
+    } else {
+        payload.extend_from_slice(&0u32.to_le_bytes());
+    }
     Ok(payload)
 }
 
@@ -337,44 +376,74 @@ fn decode_txn_append(payload: &[u8]) -> WalResult<WalEvent> {
         return Err(WalError::Corrupt("txn append payload truncated"));
     }
 
+    let mut offset = 0usize;
     let mut id_bytes = [0u8; 8];
-    id_bytes.copy_from_slice(&payload[0..8]);
+    id_bytes.copy_from_slice(&payload[offset..offset + 8]);
     let provisional_id = u64::from_le_bytes(id_bytes);
-    let mode = payload[8];
-    let ipc_bytes = &payload[TXN_APPEND_PREFIX_SIZE..];
+    offset += 8;
+    let mode = payload[offset];
+    offset += 1;
+    offset += TXN_APPEND_RESERVED_BYTES;
+    let payload_bytes = &payload[offset..];
 
     match mode {
-        APPEND_MODE_DYN => decode_dyn_append(provisional_id, ipc_bytes),
+        APPEND_MODE_DYN => decode_dyn_append(provisional_id, payload_bytes),
         APPEND_MODE_TYPED => Err(WalError::Unimplemented("typed wal payload decoding")),
         _ => Err(WalError::Corrupt("unknown txn append mode")),
     }
 }
 
-fn decode_dyn_append(provisional_id: u64, ipc_bytes: &[u8]) -> WalResult<WalEvent> {
-    if ipc_bytes.is_empty() {
-        return Err(WalError::Codec(
-            "txn append payload missing record batch".to_string(),
-        ));
+fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
+    if bytes.len() < 4 {
+        return Err(WalError::Corrupt("txn append payload missing ipc length"));
     }
+    let mut len_buf = [0u8; 4];
+    len_buf.copy_from_slice(&bytes[0..4]);
+    let ipc_len = u32::from_le_bytes(len_buf) as usize;
+    if bytes.len() < 4 + ipc_len + 4 {
+        return Err(WalError::Corrupt("txn append payload truncated"));
+    }
+    let ipc_slice = &bytes[4..4 + ipc_len];
 
-    // The streaming reader yields exactly one RecordBatch; anything more
-    // indicates the encoder violated the autocommit contract.
-    let mut reader = StreamReader::try_new(Cursor::new(ipc_bytes), None).map_err(codec_err)?;
+    // Decode the batch from the IPC stream.
+    let mut reader = StreamReader::try_new(Cursor::new(ipc_slice), None).map_err(codec_err)?;
     let batch = reader
         .next()
         .transpose()
         .map_err(codec_err)?
         .ok_or_else(|| WalError::Codec("txn append payload missing record batch".to_string()))?;
-
     if reader.next().transpose().map_err(codec_err)?.is_some() {
         return Err(WalError::Codec(
             "txn append payload contained multiple record batches".to_string(),
         ));
     }
 
+    let tombstone_len_offset = 4 + ipc_len;
+    len_buf.copy_from_slice(&bytes[tombstone_len_offset..tombstone_len_offset + 4]);
+    let tombstone_len = u32::from_le_bytes(len_buf) as usize;
+    let bitmap_bytes = (tombstone_len + 7) / 8;
+    let tombstone_start = tombstone_len_offset + 4;
+    if bytes.len() < tombstone_start + bitmap_bytes {
+        return Err(WalError::Corrupt("txn append tombstone payload truncated"));
+    }
+
+    let tombstones = if tombstone_len == 0 {
+        None
+    } else {
+        let mut out = Vec::with_capacity(tombstone_len);
+        let bitmap = &bytes[tombstone_start..tombstone_start + bitmap_bytes];
+        for idx in 0..tombstone_len {
+            let byte = bitmap[idx / 8];
+            let bit = (byte >> (idx % 8)) & 1;
+            out.push(bit == 1);
+        }
+        Some(out)
+    };
+
     Ok(WalEvent::DynAppend {
         provisional_id,
         batch,
+        tombstones,
     })
 }
 
@@ -432,6 +501,8 @@ pub enum WalEvent {
         provisional_id: u64,
         /// Record batch payload.
         batch: RecordBatch,
+        /// Optional tombstone bitmap aligned with record rows.
+        tombstones: Option<Vec<bool>>,
     },
     /// Commit the transaction at the supplied timestamp.
     TxnCommit {
@@ -567,8 +638,15 @@ mod tests {
         let commit_ts = Timestamp::new(42);
         let provisional_id = 7;
 
-        let frames = encode_payload(WalPayload::DynBatch { batch, commit_ts }, provisional_id)
-            .expect("encode succeeds");
+        let frames = encode_payload(
+            WalPayload::DynBatch {
+                batch,
+                commit_ts,
+                tombstones: Some(vec![true, false, true]),
+            },
+            provisional_id,
+        )
+        .expect("encode succeeds");
 
         assert_eq!(frames.len(), 2);
 
@@ -578,6 +656,7 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id: decoded_id,
                 batch: decoded_batch,
+                tombstones,
             } => {
                 assert_eq!(decoded_id, provisional_id);
                 assert_eq!(
@@ -607,6 +686,7 @@ mod tests {
                     .downcast_ref::<StringArray>()
                     .expect("string column");
                 assert_eq!(decoded_names, expected_names);
+                assert_eq!(tombstones, Some(vec![true, false, true]));
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -631,6 +711,7 @@ mod tests {
             WalPayload::DynBatch {
                 batch: sample_batch(),
                 commit_ts: Timestamp::new(1),
+                tombstones: None,
             },
             9,
         )
@@ -663,7 +744,8 @@ mod tests {
         payload.extend_from_slice(&123_u64.to_le_bytes());
         payload.push(0xFF);
         payload.extend_from_slice(&[0u8; TXN_APPEND_RESERVED_BYTES]);
-        payload.extend_from_slice(&[1, 2, 3]);
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
 
         let err =
             decode_frame(FrameType::TxnAppend, &payload).expect_err("unknown mode should fail");

@@ -119,6 +119,7 @@ mod tests {
         let payload = WalPayload::DynBatch {
             batch: batch.clone(),
             commit_ts: Timestamp::new(42),
+            tombstones: Some(vec![false]),
         };
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
@@ -139,9 +140,11 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
+                tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
                 assert_eq!(decoded.num_rows(), 1);
+                assert_eq!(tombstones, &Some(vec![false]));
             }
             other => panic!("unexpected event: {other:?}"),
         }
