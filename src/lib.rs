@@ -26,3 +26,6 @@ pub mod query;
 
 /// Write-ahead log framework (async, fusio-backed).
 pub mod wal;
+
+/// MVCC primitives shared across modules.
+pub mod mvcc;

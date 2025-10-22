@@ -2,9 +2,9 @@
 
 use std::{convert::TryFrom, io::Cursor, mem::size_of};
 
+use arrow_array::RecordBatch;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
-use typed_arrow::arrow_array::RecordBatch;
 
 use crate::wal::{WalError, WalPayload, WalResult};
 

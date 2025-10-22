@@ -1,10 +1,8 @@
-use typed_arrow::{
-    arrow_array::{
-        Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-        RecordBatch, StringArray, UInt32Array, UInt64Array,
-    },
-    arrow_schema::{DataType, SchemaRef},
+use arrow_array::{
+    Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
+use arrow_schema::{DataType, SchemaRef};
 
 use super::{
     errors::KeyExtractError,

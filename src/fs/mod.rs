@@ -50,6 +50,7 @@ impl Display for FileType {
     }
 }
 
+#[allow(dead_code)]
 impl FileType {
     /// Construct appropriate [`OpenOptions`] for this file type.
     pub(crate) fn open_options(&self, only_read: bool) -> OpenOptions {
@@ -83,6 +84,7 @@ impl FileType {
 /// let wrong_suffix = Path::from("/data/01J8QW8X2NV9K1T8Q3J8S2F3YZ.wal");
 /// assert_eq!(parse_file_id(&wrong_suffix, FileType::Parquet).unwrap(), None);
 /// ```
+#[allow(dead_code)]
 pub(crate) fn parse_file_id(path: &Path, suffix: FileType) -> Result<Option<FileId>, DecodeError> {
     path.filename()
         .map(|file_name| {
