@@ -71,7 +71,14 @@ impl WalStorage {
 
     /// Provide default open options for writable segments.
     pub fn write_options() -> OpenOptions {
-        OpenOptions::default().read(false).write(true).create(true)
+        // `OpenOptions::truncate(false)` (the default) instructs the concrete backend to open
+        // the handle in append mode (see fusio's disk adapters), so subsequent writes extend
+        // the segment instead of clobbering existing frames.
+        OpenOptions::default()
+            .read(false)
+            .write(true)
+            .create(true)
+            .truncate(false)
     }
 
     fn segment_path(&self, seq: u64) -> WalResult<Path> {
@@ -166,6 +173,37 @@ mod tests {
                 .open_options(&segment_path, OpenOptions::default())
                 .await;
             assert!(reopen_result.is_err(), "segment should be gone");
+        });
+    }
+
+    #[test]
+    fn open_segment_appends_existing_data() {
+        block_on(async {
+            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+            let root = Path::parse("wal").expect("valid wal root");
+            let storage = WalStorage::new(Arc::clone(&fs), root);
+
+            let mut first = storage.open_segment(5).await.expect("open segment");
+            let (write_res, _) = first.file_mut().write_all(b"abc".to_vec()).await;
+            write_res.expect("initial write succeeds");
+            first.file_mut().flush().await.expect("flush succeeds");
+            drop(first);
+
+            let mut second = storage.open_segment(5).await.expect("reopen segment");
+            let (write_res, _) = second.file_mut().write_all(b"def".to_vec()).await;
+            write_res.expect("append succeeds");
+            second.file_mut().flush().await.expect("flush succeeds");
+            let path = second.path().clone();
+            drop(second);
+
+            let mut reader = storage
+                .fs()
+                .open_options(&path, OpenOptions::default())
+                .await
+                .expect("open for read");
+            let (read_res, contents) = reader.read_to_end_at(Vec::new(), 0).await;
+            read_res.expect("read succeeds");
+            assert_eq!(contents, b"abcdef");
         });
     }
 }
