@@ -11,10 +11,10 @@ use typed_arrow::arrow_array::RecordBatch;
 
 use crate::db::Mode;
 
-pub mod backend;
 pub mod frame;
 pub mod metrics;
 pub mod replay;
+pub mod storage;
 // Writer logic will live here once the async queue is implemented.
 
 /// Sync policy controlling how frequently the WAL forces durability.
