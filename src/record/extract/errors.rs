@@ -1,4 +1,4 @@
-use typed_arrow::arrow_schema::{DataType, SchemaRef};
+use arrow_schema::{ArrowError, DataType, SchemaRef};
 
 use crate::wal::WalError;
 
@@ -46,4 +46,7 @@ pub enum KeyExtractError {
     /// WAL submission or durability hook failed while ingesting.
     #[error("wal error: {0}")]
     Wal(#[from] WalError),
+    /// Generic Arrow failure while materializing dynamic rows.
+    #[error("arrow error: {0}")]
+    Arrow(#[from] ArrowError),
 }

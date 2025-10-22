@@ -1,4 +1,5 @@
-use typed_arrow::{arrow_array::RecordBatch, arrow_schema::SchemaRef};
+use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
 
 use super::{errors::KeyExtractError, key_dyn::KeyDyn};
 
