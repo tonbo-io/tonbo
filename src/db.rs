@@ -123,8 +123,8 @@ where
                 }
                 WalEvent::TxnCommit { commit_ts, .. } => {
                     last_commit_ts = Some(match last_commit_ts {
-                        Some(prev) => prev.max(Timestamp::from(commit_ts)),
-                        None => Timestamp::from(commit_ts),
+                        Some(prev) => prev.max(commit_ts),
+                        None => commit_ts,
                     });
                 }
                 WalEvent::TxnBegin { .. } | WalEvent::TxnAbort { .. } | WalEvent::SealMarker => {
@@ -469,7 +469,7 @@ where
     if let Some(handle) = db.wal_handle().cloned() {
         let payload = WalPayload::DynBatch {
             batch: batch.clone(),
-            commit_ts: commit_ts.into(),
+            commit_ts,
         };
         // TODO: await the WAL ticket once durability handling lands.
         handle

@@ -9,7 +9,7 @@ use std::{fmt, marker::PhantomData, path::PathBuf, sync::Arc, time::Duration};
 use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
 
-use crate::db::Mode;
+use crate::{db::Mode, mvcc::Timestamp};
 
 pub mod backend;
 pub mod frame;
@@ -108,7 +108,7 @@ pub enum WalPayload {
         /// Arrow batch storing the row data.
         batch: RecordBatch,
         /// Commit timestamp captured at enqueue.
-        commit_ts: u64,
+        commit_ts: Timestamp,
     },
     /// Reserved for typed row append once compile-time dispatch returns.
     #[allow(dead_code)]

@@ -6,7 +6,10 @@ use arrow_array::RecordBatch;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
-use crate::wal::{WalError, WalPayload, WalResult};
+use crate::{
+    mvcc::Timestamp,
+    wal::{WalError, WalPayload, WalResult},
+};
 
 /// Maximum supported frame version.
 pub const FRAME_VERSION: u16 = 1;
@@ -300,10 +303,10 @@ fn encode_txn_append_dyn(provisional_id: u64, batch: RecordBatch) -> WalResult<V
     Ok(payload)
 }
 
-fn encode_txn_commit(provisional_id: u64, commit_ts: u64) -> Vec<u8> {
+fn encode_txn_commit(provisional_id: u64, commit_ts: Timestamp) -> Vec<u8> {
     let mut payload = Vec::with_capacity(TXN_COMMIT_PAYLOAD_SIZE);
     payload.extend_from_slice(&provisional_id.to_le_bytes());
-    payload.extend_from_slice(&commit_ts.to_le_bytes());
+    payload.extend_from_slice(&commit_ts.get().to_le_bytes());
     payload
 }
 
@@ -387,7 +390,7 @@ fn decode_txn_commit(payload: &[u8]) -> WalResult<WalEvent> {
     let commit_ts = u64::from_le_bytes(ts_bytes);
     Ok(WalEvent::TxnCommit {
         provisional_id,
-        commit_ts,
+        commit_ts: Timestamp::from(commit_ts),
     })
 }
 
@@ -435,7 +438,7 @@ pub enum WalEvent {
         /// Provisional identifier.
         provisional_id: u64,
         /// Commit timestamp.
-        commit_ts: u64,
+        commit_ts: Timestamp,
     },
     /// Abort the open transaction (optional frame).
     TxnAbort {
@@ -561,7 +564,7 @@ mod tests {
     fn encode_payload_dyn_batch_round_trip() {
         let batch = sample_batch();
         let expected_batch = batch.clone();
-        let commit_ts = 42;
+        let commit_ts = Timestamp::new(42);
         let provisional_id = 7;
 
         let frames = encode_payload(WalPayload::DynBatch { batch, commit_ts }, provisional_id)
@@ -627,7 +630,7 @@ mod tests {
         let frames = encode_payload(
             WalPayload::DynBatch {
                 batch: sample_batch(),
-                commit_ts: 1,
+                commit_ts: Timestamp::new(1),
             },
             9,
         )
