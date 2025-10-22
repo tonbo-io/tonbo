@@ -75,6 +75,9 @@ pub enum WalError {
     /// Underlying storage backend failure.
     #[error("wal backend error: {0}")]
     Backend(String),
+    /// Payload serialization or deserialization failure.
+    #[error("wal frame codec error: {0}")]
+    Codec(String),
     /// The WAL data on disk is corrupt or truncated.
     #[error("wal frame is corrupt: {0}")]
     Corrupt(&'static str),

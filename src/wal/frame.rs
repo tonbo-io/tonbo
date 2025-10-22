@@ -1,12 +1,12 @@
 //! Frame encoding and decoding primitives for the WAL.
 
-use std::convert::TryFrom;
-use std::mem::size_of;
+use std::{convert::TryFrom, io::Cursor, mem::size_of};
 
+use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 use typed_arrow::arrow_array::RecordBatch;
 
-use crate::wal::{WalError, WalResult};
+use crate::wal::{WalError, WalPayload, WalResult};
 
 /// Maximum supported frame version.
 pub const FRAME_VERSION: u16 = 1;
@@ -26,12 +26,73 @@ pub const INITIAL_FRAME_SEQ: u64 = 1;
 pub const FRAME_HEADER_SIZE: usize = frame_header_size();
 
 const fn frame_header_size() -> usize {
-    size_of::<u32>()   // magic
+    size_of::<u32>() // magic
         + size_of::<u16>() // version
         + size_of::<u16>() // frame type discriminant
         + size_of::<u64>() // sequence
         + size_of::<u32>() // payload length
         + size_of::<u32>() // payload crc32c
+}
+
+/// Payload prefix size for `TxnAppend` frames: provisional id + mode + reserved bytes.
+///
+/// We reserve 7 bytes following the mode so future metadata (e.g. schema hashes,
+/// compression hints) can slot in without reshaping the layout or bumping the
+/// frame version.
+const TXN_APPEND_PREFIX_SIZE: usize = 8 + 1 + 7;
+/// Number of reserved bytes after the mode byte in a `TxnAppend` payload.
+const TXN_APPEND_RESERVED_BYTES: usize = 7;
+/// Discriminant for dynamic-mode appends written in the `TxnAppend` payload.
+const APPEND_MODE_DYN: u8 = 0;
+/// Discriminant reserved for typed-mode appends.
+const APPEND_MODE_TYPED: u8 = 1;
+/// Payload size for `TxnCommit` frames (provisional id + commit timestamp).
+const TXN_COMMIT_PAYLOAD_SIZE: usize = 8 + 8;
+
+/// Encoded frame payload paired with its discriminant.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    frame_type: FrameType,
+    payload: Vec<u8>,
+}
+
+impl Frame {
+    /// Construct a new frame payload.
+    pub fn new(frame_type: FrameType, payload: Vec<u8>) -> Self {
+        Self {
+            frame_type,
+            payload,
+        }
+    }
+
+    /// Access the frame type.
+    pub fn frame_type(&self) -> FrameType {
+        self.frame_type
+    }
+
+    /// Access the encoded payload bytes.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Consume the frame and return the payload bytes.
+    pub fn into_payload(self) -> Vec<u8> {
+        self.payload
+    }
+
+    /// Build a [`FrameHeader`] for this payload using the supplied sequence.
+    pub fn header(&self, seq: u64) -> FrameHeader {
+        FrameHeader::new(seq, self.frame_type, &self.payload)
+    }
+
+    /// Serialize the frame into bytes by prepending the computed header.
+    pub fn into_bytes(self, seq: u64) -> Vec<u8> {
+        let header = FrameHeader::new(seq, self.frame_type, &self.payload);
+        let mut buf = Vec::with_capacity(FRAME_HEADER_SIZE + self.payload.len());
+        header.encode_into(&mut buf);
+        buf.extend_from_slice(&self.payload);
+        buf
+    }
 }
 
 /// Discriminant describing the logical frame type.
@@ -114,6 +175,19 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
+    /// Construct a header for the provided payload bytes and sequence.
+    pub fn new(seq: u64, frame_type: FrameType, payload: &[u8]) -> Self {
+        debug_assert!(seq >= INITIAL_FRAME_SEQ, "frame sequence must be non-zero");
+        Self {
+            magic: FRAME_MAGIC,
+            version: FRAME_VERSION,
+            frame_type,
+            seq,
+            len: payload.len() as u32,
+            crc32c: crc32c(payload),
+        }
+    }
+
     /// Serialize the header into the provided buffer.
     pub fn encode_into(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.magic.to_le_bytes());
@@ -190,6 +264,157 @@ impl FrameHeader {
     }
 }
 
+/// Encode a WAL payload into one or more frames using the provided provisional id.
+pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec<Frame>> {
+    match payload {
+        WalPayload::DynBatch { batch, commit_ts } => {
+            let append = encode_txn_append_dyn(provisional_id, batch)?;
+            let commit = encode_txn_commit(provisional_id, commit_ts);
+            Ok(vec![
+                Frame::new(FrameType::TxnAppend, append),
+                Frame::new(FrameType::TxnCommit, commit),
+            ])
+        }
+        WalPayload::TypedRows { .. } => Err(WalError::Unimplemented("typed wal payload encoding")),
+        WalPayload::Control { .. } => Err(WalError::Unimplemented("control wal payload encoding")),
+    }
+}
+
+fn encode_txn_append_dyn(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
+    let mut payload = Vec::with_capacity(TXN_APPEND_PREFIX_SIZE);
+    payload.extend_from_slice(&provisional_id.to_le_bytes());
+    payload.push(APPEND_MODE_DYN);
+    payload.extend_from_slice(&[0u8; TXN_APPEND_RESERVED_BYTES]);
+
+    // Encode the RecordBatch using Arrow IPC streaming so the payload is
+    // self-contained and can be decoded via StreamReader during recovery.
+    let mut ipc_buf = Vec::new();
+    {
+        let mut writer =
+            StreamWriter::try_new(&mut ipc_buf, batch.schema().as_ref()).map_err(codec_err)?;
+        writer.write(&batch).map_err(codec_err)?;
+        writer.finish().map_err(codec_err)?;
+    }
+
+    payload.extend_from_slice(&ipc_buf);
+    Ok(payload)
+}
+
+fn encode_txn_commit(provisional_id: u64, commit_ts: u64) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(TXN_COMMIT_PAYLOAD_SIZE);
+    payload.extend_from_slice(&provisional_id.to_le_bytes());
+    payload.extend_from_slice(&commit_ts.to_le_bytes());
+    payload
+}
+
+/// Decode a single frame payload into a [`WalEvent`].
+pub fn decode_frame(frame_type: FrameType, payload: &[u8]) -> WalResult<WalEvent> {
+    match frame_type {
+        FrameType::TxnBegin => decode_txn_begin(payload),
+        FrameType::TxnAppend => decode_txn_append(payload),
+        FrameType::TxnCommit => decode_txn_commit(payload),
+        FrameType::TxnAbort => decode_txn_abort(payload),
+        FrameType::SealMarker => decode_seal_marker(payload),
+        FrameType::TypedAppend => Err(WalError::Unimplemented("typed wal payload decoding")),
+    }
+}
+
+fn decode_txn_begin(payload: &[u8]) -> WalResult<WalEvent> {
+    if payload.len() != 8 {
+        return Err(WalError::Corrupt("txn begin payload size mismatch"));
+    }
+    let mut id_bytes = [0u8; 8];
+    id_bytes.copy_from_slice(payload);
+    let provisional_id = u64::from_le_bytes(id_bytes);
+    Ok(WalEvent::TxnBegin { provisional_id })
+}
+
+fn decode_txn_append(payload: &[u8]) -> WalResult<WalEvent> {
+    if payload.len() < TXN_APPEND_PREFIX_SIZE {
+        return Err(WalError::Corrupt("txn append payload truncated"));
+    }
+
+    let mut id_bytes = [0u8; 8];
+    id_bytes.copy_from_slice(&payload[0..8]);
+    let provisional_id = u64::from_le_bytes(id_bytes);
+    let mode = payload[8];
+    let ipc_bytes = &payload[TXN_APPEND_PREFIX_SIZE..];
+
+    match mode {
+        APPEND_MODE_DYN => decode_dyn_append(provisional_id, ipc_bytes),
+        APPEND_MODE_TYPED => Err(WalError::Unimplemented("typed wal payload decoding")),
+        _ => Err(WalError::Corrupt("unknown txn append mode")),
+    }
+}
+
+fn decode_dyn_append(provisional_id: u64, ipc_bytes: &[u8]) -> WalResult<WalEvent> {
+    if ipc_bytes.is_empty() {
+        return Err(WalError::Codec(
+            "txn append payload missing record batch".to_string(),
+        ));
+    }
+
+    // The streaming reader yields exactly one RecordBatch; anything more
+    // indicates the encoder violated the autocommit contract.
+    let mut reader = StreamReader::try_new(Cursor::new(ipc_bytes), None).map_err(codec_err)?;
+    let batch = reader
+        .next()
+        .transpose()
+        .map_err(codec_err)?
+        .ok_or_else(|| WalError::Codec("txn append payload missing record batch".to_string()))?;
+
+    if reader.next().transpose().map_err(codec_err)?.is_some() {
+        return Err(WalError::Codec(
+            "txn append payload contained multiple record batches".to_string(),
+        ));
+    }
+
+    Ok(WalEvent::DynAppend {
+        provisional_id,
+        batch,
+    })
+}
+
+fn decode_txn_commit(payload: &[u8]) -> WalResult<WalEvent> {
+    if payload.len() != TXN_COMMIT_PAYLOAD_SIZE {
+        return Err(WalError::Corrupt("txn commit payload size mismatch"));
+    }
+    let mut id_bytes = [0u8; 8];
+    id_bytes.copy_from_slice(&payload[0..8]);
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(&payload[8..16]);
+    let provisional_id = u64::from_le_bytes(id_bytes);
+    let commit_ts = u64::from_le_bytes(ts_bytes);
+    Ok(WalEvent::TxnCommit {
+        provisional_id,
+        commit_ts,
+    })
+}
+
+fn decode_txn_abort(payload: &[u8]) -> WalResult<WalEvent> {
+    if payload.len() != 8 {
+        return Err(WalError::Corrupt("txn abort payload size mismatch"));
+    }
+    let mut id_bytes = [0u8; 8];
+    id_bytes.copy_from_slice(payload);
+    let provisional_id = u64::from_le_bytes(id_bytes);
+    Ok(WalEvent::TxnAbort { provisional_id })
+}
+
+fn decode_seal_marker(payload: &[u8]) -> WalResult<WalEvent> {
+    if !payload.is_empty() {
+        return Err(WalError::Corrupt("seal marker payload should be empty"));
+    }
+    Ok(WalEvent::SealMarker)
+}
+
+fn codec_err<E>(err: E) -> WalError
+where
+    E: std::fmt::Display,
+{
+    WalError::Codec(err.to_string())
+}
+
 /// High-level events produced by the frame decoder during recovery.
 #[derive(Debug)]
 pub enum WalEvent {
@@ -223,6 +448,13 @@ pub enum WalEvent {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use typed_arrow::{
+        arrow_array::{Array, Int32Array, StringArray},
+        arrow_schema::{DataType, Field, Schema},
+    };
+
     use super::*;
 
     fn build_frame(frame_type: FrameType, seq: u64, payload: &[u8]) -> Vec<u8> {
@@ -313,5 +545,125 @@ mod tests {
             err,
             WalError::Corrupt("frame sequence zero is reserved")
         ));
+    }
+    fn sample_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let ids = Arc::new(Int32Array::from(vec![1, 2, 3])) as _;
+        let names = Arc::new(StringArray::from(vec![Some("a"), None, Some("c")])) as _;
+
+        RecordBatch::try_new(schema, vec![ids, names]).expect("valid batch")
+    }
+
+    #[test]
+    fn encode_payload_dyn_batch_round_trip() {
+        let batch = sample_batch();
+        let expected_batch = batch.clone();
+        let commit_ts = 42;
+        let provisional_id = 7;
+
+        let frames = encode_payload(WalPayload::DynBatch { batch, commit_ts }, provisional_id)
+            .expect("encode succeeds");
+
+        assert_eq!(frames.len(), 2);
+
+        match decode_frame(frames[0].frame_type(), frames[0].payload())
+            .expect("append decode succeeds")
+        {
+            WalEvent::DynAppend {
+                provisional_id: decoded_id,
+                batch: decoded_batch,
+            } => {
+                assert_eq!(decoded_id, provisional_id);
+                assert_eq!(
+                    decoded_batch.schema().as_ref(),
+                    expected_batch.schema().as_ref()
+                );
+                let expected_ids = expected_batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("int32 column");
+                let decoded_ids = decoded_batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("int32 column");
+                assert_eq!(decoded_ids, expected_ids);
+
+                let expected_names = expected_batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("string column");
+                let decoded_names = decoded_batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("string column");
+                assert_eq!(decoded_names, expected_names);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        match decode_frame(frames[1].frame_type(), frames[1].payload())
+            .expect("commit decode succeeds")
+        {
+            WalEvent::TxnCommit {
+                provisional_id: decoded_id,
+                commit_ts: decoded_ts,
+            } => {
+                assert_eq!(decoded_id, provisional_id);
+                assert_eq!(decoded_ts, commit_ts);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_append_rejects_truncated_payload() {
+        let frames = encode_payload(
+            WalPayload::DynBatch {
+                batch: sample_batch(),
+                commit_ts: 1,
+            },
+            9,
+        )
+        .expect("encode succeeds");
+
+        let mut truncated = frames[0].payload().to_vec();
+        truncated.truncate(TXN_APPEND_PREFIX_SIZE - 1);
+        let err = decode_frame(FrameType::TxnAppend, &truncated)
+            .expect_err("truncated append should fail");
+        assert!(matches!(
+            err,
+            WalError::Corrupt("txn append payload truncated")
+        ));
+    }
+
+    #[test]
+    fn decode_commit_rejects_wrong_length() {
+        let payload = vec![0_u8; TXN_COMMIT_PAYLOAD_SIZE - 2];
+        let err = decode_frame(FrameType::TxnCommit, &payload)
+            .expect_err("commit payload length mismatch should fail");
+        assert!(matches!(
+            err,
+            WalError::Corrupt("txn commit payload size mismatch")
+        ));
+    }
+
+    #[test]
+    fn decode_append_rejects_unknown_mode() {
+        let mut payload = Vec::with_capacity(TXN_APPEND_PREFIX_SIZE);
+        payload.extend_from_slice(&123_u64.to_le_bytes());
+        payload.push(0xFF);
+        payload.extend_from_slice(&[0u8; TXN_APPEND_RESERVED_BYTES]);
+        payload.extend_from_slice(&[1, 2, 3]);
+
+        let err =
+            decode_frame(FrameType::TxnAppend, &payload).expect_err("unknown mode should fail");
+        assert!(matches!(err, WalError::Corrupt("unknown txn append mode")));
     }
 }
