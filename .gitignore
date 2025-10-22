@@ -1,6 +1,7 @@
 /target
 Cargo.lock
 .serena
+
 /.idea
 db_path
 guide/book
