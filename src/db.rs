@@ -4,8 +4,9 @@
 //! trait-driven structure remains so that compile-time typed dispatch can be
 //! reintroduced without reshaping the API.
 
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Instant};
 
+use fusio::executor::{Executor, Timer};
 use typed_arrow::{arrow_array::RecordBatch, arrow_schema::SchemaRef};
 
 use crate::{
@@ -19,10 +20,11 @@ use crate::{
     },
     record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
     scan::RangeSet,
+    wal::{WalConfig, WalHandle, WalPayload, frame::WalEvent, replay::Replayer},
 };
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
-pub struct DB<M: Mode> {
+pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
     mode: M,
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
@@ -30,6 +32,14 @@ pub struct DB<M: Mode> {
     // Sealing policy and last seal timestamp
     policy: Box<dyn SealPolicy + Send + Sync>,
     last_seal_at: Option<Instant>,
+    // Executor powering async subsystems such as the WAL.
+    executor: Arc<E>,
+    // Optional WAL handle when durability is enabled.
+    wal: Option<WalHandle<E>>,
+    /// Pending WAL configuration captured before the writer is installed.
+    wal_config: Option<WalConfig>,
+    /// Monotonic commit timestamp assigned to ingests (autocommit path for now).
+    commit_clock: u64,
 }
 
 /// Mode trait describing how to insert and what is stored.
@@ -65,11 +75,15 @@ impl Mode for DynMode {
     type Mutable = DynMem;
 }
 
-impl DB<DynMode> {
+impl<E> DB<DynMode, E>
+where
+    E: Executor + Timer,
+{
     /// Create a DB in dynamic mode from `schema` and a trait-object extractor.
     pub fn new_dyn(
         schema: SchemaRef,
         extractor: Box<dyn DynKeyExtractor>,
+        executor: Arc<E>,
     ) -> Result<Self, KeyExtractError> {
         extractor.validate_schema(&schema)?;
         Ok(Self {
@@ -78,7 +92,54 @@ impl DB<DynMode> {
             immutables: Vec::new(),
             policy: crate::inmem::policy::default_policy(),
             last_seal_at: None,
+            executor,
+            wal: None,
+            wal_config: None,
+            commit_clock: 0,
         })
+    }
+
+    /// Recover a dynamic DB by replaying WAL segments before enabling ingest.
+    pub fn recover_dyn_with_wal(
+        schema: SchemaRef,
+        extractor: Box<dyn DynKeyExtractor>,
+        executor: Arc<E>,
+        wal_cfg: WalConfig,
+    ) -> impl Future<Output = Result<Self, KeyExtractError>> {
+        async move {
+            let mut db = Self::new_dyn(schema, extractor, executor)?;
+            db.set_wal_config(Some(wal_cfg.clone()));
+
+            let replayer = Replayer::new(wal_cfg);
+            let events = replayer.scan().map_err(KeyExtractError::from)?;
+
+            let mut last_commit_ts: Option<u64> = None;
+            for event in events {
+                match event {
+                    WalEvent::DynAppend { batch, .. } => {
+                        // TODO: buffer by provisional_id once transactional replay is implemented.
+                        db.ingest(batch).await?;
+                    }
+                    WalEvent::TxnCommit { commit_ts, .. } => {
+                        last_commit_ts = Some(match last_commit_ts {
+                            Some(prev) => prev.max(commit_ts),
+                            None => commit_ts,
+                        });
+                    }
+                    WalEvent::TxnBegin { .. }
+                    | WalEvent::TxnAbort { .. }
+                    | WalEvent::SealMarker => {
+                        // TODO: implement once transactional semantics are wired up.
+                    }
+                }
+            }
+
+            if let Some(ts) = last_commit_ts {
+                db.commit_clock = ts.saturating_add(1);
+            }
+
+            Ok(db)
+        }
     }
 
     /// Create a dynamic DB by specifying the key column index.
@@ -88,6 +149,7 @@ impl DB<DynMode> {
     pub fn new_dyn_with_key_col(
         schema: SchemaRef,
         key_col: usize,
+        executor: Arc<E>,
     ) -> Result<Self, KeyExtractError> {
         let fields = schema.fields();
         if key_col >= fields.len() {
@@ -95,7 +157,7 @@ impl DB<DynMode> {
         }
         let dt = fields[key_col].data_type();
         let extractor = crate::record::extract::dyn_extractor_for_field(key_col, dt)?;
-        Self::new_dyn(schema, extractor)
+        Self::new_dyn(schema, extractor, executor)
     }
 
     /// Create a dynamic DB by specifying the key field name.
@@ -104,6 +166,7 @@ impl DB<DynMode> {
     pub fn new_dyn_with_key_name(
         schema: SchemaRef,
         key_field: &str,
+        executor: Arc<E>,
     ) -> Result<Self, KeyExtractError> {
         let fields = schema.fields();
         let Some((idx, _)) = fields
@@ -115,7 +178,7 @@ impl DB<DynMode> {
                 name: key_field.to_string(),
             });
         };
-        Self::new_dyn_with_key_col(schema, idx)
+        Self::new_dyn_with_key_col(schema, idx, executor)
     }
 
     /// Create a dynamic DB by inspecting Arrow metadata to find the key field(s).
@@ -128,7 +191,10 @@ impl DB<DynMode> {
     ///
     /// Returns an error if no key is defined, a referenced field is missing, or multiple
     /// field-level markers are present without numeric ordinals.
-    pub fn new_dyn_from_metadata(schema: SchemaRef) -> Result<Self, KeyExtractError> {
+    pub fn new_dyn_from_metadata(
+        schema: SchemaRef,
+        executor: Arc<E>,
+    ) -> Result<Self, KeyExtractError> {
         // Helpers
         fn is_truthy(s: &str) -> bool {
             matches!(s, "true" | "TRUE" | "True" | "yes" | "YES" | "Yes")
@@ -165,7 +231,7 @@ impl DB<DynMode> {
         if !marks.is_empty() {
             if marks.len() == 1 {
                 let idx = marks[0].1;
-                return Self::new_dyn_with_key_col(schema, idx);
+                return Self::new_dyn_with_key_col(schema, idx, executor);
             }
             // Composite: require numeric ordinals for disambiguation
             if marks.iter().any(|(o, _)| o.is_none()) {
@@ -182,7 +248,7 @@ impl DB<DynMode> {
             }
             let extractor = Box::new(crate::record::extract::CompositeDynExtractor::new(parts))
                 as Box<dyn DynKeyExtractor>;
-            return Self::new_dyn(schema, extractor);
+            return Self::new_dyn(schema, extractor, executor);
         }
 
         // 2) Schema-level fallback: tonbo.keys = "name" | "[\"a\",\"b\"]"
@@ -205,7 +271,7 @@ impl DB<DynMode> {
                         name: key_name.to_string(),
                     });
                 };
-                return Self::new_dyn_with_key_col(schema, idx);
+                return Self::new_dyn_with_key_col(schema, idx, executor);
             } else {
                 // Composite schema-level
                 let mut parts: Vec<Box<dyn DynKeyExtractor>> = Vec::with_capacity(names.len());
@@ -220,7 +286,7 @@ impl DB<DynMode> {
                 }
                 let extractor = Box::new(crate::record::extract::CompositeDynExtractor::new(parts))
                     as Box<dyn DynKeyExtractor>;
-                return Self::new_dyn(schema, extractor);
+                return Self::new_dyn(schema, extractor, executor);
             }
         }
 
@@ -258,7 +324,10 @@ impl DB<DynMode> {
     }
 }
 
-impl DB<DynMode> {
+impl<E> DB<DynMode, E>
+where
+    E: Executor + Timer,
+{
     /// Scan the dynamic mutable memtable over key ranges, yielding owned dynamic rows.
     pub fn scan_mutable_rows<'a>(
         &'a self,
@@ -269,27 +338,76 @@ impl DB<DynMode> {
 }
 
 // Methods common to all modes
-impl<M: Mode> DB<M> {
+impl<M: Mode, E: Executor + Timer> DB<M, E> {
     /// Unified ingestion entry point using `Insertable<M>` implementors.
-    pub fn ingest<I: Insertable<M>>(&mut self, input: I) -> Result<(), KeyExtractError> {
+    pub fn ingest<'a, I>(
+        &'a mut self,
+        input: I,
+    ) -> impl Future<Output = Result<(), KeyExtractError>> + 'a
+    where
+        I: Insertable<M> + 'a,
+    {
         input.insert_into(self)
     }
 
     /// Ingest many items implementing `Insertable<M>`.
-    pub fn ingest_many<I>(&mut self, inputs: I) -> Result<(), KeyExtractError>
+    pub fn ingest_many<'a, I>(
+        &'a mut self,
+        inputs: I,
+    ) -> impl Future<Output = Result<(), KeyExtractError>> + 'a
     where
-        I: IntoIterator,
+        I: IntoIterator + 'a,
         I::Item: Insertable<M>,
     {
-        for item in inputs {
-            item.insert_into(self)?;
+        async move {
+            for item in inputs {
+                item.insert_into(self).await?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 
     /// Approximate bytes used by keys in the mutable memtable.
     pub fn approx_mutable_bytes(&self) -> usize {
         <M::Mutable as MutableLayout<M::Key>>::approx_bytes(&self.mem)
+    }
+
+    /// Attach WAL configuration prior to enabling durability.
+    pub fn with_wal_config(mut self, cfg: WalConfig) -> Self {
+        self.wal_config = Some(cfg);
+        self
+    }
+
+    /// Access the configured WAL settings, if any.
+    pub fn wal_config(&self) -> Option<&WalConfig> {
+        self.wal_config.as_ref()
+    }
+
+    /// Access the executor powering async subsystems.
+    pub(crate) fn executor(&self) -> &Arc<E> {
+        &self.executor
+    }
+
+    /// Allocate the next commit timestamp for WAL/autocommit flows.
+    pub(crate) fn next_commit_ts(&mut self) -> u64 {
+        let ts = self.commit_clock;
+        self.commit_clock = self.commit_clock.saturating_add(1);
+        ts
+    }
+
+    /// Access the active WAL handle, if any.
+    pub(crate) fn wal_handle(&self) -> Option<&WalHandle<E>> {
+        self.wal.as_ref()
+    }
+
+    /// Replace the WAL handle (used by WAL extension methods).
+    pub(crate) fn set_wal_handle(&mut self, handle: Option<WalHandle<E>>) {
+        self.wal = handle;
+    }
+
+    /// Replace the stored WAL configuration.
+    pub(crate) fn set_wal_config(&mut self, cfg: Option<WalConfig>) {
+        self.wal_config = cfg;
     }
 
     /// Number of immutable segments attached to this DB (oldest..newest).
@@ -301,7 +419,7 @@ impl<M: Mode> DB<M> {
 }
 
 // Segment management (generic, zero-cost)
-impl<M: Mode> DB<M> {
+impl<M: Mode, E: Executor + Timer> DB<M, E> {
     #[allow(dead_code)]
     pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
         self.immutables.push(seg);
@@ -317,47 +435,103 @@ impl<M: Mode> DB<M> {
 ///
 /// Today only the dynamic mode implements this trait. Typed-mode support can
 /// be added back by implementing `Insertable` for the future typed inputs.
-pub trait Insertable<M: Mode> {
+pub trait Insertable<M: Mode>: Sized {
     /// Insert this value into the provided `DB` in mode `M`.
     ///
     /// Returns `Ok(())` on success, or a `KeyExtractError` for dynamic mode
     /// schema/key extraction issues.
-    fn insert_into(self, db: &mut DB<M>) -> Result<(), KeyExtractError>;
+    fn insert_into<'a, E>(
+        self,
+        db: &'a mut DB<M, E>,
+    ) -> impl Future<Output = Result<(), KeyExtractError>> + 'a
+    where
+        E: Executor + Timer;
 }
 
 // Dynamic mode: single RecordBatch
 impl Insertable<DynMode> for RecordBatch {
-    fn insert_into(self, db: &mut DB<DynMode>) -> Result<(), KeyExtractError> {
-        if db.mode.schema.as_ref() != self.schema().as_ref() {
-            return Err(KeyExtractError::SchemaMismatch {
-                expected: db.mode.schema.clone(),
-                actual: self.schema(),
-            });
+    fn insert_into<'a, E>(
+        self,
+        db: &'a mut DB<DynMode, E>,
+    ) -> impl Future<Output = Result<(), KeyExtractError>> + 'a
+    where
+        E: Executor + Timer,
+    {
+        async move {
+            if db.mode.schema.as_ref() != self.schema().as_ref() {
+                return Err(KeyExtractError::SchemaMismatch {
+                    expected: db.mode.schema.clone(),
+                    actual: self.schema(),
+                });
+            }
+            let has_wal = db.wal_handle().is_some();
+            let commit_ts = has_wal.then(|| db.next_commit_ts());
+            let wal_handle = if has_wal {
+                db.wal_handle().cloned()
+            } else {
+                None
+            };
+            if let (Some(handle), Some(ts)) = (wal_handle, commit_ts) {
+                let payload = WalPayload::DynBatch {
+                    batch: self.clone(),
+                    commit_ts: ts,
+                };
+                // TODO: await the WAL ticket once durability handling lands.
+                let _ticket = handle
+                    .submit(payload)
+                    .await
+                    .map_err(KeyExtractError::from)?;
+            }
+            db.mem.insert_batch(db.mode.extractor.as_ref(), self)?;
+            db.maybe_seal_after_insert()?;
+            Ok(())
         }
-        db.mem.insert_batch(db.mode.extractor.as_ref(), self)?;
-        db.maybe_seal_after_insert()?;
-        Ok(())
     }
 }
 
 // Dynamic mode: Vec of RecordBatch
 impl Insertable<DynMode> for Vec<RecordBatch> {
-    fn insert_into(self, db: &mut DB<DynMode>) -> Result<(), KeyExtractError> {
-        for batch in self.into_iter() {
-            if db.mode.schema.as_ref() != batch.schema().as_ref() {
-                return Err(KeyExtractError::SchemaMismatch {
-                    expected: db.mode.schema.clone(),
-                    actual: batch.schema(),
-                });
+    fn insert_into<'a, E>(
+        self,
+        db: &'a mut DB<DynMode, E>,
+    ) -> impl Future<Output = Result<(), KeyExtractError>> + 'a
+    where
+        E: Executor + Timer,
+    {
+        async move {
+            for batch in self.into_iter() {
+                if db.mode.schema.as_ref() != batch.schema().as_ref() {
+                    return Err(KeyExtractError::SchemaMismatch {
+                        expected: db.mode.schema.clone(),
+                        actual: batch.schema(),
+                    });
+                }
+                let has_wal = db.wal_handle().is_some();
+                let commit_ts = has_wal.then(|| db.next_commit_ts());
+                let wal_handle = if has_wal {
+                    db.wal_handle().cloned()
+                } else {
+                    None
+                };
+                if let (Some(handle), Some(ts)) = (wal_handle, commit_ts) {
+                    let payload = WalPayload::DynBatch {
+                        batch: batch.clone(),
+                        commit_ts: ts,
+                    };
+                    let _ticket = handle
+                        .submit(payload)
+                        .await
+                        .map_err(KeyExtractError::from)?;
+                }
+                db.mem.insert_batch(db.mode.extractor.as_ref(), batch)?;
+                db.maybe_seal_after_insert()?;
             }
-            db.mem.insert_batch(db.mode.extractor.as_ref(), batch)?;
-            db.maybe_seal_after_insert()?;
+            Ok(())
         }
-        Ok(())
     }
 }
 
-/// Opaque dynamic mutable store for `DB<DynMode>`.
+/// Opaque dynamic mutable store for dynamic-mode DBs.
 ///
 /// This wraps the internal `DynLayout` to avoid exposing private types via the
 /// public `Mode` trait while preserving performance and behavior.
@@ -402,6 +576,10 @@ impl StatsProvider for DynMem {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use fusio::executor::BlockingExecutor;
+    use futures::executor::block_on;
     use typed_arrow::arrow_schema::{DataType, Field, Schema};
     use typed_arrow_dyn::{DynCell, DynRow};
     use typed_arrow_unified::SchemaLike;
@@ -423,10 +601,12 @@ mod tests {
         ];
         let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
 
-        let mut db = DB::new_dyn_with_key_name(schema.clone(), "id").expect("schema ok");
+        let mut db =
+            DB::new_dyn_with_key_name(schema.clone(), "id", Arc::new(BlockingExecutor::default()))
+                .expect("schema ok");
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
         assert_eq!(db.num_immutable_segments(), 0);
-        db.ingest(batch).expect("insert batch");
+        block_on(db.ingest(batch)).expect("insert batch");
         assert_eq!(db.num_immutable_segments(), 1);
     }
 
@@ -439,7 +619,9 @@ mod tests {
         let f_id = Field::new("id", DataType::Utf8, false).with_metadata(fm);
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]));
-        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("metadata key");
+        let mut db =
+            DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
+                .expect("metadata key");
 
         // Build one batch and insert to ensure extractor wired
         let rows = vec![
@@ -447,7 +629,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
-        db.ingest(batch).expect("insert via metadata");
+        block_on(db.ingest(batch)).expect("insert via metadata");
         assert_eq!(db.num_immutable_segments(), 0);
     }
 
@@ -459,14 +641,16 @@ mod tests {
         let mut sm = HashMap::new();
         sm.insert("tonbo.keys".to_string(), "id".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]).with_metadata(sm));
-        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("schema metadata key");
+        let mut db =
+            DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
+                .expect("schema metadata key");
 
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))]),
             DynRow(vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
-        db.ingest(batch).expect("insert via metadata");
+        block_on(db.ingest(batch)).expect("insert via metadata");
         assert_eq!(db.num_immutable_segments(), 0);
     }
 
@@ -481,14 +665,20 @@ mod tests {
         let f1 = Field::new("id1", DataType::Utf8, false).with_metadata(fm1);
         let f2 = Field::new("id2", DataType::Utf8, false).with_metadata(fm2);
         let schema_conflict = std::sync::Arc::new(Schema::new(vec![f1, f2]));
-        assert!(DB::new_dyn_from_metadata(schema_conflict).is_err());
+        assert!(
+            DB::new_dyn_from_metadata(schema_conflict, Arc::new(BlockingExecutor::default()))
+                .is_err()
+        );
 
         // Missing: no markers at field or schema level
         let schema_missing = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        assert!(DB::new_dyn_from_metadata(schema_missing).is_err());
+        assert!(
+            DB::new_dyn_from_metadata(schema_missing, Arc::new(BlockingExecutor::default()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -503,7 +693,9 @@ mod tests {
         let f_ts = Field::new("ts", DataType::Int64, false).with_metadata(m2);
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
-        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("composite field metadata");
+        let mut db =
+            DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
+                .expect("composite field metadata");
 
         let rows = vec![
             DynRow(vec![
@@ -523,7 +715,7 @@ mod tests {
             ]),
         ];
         let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
-        db.ingest(batch).expect("insert batch");
+        block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
         let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(5i64)]);
@@ -554,7 +746,9 @@ mod tests {
         let mut sm = HashMap::new();
         sm.insert("tonbo.keys".to_string(), "[\"id\", \"ts\"]".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]).with_metadata(sm));
-        let mut db = DB::new_dyn_from_metadata(schema.clone()).expect("composite schema metadata");
+        let mut db =
+            DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
+                .expect("composite schema metadata");
 
         let rows = vec![
             DynRow(vec![
@@ -574,7 +768,7 @@ mod tests {
             ]),
         ];
         let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
-        db.ingest(batch).expect("insert batch");
+        block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
         let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(1i64)]);

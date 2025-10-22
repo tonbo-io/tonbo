@@ -1,14 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
-use fusio::{Error, disk::LocalFs, dynamic::DynFs, path::Path};
-use fusio_dispatch::FsOptions;
+use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
 
 /// Manages which filesystem to use for a given logical path.
 ///
 /// - `base_fs` is the default FS used when no per-level override exists.
 /// - `local_fs` is intended for temp/local operations (always a `LocalFs`).
-/// - `fs_map` holds explicit per-path overrides. **Exact match only**; this is
-///   not a prefix tree and won’t match parent directories.
+/// - `fs_map` holds explicit per-path overrides. **Exact match only**; this is not a prefix tree
+///   and won’t match parent directories.
 ///
 /// # Examples
 /// ```ignore
@@ -17,13 +16,13 @@ use fusio_dispatch::FsOptions;
 /// # use fusio_dispatch::FsOptions;
 /// # use tonbo::fs::manager::StoreManager;
 ///
-/// let base = FsOptions::from_env("BASE")?;
-/// let l0   = FsOptions::from_env("L0")?;
+/// let base = Arc::new(fusio::disk::LocalFs {}) as Arc<dyn DynFs>;
+/// let l0   = Arc::new(fusio::disk::LocalFs {}) as Arc<dyn DynFs>;
 ///
 /// let mgr = StoreManager::new(
 ///     base,
-///     vec![Some((Path::from("/level-0"), l0))],
-/// )?;
+///     vec![(Path::from("/level-0"), l0)],
+/// );
 ///
 /// // Exact-match lookup; falls back to base FS for other paths
 /// let fs = mgr.get_fs(&Path::from("/level-0"));
@@ -36,28 +35,21 @@ pub struct StoreManager {
 }
 
 impl StoreManager {
-    /// Create a new manager.
+    /// Create a new manager with the provided base filesystem and optional overrides.
     ///
-    /// - `base_options` builds the default filesystem.
-    /// - `levels_fs` is a sparse list of optional `(Path, FsOptions)` overrides.
-    ///
-    /// Returns an error if any `FsOptions::parse()` fails.
-    pub fn new(
-        base_options: FsOptions,
-        levels_fs: Vec<Option<(Path, FsOptions)>>,
-    ) -> Result<Self, Error> {
-        let mut fs_map = HashMap::with_capacity(levels_fs.len());
-
-        for (path, fs_options) in levels_fs.into_iter().flatten() {
-            fs_map.entry(path).or_insert(fs_options.parse()?);
+    /// - `base_fs` is used whenever a path-specific override is not present.
+    /// - `overrides` lists exact path matches that should map to different filesystems.
+    pub fn new(base_fs: Arc<dyn DynFs>, overrides: Vec<(Path, Arc<dyn DynFs>)>) -> Self {
+        let mut fs_map = HashMap::with_capacity(overrides.len());
+        for (path, fs) in overrides {
+            fs_map.entry(path).or_insert(fs);
         }
-        let base_fs = base_options.parse()?;
 
-        Ok(StoreManager {
+        StoreManager {
             base_fs,
             fs_map,
             local_fs: Arc::new(LocalFs {}),
-        })
+        }
     }
 
     /// Returns the base/default filesystem (used as fallback).
@@ -82,8 +74,9 @@ impl StoreManager {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     /// Helper to create a manager without calling external `FsOptions::parse()`.
     /// Fine for white-box tests inside this module.

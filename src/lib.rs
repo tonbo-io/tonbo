@@ -23,3 +23,6 @@ pub mod scan;
 
 /// Minimal key-focused expression tree and helpers.
 pub mod query;
+
+/// Write-ahead log framework (async, fusio-backed).
+pub mod wal;

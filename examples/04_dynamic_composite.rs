@@ -2,6 +2,8 @@
 
 use std::{ops::Bound, sync::Arc};
 
+use fusio::executor::BlockingExecutor;
+use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
     record::extract::KeyDyn,
@@ -26,7 +28,9 @@ fn main() {
     let schema = Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
 
     // Create DB from metadata
-    let mut db: DB<DynMode> = DB::new_dyn_from_metadata(schema.clone()).expect("composite ok");
+    let mut db: DB<DynMode, BlockingExecutor> =
+        DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
+            .expect("composite ok");
 
     // Build a batch with three rows
     let rows = vec![
@@ -47,7 +51,7 @@ fn main() {
         ]),
     ];
     let batch: RecordBatch = schema.build_batch(rows).expect("ok");
-    db.ingest(batch).expect("insert");
+    block_on(db.ingest(batch)).expect("insert");
 
     // Range over composite key: ("a", 5) ..= ("a", 10)
     let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(5i64)]);
