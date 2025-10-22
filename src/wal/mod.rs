@@ -75,6 +75,9 @@ pub enum WalError {
     /// Underlying storage backend failure.
     #[error("wal backend error: {0}")]
     Backend(String),
+    /// The WAL data on disk is corrupt or truncated.
+    #[error("wal frame is corrupt: {0}")]
+    Corrupt(&'static str),
     /// The WAL is not currently enabled.
     #[error("wal not enabled")]
     Disabled,
