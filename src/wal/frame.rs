@@ -1,6 +1,7 @@
 //! Frame encoding and decoding primitives for the WAL.
 
 use std::convert::TryFrom;
+use std::mem::size_of;
 
 use crc32c::crc32c;
 use typed_arrow::arrow_array::RecordBatch;
@@ -22,7 +23,16 @@ pub const FRAME_MAGIC: u32 = 0x544F_4E51;
 pub const INITIAL_FRAME_SEQ: u64 = 1;
 
 /// Total number of header bytes emitted for each frame.
-pub const FRAME_HEADER_SIZE: usize = 4 + 2 + 2 + 8 + 4 + 4;
+pub const FRAME_HEADER_SIZE: usize = frame_header_size();
+
+const fn frame_header_size() -> usize {
+    size_of::<u32>()   // magic
+        + size_of::<u16>() // version
+        + size_of::<u16>() // frame type discriminant
+        + size_of::<u64>() // sequence
+        + size_of::<u32>() // payload length
+        + size_of::<u32>() // payload crc32c
+}
 
 /// Discriminant describing the logical frame type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +296,10 @@ mod tests {
         let payload_offset = FRAME_HEADER_SIZE;
         frame[payload_offset] ^= 0xFF;
         let err = FrameHeader::decode_from(&frame).expect_err("crc mismatch should fail");
-        assert!(matches!(err, WalError::Corrupt("frame payload crc32c mismatch")));
+        assert!(matches!(
+            err,
+            WalError::Corrupt("frame payload crc32c mismatch")
+        ));
     }
 
     #[test]
@@ -296,6 +309,9 @@ mod tests {
         // Overwrite the sequence field with zero.
         frame[8..16].fill(0);
         let err = FrameHeader::decode_from(&frame).expect_err("zero sequence should fail");
-        assert!(matches!(err, WalError::Corrupt("frame sequence zero is reserved")));
+        assert!(matches!(
+            err,
+            WalError::Corrupt("frame sequence zero is reserved")
+        ));
     }
 }
