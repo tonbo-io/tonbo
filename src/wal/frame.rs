@@ -49,7 +49,10 @@ pub struct Frame {
 impl Frame {
     /// Construct a new frame payload.
     pub fn new(frame_type: FrameType, payload: Vec<u8>) -> Self {
-        Self { frame_type, payload }
+        Self {
+            frame_type,
+            payload,
+        }
     }
 
     /// Access the frame type.
@@ -277,8 +280,8 @@ fn encode_txn_append_dyn(provisional_id: u64, batch: RecordBatch) -> WalResult<V
     // self-contained and can be decoded via StreamReader during recovery.
     let mut ipc_buf = Vec::new();
     {
-        let mut writer = StreamWriter::try_new(&mut ipc_buf, batch.schema().as_ref())
-            .map_err(codec_err)?;
+        let mut writer =
+            StreamWriter::try_new(&mut ipc_buf, batch.schema().as_ref()).map_err(codec_err)?;
         writer.write(&batch).map_err(codec_err)?;
         writer.finish().map_err(codec_err)?;
     }
@@ -336,7 +339,9 @@ fn decode_txn_append(payload: &[u8]) -> WalResult<WalEvent> {
 
 fn decode_dyn_append(provisional_id: u64, ipc_bytes: &[u8]) -> WalResult<WalEvent> {
     if ipc_bytes.is_empty() {
-        return Err(WalError::Codec("txn append payload missing record batch".to_string()));
+        return Err(WalError::Codec(
+            "txn append payload missing record batch".to_string(),
+        ));
     }
 
     // The streaming reader yields exactly one RecordBatch; anything more
@@ -348,12 +353,7 @@ fn decode_dyn_append(provisional_id: u64, ipc_bytes: &[u8]) -> WalResult<WalEven
         .map_err(codec_err)?
         .ok_or_else(|| WalError::Codec("txn append payload missing record batch".to_string()))?;
 
-    if reader
-        .next()
-        .transpose()
-        .map_err(codec_err)?
-        .is_some()
-    {
+    if reader.next().transpose().map_err(codec_err)?.is_some() {
         return Err(WalError::Codec(
             "txn append payload contained multiple record batches".to_string(),
         ));
@@ -438,11 +438,14 @@ pub enum WalEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
 
-    use typed_arrow::arrow_array::{Array, Int32Array, StringArray};
-    use typed_arrow::arrow_schema::{DataType, Field, Schema};
+    use typed_arrow::{
+        arrow_array::{Array, Int32Array, StringArray},
+        arrow_schema::{DataType, Field, Schema},
+    };
+
+    use super::*;
 
     fn build_frame(frame_type: FrameType, seq: u64, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -515,7 +518,10 @@ mod tests {
         let payload_offset = FRAME_HEADER_SIZE;
         frame[payload_offset] ^= 0xFF;
         let err = FrameHeader::decode_from(&frame).expect_err("crc mismatch should fail");
-        assert!(matches!(err, WalError::Corrupt("frame payload crc32c mismatch")));
+        assert!(matches!(
+            err,
+            WalError::Corrupt("frame payload crc32c mismatch")
+        ));
     }
 
     #[test]
@@ -525,7 +531,10 @@ mod tests {
         // Overwrite the sequence field with zero.
         frame[8..16].fill(0);
         let err = FrameHeader::decode_from(&frame).expect_err("zero sequence should fail");
-        assert!(matches!(err, WalError::Corrupt("frame sequence zero is reserved")));
+        assert!(matches!(
+            err,
+            WalError::Corrupt("frame sequence zero is reserved")
+        ));
     }
 
     fn sample_batch() -> RecordBatch {
@@ -546,14 +555,8 @@ mod tests {
         let commit_ts = 42;
         let provisional_id = 7;
 
-        let frames = encode_payload(
-            WalPayload::DynBatch {
-                batch,
-                commit_ts,
-            },
-            provisional_id,
-        )
-        .expect("encode succeeds");
+        let frames = encode_payload(WalPayload::DynBatch { batch, commit_ts }, provisional_id)
+            .expect("encode succeeds");
 
         assert_eq!(frames.len(), 2);
 
@@ -625,7 +628,10 @@ mod tests {
         truncated.truncate(TXN_APPEND_PREFIX_SIZE - 1);
         let err = decode_frame(FrameType::TxnAppend, &truncated)
             .expect_err("truncated append should fail");
-        assert!(matches!(err, WalError::Corrupt("txn append payload truncated")));
+        assert!(matches!(
+            err,
+            WalError::Corrupt("txn append payload truncated")
+        ));
     }
 
     #[test]
@@ -633,7 +639,10 @@ mod tests {
         let payload = vec![0_u8; TXN_COMMIT_PAYLOAD_SIZE - 2];
         let err = decode_frame(FrameType::TxnCommit, &payload)
             .expect_err("commit payload length mismatch should fail");
-        assert!(matches!(err, WalError::Corrupt("txn commit payload size mismatch")));
+        assert!(matches!(
+            err,
+            WalError::Corrupt("txn commit payload size mismatch")
+        ));
     }
 
     #[test]
@@ -644,8 +653,8 @@ mod tests {
         payload.extend_from_slice(&[0u8; TXN_APPEND_RESERVED_BYTES]);
         payload.extend_from_slice(&[1, 2, 3]);
 
-        let err = decode_frame(FrameType::TxnAppend, &payload)
-            .expect_err("unknown mode should fail");
+        let err =
+            decode_frame(FrameType::TxnAppend, &payload).expect_err("unknown mode should fail");
         assert!(matches!(err, WalError::Corrupt("unknown txn append mode")));
     }
 }
