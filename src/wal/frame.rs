@@ -1,6 +1,6 @@
 //! Frame encoding and decoding primitives for the WAL.
 
-use std::{convert::TryFrom, io::Cursor};
+use std::{convert::TryFrom, io::Cursor, mem::size_of};
 
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
@@ -11,8 +11,9 @@ use crate::wal::{WalError, WalPayload, WalResult};
 /// Maximum supported frame version.
 pub const FRAME_VERSION: u16 = 1;
 
-/// Magic constant identifying Tonbo WAL frames (`"TONW"`).
-pub const FRAME_MAGIC: u32 = 0x544F_4E57;
+/// Magic constant identifying Tonbo WAL frames (`"TONQ"`).
+/// ASCII tag stays human-readable while landing on a 32-bit prime for cheap corruption checks.
+pub const FRAME_MAGIC: u32 = 0x544F_4E51;
 
 /// First sequence number written to disk.
 ///
@@ -22,7 +23,16 @@ pub const FRAME_MAGIC: u32 = 0x544F_4E57;
 pub const INITIAL_FRAME_SEQ: u64 = 1;
 
 /// Total number of header bytes emitted for each frame.
-pub const FRAME_HEADER_SIZE: usize = 4 + 2 + 2 + 8 + 4 + 4;
+pub const FRAME_HEADER_SIZE: usize = frame_header_size();
+
+const fn frame_header_size() -> usize {
+    size_of::<u32>() // magic
+        + size_of::<u16>() // version
+        + size_of::<u16>() // frame type discriminant
+        + size_of::<u64>() // sequence
+        + size_of::<u32>() // payload length
+        + size_of::<u32>() // payload crc32c
+}
 
 /// Payload prefix size for `TxnAppend` frames: provisional id + mode + reserved bytes.
 ///
@@ -536,7 +546,6 @@ mod tests {
             WalError::Corrupt("frame sequence zero is reserved")
         ));
     }
-
     fn sample_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
