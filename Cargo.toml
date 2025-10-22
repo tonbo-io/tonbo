@@ -14,7 +14,7 @@ thiserror = "2.0.6"
 ulid = { version = "1", features = ["serde"] }
 crc32c = "0.6"
 arrow-ipc = "56.1.0"
+futures = "0.3"
 
 [dev-dependencies]
 typed-arrow-unified = { version = "0.0.1" }
-futures = "0.3"

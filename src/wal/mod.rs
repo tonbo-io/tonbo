@@ -4,17 +4,37 @@
 //! as the coordination layer between ingest, the frame encoder, storage
 //! backends, and recovery. Implementations will live in the sibling modules.
 
-use std::{fmt, marker::PhantomData, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    marker::PhantomData,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
-use fusio::executor::{Executor, Timer};
+use fusio::{
+    DynFs,
+    executor::{Executor, JoinHandle, Timer},
+    impls::disk::TokioFs,
+    path::Path,
+};
+use futures::{
+    SinkExt,
+    channel::{mpsc, oneshot},
+    executor::block_on,
+};
 use typed_arrow::arrow_array::RecordBatch;
 
-use crate::db::Mode;
+use crate::{db::Mode, wal::metrics::WalMetrics};
 
 pub mod frame;
 pub mod metrics;
 pub mod replay;
 pub mod storage;
+pub mod writer;
 // Writer logic will live here once the async queue is implemented.
 
 /// Sync policy controlling how frequently the WAL forces durability.
@@ -70,7 +90,7 @@ impl Default for WalConfig {
 pub type WalResult<T> = Result<T, WalError>;
 
 /// Errors surfaced by the WAL subsystem.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum WalError {
     /// Underlying storage backend failure.
     #[error("wal backend error: {0}")]
@@ -90,7 +110,7 @@ pub enum WalError {
 }
 
 /// Acks emitted once a WAL submission satisfies the configured durability policy.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WalAck {
     /// Sequence number of the durable frame.
     pub seq: u64,
@@ -124,39 +144,133 @@ pub enum WalPayload {
     },
 }
 
-/// Handle returned when enabling the WAL on a `DB`.
-#[derive(Debug)]
-pub struct WalHandle<E> {
-    /// Placeholder for internal state until implementation is provided.
-    _inner: Arc<()>,
-    _exec: PhantomData<E>,
+struct WalHandleInner<E>
+where
+    E: Executor + Timer,
+{
+    sender: mpsc::Sender<writer::WriterMsg>,
+    queue_depth: Arc<AtomicUsize>,
+    next_seq: AtomicU64,
+    join: Mutex<Option<E::JoinHandle<WalResult<()>>>>,
 }
 
-impl<E> Clone for WalHandle<E> {
+impl<E> WalHandleInner<E>
+where
+    E: Executor + Timer,
+{
+    fn new(
+        sender: mpsc::Sender<writer::WriterMsg>,
+        queue_depth: Arc<AtomicUsize>,
+        start_seq: u64,
+        join: E::JoinHandle<WalResult<()>>,
+    ) -> Self {
+        Self {
+            sender,
+            queue_depth,
+            next_seq: AtomicU64::new(start_seq),
+            join: Mutex::new(Some(join)),
+        }
+    }
+
+    fn clone_sender(&self) -> mpsc::Sender<writer::WriterMsg> {
+        self.sender.clone()
+    }
+
+    fn close_channel(&self) {
+        let mut sender = self.sender.clone();
+        sender.close_channel();
+    }
+
+    fn take_join(&self) -> Option<E::JoinHandle<WalResult<()>>> {
+        self.join.lock().expect("wal join mutex poisoned").take()
+    }
+}
+
+/// Handle returned when enabling the WAL on a `DB`.
+pub struct WalHandle<E>
+where
+    E: Executor + Timer,
+{
+    inner: Arc<WalHandleInner<E>>,
+}
+
+impl<E> Clone for WalHandle<E>
+where
+    E: Executor + Timer,
+{
     fn clone(&self) -> Self {
         Self {
-            _inner: Arc::clone(&self._inner),
-            _exec: PhantomData,
+            inner: Arc::clone(&self.inner),
         }
     }
 }
 
-impl<E> WalHandle<E> {
-    pub(crate) fn placeholder() -> Self {
+impl<E> fmt::Debug for WalHandle<E>
+where
+    E: Executor + Timer,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WalHandle").finish()
+    }
+}
+
+impl<E> WalHandle<E>
+where
+    E: Executor + Timer,
+{
+    fn from_parts(
+        sender: mpsc::Sender<writer::WriterMsg>,
+        queue_depth: Arc<AtomicUsize>,
+        join: E::JoinHandle<WalResult<()>>,
+        start_seq: u64,
+    ) -> Self {
         Self {
-            _inner: Arc::new(()),
-            _exec: PhantomData,
+            inner: Arc::new(WalHandleInner::new(sender, queue_depth, start_seq, join)),
         }
     }
 
     /// Enqueue a payload to the WAL writer.
-    pub async fn submit(&self, _payload: WalPayload) -> WalResult<WalTicket<E>> {
-        Err(WalError::Unimplemented("wal::WalHandle::submit"))
+    pub async fn submit(&self, payload: WalPayload) -> WalResult<WalTicket<E>> {
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::SeqCst);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let enqueued_at = Instant::now();
+
+        self.inner.queue_depth.fetch_add(1, Ordering::SeqCst);
+
+        let msg = writer::WriterMsg::Enqueue {
+            seq,
+            payload,
+            enqueued_at,
+            ack_tx,
+        };
+
+        let mut sender = self.inner.clone_sender();
+        if let Err(_err) = sender.send(msg).await {
+            self.inner.queue_depth.fetch_sub(1, Ordering::SeqCst);
+            return Err(WalError::Backend("wal writer task closed".into()));
+        }
+
+        Ok(WalTicket {
+            seq,
+            receiver: ack_rx,
+            _exec: PhantomData,
+        })
     }
 
     /// Force manual rotation of the active WAL segment.
     pub async fn rotate(&self) -> WalResult<()> {
         Err(WalError::Unimplemented("wal::WalHandle::rotate"))
+    }
+
+    /// Shut down the writer task and wait for completion.
+    pub fn shutdown(self) -> WalResult<()> {
+        self.inner.close_channel();
+        if let Some(join) = self.inner.take_join() {
+            let join_result = block_on(async move { join.join().await })
+                .map_err(|err| WalError::Backend(err.to_string()))?;
+            join_result?
+        }
+        Ok(())
     }
 }
 
@@ -164,6 +278,7 @@ impl<E> WalHandle<E> {
 pub struct WalTicket<E> {
     /// Sequence number assigned to the payload.
     pub seq: u64,
+    receiver: oneshot::Receiver<WalResult<WalAck>>,
     _exec: PhantomData<E>,
 }
 
@@ -171,16 +286,12 @@ impl<E> WalTicket<E>
 where
     E: Executor + Timer,
 {
-    pub(crate) fn new(seq: u64) -> Self {
-        Self {
-            seq,
-            _exec: PhantomData,
-        }
-    }
-
     /// Resolve once durability is achieved.
-    pub async fn durable(&self) -> WalResult<WalAck> {
-        Err(WalError::Unimplemented("WalTicket::durable"))
+    pub async fn durable(self) -> WalResult<WalAck> {
+        match self.receiver.await {
+            Ok(result) => result,
+            Err(_) => Err(WalError::Backend("wal writer dropped ack".into())),
+        }
     }
 }
 
@@ -189,10 +300,7 @@ where
     E: Executor + Timer,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WalTicket")
-            .field("seq", &self.seq)
-            .field("durable", &"Unimplemented")
-            .finish()
+        f.debug_struct("WalTicket").field("seq", &self.seq).finish()
     }
 }
 
@@ -214,15 +322,35 @@ where
     E: Executor + Timer,
 {
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
+        let fs: Arc<dyn DynFs> = Arc::new(TokioFs);
+        let wal_root = Path::from_filesystem_path(&cfg.dir)
+            .map_err(|err| WalError::Backend(err.to_string()))?;
+        let storage = storage::WalStorage::new(fs, wal_root);
+
+        let metrics = Arc::new(E::rw_lock(WalMetrics::default()));
+        let writer = writer::spawn_writer(
+            Arc::clone(self.executor()),
+            storage,
+            cfg.clone(),
+            Arc::clone(&metrics),
+            0,
+            frame::INITIAL_FRAME_SEQ,
+        );
+        let (sender, queue_depth, join) = writer.into_parts();
+        let handle = WalHandle::from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+
         self.set_wal_config(Some(cfg));
-        let _ = self.executor();
-        let handle = WalHandle::placeholder();
         self.set_wal_handle(Some(handle.clone()));
         Ok(handle)
     }
 
     fn disable_wal(&mut self) -> WalResult<()> {
-        self.set_wal_handle(None);
+        if let Some(handle) = self.wal_handle().cloned() {
+            self.set_wal_handle(None);
+            handle.shutdown()?;
+        } else {
+            self.set_wal_handle(None);
+        }
         Ok(())
     }
 
