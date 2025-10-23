@@ -4,7 +4,7 @@
 //! trait-driven structure remains so that compile-time typed dispatch can be
 //! reintroduced without reshaping the API.
 
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -23,6 +23,8 @@ use crate::{
     scan::RangeSet,
     wal::{WalConfig, WalHandle, frame::WalEvent, replay::Replayer},
 };
+
+type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, Vec<bool>)>>;
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
@@ -64,10 +66,9 @@ where
         &mut self,
         events: Vec<WalEvent>,
     ) -> Result<Option<Timestamp>, KeyExtractError> {
-        use std::collections::HashMap;
-
         let mut last_commit_ts: Option<Timestamp> = None;
-        let mut pending: HashMap<u64, Vec<(RecordBatch, Vec<bool>)>> = HashMap::new();
+        let mut pending: PendingWalBatches = HashMap::new();
+
         for event in events {
             match event {
                 WalEvent::DynAppend {
@@ -195,7 +196,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     }
 
     /// Unified ingestion entry point using the mode's insertion contract.
-    pub async fn ingest<'a>(&'a mut self, input: M::InsertInput) -> Result<(), KeyExtractError>
+    pub async fn ingest(&mut self, input: M::InsertInput) -> Result<(), KeyExtractError>
     where
         M: Sized,
     {
@@ -237,7 +238,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 
     /// Allocate the next commit timestamp for WAL/autocommit flows.
     pub(crate) fn next_commit_ts(&mut self) -> Timestamp {
-        self.commit_clock.next()
+        self.commit_clock.alloc()
     }
 
     /// Access the active WAL handle, if any.
@@ -262,12 +263,13 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 
     /// Plan and flush immutable segments into a Parquet-backed SSTable.
     pub async fn flush_immutables_with_descriptor(
-        &self,
+        &mut self,
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable<M>, SsTableError>
     where
         M: Sized,
+        M::Key: Clone,
     {
         if self.immutables.is_empty() {
             return Err(SsTableError::NoImmutableSegments);
@@ -276,7 +278,14 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         for seg in &self.immutables {
             builder.add_immutable(seg)?;
         }
-        builder.finish().await
+        match builder.finish().await {
+            Ok(table) => {
+                // TODO: capture WAL ids alongside the flushed descriptor when WAL is wired up.
+                self.immutables.clear();
+                Ok(table)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     // Key-only merged scans have been removed.
@@ -382,13 +391,14 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::executor::BlockingExecutor;
+    use fusio::{disk::LocalFs, dynamic::DynFs, executor::BlockingExecutor, path::Path};
     use futures::executor::block_on;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
         inmem::policy::BatchesThreshold,
+        ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
             WalPayload, append_tombstone_column,
@@ -555,6 +565,29 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         assert!(DynModeConfig::from_metadata(schema_missing).is_err());
+    }
+
+    #[test]
+    fn flush_without_immutables_errors() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name config");
+        let executor = Arc::new(BlockingExecutor::default());
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, executor).expect("db init");
+
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sstable_cfg = Arc::new(SsTableConfig::new(
+            schema.clone(),
+            fs,
+            Path::from("/tmp/tonbo-flush-test"),
+        ));
+        let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
+
+        let result = block_on(db.flush_immutables_with_descriptor(sstable_cfg, descriptor.clone()));
+        assert!(matches!(result, Err(SsTableError::NoImmutableSegments)));
+        assert_eq!(db.num_immutable_segments(), 0);
     }
 
     #[test]

@@ -76,6 +76,7 @@ pub trait SealPolicy {
 /// Useful as a safe default when you prefer manual or explicit sealing, or in
 /// tests where sealing is controlled by the test case.
 #[derive(Clone, Debug, Default)]
+#[allow(unused)]
 pub struct NeverSeal;
 
 impl SealPolicy for NeverSeal {
@@ -190,6 +191,7 @@ impl SealPolicy for TimeElapsedPolicy {
 
 /// A replace ratio policy that suggests sealing when churn is high.
 #[derive(Clone, Debug)]
+#[allow(unused)]
 pub struct ReplaceRatioPolicy {
     /// Minimum replaces/inserts ratio to trigger sealing.
     pub min_ratio: f64,
@@ -239,12 +241,14 @@ impl SealPolicy for AnyOf {
 
 /// Composite policy that triggers only if all inner policies trigger.
 #[derive(Default)]
+#[allow(unused)]
 pub struct AllOf {
     inner: Vec<Box<dyn SealPolicy + Send + Sync>>,
 }
 
 impl AllOf {
     /// Create a composite policy from a list of inner policies.
+    #[allow(unused)]
     pub fn new(inner: Vec<Box<dyn SealPolicy + Send + Sync>>) -> Self {
         Self { inner }
     }
