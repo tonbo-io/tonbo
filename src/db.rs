@@ -467,6 +467,7 @@ async fn insert_dyn_wal_batch<E>(
 where
     E: Executor + Timer,
 {
+    validate_dyn_wal_batch_schema(db, &wal_batch)?;
     let commit_ts = db.next_commit_ts();
     if let Some(handle) = db.wal_handle().cloned() {
         let payload = WalPayload::DynBatch {
@@ -503,13 +504,7 @@ fn apply_dyn_wal_batch<E>(
 where
     E: Executor + Timer,
 {
-    if db.mode.schema.as_ref() != wal_batch.batch().schema().as_ref() {
-        return Err(KeyExtractError::SchemaMismatch {
-            expected: db.mode.schema.clone(),
-            actual: wal_batch.batch().schema(),
-        });
-    }
-
+    validate_dyn_wal_batch_schema(db, &wal_batch)?;
     let (batch, tombstones) = wal_batch.into_parts();
     let bits = tombstones;
     db.mem
@@ -517,6 +512,22 @@ where
             bits[row]
         })?;
     db.maybe_seal_after_insert()?;
+    Ok(())
+}
+
+fn validate_dyn_wal_batch_schema<E>(
+    db: &DB<DynMode, E>,
+    wal_batch: &DynWalBatch,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    if db.mode.schema.as_ref() != wal_batch.batch().schema().as_ref() {
+        return Err(KeyExtractError::SchemaMismatch {
+            expected: db.mode.schema.clone(),
+            actual: wal_batch.batch().schema(),
+        });
+    }
     Ok(())
 }
 
