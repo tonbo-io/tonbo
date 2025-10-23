@@ -13,8 +13,17 @@ use typed_arrow::{
     arrow_array::RecordBatch,
     arrow_schema::{DataType, Field, Schema},
 };
-use typed_arrow_dyn::{DynCell, DynRow};
-use typed_arrow_unified::SchemaLike;
+use typed_arrow_dyn::{DynBuilders, DynCell, DynRow};
+
+fn build_batch(schema: Arc<Schema>, rows: Vec<DynRow>) -> RecordBatch {
+    let mut builders = DynBuilders::new(schema.clone(), rows.len());
+    for row in rows {
+        builders
+            .append_option_row(Some(row))
+            .expect("row matches schema");
+    }
+    builders.finish_into_batch()
+}
 
 fn main() {
     // Field-level metadata: tonbo.key ordinals define lexicographic order
@@ -50,7 +59,7 @@ fn main() {
             Some(DynCell::I32(3)),
         ]),
     ];
-    let batch: RecordBatch = schema.build_batch(rows).expect("ok");
+    let batch: RecordBatch = build_batch(schema.clone(), rows);
     block_on(db.ingest(batch)).expect("insert");
 
     // Range over composite key: ("a", 5) ..= ("a", 10)

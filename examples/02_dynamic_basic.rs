@@ -14,8 +14,17 @@ use typed_arrow::{
     arrow_array::RecordBatch,
     arrow_schema::{DataType, Field, Schema},
 };
-use typed_arrow_dyn::{DynCell, DynRow};
-use typed_arrow_unified::SchemaLike;
+use typed_arrow_dyn::{DynBuilders, DynCell, DynRow};
+
+fn build_batch(schema: Arc<Schema>, rows: Vec<DynRow>) -> RecordBatch {
+    let mut builders = DynBuilders::new(schema.clone(), rows.len());
+    for row in rows {
+        builders
+            .append_option_row(Some(row))
+            .expect("row matches schema");
+    }
+    builders.finish_into_batch()
+}
 
 fn main() {
     // Define an Arrow schema at runtime (string key)
@@ -39,7 +48,7 @@ fn main() {
             Some(DynCell::I32(50)),
         ]),
     ];
-    let batch: RecordBatch = schema.build_batch(rows).expect("valid dynamic rows");
+    let batch: RecordBatch = build_batch(schema.clone(), rows);
 
     // Create a dynamic DB by specifying the key field name
     let mut db: DB<DynMode, BlockingExecutor> =
