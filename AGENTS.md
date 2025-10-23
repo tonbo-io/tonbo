@@ -98,9 +98,11 @@ Pre-submit routine (every source adjustment):
 
 - Dynamic DB:
   - `let exec = std::sync::Arc::new(fusio::executor::BlockingExecutor::default());`
-  - `let mut db: DB<DynMode, _> = DB::new_dyn_with_key_name(schema, "id", exec)?;`
+  - `let config = DynModeConfig::from_key_name(schema, "id")?;`
+  - `let mut db: DB<DynMode, _> = DB::new(config, exec)?;`
   - `db.ingest(batch).await?;`
-  - `let db = DB::recover_dyn_with_wal(schema, extractor, exec, cfg).await?;`
+  - `let config = DynModeConfig::new(schema, extractor)?;`
+  - `let db = DB::recover_with_wal(config, exec, cfg).await?;`
   - `let it = db.scan_mutable_rows(&RangeSet::<KeyDyn>::all()); // Iterator<Item=DynRow>`
 - Immutable builders:
   - Dynamic: `let imm = inmem::immutable::memtable::segment_from_batch_with_key_name(batch, "id")?;`

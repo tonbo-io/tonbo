@@ -6,6 +6,7 @@ use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
+    mode::DynModeConfig,
     record::extract::KeyDyn,
     scan::RangeSet,
 };
@@ -41,9 +42,9 @@ fn main() {
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
     // Create DB from metadata
+    let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
     let mut db: DB<DynMode, BlockingExecutor> =
-        DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
-            .expect("metadata ok");
+        DB::new(config, Arc::new(BlockingExecutor::default())).expect("metadata ok");
     block_on(db.ingest(batch)).expect("insert");
 
     // Scan all rows
