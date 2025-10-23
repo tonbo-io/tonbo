@@ -8,13 +8,21 @@ resolver = "2"
 fusio = { version = "0.4.2", features = ["dyn", "fs", "tokio", "executor"] }
 fusio-parquet = { version = "0.4.2" }
 once_cell = "1"
-typed-arrow = { version = "0.4.0", features = ["ext-hooks"] }
-typed-arrow-dyn = { version = "0.0.1" }
-thiserror = "2.0.6"
+typed-arrow = { version = "0.4.1", features = ["ext-hooks"] }
+typed-arrow-dyn = { version = "0.0.2" }
+thiserror = "2.0.17"
 ulid = { version = "1", features = ["serde"] }
 crc32c = "0.6"
 arrow-ipc = "56.1.0"
+arrow-array = "56.2.0"
+arrow-schema = "56.2.0"
+arrow-select = "56.2.0"
 futures = "0.3"
 
 [dev-dependencies]
 typed-arrow-unified = { version = "0.0.1" }
+
+[patch.crates-io]
+# typed-arrow-unified 0.0.1 still pins typed-arrow-dyn 0.0.1; override so
+# our dev-dependency picks up the 0.0.2 stack until an upstream release.
+typed-arrow-unified = { path = "vendor/typed-arrow-unified" }

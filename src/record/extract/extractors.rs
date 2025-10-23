@@ -1,16 +1,17 @@
-use typed_arrow::{
-    arrow_array::{
-        Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-        RecordBatch, StringArray, UInt32Array, UInt64Array,
-    },
-    arrow_schema::{DataType, SchemaRef},
+use arrow_array::{
+    Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
+use arrow_schema::{DataType, SchemaRef};
 
 use super::{
     errors::KeyExtractError,
     traits::{BatchKeyExtractor, DynFromBatch, DynKeyExtractor},
 };
-use crate::inmem::immutable::keys::{BinKey, StrKey};
+use crate::inmem::immutable::{
+    keys::{BinKey, StrKey},
+    memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
+};
 
 fn check_bounds(batch: &RecordBatch, col: usize, row: usize) -> Result<(), KeyExtractError> {
     if col >= batch.num_columns() {
@@ -74,8 +75,13 @@ pub fn row_from_batch(
     if row >= batch.num_rows() {
         return Err(KeyExtractError::RowOutOfBounds(row, batch.num_rows()));
     }
+    let schema = batch.schema();
     let mut cells = Vec::with_capacity(batch.num_columns());
     for (col_idx, arr) in batch.columns().iter().enumerate() {
+        let field = schema.field(col_idx);
+        if field.name() == MVCC_COMMIT_COL || field.name() == MVCC_TOMBSTONE_COL {
+            continue;
+        }
         if arr.is_null(row) {
             cells.push(None);
             continue;

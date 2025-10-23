@@ -6,21 +6,26 @@
 
 use std::{collections::HashMap, future::Future, sync::Arc, time::Instant};
 
+use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
-use typed_arrow::{arrow_array::RecordBatch, arrow_schema::SchemaRef};
 
 use crate::{
     inmem::{
-        immutable::memtable::{ImmutableMemTable, segment_from_batch_with_extractor},
+        immutable::memtable::ImmutableMemTable,
         mutable::{
             MutableLayout,
             memtable::{DynLayout, DynRowScan},
         },
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
+    mvcc::{CommitClock, Timestamp},
     record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
     scan::RangeSet,
-    wal::{WalConfig, WalHandle, WalPayload, frame::WalEvent, replay::Replayer},
+    wal::{
+        WalConfig, WalHandle, WalPayload, batch_with_tombstones, frame::WalEvent, replay::Replayer,
+        strip_tombstone_column,
+    },
 };
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
@@ -39,7 +44,7 @@ pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
     /// Pending WAL configuration captured before the writer is installed.
     wal_config: Option<WalConfig>,
     /// Monotonic commit timestamp assigned to ingests (autocommit path for now).
-    commit_clock: u64,
+    commit_clock: CommitClock,
 }
 
 /// Mode trait describing how to insert and what is stored.
@@ -95,51 +100,81 @@ where
             executor,
             wal: None,
             wal_config: None,
-            commit_clock: 0,
+            commit_clock: CommitClock::default(),
         })
     }
 
     /// Recover a dynamic DB by replaying WAL segments before enabling ingest.
-    pub fn recover_dyn_with_wal(
+    pub async fn recover_dyn_with_wal(
         schema: SchemaRef,
         extractor: Box<dyn DynKeyExtractor>,
         executor: Arc<E>,
         wal_cfg: WalConfig,
-    ) -> impl Future<Output = Result<Self, KeyExtractError>> {
-        async move {
-            let mut db = Self::new_dyn(schema, extractor, executor)?;
-            db.set_wal_config(Some(wal_cfg.clone()));
+    ) -> Result<Self, KeyExtractError> {
+        let mut db = Self::new_dyn(schema, extractor, executor)?;
+        db.set_wal_config(Some(wal_cfg.clone()));
 
-            let replayer = Replayer::new(wal_cfg);
-            let events = replayer.scan().map_err(KeyExtractError::from)?;
+        let replayer = Replayer::new(wal_cfg);
+        let events = replayer.scan().map_err(KeyExtractError::from)?;
 
-            let mut last_commit_ts: Option<u64> = None;
-            for event in events {
-                match event {
-                    WalEvent::DynAppend { batch, .. } => {
-                        // TODO: buffer by provisional_id once transactional replay is implemented.
-                        db.ingest(batch).await?;
-                    }
-                    WalEvent::TxnCommit { commit_ts, .. } => {
+        let mut last_commit_ts: Option<Timestamp> = None;
+        let mut pending: HashMap<u64, Vec<(RecordBatch, Option<Vec<bool>>)>> = HashMap::new();
+        for event in events {
+            match event {
+                WalEvent::DynAppend {
+                    provisional_id,
+                    batch,
+                } => {
+                    let (data_batch, tombstones) =
+                        strip_tombstone_column(batch).map_err(KeyExtractError::from)?;
+                    pending
+                        .entry(provisional_id)
+                        .or_default()
+                        .push((data_batch, tombstones));
+                }
+                WalEvent::TxnCommit {
+                    provisional_id,
+                    commit_ts,
+                } => {
+                    if let Some(batches) = pending.remove(&provisional_id) {
+                        for (batch, tombstones) in batches {
+                            if let Some(bits) = tombstones {
+                                let bitmap = bits.clone();
+                                db.mem.insert_batch_with_ts(
+                                    db.mode.extractor.as_ref(),
+                                    batch,
+                                    commit_ts,
+                                    move |row| bitmap[row],
+                                )?;
+                            } else {
+                                db.mem.insert_batch_with_ts(
+                                    db.mode.extractor.as_ref(),
+                                    batch,
+                                    commit_ts,
+                                    |_| false,
+                                )?;
+                            }
+                            db.maybe_seal_after_insert()?;
+                        }
                         last_commit_ts = Some(match last_commit_ts {
                             Some(prev) => prev.max(commit_ts),
                             None => commit_ts,
                         });
                     }
-                    WalEvent::TxnBegin { .. }
-                    | WalEvent::TxnAbort { .. }
-                    | WalEvent::SealMarker => {
-                        // TODO: implement once transactional semantics are wired up.
-                    }
+                }
+                WalEvent::TxnBegin { .. } | WalEvent::TxnAbort { .. } | WalEvent::SealMarker => {
+                    // TODO: implement once transactional semantics are wired up.
                 }
             }
-
-            if let Some(ts) = last_commit_ts {
-                db.commit_clock = ts.saturating_add(1);
-            }
-
-            Ok(db)
         }
+
+        // Any dangling appends without commits are intentionally ignored.
+
+        if let Some(ts) = last_commit_ts {
+            db.commit_clock.advance_to_at_least(ts.saturating_add(1));
+        }
+
+        Ok(db)
     }
 
     /// Create a dynamic DB by specifying the key column index.
@@ -304,7 +339,13 @@ where
                 actual: batch.schema(),
             });
         }
-        self.mem.insert_batch(self.mode.extractor.as_ref(), batch)?;
+        debug_assert!(
+            self.wal_handle().is_none(),
+            "DB::insert_batch bypasses WAL; prefer async ingest when WAL is enabled"
+        );
+        let commit_ts = self.next_commit_ts();
+        self.mem
+            .insert_batch(self.mode.extractor.as_ref(), batch, commit_ts)?;
         self.maybe_seal_after_insert()?;
         Ok(())
     }
@@ -313,9 +354,7 @@ where
         let since = self.last_seal_at.map(|t| t.elapsed());
         let stats = self.mem.build_stats(since);
         if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
-            let batches = self.mem.take_attached_batches();
-            for b in batches {
-                let seg = segment_from_batch_with_extractor(b, self.mode.extractor.as_ref())?;
+            if let Some(seg) = self.mem.seal_into_immutable(&self.mode.schema)? {
                 self.immutables.push(seg);
             }
             self.last_seal_at = Some(Instant::now());
@@ -335,6 +374,15 @@ where
     ) -> impl Iterator<Item = typed_arrow_dyn::DynRow> + 'a {
         self.mem.scan_rows(ranges)
     }
+
+    /// Scan the dynamic mutable memtable with MVCC visibility at `read_ts`.
+    pub fn scan_mutable_rows_at<'a>(
+        &'a self,
+        ranges: &'a RangeSet<KeyDyn>,
+        read_ts: Timestamp,
+    ) -> impl Iterator<Item = typed_arrow_dyn::DynRow> + 'a {
+        self.mem.scan_rows_at(ranges, read_ts)
+    }
 }
 
 // Methods common to all modes
@@ -351,20 +399,15 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     }
 
     /// Ingest many items implementing `Insertable<M>`.
-    pub fn ingest_many<'a, I>(
-        &'a mut self,
-        inputs: I,
-    ) -> impl Future<Output = Result<(), KeyExtractError>> + 'a
+    pub async fn ingest_many<'a, I>(&'a mut self, inputs: I) -> Result<(), KeyExtractError>
     where
         I: IntoIterator + 'a,
         I::Item: Insertable<M>,
     {
-        async move {
-            for item in inputs {
-                item.insert_into(self).await?;
-            }
-            Ok(())
+        for item in inputs {
+            item.insert_into(self).await?;
         }
+        Ok(())
     }
 
     /// Approximate bytes used by keys in the mutable memtable.
@@ -389,10 +432,8 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     }
 
     /// Allocate the next commit timestamp for WAL/autocommit flows.
-    pub(crate) fn next_commit_ts(&mut self) -> u64 {
-        let ts = self.commit_clock;
-        self.commit_clock = self.commit_clock.saturating_add(1);
-        ts
+    pub(crate) fn next_commit_ts(&mut self) -> Timestamp {
+        self.commit_clock.next()
     }
 
     /// Access the active WAL handle, if any.
@@ -448,6 +489,51 @@ pub trait Insertable<M: Mode>: Sized {
         E: Executor + Timer;
 }
 
+async fn insert_dyn_batch<E>(
+    db: &mut DB<DynMode, E>,
+    batch: RecordBatch,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    if db.mode.schema.as_ref() != batch.schema().as_ref() {
+        return Err(KeyExtractError::SchemaMismatch {
+            expected: db.mode.schema.clone(),
+            actual: batch.schema(),
+        });
+    }
+    let commit_ts = db.next_commit_ts();
+    if let Some(handle) = db.wal_handle().cloned() {
+        let wal_batch = batch_with_tombstones(&batch, None).map_err(KeyExtractError::from)?;
+        let payload = WalPayload::DynBatch {
+            batch: wal_batch,
+            commit_ts,
+        };
+        // TODO: await the WAL ticket once durability handling lands.
+        handle
+            .submit(payload)
+            .await
+            .map_err(KeyExtractError::from)?;
+    }
+    db.mem
+        .insert_batch(db.mode.extractor.as_ref(), batch, commit_ts)?;
+    db.maybe_seal_after_insert()?;
+    Ok(())
+}
+
+async fn insert_dyn_batches<E>(
+    db: &mut DB<DynMode, E>,
+    batches: Vec<RecordBatch>,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    for batch in batches {
+        insert_dyn_batch(db, batch).await?;
+    }
+    Ok(())
+}
+
 // Dynamic mode: single RecordBatch
 impl Insertable<DynMode> for RecordBatch {
     fn insert_into<'a, E>(
@@ -457,35 +543,7 @@ impl Insertable<DynMode> for RecordBatch {
     where
         E: Executor + Timer,
     {
-        async move {
-            if db.mode.schema.as_ref() != self.schema().as_ref() {
-                return Err(KeyExtractError::SchemaMismatch {
-                    expected: db.mode.schema.clone(),
-                    actual: self.schema(),
-                });
-            }
-            let has_wal = db.wal_handle().is_some();
-            let commit_ts = has_wal.then(|| db.next_commit_ts());
-            let wal_handle = if has_wal {
-                db.wal_handle().cloned()
-            } else {
-                None
-            };
-            if let (Some(handle), Some(ts)) = (wal_handle, commit_ts) {
-                let payload = WalPayload::DynBatch {
-                    batch: self.clone(),
-                    commit_ts: ts,
-                };
-                // TODO: await the WAL ticket once durability handling lands.
-                let _ticket = handle
-                    .submit(payload)
-                    .await
-                    .map_err(KeyExtractError::from)?;
-            }
-            db.mem.insert_batch(db.mode.extractor.as_ref(), self)?;
-            db.maybe_seal_after_insert()?;
-            Ok(())
-        }
+        insert_dyn_batch(db, self)
     }
 }
 
@@ -498,36 +556,7 @@ impl Insertable<DynMode> for Vec<RecordBatch> {
     where
         E: Executor + Timer,
     {
-        async move {
-            for batch in self.into_iter() {
-                if db.mode.schema.as_ref() != batch.schema().as_ref() {
-                    return Err(KeyExtractError::SchemaMismatch {
-                        expected: db.mode.schema.clone(),
-                        actual: batch.schema(),
-                    });
-                }
-                let has_wal = db.wal_handle().is_some();
-                let commit_ts = has_wal.then(|| db.next_commit_ts());
-                let wal_handle = if has_wal {
-                    db.wal_handle().cloned()
-                } else {
-                    None
-                };
-                if let (Some(handle), Some(ts)) = (wal_handle, commit_ts) {
-                    let payload = WalPayload::DynBatch {
-                        batch: batch.clone(),
-                        commit_ts: ts,
-                    };
-                    let _ticket = handle
-                        .submit(payload)
-                        .await
-                        .map_err(KeyExtractError::from)?;
-                }
-                db.mem.insert_batch(db.mode.extractor.as_ref(), batch)?;
-                db.maybe_seal_after_insert()?;
-            }
-            Ok(())
-        }
+        insert_dyn_batches(db, self)
     }
 }
 
@@ -546,16 +575,42 @@ impl DynMem {
         &mut self,
         extractor: &dyn DynKeyExtractor,
         batch: RecordBatch,
+        commit_ts: Timestamp,
     ) -> Result<(), KeyExtractError> {
-        self.0.insert_batch(extractor, batch)
+        self.0.insert_batch(extractor, batch, commit_ts)
     }
 
-    pub(crate) fn take_attached_batches(&mut self) -> Vec<RecordBatch> {
-        self.0.take_attached_batches()
+    pub(crate) fn insert_batch_with_ts<F>(
+        &mut self,
+        extractor: &dyn DynKeyExtractor,
+        batch: RecordBatch,
+        commit_ts: Timestamp,
+        tombstone_at: F,
+    ) -> Result<(), KeyExtractError>
+    where
+        F: FnMut(usize) -> bool,
+    {
+        self.0
+            .insert_batch_with_ts(extractor, batch, commit_ts, tombstone_at)
+    }
+
+    pub(crate) fn seal_into_immutable(
+        &mut self,
+        schema: &SchemaRef,
+    ) -> Result<Option<ImmutableMemTable<KeyDyn, RecordBatch>>, KeyExtractError> {
+        self.0.seal_into_immutable(schema)
     }
 
     pub(crate) fn scan_rows<'t, 's>(&'t self, ranges: &'s RangeSet<KeyDyn>) -> DynRowScan<'t, 's> {
         self.0.scan_rows(ranges)
+    }
+
+    pub(crate) fn scan_rows_at<'t, 's>(
+        &'t self,
+        ranges: &'s RangeSet<KeyDyn>,
+        read_ts: Timestamp,
+    ) -> DynRowScan<'t, 's> {
+        self.0.scan_rows_at(ranges, read_ts)
     }
 }
 
@@ -578,14 +633,26 @@ impl StatsProvider for DynMem {
 mod tests {
     use std::sync::Arc;
 
+    use arrow_schema::{DataType, Field, Schema};
     use fusio::executor::BlockingExecutor;
     use futures::executor::block_on;
-    use typed_arrow::arrow_schema::{DataType, Field, Schema};
     use typed_arrow_dyn::{DynCell, DynRow};
     use typed_arrow_unified::SchemaLike;
 
     use super::*;
-    use crate::inmem::policy::BatchesThreshold;
+    use crate::{
+        inmem::policy::BatchesThreshold,
+        wal::{
+            WalPayload,
+            frame::{INITIAL_FRAME_SEQ, encode_payload},
+        },
+    };
+
+    impl DynMem {
+        fn inspect_versions(&self, key: &KeyDyn) -> Option<Vec<(Timestamp, bool)>> {
+            self.0.inspect_versions(key)
+        }
+    }
 
     #[test]
     fn dynamic_seal_on_batches_threshold() {
@@ -788,6 +855,92 @@ mod tests {
             })
             .collect();
         assert_eq!(got, vec![("a".to_string(), 5), ("a".to_string(), 10)]);
+    }
+
+    #[test]
+    fn recover_replays_commit_timestamps_and_advances_clock() {
+        use std::{fs, time::SystemTime};
+
+        let wal_dir = std::env::temp_dir().join(format!(
+            "tonbo-replay-test-{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&wal_dir).expect("create wal dir");
+
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let batch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(1)),
+            ])])
+            .expect("batch");
+
+        let wal_batch =
+            batch_with_tombstones(&batch.clone(), Some(&[true])).expect("batch with tombstone");
+        let payload = WalPayload::DynBatch {
+            batch: wal_batch,
+            commit_ts: Timestamp::new(42),
+        };
+        let frames = encode_payload(payload, 7).expect("encode");
+        let mut seq = INITIAL_FRAME_SEQ;
+        let mut bytes = Vec::new();
+        for frame in frames {
+            bytes.extend_from_slice(&frame.into_bytes(seq));
+            seq += 1;
+        }
+        fs::write(wal_dir.join("000001.wal"), bytes).expect("write wal");
+
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+        let mut cfg = WalConfig::default();
+        cfg.dir = wal_dir.clone();
+        let executor = Arc::new(BlockingExecutor::default());
+        let mut db = block_on(DB::recover_dyn_with_wal(
+            schema.clone(),
+            extractor,
+            executor.clone(),
+            cfg,
+        ))
+        .expect("recover");
+
+        // Replayed version retains commit_ts 42 and tombstone state.
+        let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
+        assert_eq!(chain, vec![(Timestamp::new(42), true)]);
+
+        use std::ops::Bound as B;
+        let ranges = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
+            B::Included(KeyDyn::from("k")),
+            B::Included(KeyDyn::from("k")),
+        )]);
+        let visible: Vec<_> = db
+            .scan_mutable_rows_at(&ranges, Timestamp::new(50))
+            .collect();
+        assert!(visible.is_empty());
+
+        // New ingest should advance to > 42 (next clock tick).
+        let new_batch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(2)),
+            ])])
+            .expect("batch2");
+        block_on(db.ingest(new_batch)).expect("ingest new");
+
+        let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
+        assert_eq!(
+            chain,
+            vec![(Timestamp::new(42), true), (Timestamp::new(43), false)]
+        );
+
+        fs::remove_dir_all(&wal_dir).expect("cleanup");
     }
 }
 // duplicates removed (moved above tests)

@@ -163,6 +163,22 @@ where
     loop {
         if let Some(mut timer_future) = timer.as_mut() {
             futures::select_biased! {
+                _ = timer_future => {
+                    timer = None;
+                    match ctx.handle_timer_elapsed().await {
+                        Ok(TimerEvent { sync_performed, reschedule }) => {
+                            if sync_performed {
+                                ctx.record_sync().await;
+                            }
+                            if let Some(interval) = reschedule {
+                                timer = Some(ctx.schedule_timer(interval).fuse());
+                            }
+                        }
+                        Err(err) => {
+                            return Err(err);
+                        }
+                    }
+                }
                 msg = receiver.next() => {
                     match msg {
                         Some(WriterMsg::Enqueue { payload_seq, payload, enqueued_at, ack_tx }) => {
@@ -188,22 +204,6 @@ where
                         }
                     }
                 }
-                _ = timer_future => {
-                    timer = None;
-                    match ctx.handle_timer_elapsed().await {
-                        Ok(TimerEvent { sync_performed, reschedule }) => {
-                            if sync_performed {
-                                ctx.record_sync().await;
-                            }
-                            if let Some(interval) = reschedule {
-                                timer = Some(ctx.schedule_timer(interval).fuse());
-                            }
-                        }
-                        Err(err) => {
-                            return Err(err);
-                        }
-                    }
-                }
             }
         } else {
             match receiver.next().await {
@@ -215,10 +215,7 @@ where
                 }) => {
                     ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                     ctx.update_queue_depth_metric().await;
-                    match ctx
-                        .handle_enqueue(payload_seq, payload, enqueued_at)
-                        .await
-                    {
+                    match ctx.handle_enqueue(payload_seq, payload, enqueued_at).await {
                         Ok(HandleOutcome {
                             ack,
                             sync_performed,
@@ -592,7 +589,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::wal::{WalPayload, WalResult};
+    use crate::{
+        mvcc::Timestamp,
+        wal::{WalPayload, WalResult},
+    };
 
     fn sample_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -643,7 +643,7 @@ mod tests {
 
         let payload = WalPayload::DynBatch {
             batch: sample_batch(),
-            commit_ts: 42,
+            commit_ts: Timestamp::new(42),
         };
 
         let payload_seq = 777;
@@ -733,7 +733,7 @@ mod tests {
                 seq1,
                 WalPayload::DynBatch {
                     batch: sample_batch(),
-                    commit_ts: 1,
+                    commit_ts: Timestamp::new(1),
                 },
                 Instant::now(),
                 ack1_tx,
@@ -766,7 +766,7 @@ mod tests {
                 seq1 + 1,
                 WalPayload::DynBatch {
                     batch: sample_batch(),
-                    commit_ts: 2,
+                    commit_ts: Timestamp::new(2),
                 },
                 Instant::now(),
                 ack2_tx,
@@ -849,7 +849,7 @@ mod tests {
                 99,
                 WalPayload::DynBatch {
                     batch: sample_batch(),
-                    commit_ts: 11,
+                    commit_ts: Timestamp::new(11),
                 },
                 Instant::now(),
                 ack_tx,
@@ -931,7 +931,7 @@ mod tests {
                 7,
                 WalPayload::DynBatch {
                     batch: sample_batch(),
-                    commit_ts: 21,
+                    commit_ts: Timestamp::new(21),
                 },
                 Instant::now(),
                 ack_tx,

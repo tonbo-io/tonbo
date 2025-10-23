@@ -15,6 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use arrow_array::{BooleanArray, RecordBatch};
+use arrow_schema::{DataType, Field};
 use fusio::{
     DynFs,
     executor::{Executor, JoinHandle, Timer},
@@ -26,9 +28,11 @@ use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
 };
-use typed_arrow::arrow_array::RecordBatch;
 
-use crate::{db::Mode, wal::metrics::WalMetrics};
+use crate::{
+    db::Mode, inmem::immutable::memtable::MVCC_TOMBSTONE_COL, mvcc::Timestamp,
+    wal::metrics::WalMetrics,
+};
 
 pub mod frame;
 pub mod metrics;
@@ -128,7 +132,7 @@ pub enum WalPayload {
         /// Arrow batch storing the row data.
         batch: RecordBatch,
         /// Commit timestamp captured at enqueue.
-        commit_ts: u64,
+        commit_ts: Timestamp,
     },
     /// Reserved for typed row append once compile-time dispatch returns.
     #[allow(dead_code)]
@@ -150,7 +154,8 @@ where
 {
     sender: mpsc::Sender<writer::WriterMsg>,
     queue_depth: Arc<AtomicUsize>, // current queue occupancy
-    next_payload_seq: AtomicU64, // logical seq handed to each submitted payload (embedded in frames)
+    next_payload_seq: AtomicU64,   /* logical seq handed to each submitted payload (embedded in
+                                    * frames) */
     join: Mutex<Option<E::JoinHandle<WalResult<()>>>>,
 }
 
@@ -231,10 +236,7 @@ where
 
     /// Enqueue a payload to the WAL writer.
     pub async fn submit(&self, payload: WalPayload) -> WalResult<WalTicket<E>> {
-        let payload_seq = self
-            .inner
-            .next_payload_seq
-            .fetch_add(1, Ordering::SeqCst);
+        let payload_seq = self.inner.next_payload_seq.fetch_add(1, Ordering::SeqCst);
         let (ack_tx, ack_rx) = oneshot::channel();
         let enqueued_at = Instant::now();
 
@@ -274,6 +276,86 @@ where
             join_result?
         }
         Ok(())
+    }
+}
+
+/// Append a `_tombstone` boolean column to `batch`, returning a new batch for WAL storage.
+pub fn batch_with_tombstones(
+    batch: &RecordBatch,
+    tombstones: Option<&[bool]>,
+) -> WalResult<RecordBatch> {
+    let rows = batch.num_rows();
+    let values = match tombstones {
+        Some(bits) => {
+            if bits.len() != rows {
+                return Err(WalError::Codec(
+                    "tombstone bitmap length mismatch record batch".to_string(),
+                ));
+            }
+            bits.to_vec()
+        }
+        None => vec![false; rows],
+    };
+
+    if batch
+        .schema()
+        .fields()
+        .iter()
+        .any(|f| f.name() == MVCC_TOMBSTONE_COL)
+    {
+        return Err(WalError::Codec(
+            "record batch already contains _tombstone column".to_string(),
+        ));
+    }
+
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
+
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(BooleanArray::from(values)) as _);
+
+    let schema = Arc::new(arrow_schema::Schema::new(fields));
+    RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
+}
+
+/// Remove `_tombstone` column, returning the stripped batch and bitmap when present.
+pub fn strip_tombstone_column(batch: RecordBatch) -> WalResult<(RecordBatch, Option<Vec<bool>>)> {
+    let schema = batch.schema();
+    if let Some(idx) = schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == MVCC_TOMBSTONE_COL)
+    {
+        let array = batch.column(idx);
+        let bools = array
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+        let bitmap = (0..bools.len())
+            .map(|i| bools.value(i))
+            .collect::<Vec<bool>>();
+        let stripped_fields = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, f)| f.clone())
+            .collect::<Vec<_>>();
+        let stripped_columns = batch
+            .columns()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, col)| col.clone())
+            .collect::<Vec<_>>();
+        let stripped = RecordBatch::try_new(
+            Arc::new(arrow_schema::Schema::new(stripped_fields)),
+            stripped_columns,
+        )
+        .map_err(|err| WalError::Codec(err.to_string()))?;
+        Ok((stripped, Some(bitmap)))
+    } else {
+        Ok((batch, None))
     }
 }
 
