@@ -19,10 +19,7 @@ use crate::{
     mvcc::{CommitClock, Timestamp},
     record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
     scan::RangeSet,
-    wal::{
-        WalConfig, WalHandle, WalPayload, append_tombstone_column, frame::WalEvent,
-        replay::Replayer,
-    },
+    wal::{WalConfig, WalHandle, frame::WalEvent, replay::Replayer},
 };
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
@@ -479,15 +476,9 @@ where
     validate_tombstone_bitmap(&batch, &tombstones)?;
     let commit_ts = db.next_commit_ts();
     if let Some(handle) = db.wal_handle().cloned() {
-        let wal_batch =
-            append_tombstone_column(&batch, Some(&tombstones)).map_err(KeyExtractError::from)?;
-        let payload = WalPayload::DynBatch {
-            batch: wal_batch,
-            commit_ts,
-        };
         // TODO: await the WAL ticket once durability handling lands.
         handle
-            .submit(payload)
+            .append(&batch, &tombstones, commit_ts)
             .await
             .map_err(KeyExtractError::from)?;
     }

@@ -127,9 +127,9 @@ pub struct WalAck {
 /// Logical payloads accepted by the WAL.
 #[derive(Debug)]
 pub enum WalPayload {
-    /// Dynamic mode batch along with the commit timestamp.
+    /// Dynamic mode batch along with the commit timestamp (batch already includes `_tombstone`).
     DynBatch {
-        /// Arrow batch storing the row data (with `_tombstone` column appended).
+        /// Arrow batch storing the row data with `_tombstone` column appended.
         batch: RecordBatch,
         /// Commit timestamp captured at enqueue.
         commit_ts: Timestamp,
@@ -341,6 +341,26 @@ where
             receiver: ack_rx,
             _exec: PhantomData,
         })
+    }
+
+    /// Append a record batch with its tombstone bitmap to the WAL.
+    pub async fn append(
+        &self,
+        batch: &RecordBatch,
+        tombstones: &[bool],
+        commit_ts: Timestamp,
+    ) -> WalResult<WalTicket<E>> {
+        if batch.num_rows() != tombstones.len() {
+            return Err(WalError::Codec(
+                "tombstone bitmap length mismatch record batch".to_string(),
+            ));
+        }
+        let wal_batch = append_tombstone_column(batch, Some(tombstones))?;
+        self.submit(WalPayload::DynBatch {
+            batch: wal_batch,
+            commit_ts,
+        })
+        .await
     }
 
     /// Force manual rotation of the active WAL segment.
