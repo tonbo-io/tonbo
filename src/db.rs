@@ -18,6 +18,7 @@ use crate::{
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
     mvcc::{CommitClock, Timestamp},
+    ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
     wal::{WalConfig, WalHandle, frame::WalEvent, replay::Replayer, strip_tombstone_column},
@@ -260,6 +261,25 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         self.immutables.len()
     }
 
+    /// Plan and flush immutable segments into a Parquet-backed SSTable.
+    pub async fn flush_immutables_with_descriptor(
+        &self,
+        config: Arc<SsTableConfig>,
+        descriptor: SsTableDescriptor,
+    ) -> Result<SsTable<M>, SsTableError>
+    where
+        M: Sized,
+    {
+        if self.immutables.is_empty() {
+            return Err(SsTableError::NoImmutableSegments);
+        }
+        let mut builder = SsTableBuilder::<M>::new(config, descriptor);
+        for seg in &self.immutables {
+            builder.add_immutable(seg)?;
+        }
+        builder.finish().await
+    }
+
     // Key-only merged scans have been removed.
 }
 
@@ -287,19 +307,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        inmem::{mutable::DynMem, policy::BatchesThreshold},
+        inmem::policy::BatchesThreshold,
         test_util::build_batch,
         wal::{
             WalPayload, batch_with_tombstones,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
         },
     };
-
-    impl DynMem {
-        fn inspect_versions(&self, key: &KeyDyn) -> Option<Vec<(Timestamp, bool)>> {
-            self.0.inspect_versions(key)
-        }
-    }
 
     #[test]
     fn dynamic_seal_on_batches_threshold() {

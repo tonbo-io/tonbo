@@ -137,7 +137,7 @@ This RFC records the design rationale, API impacts, and next steps.
 ## Appendix: Module Mapping (as of this RFC)
 
 - `src/inmem/mutable/memtable.rs`:
-  - `DynLayout`: columnar mutable backed by attached `RecordBatch` chunks and a last-writer index.
+  - `DynMem`: columnar mutable backed by attached `RecordBatch` chunks and a last-writer index.
   - Typed layout scaffolding is removed for now but the trait surface stays ready for it.
 - `src/inmem/immutable/memtable.rs`:
   - Generic immutable memtable with runtime builders (`segment_from_batch_with_*`). Typed builders will return alongside the typed mode.
