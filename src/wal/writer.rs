@@ -30,15 +30,21 @@ use crate::wal::{
     storage::{WalSegment, WalStorage},
 };
 
+// Wrapper around executor-specific sleep futures so we can store them in the timer slot.
 type SleepFuture = Pin<Box<dyn MaybeSendFuture<Output = ()>>>;
+// Optional holder for the active sleep future (fused so we can poll it safely multiple times).
 type SleepSlot = Option<Fuse<SleepFuture>>;
 
 /// Message dispatched to the writer loop.
 pub(crate) enum WriterMsg {
     /// Append a payload to the WAL.
+    ///
+    /// We model messages as an enum even though only `Enqueue` exists today so
+    /// future command variants (e.g. rotation, flush) can ride the same queue
+    /// without changing its type.
     Enqueue {
-        /// Provisional identifier assigned by the submitter.
-        provisional_seq: u64,
+        /// Logical sequence assigned by the submitter (embedded in frame payloads).
+        payload_seq: u64,
         /// Logical payload to encode.
         payload: WalPayload,
         /// Instant at which the payload was enqueued (used for latency metrics).
@@ -51,13 +57,13 @@ pub(crate) enum WriterMsg {
 impl WriterMsg {
     #[cfg(test)]
     fn queued(
-        provisional_seq: u64,
+        payload_seq: u64,
         payload: WalPayload,
         enqueued_at: Instant,
         ack_tx: oneshot::Sender<WalResult<WalAck>>,
     ) -> Self {
         Self::Enqueue {
-            provisional_seq,
+            payload_seq,
             payload,
             enqueued_at,
             ack_tx,
@@ -73,7 +79,7 @@ where
     /// Bounded sender feeding the writer task.
     pub(crate) sender: mpsc::Sender<WriterMsg>,
     /// Shared counter tracking the approximate queue depth.
-    pub(crate) queue_depth: Arc<AtomicUsize>,
+    pub(crate) queue_depth: Arc<AtomicUsize>, // current queue occupancy
     join: E::JoinHandle<WalResult<()>>,
 }
 
@@ -159,10 +165,10 @@ where
             futures::select_biased! {
                 msg = receiver.next() => {
                     match msg {
-                        Some(WriterMsg::Enqueue { provisional_seq, payload, enqueued_at, ack_tx }) => {
+                        Some(WriterMsg::Enqueue { payload_seq, payload, enqueued_at, ack_tx }) => {
                             ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                             ctx.update_queue_depth_metric().await;
-                            match ctx.handle_enqueue(provisional_seq, payload, enqueued_at).await {
+                            match ctx.handle_enqueue(payload_seq, payload, enqueued_at).await {
                                 Ok(HandleOutcome { ack, sync_performed, timer_directive }) => {
                                     if sync_performed {
                                         ctx.record_sync().await;
@@ -202,7 +208,7 @@ where
         } else {
             match receiver.next().await {
                 Some(WriterMsg::Enqueue {
-                    provisional_seq,
+                    payload_seq,
                     payload,
                     enqueued_at,
                     ack_tx,
@@ -210,7 +216,7 @@ where
                     ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                     ctx.update_queue_depth_metric().await;
                     match ctx
-                        .handle_enqueue(provisional_seq, payload, enqueued_at)
+                        .handle_enqueue(payload_seq, payload, enqueued_at)
                         .await
                     {
                         Ok(HandleOutcome {
@@ -304,11 +310,11 @@ where
 
     async fn handle_enqueue(
         &mut self,
-        provisional_seq: u64,
+        payload_seq: u64,
         payload: WalPayload,
         enqueued_at: Instant,
     ) -> WalResult<HandleOutcome> {
-        let mut frames = encode_payload(payload, provisional_seq)?;
+        let mut frames = encode_payload(payload, payload_seq)?;
         if frames.is_empty() {
             return Err(WalError::Corrupt("wal payload produced no frames"));
         }
@@ -640,12 +646,12 @@ mod tests {
             commit_ts: 42,
         };
 
-        let provisional_seq = 777;
+        let payload_seq = 777;
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
         sender
             .try_send(WriterMsg::queued(
-                provisional_seq,
+                payload_seq,
                 payload,
                 Instant::now(),
                 ack_tx,
