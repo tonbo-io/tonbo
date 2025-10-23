@@ -188,7 +188,7 @@ pub fn append_tombstone_column(
 }
 
 /// Remove `_tombstone` column, returning the stripped batch and bitmap.
-pub fn split_tombstone_column(batch: RecordBatch) -> WalResult<(RecordBatch, Vec<bool>)> {
+pub(crate) fn split_tombstone_column(batch: RecordBatch) -> WalResult<(RecordBatch, Vec<bool>)> {
     let schema = batch.schema();
     let idx = schema
         .fields()
