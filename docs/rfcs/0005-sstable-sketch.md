@@ -55,9 +55,10 @@ impl<M: Mode> SsTableBuilder<M> {
 }
 ```
 
-* Tracks target descriptor/config; returns `SsTableError::Unimplemented` today.
-* `SsTableError::NoImmutableSegments` guards empty flush attempts.
-* Future: stream immutable rows into a Parquet writer (`AsyncArrowWriter` as on main) using the config’s schema and compression.
+* Tracks target descriptor/config and aggregates MVCC-aware stats through `StagedTableStats`.
+* `finish` now returns an `SsTable` handle populated with row-count stats (bytes held at `0` until the real writer lands).
+* `SsTableError::NoImmutableSegments` still guards empty flush attempts.
+* Future: stream immutable rows into a Parquet writer (`AsyncArrowWriter` as on main) using the config’s schema and compression, replacing the stub return value.
 
 ### DB Integration
 
@@ -72,7 +73,26 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 ```
 
 * Minor compaction entry point – owner of the sealed `immutables` deque.
-* For now iterates all immutables into the builder and returns the `Unimplemented` error; next step replaces that with real IO.
+* Drains the in-memory runs into the builder and clears them once the staged flush succeeds; immutables stay untouched on error.
+
+### Compaction Helper
+
+```rust
+pub struct MinorCompactor { .. }
+
+impl MinorCompactor {
+    pub fn new(segment_threshold: usize, target_level: usize, start_id: u64) -> Self;
+    pub async fn maybe_compact<M, E>(
+        &self,
+        db: &mut DB<M, E>,
+        cfg: Arc<SsTableConfig>,
+    ) -> Result<Option<SsTable<M>>, SsTableError>;
+}
+```
+
+* Provides a simple segment-count based trigger that generates `SsTableDescriptor`s and invokes `flush_immutables_with_descriptor`.
+* Returns `Some(SsTable)` when a flush completes and leaves immutables intact if the builder reports an error.
+* Intended as a starter orchestrator; smarter policies can swap in later or wrap this helper.
 
 ### Read Path Placeholders
 
@@ -83,27 +103,28 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 
 | Area | Legacy Tonbo | Current Scaffold | Notes |
 | --- | --- | --- | --- |
-| Writer | Real Parquet writer with range filters and LRU caching | `SsTableBuilder::add_immutable` + `finish` stubs | Need to port `AsyncWriter`, page index filters, and composite key handling. |
+| Writer | Real Parquet writer with range filters and LRU caching | `SsTableBuilder::add_immutable` collects stats; `finish` returns stub `SsTable` | Need to port `AsyncWriter`, compute byte sizes, and persist MVCC metadata. |
 | Store wrapper | `ParquetStore` newtype | Inlined `fs` + `root` on `SsTableConfig` | Simpler config; future manifest can still derive full paths. |
 | Reader | Async `SsTable::scan/get` returning `SsTableScan` stream | Placeholder `SsTableReader`/`SsTableStream` | Requires row filter + ordering support once IO lands. |
-| DB flush | Handled by compaction pipeline in `main` | `DB::flush_immutables_with_descriptor` entry point | Minor compaction will call this once writer is real. |
+| DB flush | Handled by compaction pipeline in `main` | `DB::flush_immutables_with_descriptor` drains immutables and returns staged descriptor | Real writer + WAL/plumbing will extend this; manifest work can observe descriptors today. |
+
+| Compaction helper | Policy-driven scheduler in legacy code | `MinorCompactor` with segment threshold | Acts as a placeholder orchestrator until version-set logic lands. |
 
 ## Execution Plan
 
 1. **Implement Writer IO**
-   * Introduce `ParquetTableWriter` inside `ondisk::sstable`.
-   * Serialize MVCC columns and index metadata; collect `SsTableStats`.
-   * Return a populated `SsTable<M>` (descriptor + stats) from `finish`.
+   * `ParquetTableWriter` accumulates rows/tombstones/min/max commit timestamps today; real Parquet IO still TODO.
+   * Future: serialize MVCC columns and index metadata; compute on-disk byte size.
 2. **Hook Minor Compaction**
-   * Extend `DB::flush_immutables_with_descriptor` to drain immutables once the SST file is written.
-   * Surface resulting descriptor to compaction coordinator (future version set).
+   * `DB::flush_immutables_with_descriptor` now drains immutables on success.
+   * `MinorCompactor` provides a baseline orchestrator; richer policies can replace it.
 3. **Reader + Row Filter**
    * Port `get_range_filter` logic from main to dynamic `KeyDyn`.
    * Implement `SsTableReader::open` using fusio LRU cache.
    * Materialize `SsTableScanPlan::execute` -> Parquet stream + selection vector.
 4. **Testing & Validation**
-   * Parquet round-trip unit tests (write -> scan -> collect).
-   * Integration test proving WAL replay + flush produces on-disk SST.
+   * Unit tests cover immutable MVCC ranges, builder stats, DB flush guards, and the compactor path.
+   * Still pending: Parquet round-trip tests once IO lands; integration covering WAL replay + flush + manifest hand-off.
 5. **Docs/Manifest Follow-up**
    * Update `0004-storage-layout` once SST files land on disk.
    * Draft RFD for version-set/manifest interactions (leveling, metadata).
@@ -118,4 +139,4 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 
 * Legacy Tonbo `src/ondisk/sstable.rs` for full Parquet implementation.
 * `docs/rfcs/0001-hybrid-mutable-and-compaction.md` – outlines mutable sealing and minor compaction triggers.
-* This branch’s `src/ondisk/sstable.rs` for the live scaffold described above.
+* This branch’s `src/ondisk/sstable.rs` & `src/compaction.rs` for the live scaffolding and helper implementations.

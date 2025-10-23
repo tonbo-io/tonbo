@@ -83,6 +83,12 @@ where
     join: E::JoinHandle<WalResult<()>>,
 }
 
+#[allow(unused)]
+struct WriterLoopStart {
+    segment_seq: u64,
+    frame_seq: u64,
+}
+
 impl<E> WriterHandle<E>
 where
     E: Executor + Timer,
@@ -134,6 +140,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_writer_loop<E>(
     exec: Arc<E>,
     storage: WalStorage,
