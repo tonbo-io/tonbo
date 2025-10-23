@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use arrow_array::{BooleanArray, RecordBatch};
+use arrow_array::{ArrayRef, BooleanArray, RecordBatch};
 use arrow_schema::{DataType, Field};
 use fusio::{
     DynFs,
@@ -96,9 +96,9 @@ pub type WalResult<T> = Result<T, WalError>;
 /// Errors surfaced by the WAL subsystem.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum WalError {
-    /// Underlying storage backend failure.
-    #[error("wal backend error: {0}")]
-    Backend(String),
+    /// Underlying storage layer failure.
+    #[error("wal storage error: {0}")]
+    Storage(String),
     /// Payload serialization or deserialization failure.
     #[error("wal frame codec error: {0}")]
     Codec(String),
@@ -129,8 +129,8 @@ pub struct WalAck {
 pub enum WalPayload {
     /// Dynamic mode batch along with the commit timestamp.
     DynBatch {
-        /// Arrow batch storing the row data.
-        batch: RecordBatch,
+        /// Arrow batch and tombstone bitmap for dynamic mode.
+        batch: DynWalBatch,
         /// Commit timestamp captured at enqueue.
         commit_ts: Timestamp,
     },
@@ -146,6 +146,106 @@ pub enum WalPayload {
         /// Placeholder for control payload.
         _todo: (),
     },
+}
+
+/// Dynamic-mode WAL batch containing row data and per-row tombstone markers.
+#[derive(Debug, Clone)]
+pub struct DynWalBatch {
+    batch: RecordBatch,
+    tombstones: Vec<bool>,
+}
+
+impl DynWalBatch {
+    /// Construct a WAL batch for pure inserts (all tombstones are `false`).
+    pub fn from_batch(batch: RecordBatch) -> Self {
+        let tombstones = vec![false; batch.num_rows()];
+        Self { batch, tombstones }
+    }
+
+    /// Construct a WAL batch with an explicit tombstone bitmap.
+    pub fn try_from_parts(batch: RecordBatch, tombstones: Vec<bool>) -> WalResult<Self> {
+        if batch.num_rows() != tombstones.len() {
+            return Err(WalError::Codec(
+                "tombstone bitmap length mismatch record batch".to_string(),
+            ));
+        }
+        Ok(Self { batch, tombstones })
+    }
+
+    /// Borrow the underlying record batch.
+    pub fn batch(&self) -> &RecordBatch {
+        &self.batch
+    }
+
+    /// Borrow the tombstone bitmap.
+    pub fn tombstones(&self) -> &[bool] {
+        &self.tombstones
+    }
+
+    /// Consume the wrapper, returning the batch and bitmap.
+    pub fn into_parts(self) -> (RecordBatch, Vec<bool>) {
+        (self.batch, self.tombstones)
+    }
+
+    /// Encode by appending the `_tombstone` column to the underlying batch.
+    pub fn encode(&self) -> WalResult<RecordBatch> {
+        let mut fields = self.batch.schema().fields().to_vec();
+        if fields.iter().any(|f| f.name() == MVCC_TOMBSTONE_COL) {
+            return Err(WalError::Codec(
+                "record batch already contains _tombstone column".to_string(),
+            ));
+        }
+
+        fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
+
+        let mut columns = self.batch.columns().to_vec();
+        columns.push(Arc::new(BooleanArray::from(self.tombstones.clone())) as ArrayRef);
+
+        let schema = Arc::new(arrow_schema::Schema::new(fields));
+        RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
+    }
+
+    /// Decode from a WAL-encoded batch by separating the `_tombstone` column.
+    pub fn decode(encoded: RecordBatch) -> WalResult<Self> {
+        let schema = encoded.schema();
+        let idx = schema
+            .fields()
+            .iter()
+            .position(|f| f.name() == MVCC_TOMBSTONE_COL)
+            .ok_or_else(|| WalError::Codec("_tombstone column missing".to_string()))?;
+
+        let array = encoded.column(idx);
+        let bools = array
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+        let tombstones = (0..bools.len())
+            .map(|i| bools.value(i))
+            .collect::<Vec<bool>>();
+
+        let stripped_fields = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, f)| f.clone())
+            .collect::<Vec<_>>();
+        let stripped_columns = encoded
+            .columns()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, col)| col.clone())
+            .collect::<Vec<_>>();
+
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow_schema::Schema::new(stripped_fields)),
+            stripped_columns,
+        )
+        .map_err(|err| WalError::Codec(err.to_string()))?;
+
+        Ok(Self { batch, tombstones })
+    }
 }
 
 struct WalHandleInner<E>
@@ -252,7 +352,7 @@ where
         let mut sender = self.inner.clone_sender();
         if let Err(_err) = sender.send(msg).await {
             self.inner.queue_depth.fetch_sub(1, Ordering::SeqCst);
-            return Err(WalError::Backend("wal writer task closed".into()));
+            return Err(WalError::Storage("wal writer task closed".into()));
         }
 
         Ok(WalTicket {
@@ -272,90 +372,10 @@ where
         self.inner.close_channel();
         if let Some(join) = self.inner.take_join() {
             let join_result = block_on(async move { join.join().await })
-                .map_err(|err| WalError::Backend(err.to_string()))?;
+                .map_err(|err| WalError::Storage(err.to_string()))?;
             join_result?
         }
         Ok(())
-    }
-}
-
-/// Append a `_tombstone` boolean column to `batch`, returning a new batch for WAL storage.
-pub fn batch_with_tombstones(
-    batch: &RecordBatch,
-    tombstones: Option<&[bool]>,
-) -> WalResult<RecordBatch> {
-    let rows = batch.num_rows();
-    let values = match tombstones {
-        Some(bits) => {
-            if bits.len() != rows {
-                return Err(WalError::Codec(
-                    "tombstone bitmap length mismatch record batch".to_string(),
-                ));
-            }
-            bits.to_vec()
-        }
-        None => vec![false; rows],
-    };
-
-    if batch
-        .schema()
-        .fields()
-        .iter()
-        .any(|f| f.name() == MVCC_TOMBSTONE_COL)
-    {
-        return Err(WalError::Codec(
-            "record batch already contains _tombstone column".to_string(),
-        ));
-    }
-
-    let mut fields = batch.schema().fields().to_vec();
-    fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
-
-    let mut columns = batch.columns().to_vec();
-    columns.push(Arc::new(BooleanArray::from(values)) as _);
-
-    let schema = Arc::new(arrow_schema::Schema::new(fields));
-    RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
-}
-
-/// Remove `_tombstone` column, returning the stripped batch and bitmap when present.
-pub fn strip_tombstone_column(batch: RecordBatch) -> WalResult<(RecordBatch, Option<Vec<bool>>)> {
-    let schema = batch.schema();
-    if let Some(idx) = schema
-        .fields()
-        .iter()
-        .position(|f| f.name() == MVCC_TOMBSTONE_COL)
-    {
-        let array = batch.column(idx);
-        let bools = array
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
-        let bitmap = (0..bools.len())
-            .map(|i| bools.value(i))
-            .collect::<Vec<bool>>();
-        let stripped_fields = schema
-            .fields()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != idx)
-            .map(|(_, f)| f.clone())
-            .collect::<Vec<_>>();
-        let stripped_columns = batch
-            .columns()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != idx)
-            .map(|(_, col)| col.clone())
-            .collect::<Vec<_>>();
-        let stripped = RecordBatch::try_new(
-            Arc::new(arrow_schema::Schema::new(stripped_fields)),
-            stripped_columns,
-        )
-        .map_err(|err| WalError::Codec(err.to_string()))?;
-        Ok((stripped, Some(bitmap)))
-    } else {
-        Ok((batch, None))
     }
 }
 
@@ -375,7 +395,7 @@ where
     pub async fn durable(self) -> WalResult<WalAck> {
         match self.receiver.await {
             Ok(result) => result,
-            Err(_) => Err(WalError::Backend("wal writer dropped ack".into())),
+            Err(_) => Err(WalError::Storage("wal writer dropped ack".into())),
         }
     }
 }
@@ -409,7 +429,7 @@ where
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
         let fs: Arc<dyn DynFs> = Arc::new(TokioFs);
         let wal_root = Path::from_filesystem_path(&cfg.dir)
-            .map_err(|err| WalError::Backend(err.to_string()))?;
+            .map_err(|err| WalError::Storage(err.to_string()))?;
         let storage = storage::WalStorage::new(fs, wal_root);
 
         let metrics = Arc::new(E::rw_lock(WalMetrics::default()));

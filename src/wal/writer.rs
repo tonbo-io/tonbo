@@ -505,13 +505,13 @@ async fn perform_sync(
     match fs_tag {
         FileSystemTag::Local => {
             let local_path = path_to_local(segment_path).map_err(|err| {
-                WalError::Backend(format!("failed to resolve wal segment path: {err}"))
+                WalError::Storage(format!("failed to resolve wal segment path: {err}"))
             })?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
                 .open(&local_path)
                 .map_err(|err| {
-                    WalError::Backend(format!(
+                    WalError::Storage(format!(
                         "failed to reopen wal segment {} for sync: {}",
                         local_path.display(),
                         err
@@ -519,14 +519,14 @@ async fn perform_sync(
                 })?;
             match variant {
                 SyncVariant::Data => file.sync_data().map_err(|err| {
-                    WalError::Backend(format!(
+                    WalError::Storage(format!(
                         "failed to fdatasync wal segment {}: {}",
                         local_path.display(),
                         err
                     ))
                 }),
                 SyncVariant::All => file.sync_all().map_err(|err| {
-                    WalError::Backend(format!(
+                    WalError::Storage(format!(
                         "failed to fsync wal segment {}: {}",
                         local_path.display(),
                         err
@@ -535,7 +535,7 @@ async fn perform_sync(
             }
         }
         FileSystemTag::Memory => Ok(()),
-        _ => Err(WalError::Backend(format!(
+        _ => Err(WalError::Storage(format!(
             "wal backend {:?} does not support durability sync",
             fs_tag
         ))),
@@ -543,7 +543,7 @@ async fn perform_sync(
 }
 
 fn backend_err(action: &str, err: FusioError) -> WalError {
-    WalError::Backend(format!("failed to {action}: {err}"))
+    WalError::Storage(format!("failed to {action}: {err}"))
 }
 
 struct HandleOutcome {
@@ -591,13 +591,14 @@ mod tests {
     use super::*;
     use crate::{
         mvcc::Timestamp,
-        wal::{WalPayload, WalResult},
+        wal::{DynWalBatch, WalPayload, WalResult},
     };
 
-    fn sample_batch() -> RecordBatch {
+    fn sample_batch() -> DynWalBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let data: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2, 3]));
-        RecordBatch::try_new(schema, vec![data]).expect("valid batch")
+        let batch = RecordBatch::try_new(schema, vec![data]).expect("valid batch");
+        DynWalBatch::from_batch(batch)
     }
 
     #[test]

@@ -46,7 +46,7 @@ impl WalStorage {
             .open_options(&segment_path, Self::write_options())
             .await
             .map_err(|err| {
-                WalError::Backend(format!(
+                WalError::Storage(format!(
                     "failed to open wal segment {}: {}",
                     segment_path, err
                 ))
@@ -58,14 +58,14 @@ impl WalStorage {
     /// Remove an existing WAL segment by path.
     pub async fn remove_segment(&self, path: &Path) -> WalResult<()> {
         self.fs.remove(path).await.map_err(|err| {
-            WalError::Backend(format!("failed to remove wal segment {}: {}", path, err))
+            WalError::Storage(format!("failed to remove wal segment {}: {}", path, err))
         })
     }
 
     /// Expose convenience to create the WAL directory structure.
     pub async fn ensure_dir(&self, path: &Path) -> WalResult<()> {
         self.fs.create_dir_all(path).await.map_err(|err| {
-            WalError::Backend(format!("failed to ensure wal directory {}: {}", path, err))
+            WalError::Storage(format!("failed to ensure wal directory {}: {}", path, err))
         })
     }
 
@@ -84,7 +84,7 @@ impl WalStorage {
     fn segment_path(&self, seq: u64) -> WalResult<Path> {
         let filename = format!("wal-{seq:020}.tonwal");
         let part = PathPart::parse(&filename).map_err(|err| {
-            WalError::Backend(format!("invalid wal segment name {filename}: {err}"))
+            WalError::Storage(format!("invalid wal segment name {filename}: {err}"))
         })?;
         Ok(self.root.child(part))
     }
