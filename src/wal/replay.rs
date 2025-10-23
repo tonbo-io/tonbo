@@ -87,7 +87,7 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
-            DynWalBatch, WalPayload,
+            WalPayload,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
         },
     };
@@ -116,7 +116,8 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch = DynWalBatch::try_from_parts(batch.clone(), vec![false]).expect("wal batch");
+        let wal_batch =
+            crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
         let payload = WalPayload::DynBatch {
             batch: wal_batch.clone(),
             commit_ts: Timestamp::new(42),
@@ -140,10 +141,11 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
+                tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
-                assert_eq!(decoded.tombstones(), &[false]);
-                assert_eq!(decoded.batch().num_rows(), 1);
+                assert_eq!(*tombstones, vec![false]);
+                assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }

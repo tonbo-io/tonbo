@@ -129,8 +129,8 @@ pub struct WalAck {
 pub enum WalPayload {
     /// Dynamic mode batch along with the commit timestamp.
     DynBatch {
-        /// Arrow batch and tombstone bitmap for dynamic mode.
-        batch: DynWalBatch,
+        /// Arrow batch storing the row data (with `_tombstone` column appended).
+        batch: RecordBatch,
         /// Commit timestamp captured at enqueue.
         commit_ts: Timestamp,
     },
@@ -148,104 +148,85 @@ pub enum WalPayload {
     },
 }
 
-/// Dynamic-mode WAL batch containing row data and per-row tombstone markers.
-#[derive(Debug, Clone)]
-pub struct DynWalBatch {
-    batch: RecordBatch,
-    tombstones: Vec<bool>,
+/// Append a `_tombstone` boolean column, returning a new batch for WAL storage.
+pub fn append_tombstone_column(
+    batch: &RecordBatch,
+    tombstones: Option<&[bool]>,
+) -> WalResult<RecordBatch> {
+    let rows = batch.num_rows();
+    let values = match tombstones {
+        Some(bits) => {
+            if bits.len() != rows {
+                return Err(WalError::Codec(
+                    "tombstone bitmap length mismatch record batch".to_string(),
+                ));
+            }
+            bits.to_vec()
+        }
+        None => vec![false; rows],
+    };
+
+    if batch
+        .schema()
+        .fields()
+        .iter()
+        .any(|f| f.name() == MVCC_TOMBSTONE_COL)
+    {
+        return Err(WalError::Codec(
+            "record batch already contains _tombstone column".to_string(),
+        ));
+    }
+
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
+
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(BooleanArray::from(values)) as ArrayRef);
+
+    let schema = Arc::new(arrow_schema::Schema::new(fields));
+    RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
 }
 
-impl DynWalBatch {
-    /// Construct a WAL batch for pure inserts (all tombstones are `false`).
-    pub fn from_batch(batch: RecordBatch) -> Self {
-        let tombstones = vec![false; batch.num_rows()];
-        Self { batch, tombstones }
-    }
+/// Remove `_tombstone` column, returning the stripped batch and bitmap.
+pub fn split_tombstone_column(batch: RecordBatch) -> WalResult<(RecordBatch, Vec<bool>)> {
+    let schema = batch.schema();
+    let idx = schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == MVCC_TOMBSTONE_COL)
+        .ok_or_else(|| WalError::Codec("_tombstone column missing".to_string()))?;
 
-    /// Construct a WAL batch with an explicit tombstone bitmap.
-    pub fn try_from_parts(batch: RecordBatch, tombstones: Vec<bool>) -> WalResult<Self> {
-        if batch.num_rows() != tombstones.len() {
-            return Err(WalError::Codec(
-                "tombstone bitmap length mismatch record batch".to_string(),
-            ));
-        }
-        Ok(Self { batch, tombstones })
-    }
+    let array = batch.column(idx);
+    let bools = array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+    let bitmap = (0..bools.len())
+        .map(|i| bools.value(i))
+        .collect::<Vec<bool>>();
 
-    /// Borrow the underlying record batch.
-    pub fn batch(&self) -> &RecordBatch {
-        &self.batch
-    }
+    let stripped_fields = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .map(|(_, f)| f.clone())
+        .collect::<Vec<_>>();
+    let stripped_columns = batch
+        .columns()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .map(|(_, col)| col.clone())
+        .collect::<Vec<_>>();
 
-    /// Borrow the tombstone bitmap.
-    pub fn tombstones(&self) -> &[bool] {
-        &self.tombstones
-    }
+    let stripped = RecordBatch::try_new(
+        Arc::new(arrow_schema::Schema::new(stripped_fields)),
+        stripped_columns,
+    )
+    .map_err(|err| WalError::Codec(err.to_string()))?;
 
-    /// Consume the wrapper, returning the batch and bitmap.
-    pub fn into_parts(self) -> (RecordBatch, Vec<bool>) {
-        (self.batch, self.tombstones)
-    }
-
-    /// Encode by appending the `_tombstone` column to the underlying batch.
-    pub fn encode(&self) -> WalResult<RecordBatch> {
-        let mut fields = self.batch.schema().fields().to_vec();
-        if fields.iter().any(|f| f.name() == MVCC_TOMBSTONE_COL) {
-            return Err(WalError::Codec(
-                "record batch already contains _tombstone column".to_string(),
-            ));
-        }
-
-        fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
-
-        let mut columns = self.batch.columns().to_vec();
-        columns.push(Arc::new(BooleanArray::from(self.tombstones.clone())) as ArrayRef);
-
-        let schema = Arc::new(arrow_schema::Schema::new(fields));
-        RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
-    }
-
-    /// Decode from a WAL-encoded batch by separating the `_tombstone` column.
-    pub fn decode(encoded: RecordBatch) -> WalResult<Self> {
-        let schema = encoded.schema();
-        let idx = schema
-            .fields()
-            .iter()
-            .position(|f| f.name() == MVCC_TOMBSTONE_COL)
-            .ok_or_else(|| WalError::Codec("_tombstone column missing".to_string()))?;
-
-        let array = encoded.column(idx);
-        let bools = array
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
-        let tombstones = (0..bools.len())
-            .map(|i| bools.value(i))
-            .collect::<Vec<bool>>();
-
-        let stripped_fields = schema
-            .fields()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != idx)
-            .map(|(_, f)| f.clone())
-            .collect::<Vec<_>>();
-        let stripped_columns = encoded
-            .columns()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != idx)
-            .map(|(_, col)| col.clone())
-            .collect::<Vec<_>>();
-
-        let batch = RecordBatch::try_new(
-            Arc::new(arrow_schema::Schema::new(stripped_fields)),
-            stripped_columns,
-        )
-        .map_err(|err| WalError::Codec(err.to_string()))?;
-
-        Ok(Self { batch, tombstones })
-    }
+    Ok((stripped, bitmap))
 }
 
 struct WalHandleInner<E>

@@ -591,14 +591,13 @@ mod tests {
     use super::*;
     use crate::{
         mvcc::Timestamp,
-        wal::{DynWalBatch, WalPayload, WalResult},
+        wal::{WalPayload, WalResult, append_tombstone_column},
     };
 
-    fn sample_batch() -> DynWalBatch {
+    fn sample_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let data: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2, 3]));
-        let batch = RecordBatch::try_new(schema, vec![data]).expect("valid batch");
-        DynWalBatch::from_batch(batch)
+        RecordBatch::try_new(schema, vec![data]).expect("valid batch")
     }
 
     #[test]
@@ -642,8 +641,10 @@ mod tests {
             })
             .expect("spawn");
 
+        let base = sample_batch();
+        let wal_batch = append_tombstone_column(&base, None).expect("wal batch");
         let payload = WalPayload::DynBatch {
-            batch: sample_batch(),
+            batch: wal_batch,
             commit_ts: Timestamp::new(42),
         };
 
@@ -733,7 +734,7 @@ mod tests {
             .try_send(WriterMsg::queued(
                 seq1,
                 WalPayload::DynBatch {
-                    batch: sample_batch(),
+                    batch: append_tombstone_column(&sample_batch(), None).expect("wal batch"),
                     commit_ts: Timestamp::new(1),
                 },
                 Instant::now(),
@@ -766,7 +767,7 @@ mod tests {
             .try_send(WriterMsg::queued(
                 seq1 + 1,
                 WalPayload::DynBatch {
-                    batch: sample_batch(),
+                    batch: append_tombstone_column(&sample_batch(), None).expect("wal batch"),
                     commit_ts: Timestamp::new(2),
                 },
                 Instant::now(),
@@ -849,7 +850,7 @@ mod tests {
             .try_send(WriterMsg::queued(
                 99,
                 WalPayload::DynBatch {
-                    batch: sample_batch(),
+                    batch: append_tombstone_column(&sample_batch(), None).expect("wal batch"),
                     commit_ts: Timestamp::new(11),
                 },
                 Instant::now(),
@@ -931,7 +932,7 @@ mod tests {
             .try_send(WriterMsg::queued(
                 7,
                 WalPayload::DynBatch {
-                    batch: sample_batch(),
+                    batch: append_tombstone_column(&sample_batch(), None).expect("wal batch"),
                     commit_ts: Timestamp::new(21),
                 },
                 Instant::now(),
