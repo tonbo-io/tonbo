@@ -12,6 +12,9 @@ pub mod record;
 // Re-export the unified DB so users can do `tonbo::DB`.
 pub use crate::db::DB;
 
+#[cfg(test)]
+mod test_util;
+
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;
 

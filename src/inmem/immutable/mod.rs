@@ -5,3 +5,7 @@
 
 pub(crate) mod keys;
 pub(crate) mod memtable;
+
+/// Convenience alias for the immutable segment associated with a `Mode`.
+pub(crate) type Immutable<M> =
+    memtable::ImmutableMemTable<<M as crate::db::Mode>::Key, <M as crate::db::Mode>::ImmLayout>;
