@@ -17,7 +17,6 @@ use std::{
 
 use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::{DataType, Field};
-
 use fusio::{
     DynFs,
     executor::{Executor, JoinHandle, Timer},

@@ -7,8 +7,6 @@
 //! The policy layer is mode-agnostic and uses a unified `MemStats` struct which
 //! carries common counters and optional, mode-specific hints.
 
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 /// A unified snapshot of mutable memtable statistics used by sealing policies.

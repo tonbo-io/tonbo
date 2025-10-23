@@ -12,11 +12,8 @@ use fusio::executor::{Executor, Timer};
 
 use crate::{
     inmem::{
-        immutable::memtable::ImmutableMemTable,
-        mutable::{
-            MutableLayout,
-            memtable::{DynLayout, DynRowScan},
-        },
+        immutable::Immutable,
+        mutable::{DynMem, MutableLayout},
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
     mvcc::{CommitClock, Timestamp},
@@ -60,8 +57,6 @@ pub trait Mode {
 }
 
 /// Convenience alias for the immutable segment type of a `Mode`.
-pub(crate) type Immutable<M> = ImmutableMemTable<<M as Mode>::Key, <M as Mode>::ImmLayout>;
-
 /// Dynamic mode: runtime schema + trait-object extractor produce keys and store dynamic rows.
 ///
 /// Notes:
@@ -560,75 +555,6 @@ impl Insertable<DynMode> for Vec<RecordBatch> {
     }
 }
 
-/// Opaque dynamic mutable store for dynamic-mode DBs.
-///
-/// This wraps the internal `DynLayout` to avoid exposing private types via the
-/// public `Mode` trait while preserving performance and behavior.
-pub struct DynMem(pub(crate) DynLayout);
-
-impl DynMem {
-    pub(crate) fn new() -> Self {
-        Self(DynLayout::new())
-    }
-
-    pub(crate) fn insert_batch(
-        &mut self,
-        extractor: &dyn DynKeyExtractor,
-        batch: RecordBatch,
-        commit_ts: Timestamp,
-    ) -> Result<(), KeyExtractError> {
-        self.0.insert_batch(extractor, batch, commit_ts)
-    }
-
-    pub(crate) fn insert_batch_with_ts<F>(
-        &mut self,
-        extractor: &dyn DynKeyExtractor,
-        batch: RecordBatch,
-        commit_ts: Timestamp,
-        tombstone_at: F,
-    ) -> Result<(), KeyExtractError>
-    where
-        F: FnMut(usize) -> bool,
-    {
-        self.0
-            .insert_batch_with_ts(extractor, batch, commit_ts, tombstone_at)
-    }
-
-    pub(crate) fn seal_into_immutable(
-        &mut self,
-        schema: &SchemaRef,
-    ) -> Result<Option<ImmutableMemTable<KeyDyn, RecordBatch>>, KeyExtractError> {
-        self.0.seal_into_immutable(schema)
-    }
-
-    pub(crate) fn scan_rows<'t, 's>(&'t self, ranges: &'s RangeSet<KeyDyn>) -> DynRowScan<'t, 's> {
-        self.0.scan_rows(ranges)
-    }
-
-    pub(crate) fn scan_rows_at<'t, 's>(
-        &'t self,
-        ranges: &'s RangeSet<KeyDyn>,
-        read_ts: Timestamp,
-    ) -> DynRowScan<'t, 's> {
-        self.0.scan_rows_at(ranges, read_ts)
-    }
-}
-
-impl MutableLayout<KeyDyn> for DynMem {
-    fn approx_bytes(&self) -> usize {
-        self.0.approx_bytes()
-    }
-}
-
-impl StatsProvider for DynMem {
-    fn build_stats(
-        &self,
-        since_last_seal: Option<std::time::Duration>,
-    ) -> crate::inmem::policy::MemStats {
-        self.0.build_stats(since_last_seal)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -637,11 +563,11 @@ mod tests {
     use fusio::executor::BlockingExecutor;
     use futures::executor::block_on;
     use typed_arrow_dyn::{DynCell, DynRow};
-    use typed_arrow_unified::SchemaLike;
 
     use super::*;
     use crate::{
         inmem::policy::BatchesThreshold,
+        test_util::build_batch,
         wal::{
             WalPayload,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
@@ -666,7 +592,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
 
         let mut db =
             DB::new_dyn_with_key_name(schema.clone(), "id", Arc::new(BlockingExecutor::default()))
@@ -695,7 +621,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
         assert_eq!(db.num_immutable_segments(), 0);
     }
@@ -716,7 +642,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))]),
             DynRow(vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
         assert_eq!(db.num_immutable_segments(), 0);
     }
@@ -781,7 +707,7 @@ mod tests {
                 Some(DynCell::I32(3)),
             ]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
@@ -834,7 +760,7 @@ mod tests {
                 Some(DynCell::I32(3)),
             ]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("valid dyn rows");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
@@ -874,13 +800,14 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let batch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let batch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(1)),
-            ])])
-            .expect("batch");
+            ])],
+        )
+        .expect("batch");
 
         let wal_batch =
             batch_with_tombstones(&batch.clone(), Some(&[true])).expect("batch with tombstone");
@@ -925,13 +852,14 @@ mod tests {
         assert!(visible.is_empty());
 
         // New ingest should advance to > 42 (next clock tick).
-        let new_batch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let new_batch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(2)),
-            ])])
-            .expect("batch2");
+            ])],
+        )
+        .expect("batch2");
         block_on(db.ingest(new_batch)).expect("ingest new");
 
         let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");

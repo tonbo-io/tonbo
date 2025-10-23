@@ -21,9 +21,4 @@ futures = "0.3"
 
 
 [dev-dependencies]
-typed-arrow-unified = { version = "0.0.1" }
-
-[patch.crates-io]
-# typed-arrow-unified 0.0.1 still pins typed-arrow-dyn 0.0.1; override so
-# our dev-dependency picks up the 0.0.2 stack until an upstream release.
-typed-arrow-unified = { path = "vendor/typed-arrow-unified" }
+futures = "0.3"

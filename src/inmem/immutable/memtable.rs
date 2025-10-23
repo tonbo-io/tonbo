@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::{
     collections::{BTreeMap, btree_map::Range as BTreeRange},
     sync::Arc,
@@ -254,9 +253,9 @@ impl<'t, 's, K: Ord, S> Iterator for ImmutableVisibleScan<'t, 's, K, S> {
 mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use typed_arrow_dyn::{DynCell, DynRow};
-    use typed_arrow_unified::SchemaLike;
 
     use super::*;
+    use crate::test_util::build_batch;
 
     #[test]
     fn scan_ranges_dynamic_key_name() {
@@ -270,7 +269,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("c".into())), Some(DynCell::I32(2))]),
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(3))]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("ok");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let seg = segment_from_batch_with_key_name(batch, "id").expect("seg");
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
@@ -299,7 +298,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
             DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("batch");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
         index.insert(KeyDyn::from("k"), VersionSlice::new(0, 4));
         let (batch, mvcc) = attach_mvcc_columns(
@@ -358,7 +357,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
             DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("batch");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
         index.insert(KeyDyn::from("k"), VersionSlice::new(0, 3));
         let (batch, mvcc) = attach_mvcc_columns(

@@ -306,10 +306,9 @@ impl<'t, 's> Iterator for DynRowScan<'t, 's> {
 mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use typed_arrow_dyn::{DynCell, DynRow};
-    use typed_arrow_unified::SchemaLike;
 
     use super::*;
-    use crate::inmem::policy::StatsProvider;
+    use crate::{inmem::policy::StatsProvider, test_util::build_batch};
 
     #[test]
     fn dyn_stats_and_scan() {
@@ -324,7 +323,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
             DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(3))]),
         ];
-        let batch: RecordBatch = schema.build_batch(rows).expect("ok");
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let extractor =
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
         m.insert_batch(extractor.as_ref(), batch, Timestamp::MIN)
@@ -373,7 +372,7 @@ mod tests {
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(1)),
         ])];
-        let batch_v1: RecordBatch = schema.build_batch(rows_v1).expect("batch v1");
+        let batch_v1: RecordBatch = build_batch(schema.clone(), rows_v1).expect("batch v1");
         m.insert_batch(extractor.as_ref(), batch_v1, Timestamp::new(10))
             .expect("insert v1");
 
@@ -382,7 +381,7 @@ mod tests {
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(2)),
         ])];
-        let batch_v2: RecordBatch = schema.build_batch(rows_v2).expect("batch v2");
+        let batch_v2: RecordBatch = build_batch(schema.clone(), rows_v2).expect("batch v2");
         m.insert_batch(extractor.as_ref(), batch_v2, Timestamp::new(20))
             .expect("insert v2");
 
@@ -391,7 +390,7 @@ mod tests {
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(3)),
         ])];
-        let batch_v3: RecordBatch = schema.build_batch(rows_v3).expect("batch v3");
+        let batch_v3: RecordBatch = build_batch(schema.clone(), rows_v3).expect("batch v3");
         m.insert_batch(extractor.as_ref(), batch_v3, Timestamp::new(30))
             .expect("insert v3");
 
@@ -444,46 +443,50 @@ mod tests {
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
 
         // four versions for the same key
-        let batch1: RecordBatch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let batch1: RecordBatch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(1)),
-            ])])
-            .expect("batch1");
+            ])],
+        )
+        .expect("batch1");
         layout
             .insert_batch(extractor.as_ref(), batch1, Timestamp::new(10))
             .expect("insert");
 
-        let batch2: RecordBatch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let batch2: RecordBatch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(2)),
-            ])])
-            .expect("batch2");
+            ])],
+        )
+        .expect("batch2");
         layout
             .insert_batch(extractor.as_ref(), batch2, Timestamp::new(20))
             .expect("insert");
 
-        let batch3: RecordBatch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let batch3: RecordBatch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(3)),
-            ])])
-            .expect("batch3");
+            ])],
+        )
+        .expect("batch3");
         layout
             .insert_batch(extractor.as_ref(), batch3, Timestamp::new(30))
             .expect("insert");
 
-        let batch4: RecordBatch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let batch4: RecordBatch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(4)),
-            ])])
-            .expect("batch4");
+            ])],
+        )
+        .expect("batch4");
         layout
             .insert_batch(extractor.as_ref(), batch4, Timestamp::new(40))
             .expect("insert");
@@ -558,24 +561,26 @@ mod tests {
         let extractor =
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
 
-        let batch1: RecordBatch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let batch1: RecordBatch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(1)),
-            ])])
-            .expect("batch1");
+            ])],
+        )
+        .expect("batch1");
         layout
             .insert_batch_with_ts(extractor.as_ref(), batch1, Timestamp::new(10), |_| false)
             .expect("insert batch1");
 
-        let batch2: RecordBatch = schema
-            .clone()
-            .build_batch(vec![DynRow(vec![
+        let batch2: RecordBatch = build_batch(
+            schema.clone(),
+            vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(2)),
-            ])])
-            .expect("batch2");
+            ])],
+        )
+        .expect("batch2");
         layout
             .insert_batch_with_ts(extractor.as_ref(), batch2, Timestamp::new(20), |row| {
                 row == 0
