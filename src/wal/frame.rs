@@ -6,7 +6,10 @@ use arrow_array::RecordBatch;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
-use crate::wal::{WalError, WalPayload, WalResult};
+use crate::{
+    mvcc::Timestamp,
+    wal::{WalError, WalPayload, WalResult},
+};
 
 /// Maximum supported frame version.
 pub const FRAME_VERSION: u16 = 1;
@@ -300,10 +303,10 @@ fn encode_txn_append_dyn(provisional_id: u64, batch: RecordBatch) -> WalResult<V
     Ok(payload)
 }
 
-fn encode_txn_commit(provisional_id: u64, commit_ts: u64) -> Vec<u8> {
+fn encode_txn_commit(provisional_id: u64, commit_ts: Timestamp) -> Vec<u8> {
     let mut payload = Vec::with_capacity(TXN_COMMIT_PAYLOAD_SIZE);
     payload.extend_from_slice(&provisional_id.to_le_bytes());
-    payload.extend_from_slice(&commit_ts.to_le_bytes());
+    payload.extend_from_slice(&commit_ts.get().to_le_bytes());
     payload
 }
 
@@ -338,31 +341,28 @@ fn decode_txn_append(payload: &[u8]) -> WalResult<WalEvent> {
     id_bytes.copy_from_slice(&payload[0..8]);
     let provisional_id = u64::from_le_bytes(id_bytes);
     let mode = payload[8];
-    let ipc_bytes = &payload[TXN_APPEND_PREFIX_SIZE..];
+    let payload_bytes = &payload[TXN_APPEND_PREFIX_SIZE..];
 
     match mode {
-        APPEND_MODE_DYN => decode_dyn_append(provisional_id, ipc_bytes),
+        APPEND_MODE_DYN => decode_dyn_append(provisional_id, payload_bytes),
         APPEND_MODE_TYPED => Err(WalError::Unimplemented("typed wal payload decoding")),
         _ => Err(WalError::Corrupt("unknown txn append mode")),
     }
 }
 
-fn decode_dyn_append(provisional_id: u64, ipc_bytes: &[u8]) -> WalResult<WalEvent> {
-    if ipc_bytes.is_empty() {
+fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
+    if bytes.is_empty() {
         return Err(WalError::Codec(
             "txn append payload missing record batch".to_string(),
         ));
     }
 
-    // The streaming reader yields exactly one RecordBatch; anything more
-    // indicates the encoder violated the autocommit contract.
-    let mut reader = StreamReader::try_new(Cursor::new(ipc_bytes), None).map_err(codec_err)?;
+    let mut reader = StreamReader::try_new(Cursor::new(bytes), None).map_err(codec_err)?;
     let batch = reader
         .next()
         .transpose()
         .map_err(codec_err)?
         .ok_or_else(|| WalError::Codec("txn append payload missing record batch".to_string()))?;
-
     if reader.next().transpose().map_err(codec_err)?.is_some() {
         return Err(WalError::Codec(
             "txn append payload contained multiple record batches".to_string(),
@@ -387,7 +387,7 @@ fn decode_txn_commit(payload: &[u8]) -> WalResult<WalEvent> {
     let commit_ts = u64::from_le_bytes(ts_bytes);
     Ok(WalEvent::TxnCommit {
         provisional_id,
-        commit_ts,
+        commit_ts: Timestamp::from(commit_ts),
     })
 }
 
@@ -435,7 +435,7 @@ pub enum WalEvent {
         /// Provisional identifier.
         provisional_id: u64,
         /// Commit timestamp.
-        commit_ts: u64,
+        commit_ts: Timestamp,
     },
     /// Abort the open transaction (optional frame).
     TxnAbort {
@@ -450,10 +450,8 @@ pub enum WalEvent {
 mod tests {
     use std::sync::Arc;
 
-    use typed_arrow::{
-        arrow_array::{Array, Int32Array, StringArray},
-        arrow_schema::{DataType, Field, Schema},
-    };
+    use arrow_array::{Int32Array, StringArray};
+    use typed_arrow::arrow_schema::{DataType, Field, Schema};
 
     use super::*;
 
@@ -559,13 +557,21 @@ mod tests {
 
     #[test]
     fn encode_payload_dyn_batch_round_trip() {
-        let batch = sample_batch();
-        let expected_batch = batch.clone();
-        let commit_ts = 42;
+        let base = sample_batch();
+        let wal_batch = crate::wal::batch_with_tombstones(&base, Some(&[true, false, true]))
+            .expect("wal batch");
+        let user_expected = base.clone();
+        let commit_ts = Timestamp::new(42);
         let provisional_id = 7;
 
-        let frames = encode_payload(WalPayload::DynBatch { batch, commit_ts }, provisional_id)
-            .expect("encode succeeds");
+        let frames = encode_payload(
+            WalPayload::DynBatch {
+                batch: wal_batch,
+                commit_ts,
+            },
+            provisional_id,
+        )
+        .expect("encode succeeds");
 
         assert_eq!(frames.len(), 2);
 
@@ -577,33 +583,10 @@ mod tests {
                 batch: decoded_batch,
             } => {
                 assert_eq!(decoded_id, provisional_id);
-                assert_eq!(
-                    decoded_batch.schema().as_ref(),
-                    expected_batch.schema().as_ref()
-                );
-                let expected_ids = expected_batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .expect("int32 column");
-                let decoded_ids = decoded_batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .expect("int32 column");
-                assert_eq!(decoded_ids, expected_ids);
-
-                let expected_names = expected_batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("string column");
-                let decoded_names = decoded_batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("string column");
-                assert_eq!(decoded_names, expected_names);
+                let (stripped, tombstones) =
+                    crate::wal::strip_tombstone_column(decoded_batch).expect("strip tombstones failed");
+                assert_eq!(tombstones, Some(vec![true, false, true]));
+                assert_eq!(stripped.schema().as_ref(), user_expected.schema().as_ref());
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -624,10 +607,12 @@ mod tests {
 
     #[test]
     fn decode_append_rejects_truncated_payload() {
+        let wal_batch =
+            crate::wal::batch_with_tombstones(&sample_batch(), None).expect("wal batch");
         let frames = encode_payload(
             WalPayload::DynBatch {
-                batch: sample_batch(),
-                commit_ts: 1,
+                batch: wal_batch,
+                commit_ts: Timestamp::new(1),
             },
             9,
         )
@@ -660,7 +645,8 @@ mod tests {
         payload.extend_from_slice(&123_u64.to_le_bytes());
         payload.push(0xFF);
         payload.extend_from_slice(&[0u8; TXN_APPEND_RESERVED_BYTES]);
-        payload.extend_from_slice(&[1, 2, 3]);
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
 
         let err =
             decode_frame(FrameType::TxnAppend, &payload).expect_err("unknown mode should fail");

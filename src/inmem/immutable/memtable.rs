@@ -1,13 +1,20 @@
 #![allow(dead_code)]
-use std::collections::{BTreeMap, btree_map::Range as BTreeRange};
+use std::{
+    collections::{BTreeMap, btree_map::Range as BTreeRange},
+    sync::Arc,
+};
 
-use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_schema::{DataType, Field, Schema};
 
 use crate::{
     mvcc::Timestamp,
     record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError, dyn_extractor_for_field},
     scan::{KeyRange, RangeSet},
 };
+
+pub(crate) const MVCC_COMMIT_COL: &str = "_commit_ts";
+pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 
 /// Generic, read-only immutable memtable with a key index and arbitrary storage `S`.
 pub(crate) struct ImmutableMemTable<K: Ord, S> {
@@ -26,19 +33,18 @@ impl<K: Ord, S> ImmutableMemTable<K, S> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.mvcc.begin_ts.len()
+        self.mvcc.commit_ts.len()
     }
 
     pub(crate) fn storage(&self) -> &S {
         &self.storage
     }
 
-    fn mvcc_slice(&self, slice: VersionSlice) -> (&[Timestamp], &[Timestamp], &[bool]) {
+    fn mvcc_slice(&self, slice: VersionSlice) -> (&[Timestamp], &[bool]) {
         let start = slice.start as usize;
         let end = start + slice.len as usize;
         (
-            &self.mvcc.begin_ts[start..end],
-            &self.mvcc.end_ts[start..end],
+            &self.mvcc.commit_ts[start..end],
             &self.mvcc.tombstone[start..end],
         )
     }
@@ -83,11 +89,10 @@ pub(crate) fn segment_from_batch_with_extractor(
         let k = extractor.key_at(&batch, row)?;
         index.insert(k, VersionSlice::new(row as u32, 1));
     }
-    let mvcc = MvccColumns::new(
-        vec![Timestamp::MIN; len],
-        vec![Timestamp::MAX; len],
-        vec![false; len],
-    );
+    let commit_ts = vec![Timestamp::MIN; len];
+    let tombstone = vec![false; len];
+    let (batch, mvcc) =
+        attach_mvcc_columns(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
     Ok(ImmutableMemTable::new(batch, index, mvcc))
 }
 
@@ -123,6 +128,28 @@ pub(crate) fn segment_from_batch_with_key_name(
         });
     };
     segment_from_batch_with_key_col(batch, idx)
+}
+
+pub(crate) fn attach_mvcc_columns(
+    batch: RecordBatch,
+    commit_ts: Vec<Timestamp>,
+    tombstone: Vec<bool>,
+) -> Result<(RecordBatch, MvccColumns), arrow_schema::ArrowError> {
+    debug_assert_eq!(commit_ts.len(), tombstone.len());
+    let commit_array = UInt64Array::from_iter_values(commit_ts.iter().map(|ts| ts.get()));
+    let tombstone_array = BooleanArray::from(tombstone.clone());
+    let mut columns: Vec<ArrayRef> = batch.columns().iter().cloned().collect();
+    columns.push(Arc::new(commit_array) as ArrayRef);
+    columns.push(Arc::new(tombstone_array) as ArrayRef);
+
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
+    fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
+    let schema = Arc::new(Schema::new(fields));
+
+    let batch = RecordBatch::try_new(schema, columns)?;
+    let mvcc = MvccColumns::new(commit_ts, tombstone);
+    Ok((batch, mvcc))
 }
 
 /// Iterator for immutable scans over key ranges.
@@ -209,9 +236,9 @@ impl<'t, 's, K: Ord, S> Iterator for ImmutableVisibleScan<'t, 's, K, S> {
                 while let Some((key, slice)) = cur.next() {
                     let start = slice.start as usize;
                     let len = slice.len as usize;
-                    let (begin, end_ts, tomb) = self.table.mvcc_slice(*slice);
-                    for idx in (0..len).rev() {
-                        if begin[idx] <= self.read_ts && self.read_ts < end_ts[idx] && !tomb[idx] {
+                    let (commit_ts, tomb) = self.table.mvcc_slice(*slice);
+                    for idx in 0..len {
+                        if commit_ts[idx] <= self.read_ts && !tomb[idx] {
                             return Some((key, (start + idx) as u32));
                         }
                     }
@@ -267,17 +294,25 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(4))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]),
             DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
         ];
         let batch: RecordBatch = schema.build_batch(rows).expect("batch");
         let mut index = BTreeMap::new();
-        index.insert(KeyDyn::from("k"), VersionSlice::new(0, 2));
-        let mvcc = MvccColumns::new(
-            vec![Timestamp::new(10), Timestamp::new(20)],
-            vec![Timestamp::new(20), Timestamp::MAX],
-            vec![false, false],
-        );
+        index.insert(KeyDyn::from("k"), VersionSlice::new(0, 4));
+        let (batch, mvcc) = attach_mvcc_columns(
+            batch,
+            vec![
+                Timestamp::new(40),
+                Timestamp::new(30),
+                Timestamp::new(20),
+                Timestamp::new(10),
+            ],
+            vec![false, false, false, false],
+        )
+        .expect("mvcc columns");
         let seg = ImmutableMemTable::new(batch, index, mvcc);
 
         use std::ops::Bound as B;
@@ -286,32 +321,88 @@ mod tests {
             B::Included(KeyDyn::from("k")),
         )]);
 
-        let mid: Vec<u32> = seg
+        let first_visible: Vec<u32> = seg
             .scan_visible(&ranges, Timestamp::new(15))
             .map(|(_, row)| row)
             .collect();
-        assert_eq!(mid, vec![0]);
+        assert_eq!(first_visible, vec![3]);
 
         let latest: Vec<u32> = seg
-            .scan_visible(&ranges, Timestamp::new(25))
+            .scan_visible(&ranges, Timestamp::new(45))
             .map(|(_, row)| row)
             .collect();
-        assert_eq!(latest, vec![1]);
+        assert_eq!(latest, vec![0]);
+
+        let batch = seg.storage();
+        let value_at = |idx: u32| match &crate::record::extract::row_from_batch(batch, idx as usize)
+            .expect("row")
+            .0[1]
+        {
+            Some(DynCell::I32(v)) => *v,
+            _ => panic!("unexpected cell"),
+        };
+
+        assert_eq!(value_at(first_visible[0]), 1);
+        assert_eq!(value_at(latest[0]), 4);
+    }
+
+    #[test]
+    fn scan_visible_skips_tombstones() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        // Newest → oldest rows to align with commit timestamp ordering.
+        let rows = vec![
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
+        ];
+        let batch: RecordBatch = schema.build_batch(rows).expect("batch");
+        let mut index = BTreeMap::new();
+        index.insert(KeyDyn::from("k"), VersionSlice::new(0, 3));
+        let (batch, mvcc) = attach_mvcc_columns(
+            batch,
+            vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
+            vec![false, true, false],
+        )
+        .expect("mvcc columns");
+        let seg = ImmutableMemTable::new(batch, index, mvcc);
+
+        use std::ops::Bound as B;
+        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
+            B::Included(KeyDyn::from("k")),
+            B::Included(KeyDyn::from("k")),
+        )]);
+
+        // Timestamp past the tombstoned version should return the next older live row.
+        let visible: Vec<u32> = seg
+            .scan_visible(&ranges, Timestamp::new(21))
+            .map(|(_, row)| row)
+            .collect();
+        assert_eq!(visible, vec![2]);
+
+        let batch = seg.storage();
+        let value = match &crate::record::extract::row_from_batch(batch, visible[0] as usize)
+            .expect("row")
+            .0[1]
+        {
+            Some(DynCell::I32(v)) => *v,
+            _ => panic!("unexpected cell"),
+        };
+        assert_eq!(value, 1);
     }
 }
 pub(crate) struct MvccColumns {
-    pub begin_ts: Vec<Timestamp>,
-    pub end_ts: Vec<Timestamp>,
+    pub commit_ts: Vec<Timestamp>,
     pub tombstone: Vec<bool>,
 }
 
 impl MvccColumns {
-    pub fn new(begin_ts: Vec<Timestamp>, end_ts: Vec<Timestamp>, tombstone: Vec<bool>) -> Self {
-        debug_assert_eq!(begin_ts.len(), end_ts.len());
-        debug_assert_eq!(begin_ts.len(), tombstone.len());
+    pub fn new(commit_ts: Vec<Timestamp>, tombstone: Vec<bool>) -> Self {
+        debug_assert_eq!(commit_ts.len(), tombstone.len());
         Self {
-            begin_ts,
-            end_ts,
+            commit_ts,
             tombstone,
         }
     }
