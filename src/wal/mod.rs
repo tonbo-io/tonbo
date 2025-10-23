@@ -150,7 +150,7 @@ where
 {
     sender: mpsc::Sender<writer::WriterMsg>,
     queue_depth: Arc<AtomicUsize>,
-    next_seq: AtomicU64,
+    provisional_seq: AtomicU64,
     join: Mutex<Option<E::JoinHandle<WalResult<()>>>>,
 }
 
@@ -167,7 +167,7 @@ where
         Self {
             sender,
             queue_depth,
-            next_seq: AtomicU64::new(start_seq),
+            provisional_seq: AtomicU64::new(start_seq),
             join: Mutex::new(Some(join)),
         }
     }
@@ -231,14 +231,14 @@ where
 
     /// Enqueue a payload to the WAL writer.
     pub async fn submit(&self, payload: WalPayload) -> WalResult<WalTicket<E>> {
-        let seq = self.inner.next_seq.fetch_add(1, Ordering::SeqCst);
+        let provisional_seq = self.inner.provisional_seq.fetch_add(1, Ordering::SeqCst);
         let (ack_tx, ack_rx) = oneshot::channel();
         let enqueued_at = Instant::now();
 
         self.inner.queue_depth.fetch_add(1, Ordering::SeqCst);
 
         let msg = writer::WriterMsg::Enqueue {
-            seq,
+            provisional_seq,
             payload,
             enqueued_at,
             ack_tx,
@@ -251,7 +251,7 @@ where
         }
 
         Ok(WalTicket {
-            seq,
+            seq: provisional_seq,
             receiver: ack_rx,
             _exec: PhantomData,
         })

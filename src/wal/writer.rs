@@ -1,22 +1,26 @@
 //! Asynchronous WAL writer task and queue plumbing.
 
 use std::{
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use fusio::{
     Write,
-    dynamic::fs::DynFile,
+    dynamic::MaybeSendFuture,
     error::Error as FusioError,
     executor::{Executor, RwLock, Timer},
+    fs::FileSystemTag,
+    path::path_to_local,
 };
 use futures::{
     StreamExt,
     channel::{mpsc, oneshot},
+    future::{Fuse, FutureExt},
 };
 
 use crate::wal::{
@@ -26,12 +30,15 @@ use crate::wal::{
     storage::{WalSegment, WalStorage},
 };
 
+type SleepFuture = Pin<Box<dyn MaybeSendFuture<Output = ()>>>;
+type SleepSlot = Option<Fuse<SleepFuture>>;
+
 /// Message dispatched to the writer loop.
 pub(crate) enum WriterMsg {
     /// Append a payload to the WAL.
     Enqueue {
-        /// Frame sequence number assigned to the first emitted frame.
-        seq: u64,
+        /// Provisional identifier assigned by the submitter.
+        provisional_seq: u64,
         /// Logical payload to encode.
         payload: WalPayload,
         /// Instant at which the payload was enqueued (used for latency metrics).
@@ -44,13 +51,13 @@ pub(crate) enum WriterMsg {
 impl WriterMsg {
     #[cfg(test)]
     fn queued(
-        seq: u64,
+        provisional_seq: u64,
         payload: WalPayload,
         enqueued_at: Instant,
         ack_tx: oneshot::Sender<WalResult<WalAck>>,
     ) -> Self {
         Self::Enqueue {
-            seq,
+            provisional_seq,
             payload,
             enqueued_at,
             ack_tx,
@@ -89,8 +96,6 @@ where
 /// Spawn the asynchronous writer task and return a [`WriterHandle`] for coordination.
 pub(crate) fn spawn_writer<E>(
     exec: Arc<E>,
-    #[allow(dead_code)]
-    #[allow(dead_code)]
     storage: WalStorage,
     cfg: WalConfig,
     metrics: Arc<E::RwLock<WalMetrics>>,
@@ -104,6 +109,7 @@ where
     let queue_depth = Arc::new(AtomicUsize::new(0));
 
     let fut = run_writer_loop::<E>(
+        Arc::clone(&exec),
         storage,
         cfg,
         metrics,
@@ -123,6 +129,7 @@ where
 }
 
 async fn run_writer_loop<E>(
+    exec: Arc<E>,
     storage: WalStorage,
     cfg: WalConfig,
     metrics: Arc<E::RwLock<WalMetrics>>,
@@ -134,34 +141,104 @@ async fn run_writer_loop<E>(
 where
     E: Executor + Timer,
 {
-    let mut ctx: WriterContext<E> =
-        WriterContext::new(storage, cfg, metrics, queue_depth, initial_segment_seq).await?;
+    let mut ctx: WriterContext<E> = WriterContext::new(
+        exec,
+        storage,
+        cfg,
+        metrics,
+        queue_depth,
+        initial_segment_seq,
+    )
+    .await?;
     ctx.next_frame_seq = initial_frame_seq.max(frame::INITIAL_FRAME_SEQ);
 
-    while let Some(msg) = receiver.next().await {
-        match msg {
-            WriterMsg::Enqueue {
-                seq,
-                payload,
-                enqueued_at,
-                ack_tx,
-            } => {
-                ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
-                ctx.update_queue_depth_metric().await;
-                match ctx.handle_enqueue(seq, payload, enqueued_at).await {
-                    Ok(ack) => {
-                        let _ = ack_tx.send(Ok(ack));
-                    }
-                    Err(err) => {
-                        let _ = ack_tx.send(Err(err.clone()));
-                        return Err(err);
+    let mut timer: SleepSlot = None;
+
+    loop {
+        if let Some(mut timer_future) = timer.as_mut() {
+            futures::select_biased! {
+                msg = receiver.next() => {
+                    match msg {
+                        Some(WriterMsg::Enqueue { provisional_seq, payload, enqueued_at, ack_tx }) => {
+                            ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
+                            ctx.update_queue_depth_metric().await;
+                            match ctx.handle_enqueue(provisional_seq, payload, enqueued_at).await {
+                                Ok(HandleOutcome { ack, sync_performed, timer_directive }) => {
+                                    if sync_performed {
+                                        ctx.record_sync().await;
+                                    }
+                                    ctx.apply_timer_directive(timer_directive, &mut timer);
+                                    let _ = ack_tx.send(Ok(ack));
+                                }
+                                Err(err) => {
+                                    ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
+                                    let _ = ack_tx.send(Err(err.clone()));
+                                    return Err(err);
+                                }
+                            }
+                        }
+                        None => {
+                            break;
+                        }
                     }
                 }
+                _ = timer_future => {
+                    timer = None;
+                    match ctx.handle_timer_elapsed().await {
+                        Ok(TimerEvent { sync_performed, reschedule }) => {
+                            if sync_performed {
+                                ctx.record_sync().await;
+                            }
+                            if let Some(interval) = reschedule {
+                                timer = Some(ctx.schedule_timer(interval).fuse());
+                            }
+                        }
+                        Err(err) => {
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        } else {
+            match receiver.next().await {
+                Some(WriterMsg::Enqueue {
+                    provisional_seq,
+                    payload,
+                    enqueued_at,
+                    ack_tx,
+                }) => {
+                    ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
+                    ctx.update_queue_depth_metric().await;
+                    match ctx
+                        .handle_enqueue(provisional_seq, payload, enqueued_at)
+                        .await
+                    {
+                        Ok(HandleOutcome {
+                            ack,
+                            sync_performed,
+                            timer_directive,
+                        }) => {
+                            if sync_performed {
+                                ctx.record_sync().await;
+                            }
+                            ctx.apply_timer_directive(timer_directive, &mut timer);
+                            let _ = ack_tx.send(Ok(ack));
+                        }
+                        Err(err) => {
+                            let _ = ack_tx.send(Err(err.clone()));
+                            return Err(err);
+                        }
+                    }
+                }
+                None => break,
             }
         }
     }
 
-    ctx.flush_and_sync_for_shutdown().await?;
+    let shutdown_synced = ctx.flush_and_sync_for_shutdown().await?;
+    if shutdown_synced {
+        ctx.record_sync().await;
+    }
     ctx.queue_depth.store(0, Ordering::SeqCst);
     ctx.update_queue_depth_metric().await;
 
@@ -172,9 +249,11 @@ struct WriterContext<E>
 where
     E: Executor + Timer,
 {
+    exec: Arc<E>,
     #[allow(dead_code)]
     storage: WalStorage,
     cfg: WalConfig,
+    fs_tag: FileSystemTag,
     metrics: Arc<E::RwLock<WalMetrics>>,
     queue_depth: Arc<AtomicUsize>,
     #[allow(dead_code)]
@@ -191,12 +270,14 @@ where
     E: Executor + Timer,
 {
     async fn new(
+        exec: Arc<E>,
         storage: WalStorage,
         cfg: WalConfig,
         metrics: Arc<E::RwLock<WalMetrics>>,
         queue_depth: Arc<AtomicUsize>,
         segment_seq: u64,
     ) -> WalResult<Self> {
+        let fs_tag = storage.fs().file_system();
         let mut segment = storage.open_segment(segment_seq).await?;
         let existing_bytes = {
             let file = segment.file_mut();
@@ -206,8 +287,10 @@ where
         } as usize;
 
         Ok(Self {
+            exec,
             storage,
             cfg,
+            fs_tag,
             metrics,
             queue_depth,
             segment_seq,
@@ -221,11 +304,11 @@ where
 
     async fn handle_enqueue(
         &mut self,
-        seq: u64,
+        provisional_seq: u64,
         payload: WalPayload,
         enqueued_at: Instant,
-    ) -> WalResult<WalAck> {
-        let mut frames = encode_payload(payload, seq)?;
+    ) -> WalResult<HandleOutcome> {
+        let mut frames = encode_payload(payload, provisional_seq)?;
         if frames.is_empty() {
             return Err(WalError::Corrupt("wal payload produced no frames"));
         }
@@ -240,21 +323,24 @@ where
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(bytes_written);
 
         self.flush_if_needed().await?;
-        let sync_performed = self.maybe_sync().await?;
+        let sync_outcome = self.maybe_sync().await?;
 
         if bytes_written > 0 {
             self.record_bytes_written(bytes_written).await;
         }
-        if sync_performed {
-            self.record_sync().await;
-        }
+
+        let durable_seq = self.current_frame_seq();
 
         let ack = WalAck {
-            seq,
+            seq: durable_seq,
             bytes_flushed: bytes_written,
             elapsed: enqueued_at.elapsed(),
         };
-        Ok(ack)
+        Ok(HandleOutcome {
+            ack,
+            sync_performed: sync_outcome.performed,
+            timer_directive: sync_outcome.timer_directive,
+        })
     }
 
     async fn write_frame(&mut self, frame: Frame) -> WalResult<usize> {
@@ -276,52 +362,72 @@ where
             .map_err(|err| backend_err("flush wal segment", err))
     }
 
-    async fn maybe_sync(&mut self) -> WalResult<bool> {
+    async fn maybe_sync(&mut self) -> WalResult<SyncOutcome> {
         match self.cfg.sync {
             WalSyncPolicy::Always => {
                 self.sync_all().await?;
                 self.bytes_since_sync = 0;
                 self.last_sync = Instant::now();
-                Ok(true)
+                Ok(SyncOutcome {
+                    performed: true,
+                    timer_directive: TimerDirective::Cancel,
+                })
             }
             WalSyncPolicy::IntervalBytes(threshold) => {
                 if self.bytes_since_sync >= threshold {
                     self.sync_data().await?;
                     self.bytes_since_sync = 0;
                     self.last_sync = Instant::now();
-                    Ok(true)
+                    Ok(SyncOutcome {
+                        performed: true,
+                        timer_directive: TimerDirective::Cancel,
+                    })
                 } else {
-                    Ok(false)
+                    Ok(SyncOutcome {
+                        performed: false,
+                        timer_directive: TimerDirective::None,
+                    })
                 }
             }
             WalSyncPolicy::IntervalTime(interval) => {
-                let now = Instant::now();
-                if now.duration_since(self.last_sync) >= interval {
-                    self.sync_data().await?;
-                    self.last_sync = now;
-                    Ok(true)
+                if self.bytes_since_sync > 0 {
+                    Ok(SyncOutcome {
+                        performed: false,
+                        timer_directive: TimerDirective::Schedule(interval),
+                    })
                 } else {
-                    Ok(false)
+                    Ok(SyncOutcome {
+                        performed: false,
+                        timer_directive: TimerDirective::Cancel,
+                    })
                 }
             }
-            WalSyncPolicy::Disabled => Ok(false),
+            WalSyncPolicy::Disabled => Ok(SyncOutcome {
+                performed: false,
+                timer_directive: TimerDirective::None,
+            }),
         }
     }
 
     async fn sync_data(&mut self) -> WalResult<()> {
-        perform_sync(self.segment.file_mut(), SyncVariant::Data).await
+        let path = self.segment.path().clone();
+        perform_sync(self.fs_tag, &path, SyncVariant::Data).await
     }
 
     async fn sync_all(&mut self) -> WalResult<()> {
-        perform_sync(self.segment.file_mut(), SyncVariant::All).await
+        let path = self.segment.path().clone();
+        perform_sync(self.fs_tag, &path, SyncVariant::All).await
     }
 
-    async fn flush_and_sync_for_shutdown(&mut self) -> WalResult<()> {
+    async fn flush_and_sync_for_shutdown(&mut self) -> WalResult<bool> {
         self.flush_if_needed().await?;
         if !matches!(self.cfg.sync, WalSyncPolicy::Disabled) {
-            let _ = self.sync_all().await;
+            self.sync_all().await?;
+            self.bytes_since_sync = 0;
+            self.last_sync = Instant::now();
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     async fn record_bytes_written(&self, bytes: usize) {
@@ -339,6 +445,48 @@ where
         let mut guard = self.metrics.write().await;
         guard.record_queue_depth(depth);
     }
+
+    fn current_frame_seq(&self) -> u64 {
+        self.next_frame_seq.saturating_sub(1)
+    }
+
+    fn schedule_timer(&self, interval: Duration) -> SleepFuture {
+        self.exec.sleep(interval)
+    }
+
+    fn apply_timer_directive(&self, directive: TimerDirective, timer_slot: &mut SleepSlot) {
+        match directive {
+            TimerDirective::None => {}
+            TimerDirective::Cancel => {
+                *timer_slot = None;
+            }
+            TimerDirective::Schedule(interval) => {
+                if timer_slot.is_none() {
+                    *timer_slot = Some(self.schedule_timer(interval).fuse());
+                }
+            }
+        }
+    }
+
+    async fn handle_timer_elapsed(&mut self) -> WalResult<TimerEvent> {
+        let mut sync_performed = false;
+        if self.bytes_since_sync > 0 {
+            self.sync_data().await?;
+            self.bytes_since_sync = 0;
+            self.last_sync = Instant::now();
+            sync_performed = true;
+        }
+
+        let reschedule = match self.cfg.sync {
+            WalSyncPolicy::IntervalTime(interval) if self.bytes_since_sync > 0 => Some(interval),
+            _ => None,
+        };
+
+        Ok(TimerEvent {
+            sync_performed,
+            reschedule,
+        })
+    }
 }
 
 enum SyncVariant {
@@ -346,13 +494,76 @@ enum SyncVariant {
     All,
 }
 
-async fn perform_sync(_file: &mut Box<dyn DynFile>, _variant: SyncVariant) -> WalResult<()> {
-    // TODO: Integrate fusio durability hooks once dynamic FileSync is exposed.
-    Ok(())
+async fn perform_sync(
+    fs_tag: FileSystemTag,
+    segment_path: &fusio::path::Path,
+    variant: SyncVariant,
+) -> WalResult<()> {
+    match fs_tag {
+        FileSystemTag::Local => {
+            let local_path = path_to_local(segment_path).map_err(|err| {
+                WalError::Backend(format!("failed to resolve wal segment path: {err}"))
+            })?;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&local_path)
+                .map_err(|err| {
+                    WalError::Backend(format!(
+                        "failed to reopen wal segment {} for sync: {}",
+                        local_path.display(),
+                        err
+                    ))
+                })?;
+            match variant {
+                SyncVariant::Data => file.sync_data().map_err(|err| {
+                    WalError::Backend(format!(
+                        "failed to fdatasync wal segment {}: {}",
+                        local_path.display(),
+                        err
+                    ))
+                }),
+                SyncVariant::All => file.sync_all().map_err(|err| {
+                    WalError::Backend(format!(
+                        "failed to fsync wal segment {}: {}",
+                        local_path.display(),
+                        err
+                    ))
+                }),
+            }
+        }
+        FileSystemTag::Memory => Ok(()),
+        _ => Err(WalError::Backend(format!(
+            "wal backend {:?} does not support durability sync",
+            fs_tag
+        ))),
+    }
 }
 
 fn backend_err(action: &str, err: FusioError) -> WalError {
     WalError::Backend(format!("failed to {action}: {err}"))
+}
+
+struct HandleOutcome {
+    ack: WalAck,
+    sync_performed: bool,
+    timer_directive: TimerDirective,
+}
+
+struct SyncOutcome {
+    performed: bool,
+    timer_directive: TimerDirective,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TimerDirective {
+    None,
+    Cancel,
+    Schedule(Duration),
+}
+
+struct TimerEvent {
+    sync_performed: bool,
+    reschedule: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -410,6 +621,7 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
                     storage,
                     cfg,
                     Arc::clone(&metrics),
@@ -428,11 +640,16 @@ mod tests {
             commit_ts: 42,
         };
 
-        let seq = frame::INITIAL_FRAME_SEQ;
+        let provisional_seq = 777;
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
         sender
-            .try_send(WriterMsg::queued(seq, payload, Instant::now(), ack_tx))
+            .try_send(WriterMsg::queued(
+                provisional_seq,
+                payload,
+                Instant::now(),
+                ack_tx,
+            ))
             .expect("send");
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
@@ -452,7 +669,7 @@ mod tests {
             .clone()
             .expect("ack result")
             .expect("ack ok");
-        assert_eq!(ack.seq, seq);
+        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
@@ -488,6 +705,7 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
                     storage,
                     cfg,
                     Arc::clone(&metrics),
@@ -501,7 +719,7 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let seq1 = frame::INITIAL_FRAME_SEQ;
+        let seq1 = 42;
         let (ack1_tx, ack1_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
         sender
@@ -532,7 +750,7 @@ mod tests {
             .clone()
             .expect("ack1 result")
             .expect("ack1 ok");
-        assert_eq!(ack1.seq, seq1);
+        assert_eq!(ack1.seq, frame::INITIAL_FRAME_SEQ + 1);
         assert_eq!(queue_depth.load(Ordering::SeqCst), 0);
 
         queue_depth.fetch_add(1, Ordering::SeqCst);
@@ -566,12 +784,177 @@ mod tests {
             .clone()
             .expect("ack2 result")
             .expect("ack2 ok");
-        assert_eq!(ack2.seq, seq1 + 1);
+        assert_eq!(ack2.seq, frame::INITIAL_FRAME_SEQ + 3);
 
         let metrics_guard = futures::executor::block_on(metrics_reader.read());
         assert_eq!(metrics_guard.queue_depth, 0);
         assert!(metrics_guard.bytes_written > 0);
-        assert_eq!(metrics_guard.sync_operations, 2);
+        assert!(metrics_guard.sync_operations >= 2);
+
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+    }
+
+    #[test]
+    fn interval_time_policy_triggers_sync_without_additional_writes() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal-interval-time").expect("path");
+        let storage = WalStorage::new(fs, root);
+
+        let cfg = WalConfig {
+            queue_size: 2,
+            sync: WalSyncPolicy::IntervalTime(Duration::from_millis(0)),
+            ..WalConfig::default()
+        };
+
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics_reader = Arc::clone(&metrics);
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                99,
+                WalPayload::DynBatch {
+                    batch: sample_batch(),
+                    commit_ts: 11,
+                },
+                Instant::now(),
+                ack_tx,
+            ))
+            .expect("send");
+
+        let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
+        let ack_cell_clone = Rc::clone(&ack_cell);
+        spawner
+            .spawn_local(async move {
+                let ack = ack_rx.await.expect("oneshot");
+                *ack_cell_clone.borrow_mut() = Some(ack);
+            })
+            .expect("spawn ack");
+
+        sender.close_channel();
+        pool.run();
+
+        let ack = ack_cell
+            .borrow()
+            .clone()
+            .expect("ack result")
+            .expect("ack ok");
+        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+
+        let metrics_guard = futures::executor::block_on(metrics_reader.read());
+        assert_eq!(metrics_guard.queue_depth, 0);
+        assert!(metrics_guard.bytes_written > 0);
+        assert!(metrics_guard.sync_operations >= 1);
+    }
+
+    #[test]
+    fn interval_bytes_policy_honors_threshold() {
+        let cfg = WalConfig {
+            queue_size: 4,
+            sync: WalSyncPolicy::IntervalBytes(1),
+            ..WalConfig::default()
+        };
+
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal-interval-bytes").expect("path");
+        let storage = WalStorage::new(fs, root);
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics_reader = Arc::clone(&metrics);
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                7,
+                WalPayload::DynBatch {
+                    batch: sample_batch(),
+                    commit_ts: 21,
+                },
+                Instant::now(),
+                ack_tx,
+            ))
+            .expect("send");
+
+        let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
+        let ack_cell_clone = Rc::clone(&ack_cell);
+        spawner
+            .spawn_local(async move {
+                let ack = ack_rx.await.expect("oneshot");
+                *ack_cell_clone.borrow_mut() = Some(ack);
+            })
+            .expect("spawn ack");
+
+        sender.close_channel();
+        pool.run();
+
+        let ack = ack_cell
+            .borrow()
+            .clone()
+            .expect("ack result")
+            .expect("ack ok");
+        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+
+        let metrics_guard = futures::executor::block_on(metrics_reader.read());
+        assert_eq!(metrics_guard.queue_depth, 0);
+        assert!(metrics_guard.bytes_written > 0);
+        assert!(metrics_guard.sync_operations >= 1);
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
