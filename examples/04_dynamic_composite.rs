@@ -6,6 +6,7 @@ use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
+    mode::DynModeConfig,
     record::extract::KeyDyn,
     scan::{KeyRange, RangeSet},
 };
@@ -37,9 +38,9 @@ fn main() {
     let schema = Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
 
     // Create DB from metadata
+    let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
     let mut db: DB<DynMode, BlockingExecutor> =
-        DB::new_dyn_from_metadata(schema.clone(), Arc::new(BlockingExecutor::default()))
-            .expect("composite ok");
+        DB::new(config, Arc::new(BlockingExecutor::default())).expect("composite ok");
 
     // Build a batch with three rows
     let rows = vec![
