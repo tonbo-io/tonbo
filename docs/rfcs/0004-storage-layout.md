@@ -65,7 +65,7 @@ When a caller constructs a DB with `DB::new_dyn_with_root(schema, extractor, exe
 
 1. Build a `DbPaths` helper that resolves the four subdirectories using `root.join("wal")`, `root.join("sst")`, etc.
 2. Call `WalStorage::ensure_dir(&paths.wal)` to create the WAL directory and associated state file if missing.
-3. If any WAL segments exist (`WalStorage::list_segments` TBD), invoke `DB::recover_dyn_with_wal(schema, extractor, executor, cfg.clone()).await` before enabling live ingest. The recovery routine updates `commit_clock` from either the state file or replayed events.
+3. If any WAL segments exist (`WalStorage::list_segments` TBD), build a `DynModeConfig` and invoke `DB::recover_with_wal(config, executor, cfg.clone()).await` before enabling live ingest. The recovery routine updates `commit_clock` from either the state file or replayed events.
 4. Ensure `sst/`, `manifest/`, and `mutable/` directories exist (no-op today).
 
 The same flow applies to typed modes once they return; only the ingest adapter changes.
@@ -86,5 +86,5 @@ The same flow applies to typed modes once they return; only the ingest adapter c
 
 - Implement `DbPaths` helper in code and update constructors to accept `root: Arc<Path>` alongside `WalConfig`.
 - Update `WalStorage::ensure_dir` to create `state.json` and expose helpers for listing existing segments.
-- Extend `DB::recover_dyn_with_wal` to leverage the state file once available.
+- Extend `DB::recover_with_wal` to leverage the state file once available.
 - Document operational guidance in AGENTS.md after the hierarchy lands in code.

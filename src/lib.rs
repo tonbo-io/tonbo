@@ -7,6 +7,7 @@
 //! re-introducing compile-time typed dispatch in the future.
 
 mod inmem;
+pub mod mode;
 pub mod record;
 
 // Re-export the unified DB so users can do `tonbo::DB`.

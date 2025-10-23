@@ -6,6 +6,7 @@ use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
+    mode::DynModeConfig,
     query::{Expr, Predicate},
     record::extract::KeyDyn,
     scan::{KeyRange, RangeSet},
@@ -51,9 +52,9 @@ fn main() {
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
     // Create a dynamic DB by specifying the key field name
+    let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key col");
     let mut db: DB<DynMode, BlockingExecutor> =
-        DB::new_dyn_with_key_name(schema.clone(), "id", Arc::new(BlockingExecutor::default()))
-            .expect("schema ok");
+        DB::new(config, Arc::new(BlockingExecutor::default())).expect("schema ok");
     block_on(db.ingest(batch)).expect("insert dynamic batch");
 
     // Scan for a specific key (id == "carol") using KeyDyn
