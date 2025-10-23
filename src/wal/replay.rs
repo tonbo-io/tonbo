@@ -3,8 +3,8 @@
 use std::{fs, io, path::PathBuf};
 
 use crate::wal::{
+    frame::{decode_frame, FrameHeader, WalEvent, FRAME_HEADER_SIZE},
     WalConfig, WalError, WalResult,
-    frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
 };
 
 /// Scans WAL segments on disk and yields decoded events.
@@ -82,6 +82,7 @@ mod tests {
 
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
+    use crate::wal::{batch_with_tombstones, strip_tombstone_column};
 
     use super::*;
     use crate::{
@@ -116,10 +117,10 @@ mod tests {
         )
         .expect("batch");
 
+        let wal_batch = batch_with_tombstones(&batch, Some(&[false])).expect("wal batch");
         let payload = WalPayload::DynBatch {
-            batch: batch.clone(),
+            batch: wal_batch.clone(),
             commit_ts: Timestamp::new(42),
-            tombstones: Some(vec![false]),
         };
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
@@ -140,11 +141,11 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
-                tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
-                assert_eq!(decoded.num_rows(), 1);
-                assert_eq!(tombstones, &Some(vec![false]));
+                let (stripped, bits) = strip_tombstone_column(decoded.clone()).expect("strip");
+                assert_eq!(bits, Some(vec![false]));
+                assert_eq!(stripped.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }

@@ -22,7 +22,10 @@ use crate::{
     mvcc::{CommitClock, Timestamp},
     record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
     scan::RangeSet,
-    wal::{WalConfig, WalHandle, WalPayload, frame::WalEvent, replay::Replayer},
+    wal::{
+        WalConfig, WalHandle, WalPayload, batch_with_tombstones, frame::WalEvent, replay::Replayer,
+        strip_tombstone_column,
+    },
 };
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
@@ -121,12 +124,13 @@ where
                 WalEvent::DynAppend {
                     provisional_id,
                     batch,
-                    tombstones,
                 } => {
+                    let (data_batch, tombstones) =
+                        strip_tombstone_column(batch).map_err(KeyExtractError::from)?;
                     pending
                         .entry(provisional_id)
                         .or_default()
-                        .push((batch, tombstones));
+                        .push((data_batch, tombstones));
                 }
                 WalEvent::TxnCommit {
                     provisional_id,
@@ -134,17 +138,22 @@ where
                 } => {
                     if let Some(batches) = pending.remove(&provisional_id) {
                         for (batch, tombstones) in batches {
-                            let rows = batch.num_rows();
-                            let bitmap = tombstones.unwrap_or_else(|| vec![false; rows]);
-                            db.mem.insert_batch_with_ts(
-                                db.mode.extractor.as_ref(),
-                                batch,
-                                commit_ts,
-                                {
-                                    let bitmap = bitmap;
-                                    move |row| bitmap[row]
-                                },
-                            )?;
+                            if let Some(bits) = tombstones {
+                                let bitmap = bits.clone();
+                                db.mem.insert_batch_with_ts(
+                                    db.mode.extractor.as_ref(),
+                                    batch,
+                                    commit_ts,
+                                    move |row| bitmap[row],
+                                )?;
+                            } else {
+                                db.mem.insert_batch_with_ts(
+                                    db.mode.extractor.as_ref(),
+                                    batch,
+                                    commit_ts,
+                                    |_| false,
+                                )?;
+                            }
                             db.maybe_seal_after_insert()?;
                         }
                         last_commit_ts = Some(match last_commit_ts {
@@ -495,10 +504,10 @@ where
     }
     let commit_ts = db.next_commit_ts();
     if let Some(handle) = db.wal_handle().cloned() {
+        let wal_batch = batch_with_tombstones(&batch, None).map_err(KeyExtractError::from)?;
         let payload = WalPayload::DynBatch {
-            batch: batch.clone(),
+            batch: wal_batch,
             commit_ts,
-            tombstones: None,
         };
         // TODO: await the WAL ticket once durability handling lands.
         handle
@@ -873,10 +882,11 @@ mod tests {
             ])])
             .expect("batch");
 
+        let wal_batch =
+            batch_with_tombstones(&batch.clone(), Some(&[true])).expect("batch with tombstone");
         let payload = WalPayload::DynBatch {
-            batch: batch.clone(),
+            batch: wal_batch,
             commit_ts: Timestamp::new(42),
-            tombstones: Some(vec![true]),
         };
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
