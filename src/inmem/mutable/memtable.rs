@@ -11,8 +11,10 @@ use arrow_schema::SchemaRef;
 
 use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
 use crate::{
-    inmem::immutable::memtable::{ImmutableMemTable, MvccColumns, VersionSlice},
-    inmem::policy::{MemStats, StatsProvider},
+    inmem::{
+        immutable::memtable::{ImmutableMemTable, VersionSlice, attach_mvcc_columns},
+        policy::{MemStats, StatsProvider},
+    },
     mvcc::Timestamp,
     record::extract::{DynKeyExtractor, KeyDyn},
     scan::{KeyRange, RangeSet},
@@ -22,9 +24,7 @@ use crate::{
 struct VersionLoc {
     batch_idx: usize,
     row_idx: usize,
-    #[allow(dead_code)]
     commit_ts: Timestamp,
-    #[allow(dead_code)]
     tombstone: bool,
 }
 
@@ -71,30 +71,50 @@ impl DynLayout {
         batch: RecordBatch,
         commit_ts: Timestamp,
     ) -> Result<(), crate::record::extract::KeyExtractError> {
+        self.insert_batch_with_ts(extractor, batch, commit_ts, |_| false)
+    }
+
+    /// Insert a batch using supplied commit timestamps (replay path).
+    pub(crate) fn insert_batch_with_ts<F>(
+        &mut self,
+        extractor: &dyn DynKeyExtractor,
+        batch: RecordBatch,
+        commit_ts: Timestamp,
+        mut tombstone_at: F,
+    ) -> Result<(), crate::record::extract::KeyExtractError>
+    where
+        F: FnMut(usize) -> bool,
+    {
         extractor.validate_schema(&batch.schema())?;
-        let _ = commit_ts;
         let batch_id = self.batches_attached.len();
         for row_idx in 0..batch.num_rows() {
             let k = extractor.key_at(&batch, row_idx)?;
             let key_size = k.key_heap_size();
             self.metrics.inserts += 1;
 
+            let version_loc = VersionLoc::new(batch_id, row_idx, commit_ts, tombstone_at(row_idx));
+
             match self.versions.entry(k) {
                 BTreeEntry::Vacant(v) => {
                     self.metrics.entries += 1;
                     self.metrics.approx_key_bytes += key_size;
-                    let chain = vec![VersionLoc::new(batch_id, row_idx, commit_ts, false)];
-                    v.insert(chain);
+                    v.insert(vec![version_loc]);
                 }
                 BTreeEntry::Occupied(mut o) => {
                     self.metrics.replaces += 1;
-                    o.get_mut()
-                        .push(VersionLoc::new(batch_id, row_idx, commit_ts, false));
+                    o.get_mut().push(version_loc);
                 }
             }
         }
         self.batches_attached.push(batch);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inspect_versions(&self, key: &KeyDyn) -> Option<Vec<(Timestamp, bool)>> {
+        self.versions
+            .get(key)
+            .map(|chain| chain.iter().map(|v| (v.commit_ts, v.tombstone)).collect())
     }
 
     // Key-only scan helper removed.
@@ -139,11 +159,10 @@ impl DynLayout {
         use arrow_select::concat::concat_batches;
 
         let mut slices = Vec::new();
-        let mut begin_ts = Vec::new();
-        let mut end_ts = Vec::new();
+        let mut commit_ts = Vec::new();
         let mut tombstone = Vec::new();
         let mut index = BTreeMap::new();
-        let mut next_row: u32 = 0;
+        let mut next_key: u32 = 0;
         let mut null_row_batch: Option<RecordBatch> = None;
 
         let versions = std::mem::take(&mut self.versions);
@@ -151,15 +170,12 @@ impl DynLayout {
             if chain.is_empty() {
                 continue;
             }
-            let start = next_row;
+            let start = next_key;
             let mut chain_rows = 0u32;
-            for (idx, version) in chain.iter().enumerate() {
-                let begin = version.commit_ts;
-                let end = if let Some(next) = chain.get(idx + 1) {
-                    next.commit_ts
-                } else {
-                    Timestamp::MAX
-                };
+            // Versions are appended to each chain in commit order (oldest → newest) as we ingest
+            // into the mutable table. By iterating in reverse we emit newest → oldest so the
+            // immutable run stores rows per key in descending commit timestamp order.
+            for version in chain.iter().rev() {
                 let row_batch = if version.tombstone {
                     if null_row_batch.is_none() {
                         let arrays = schema
@@ -175,11 +191,10 @@ impl DynLayout {
                     batch.slice(version.row_idx, 1)
                 };
                 slices.push(row_batch);
-                begin_ts.push(begin);
-                end_ts.push(end);
+                commit_ts.push(version.commit_ts);
                 tombstone.push(version.tombstone);
                 chain_rows += 1;
-                next_row += 1;
+                next_key += 1;
             }
             index.insert(key, VersionSlice::new(start, chain_rows));
         }
@@ -191,7 +206,7 @@ impl DynLayout {
         };
 
         let batch = concat_batches(schema, &slices)?;
-        let mvcc = MvccColumns::new(begin_ts, end_ts, tombstone);
+        let (batch, mvcc) = attach_mvcc_columns(batch, commit_ts, tombstone)?;
         Ok(Some(ImmutableMemTable::new(batch, index, mvcc)))
     }
 }
@@ -371,6 +386,15 @@ mod tests {
         m.insert_batch(extractor.as_ref(), batch_v2, Timestamp::new(20))
             .expect("insert v2");
 
+        // Third commit overwrites key at ts=30
+        let rows_v3 = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(3)),
+        ])];
+        let batch_v3: RecordBatch = schema.build_batch(rows_v3).expect("batch v3");
+        m.insert_batch(extractor.as_ref(), batch_v3, Timestamp::new(30))
+            .expect("insert v3");
+
         let ranges = RangeSet::all();
 
         // Before the first commit nothing should be visible
@@ -378,25 +402,35 @@ mod tests {
             m.scan_rows_at(&ranges, Timestamp::new(5)).collect();
         assert!(rows_before.is_empty());
 
-        // Between commits the first value is visible
-        let rows_mid: Vec<i32> = m
+        // Between first and second commits the first value is visible
+        let rows_after_first: Vec<i32> = m
             .scan_rows_at(&ranges, Timestamp::new(15))
             .map(|row| match &row.0[1] {
                 Some(DynCell::I32(v)) => *v,
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(rows_mid, vec![1]);
+        assert_eq!(rows_after_first, vec![1]);
 
-        // After the second commit the latest value is visible
-        let rows_latest: Vec<i32> = m
+        // Between second and third commits the second value is visible
+        let rows_after_second: Vec<i32> = m
             .scan_rows_at(&ranges, Timestamp::new(25))
             .map(|row| match &row.0[1] {
                 Some(DynCell::I32(v)) => *v,
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(rows_latest, vec![2]);
+        assert_eq!(rows_after_second, vec![2]);
+
+        // Between third and fourth commits the third value is visible
+        let row_latest: Vec<i32> = m
+            .scan_rows_at(&ranges, Timestamp::new(35))
+            .map(|row| match &row.0[1] {
+                Some(DynCell::I32(v)) => *v,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(row_latest, vec![3]);
     }
 
     #[test]
@@ -409,7 +443,7 @@ mod tests {
         let extractor =
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
 
-        // two versions for the same key
+        // four versions for the same key
         let batch1: RecordBatch = schema
             .clone()
             .build_batch(vec![DynRow(vec![
@@ -432,11 +466,33 @@ mod tests {
             .insert_batch(extractor.as_ref(), batch2, Timestamp::new(20))
             .expect("insert");
 
+        let batch3: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(3)),
+            ])])
+            .expect("batch3");
+        layout
+            .insert_batch(extractor.as_ref(), batch3, Timestamp::new(30))
+            .expect("insert");
+
+        let batch4: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(4)),
+            ])])
+            .expect("batch4");
+        layout
+            .insert_batch(extractor.as_ref(), batch4, Timestamp::new(40))
+            .expect("insert");
+
         let segment = layout
             .seal_into_immutable(&schema)
             .expect("seal ok")
             .expect("segment");
-        assert_eq!(segment.len(), 2);
+        assert_eq!(segment.len(), 4);
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
@@ -444,24 +500,96 @@ mod tests {
             B::Included(KeyDyn::from("k")),
         )]);
 
-        let visible_mid: Vec<u32> = segment
+        let visible_after_first: Vec<u32> = segment
             .scan_visible(&ranges, Timestamp::new(15))
             .map(|(_, row)| row)
             .collect();
-        assert_eq!(visible_mid, vec![0]);
+        assert_eq!(visible_after_first, vec![3]);
 
-        let visible_latest: Vec<u32> = segment
+        let visible_after_second: Vec<u32> = segment
             .scan_visible(&ranges, Timestamp::new(25))
             .map(|(_, row)| row)
             .collect();
-        assert_eq!(visible_latest, vec![1]);
+        assert_eq!(visible_after_second, vec![2]);
+
+        let visible_after_third: Vec<u32> = segment
+            .scan_visible(&ranges, Timestamp::new(35))
+            .map(|(_, row)| row)
+            .collect();
+        assert_eq!(visible_after_third, vec![1]);
+
+        let visible_latest: Vec<u32> = segment
+            .scan_visible(&ranges, Timestamp::new(45))
+            .map(|(_, row)| row)
+            .collect();
+        assert_eq!(visible_latest, vec![0]);
 
         let batch = segment.storage();
-        let row_mid =
-            crate::record::extract::row_from_batch(batch, visible_mid[0] as usize).expect("row");
+        let row_after_first =
+            crate::record::extract::row_from_batch(batch, visible_after_first[0] as usize)
+                .expect("row");
+        let row_after_second =
+            crate::record::extract::row_from_batch(batch, visible_after_second[0] as usize)
+                .expect("row");
+        let row_after_third =
+            crate::record::extract::row_from_batch(batch, visible_after_third[0] as usize)
+                .expect("row");
         let row_latest =
             crate::record::extract::row_from_batch(batch, visible_latest[0] as usize).expect("row");
-        assert_eq!(row_mid.0[1], Some(DynCell::I32(1)));
-        assert_eq!(row_latest.0[1], Some(DynCell::I32(2)));
+
+        let cell_value = |row: &typed_arrow_dyn::DynRow| match &row.0[1] {
+            Some(DynCell::I32(v)) => *v,
+            _ => panic!("unexpected cell"),
+        };
+
+        assert_eq!(cell_value(&row_after_first), 1);
+        assert_eq!(cell_value(&row_after_second), 2);
+        assert_eq!(cell_value(&row_after_third), 3);
+        assert_eq!(cell_value(&row_latest), 4);
+    }
+
+    #[test]
+    fn insert_batch_with_ts_preserves_metadata() {
+        let mut layout = DynLayout::new();
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+
+        let batch1: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(1)),
+            ])])
+            .expect("batch1");
+        layout
+            .insert_batch_with_ts(extractor.as_ref(), batch1, Timestamp::new(10), |_| false)
+            .expect("insert batch1");
+
+        let batch2: RecordBatch = schema
+            .clone()
+            .build_batch(vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(2)),
+            ])])
+            .expect("batch2");
+        layout
+            .insert_batch_with_ts(extractor.as_ref(), batch2, Timestamp::new(20), |row| {
+                row == 0
+            })
+            .expect("insert batch2");
+
+        let chain = layout
+            .versions
+            .get(&KeyDyn::from("k"))
+            .expect("version chain");
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].commit_ts, Timestamp::new(10));
+        assert!(!chain[0].tombstone);
+        assert_eq!(chain[1].commit_ts, Timestamp::new(20));
+        assert!(chain[1].tombstone);
     }
 }
