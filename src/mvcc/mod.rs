@@ -70,7 +70,7 @@ impl CommitClock {
 
     /// Allocate and return the next commit timestamp.
     #[inline]
-    pub fn next(&mut self) -> Timestamp {
+    pub fn alloc(&mut self) -> Timestamp {
         let current = self.next;
         self.next = current.next();
         current
