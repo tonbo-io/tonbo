@@ -583,8 +583,8 @@ mod tests {
                 batch: decoded_batch,
             } => {
                 assert_eq!(decoded_id, provisional_id);
-                let (stripped, tombstones) =
-                    crate::wal::strip_tombstone_column(decoded_batch).expect("strip tombstones failed");
+                let (stripped, tombstones) = crate::wal::strip_tombstone_column(decoded_batch)
+                    .expect("strip tombstones failed");
                 assert_eq!(tombstones, Some(vec![true, false, true]));
                 assert_eq!(stripped.schema().as_ref(), user_expected.schema().as_ref());
             }
