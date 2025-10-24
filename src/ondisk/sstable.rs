@@ -5,13 +5,27 @@
 //! yet. Future patches will flesh out the concrete dynamic and typed builders,
 //! readers, and range scans using this scaffolding.
 
-use std::{fmt, marker::PhantomData, sync::Arc};
+use std::{convert::TryFrom, fmt, marker::PhantomData, sync::Arc};
 
+use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use fusio::{DynFs, path::Path};
+use fusio::{
+    DynFs,
+    error::Error as FsError,
+    fs::OpenOptions,
+    path::{Path, PathPart},
+};
+use fusio_parquet::writer::AsyncWriter;
+use parquet::{
+    arrow::async_writer::AsyncArrowWriter,
+    basic::{Compression, ZstdLevel},
+    errors::ParquetError,
+    file::properties::WriterProperties,
+};
 
 use crate::{
-    inmem::immutable::Immutable, mode::Mode, mvcc::Timestamp, query::Predicate, scan::RangeSet,
+    fs::FileId, inmem::immutable::Immutable, mode::Mode, mvcc::Timestamp, query::Predicate,
+    record::extract::KeyDyn, scan::RangeSet,
 };
 
 /// Identifier for an SSTable stored on disk.
@@ -139,6 +153,7 @@ pub struct SsTableDescriptor {
     id: SsTableId,
     level: usize,
     approximate_stats: Option<SsTableStats>,
+    wal_ids: Option<Vec<FileId>>,
 }
 
 impl SsTableDescriptor {
@@ -148,12 +163,19 @@ impl SsTableDescriptor {
             id,
             level,
             approximate_stats: None,
+            wal_ids: None,
         }
     }
 
     /// Attach rough statistics computed during flush.
     pub fn with_stats(mut self, stats: SsTableStats) -> Self {
         self.approximate_stats = Some(stats);
+        self
+    }
+
+    /// Attach the WAL IDs associated with this table.
+    pub fn with_wal_ids(mut self, wal_ids: Option<Vec<FileId>>) -> Self {
+        self.wal_ids = wal_ids;
         self
     }
 
@@ -171,6 +193,11 @@ impl SsTableDescriptor {
     pub fn stats(&self) -> Option<&SsTableStats> {
         self.approximate_stats.as_ref()
     }
+
+    /// WAL file identifiers that contributed to this table.
+    pub fn wal_ids(&self) -> Option<&[FileId]> {
+        self.wal_ids.as_deref()
+    }
 }
 
 /// Lightweight table statistics captured at flush time.
@@ -180,33 +207,54 @@ pub struct SsTableStats {
     pub rows: usize,
     /// Approximate on-disk byte size of the table payload.
     pub bytes: usize,
-    // TODO: decide which staged stats (key bounds, tombstones, ts range) graduate here.
+    /// Number of tombstoned rows recorded in the table.
+    pub tombstones: usize,
+    /// Minimum key observed across staged segments.
+    pub min_key: Option<KeyDyn>,
+    /// Maximum key observed across staged segments.
+    pub max_key: Option<KeyDyn>,
+    /// Oldest commit timestamp contained in the table.
+    pub min_commit_ts: Option<Timestamp>,
+    /// Newest commit timestamp contained in the table.
+    pub max_commit_ts: Option<Timestamp>,
 }
 
 /// Error type shared across SSTable planning and IO.
 #[derive(Debug, thiserror::Error)]
 pub enum SsTableError {
-    /// Placeholder variant until real IO wiring lands.
+    /// Placeholder variant for features not yet implemented.
     #[error("sstable operation has not been implemented yet")]
     Unimplemented,
     /// No immutable segments were available when attempting to flush.
     #[error("no immutable segments available for SSTable flush")]
     NoImmutableSegments,
+    /// Attempted to use the writer after it was already closed.
+    #[error("parquet writer already closed")]
+    WriterClosed,
+    /// Filesystem operation failed while writing an SSTable.
+    #[error("filesystem error: {0}")]
+    Fs(#[from] FsError),
+    /// Parquet writer failed while persisting an SSTable.
+    #[error("parquet write error: {0}")]
+    Parquet(#[from] ParquetError),
+    /// Invalid path component produced while building an SSTable destination.
+    #[error("invalid sstable path component: {0}")]
+    InvalidPath(String),
 }
 
 /// Scratchpad used while minor compaction plans an SST. Keeps provisional stats
 /// that may not map 1:1 onto the persisted descriptor yet.
-pub(crate) struct StagedTableStats<K> {
+pub(crate) struct StagedTableStats {
     pub segments: usize,
     pub rows: usize,
     pub tombstones: usize,
-    pub min_key: Option<K>,
-    pub max_key: Option<K>,
+    pub min_key: Option<KeyDyn>,
+    pub max_key: Option<KeyDyn>,
     pub min_commit_ts: Option<Timestamp>,
     pub max_commit_ts: Option<Timestamp>,
 }
 
-impl<K: Ord + Clone> StagedTableStats<K> {
+impl StagedTableStats {
     fn new() -> Self {
         Self {
             segments: 0,
@@ -219,7 +267,7 @@ impl<K: Ord + Clone> StagedTableStats<K> {
         }
     }
 
-    fn update_key_bounds(&mut self, seg_min: &K, seg_max: &K) {
+    fn update_key_bounds(&mut self, seg_min: &KeyDyn, seg_max: &KeyDyn) {
         match self.min_key {
             Some(ref existing) if existing <= seg_min => {}
             _ => self.min_key = Some(seg_min.clone()),
@@ -231,7 +279,7 @@ impl<K: Ord + Clone> StagedTableStats<K> {
     }
 }
 
-impl<K> StagedTableStats<K> {
+impl StagedTableStats {
     fn update_commit_bounds(&mut self, seg_min: Timestamp, seg_max: Timestamp) {
         match self.min_commit_ts {
             Some(curr) if curr <= seg_min => {}
@@ -244,7 +292,7 @@ impl<K> StagedTableStats<K> {
     }
 }
 
-impl<K> fmt::Debug for StagedTableStats<K> {
+impl fmt::Debug for StagedTableStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StagedTableStats")
             .field("segments", &self.segments)
@@ -258,26 +306,46 @@ impl<K> fmt::Debug for StagedTableStats<K> {
     }
 }
 
-/// PlaceHolder Parquet writer facade used while IO is stubbed out.
+impl SsTableStats {
+    fn from_staged(staged: StagedTableStats, bytes: usize) -> Self {
+        Self {
+            rows: staged.rows,
+            bytes,
+            tombstones: staged.tombstones,
+            min_key: staged.min_key,
+            max_key: staged.max_key,
+            min_commit_ts: staged.min_commit_ts,
+            max_commit_ts: staged.max_commit_ts,
+        }
+    }
+}
+
+/// Parquet writer facade that streams staged immutables into an SST file.
 pub(crate) struct ParquetTableWriter<M: Mode> {
-    _config: Arc<SsTableConfig>,
+    config: Arc<SsTableConfig>,
     descriptor: SsTableDescriptor,
-    staged: StagedTableStats<M::Key>,
+    staged: StagedTableStats,
+    segments: Vec<RecordBatch>,
+    wal_ids: Option<Vec<FileId>>,
     _mode: PhantomData<M>,
 }
 
 impl<M> ParquetTableWriter<M>
 where
-    M: Mode,
-    M::Key: Clone,
+    M: Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
 {
     pub(crate) fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
         Self {
-            _config: config,
+            config,
             descriptor,
             staged: StagedTableStats::new(),
+            segments: Vec::new(),
+            wal_ids: None,
             _mode: PhantomData,
         }
+    }
+    pub(crate) fn set_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
+        self.wal_ids = wal_ids;
     }
 
     pub(crate) fn stage_immutable(&mut self, segment: &Immutable<M>) -> Result<(), SsTableError> {
@@ -319,6 +387,7 @@ where
         self.staged.segments += 1;
         self.staged.rows += rows;
         self.staged.tombstones += segment_tombstones;
+        self.segments.push(segment.storage().clone());
         Ok(())
     }
 
@@ -327,24 +396,96 @@ where
             return Err(SsTableError::NoImmutableSegments);
         }
 
-        // TODO: Implement actual Parquet writing logic here.
-        let stats = SsTableStats {
-            rows: self.staged.rows,
-            bytes: 0,
-        };
-
-        let descriptor = if stats.rows > 0 {
-            self.descriptor.with_stats(stats)
-        } else {
-            self.descriptor
-        };
-
-        Ok(SsTable::new(descriptor))
+        let mut ctx = WriteContext::new(Arc::clone(&self.config), &self.descriptor).await?;
+        for batch in &self.segments {
+            ctx.write_batch(batch).await?;
+        }
+        let bytes_written = ctx.finish().await?;
+        let stats = SsTableStats::from_staged(
+            self.staged,
+            usize::try_from(bytes_written).unwrap_or(usize::MAX),
+        );
+        Ok(SsTable::new(self.descriptor.with_stats(stats)))
     }
 
     #[cfg(test)]
-    pub(crate) fn plan(&self) -> &StagedTableStats<M::Key> {
+    pub(crate) fn plan(&self) -> &StagedTableStats {
         &self.staged
+    }
+}
+
+fn writer_properties(compression: SsTableCompression) -> WriterProperties {
+    let builder = match compression {
+        SsTableCompression::None => {
+            WriterProperties::builder().set_compression(Compression::UNCOMPRESSED)
+        }
+        SsTableCompression::Zstd => {
+            WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default()))
+        }
+    };
+    builder.build()
+}
+struct WriteContext {
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    writer: Option<AsyncArrowWriter<AsyncWriter>>,
+}
+impl WriteContext {
+    async fn new(
+        config: Arc<SsTableConfig>,
+        descriptor: &SsTableDescriptor,
+    ) -> Result<Self, SsTableError> {
+        let fs = Arc::clone(config.fs());
+        let level_name = format!("L{}", descriptor.level());
+        let level_part = PathPart::parse(&level_name)
+            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
+        let dir_path = config.root().child(level_part);
+        fs.create_dir_all(&dir_path).await?;
+        let file_name = format!("{:020}.parquet", descriptor.id().raw());
+        let file_part = PathPart::parse(&file_name)
+            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
+        let file_path = dir_path.child(file_part);
+        let options = OpenOptions::default()
+            .create(true)
+            .write(true)
+            .truncate(true);
+        let file = fs.open_options(&file_path, options).await?;
+        let writer = AsyncWriter::new(file);
+        let props = writer_properties(config.compression());
+        let arrow_writer = AsyncArrowWriter::try_new(writer, config.schema().clone(), Some(props))?;
+        Ok(Self {
+            fs,
+            path: file_path,
+            writer: Some(arrow_writer),
+        })
+    }
+    async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SsTableError> {
+        match self.writer.as_mut() {
+            Some(writer) => {
+                writer.write(batch).await?;
+                Ok(())
+            }
+            None => Err(SsTableError::WriterClosed),
+        }
+    }
+    async fn finish(mut self) -> Result<u64, SsTableError> {
+        if let Some(writer) = self.writer.take() {
+            writer.close().await?;
+        }
+        let file = self
+            .fs
+            .open_options(&self.path, OpenOptions::default().read(true))
+            .await?;
+        let size = file.size().await?;
+        Ok(size)
+    }
+}
+impl Drop for WriteContext {
+    fn drop(&mut self) {
+        debug_assert!(
+            self.writer.is_none(),
+            "WriteContext dropped without closing writer"
+        );
     }
 }
 
@@ -352,31 +493,26 @@ where
 pub struct SsTableBuilder<M: Mode> {
     writer: ParquetTableWriter<M>,
 }
-
-impl<M: Mode> SsTableBuilder<M> {
+impl<M> SsTableBuilder<M>
+where
+    M: Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
+{
     /// Create a new builder for the provided descriptor.
-    pub fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self
-    where
-        M::Key: Clone,
-    {
+    pub fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
         Self {
             writer: ParquetTableWriter::new(config, descriptor),
         }
     }
-
+    /// Attach WAL identifiers derived from the staged immutables.
+    pub fn set_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
+        self.writer.set_wal_ids(wal_ids);
+    }
     /// Stage an immutable run emitted by the mutable layer.
-    pub(crate) fn add_immutable(&mut self, segment: &Immutable<M>) -> Result<(), SsTableError>
-    where
-        M::Key: Clone,
-    {
+    pub(crate) fn add_immutable(&mut self, segment: &Immutable<M>) -> Result<(), SsTableError> {
         self.writer.stage_immutable(segment)
     }
-
     /// Finalize the staged runs and flush them to durable storage.
-    pub async fn finish(self) -> Result<SsTable<M>, SsTableError>
-    where
-        M::Key: Clone,
-    {
+    pub async fn finish(self) -> Result<SsTable<M>, SsTableError> {
         self.writer.finish().await
     }
 }
