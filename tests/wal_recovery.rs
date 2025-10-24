@@ -8,11 +8,11 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
-    record::extract::{dyn_extractor_for_field, KeyDyn},
-    scan::RangeSet,
-    wal::{WalConfig, WalExt},
     DB,
     mode::{DynMode, DynModeConfig},
+    record::extract::{KeyDyn, dyn_extractor_for_field},
+    scan::RangeSet,
+    wal::{WalConfig, WalExt},
 };
 use typed_arrow_dyn::DynCell;
 
@@ -20,9 +20,7 @@ use typed_arrow_dyn::DynCell;
 async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Error>> {
     let wal_dir = std::env::temp_dir().join(format!(
         "tonbo-wal-e2e-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_nanos()
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     fs::create_dir_all(&wal_dir)?;
 
