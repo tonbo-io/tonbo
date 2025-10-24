@@ -9,7 +9,7 @@ Except using it in Python and WASM bindings for Tonbo, we have also used it to b
 
 ## DynRecord
 
-`DynRecord` is just like the schema you defined by `#[derive(Record)]`, but the fields are not known at compile time. So, before using it, you need to pass the schema and value by yourself. Here is the constructor of the `DynSchema`, the schema of `DynRecord`:
+`DynRecord` is just like the schema you defined by `#[derive(Record)]`, but the fields are not known at compile time. Therefore, before using it, you need to pass the schema and value by yourself. Here is the constructor of the `DynSchema`, the schema of `DynRecord`:
 
 ```rust
 // constructor of DynSchema
