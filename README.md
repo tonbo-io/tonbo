@@ -21,7 +21,7 @@
 
 ## Introduction
 
-Tonbo is an embedded, persistent database offering fast KV-like methods for conveniently writing and scanning type-safe structured data. Tonbo can be used to build data-intensive applications, including other types of databases.
+Tonbo is an embedded database offering fast KV-like methods for conveniently writing and scanning type-safe structured data. Tonbo can be used to build data-intensive applications, including other types of databases.
 
 Tonbo is implemented with a [Log-Structured Merge Tree](https://en.wikipedia.org/wiki/Log-structured_merge-tree), constructed using [Apache Arrow](https://github.com/apache/arrow-rs) & [Apache Parquet](https://github.com/apache/arrow-rs/tree/master/parquet) data blocks. Leveraging Arrow and Parquet, Tonbo supports:
 - Pushdown limits, predicates, and projection operators
