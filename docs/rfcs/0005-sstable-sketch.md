@@ -43,6 +43,7 @@ pub struct SsTableDescriptor {
 * Mirrors `main/src/ondisk/sstable.rs`, but parameterised for dynamic mode.
 * `SsTableCompression` currently exposes `None | Zstd`; default matches main.
 * `fs` + `root` inline the former `ParquetStore` wrapper.
+* `SsTableDescriptor` now captures optional WAL IDs alongside enriched stats for manifest consumers.
 
 ### Builder Skeleton
 
@@ -55,10 +56,10 @@ impl<M: Mode> SsTableBuilder<M> {
 }
 ```
 
-* Tracks target descriptor/config and aggregates MVCC-aware stats through `StagedTableStats`.
-* `finish` now returns an `SsTable` handle populated with row-count stats (bytes held at `0` until the real writer lands).
+* Tracks target descriptor/config and aggregates MVCC-aware stats through `StagedTableStats` (min/max key, commit horizon, tombstone count).
+* `finish` now streams batches through `AsyncArrowWriter`, records byte size, and returns an `SsTable` handle populated with the enriched `SsTableStats`.
 * `SsTableError::NoImmutableSegments` still guards empty flush attempts.
-* Future: stream immutable rows into a Parquet writer (`AsyncArrowWriter` as on main) using the config’s schema and compression, replacing the stub return value.
+* Future: extend writer with page indexes/compression tuning.
 
 ### DB Integration
 
@@ -73,7 +74,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 ```
 
 * Minor compaction entry point – owner of the sealed `immutables` deque.
-* Drains the in-memory runs into the builder and clears them once the staged flush succeeds; immutables stay untouched on error.
+* Drains the in-memory runs into the builder, attaches collected WAL IDs, and clears them once the staged flush succeeds; immutables stay untouched on error.
 
 ### Compaction Helper
 
@@ -91,7 +92,7 @@ impl MinorCompactor {
 ```
 
 * Provides a simple segment-count based trigger that generates `SsTableDescriptor`s and invokes `flush_immutables_with_descriptor`.
-* Returns `Some(SsTable)` when a flush completes and leaves immutables intact if the builder reports an error.
+* Returns `Some(SsTable)` when a flush completes, exposing descriptor stats + WAL IDs; leaves immutables intact if the builder reports an error.
 * Intended as a starter orchestrator; smarter policies can swap in later or wrap this helper.
 
 ### Read Path Placeholders
@@ -113,10 +114,9 @@ impl MinorCompactor {
 ## Execution Plan
 
 1. **Implement Writer IO**
-   * `ParquetTableWriter` accumulates rows/tombstones/min/max commit timestamps today; real Parquet IO still TODO.
-   * Future: serialize MVCC columns and index metadata; compute on-disk byte size.
+   * `ParquetTableWriter` now performs real Parquet writes (via `AsyncArrowWriter`) and records enriched stats; future work includes page indexes & compression tuning.
 2. **Hook Minor Compaction**
-   * `DB::flush_immutables_with_descriptor` now drains immutables on success.
+   * `DB::flush_immutables_with_descriptor` drains immutables on success and propagates WAL IDs into the descriptor.
    * `MinorCompactor` provides a baseline orchestrator; richer policies can replace it.
 3. **Reader + Row Filter**
    * Port `get_range_filter` logic from main to dynamic `KeyDyn`.
