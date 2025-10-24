@@ -43,6 +43,14 @@ pub enum KeyExtractError {
         /// The incoming batch schema.
         actual: SchemaRef,
     },
+    /// Tombstone bitmap length does not match the batch row count.
+    #[error("tombstone bitmap length mismatch: expected {expected}, got {actual}")]
+    TombstoneLengthMismatch {
+        /// Expected number of rows.
+        expected: usize,
+        /// Provided tombstone entries.
+        actual: usize,
+    },
     /// WAL submission or durability hook failed while ingesting.
     #[error("wal error: {0}")]
     Wal(#[from] WalError),

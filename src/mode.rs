@@ -12,7 +12,7 @@ use crate::{
     inmem::mutable::{DynMem, MutableLayout},
     mvcc::Timestamp,
     record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
-    wal::{WalPayload, batch_with_tombstones, frame::WalEvent},
+    wal::{WalPayload, append_tombstone_column, frame::WalEvent},
 };
 
 mod dyn_config;
@@ -115,7 +115,7 @@ impl Mode for DynMode {
             let commit_ts = db.next_commit_ts();
             if let Some(handle) = db.wal_handle().cloned() {
                 let wal_batch =
-                    batch_with_tombstones(&batch, None).map_err(KeyExtractError::from)?;
+                    append_tombstone_column(&batch, None).map_err(KeyExtractError::from)?;
                 let payload = WalPayload::DynBatch {
                     batch: wal_batch,
                     commit_ts,

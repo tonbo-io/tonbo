@@ -33,7 +33,8 @@
    - Create a `WalHandle` with real writer state (today: placeholder).
    - Bootstrap the storage directory and spawn the async writer on the executor.
    - Run recovery (`replay::Replayer::scan`) before allowing new ingest.
-2. **Submit**: `DB::ingest` calls `WalHandle::submit(WalPayload::DynBatch { .. })`.
+2. **Submit**: `DB::ingest` calls `WalHandle::append(&batch, &tombstones, commit_ts)`,
+   which internally enqueues `WalPayload::DynBatch { .. }`.
    - When implementation lands, this will push into the writer queue, assign a
      sequence number, and return a `WalTicket`.
 3. **Durability Ack**: `WalTicket::durable().await` yields a `WalAck` describing
