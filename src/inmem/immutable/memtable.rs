@@ -1,5 +1,8 @@
 use std::{
-    collections::{BTreeMap, btree_map::Range as BTreeRange},
+    collections::{
+        BTreeMap,
+        btree_map::{Iter as BTreeIter, Range as BTreeRange},
+    },
     sync::Arc,
 };
 
@@ -17,7 +20,7 @@ pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 
 /// Generic, read-only immutable memtable with a key index and arbitrary storage `S`.
 pub(crate) struct ImmutableMemTable<K: Ord, S> {
-    storage: S,
+    _storage: S,
     index: BTreeMap<K, VersionSlice>,
     mvcc: MvccColumns,
 }
@@ -25,7 +28,7 @@ pub(crate) struct ImmutableMemTable<K: Ord, S> {
 impl<K: Ord, S> ImmutableMemTable<K, S> {
     pub(crate) fn new(storage: S, index: BTreeMap<K, VersionSlice>, mvcc: MvccColumns) -> Self {
         Self {
-            storage,
+            _storage: storage,
             index,
             mvcc,
         }
@@ -35,8 +38,26 @@ impl<K: Ord, S> ImmutableMemTable<K, S> {
         self.mvcc.commit_ts.len()
     }
 
+    #[allow(unused)]
     pub(crate) fn storage(&self) -> &S {
-        &self.storage
+        &self._storage
+    }
+
+    pub(crate) fn row_iter(&self) -> ImmutableRowIter<'_, K, S> {
+        ImmutableRowIter::new(self)
+    }
+
+    pub(crate) fn min_key(&self) -> Option<&K> {
+        self.index.keys().next()
+    }
+
+    pub(crate) fn max_key(&self) -> Option<&K> {
+        self.index.keys().next_back()
+    }
+
+    #[allow(unused)]
+    pub(crate) fn mvcc_columns(&self) -> &MvccColumns {
+        &self.mvcc
     }
 
     fn mvcc_slice(&self, slice: VersionSlice) -> (&[Timestamp], &[bool]) {
@@ -48,6 +69,7 @@ impl<K: Ord, S> ImmutableMemTable<K, S> {
         )
     }
 
+    #[allow(unused)]
     pub(crate) fn scan_ranges<'t, 's>(
         &'t self,
         ranges: &'s RangeSet<K>,
@@ -55,6 +77,7 @@ impl<K: Ord, S> ImmutableMemTable<K, S> {
         ImmutableScan::new(&self.index, ranges)
     }
 
+    #[allow(unused)]
     pub(crate) fn scan_visible<'t, 's>(
         &'t self,
         ranges: &'s RangeSet<K>,
@@ -77,6 +100,7 @@ impl VersionSlice {
 }
 
 /// Build a dynamic immutable segment from a batch using a provided extractor.
+#[allow(unused)]
 pub(crate) fn segment_from_batch_with_extractor(
     batch: RecordBatch,
     extractor: &dyn DynKeyExtractor,
@@ -96,6 +120,7 @@ pub(crate) fn segment_from_batch_with_extractor(
 }
 
 /// Build a dynamic immutable segment given a key column index.
+#[allow(unused)]
 pub(crate) fn segment_from_batch_with_key_col(
     batch: RecordBatch,
     key_col: usize,
@@ -111,6 +136,7 @@ pub(crate) fn segment_from_batch_with_key_col(
 }
 
 /// Build a dynamic immutable segment given a key field name.
+#[allow(unused)]
 pub(crate) fn segment_from_batch_with_key_name(
     batch: RecordBatch,
     key_field: &str,
@@ -137,7 +163,7 @@ pub(crate) fn attach_mvcc_columns(
     debug_assert_eq!(commit_ts.len(), tombstone.len());
     let commit_array = UInt64Array::from_iter_values(commit_ts.iter().map(|ts| ts.get()));
     let tombstone_array = BooleanArray::from(tombstone.clone());
-    let mut columns: Vec<ArrayRef> = batch.columns().iter().cloned().collect();
+    let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
     columns.push(Arc::new(commit_array) as ArrayRef);
     columns.push(Arc::new(tombstone_array) as ArrayRef);
 
@@ -232,7 +258,7 @@ impl<'t, 's, K: Ord, S> Iterator for ImmutableVisibleScan<'t, 's, K, S> {
             }
 
             if let Some(cur) = &mut self.cursor {
-                while let Some((key, slice)) = cur.next() {
+                for (key, slice) in cur.by_ref() {
                     let start = slice.start as usize;
                     let len = slice.len as usize;
                     let (commit_ts, tomb) = self.table.mvcc_slice(*slice);
@@ -246,6 +272,71 @@ impl<'t, 's, K: Ord, S> Iterator for ImmutableVisibleScan<'t, 's, K, S> {
                 continue;
             }
         }
+    }
+}
+
+pub(crate) struct ImmutableRowIter<'t, K: Ord, S> {
+    table: &'t ImmutableMemTable<K, S>,
+    iter: BTreeIter<'t, K, VersionSlice>,
+    current: Option<ImmutableSliceCursor<'t, K>>,
+}
+
+struct ImmutableSliceCursor<'t, K> {
+    key: &'t K,
+    slice: VersionSlice,
+    commit_ts: &'t [Timestamp],
+    tombstone: &'t [bool],
+    offset: usize,
+}
+
+pub(crate) struct ImmutableRowEntry<'t, K> {
+    pub _key: &'t K,
+    pub _row: u32,
+    pub commit_ts: Timestamp,
+    pub tombstone: bool,
+}
+
+impl<'t, K: Ord, S> ImmutableRowIter<'t, K, S> {
+    fn new(table: &'t ImmutableMemTable<K, S>) -> Self {
+        Self {
+            table,
+            iter: table.index.iter(),
+            current: None,
+        }
+    }
+
+    fn advance(&mut self) -> Option<&mut ImmutableSliceCursor<'t, K>> {
+        if let Some(cursor) = &mut self.current
+            && cursor.offset < cursor.commit_ts.len()
+        {
+            return self.current.as_mut();
+        }
+        let (key, slice) = self.iter.next()?;
+        let (commit_ts, tombstone) = self.table.mvcc_slice(*slice);
+        self.current = Some(ImmutableSliceCursor {
+            key,
+            slice: *slice,
+            commit_ts,
+            tombstone,
+            offset: 0,
+        });
+        self.current.as_mut()
+    }
+}
+
+impl<'t, K: Ord, S> Iterator for ImmutableRowIter<'t, K, S> {
+    type Item = ImmutableRowEntry<'t, K>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let cursor = self.advance()?;
+        let idx = cursor.offset;
+        cursor.offset += 1;
+        Some(ImmutableRowEntry {
+            _key: cursor.key,
+            _row: cursor.slice.start + idx as u32,
+            commit_ts: cursor.commit_ts[idx],
+            tombstone: cursor.tombstone[idx],
+        })
     }
 }
 
@@ -391,7 +482,64 @@ mod tests {
         };
         assert_eq!(value, 1);
     }
+
+    #[test]
+    fn row_iter_exposes_mvcc_and_bounds() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        // rows stored newest → oldest
+        let rows = vec![
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(10))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(8))]),
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(9))]),
+        ];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+        let mut index = BTreeMap::new();
+        index.insert(KeyDyn::from("a"), VersionSlice::new(0, 2));
+        index.insert(KeyDyn::from("b"), VersionSlice::new(2, 1));
+        let (batch, mvcc) = attach_mvcc_columns(
+            batch,
+            vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
+            vec![false, true, false],
+        )
+        .expect("mvcc columns");
+        let seg = ImmutableMemTable::new(batch, index, mvcc);
+
+        let got: Vec<(String, u32, u64, bool)> = seg
+            .row_iter()
+            .map(|entry| {
+                let key = match entry._key {
+                    KeyDyn::Str(s) => s.as_str().to_string(),
+                    _ => unreachable!("unexpected key type"),
+                };
+                (key, entry._row, entry.commit_ts.get(), entry.tombstone)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), 0, 30, false),
+                ("a".to_string(), 1, 20, true),
+                ("b".to_string(), 2, 10, false)
+            ]
+        );
+
+        let min_key = seg.min_key().and_then(|k| match k {
+            KeyDyn::Str(s) => Some(s.as_str()),
+            _ => None,
+        });
+        let max_key = seg.max_key().and_then(|k| match k {
+            KeyDyn::Str(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(min_key, Some("a"));
+        assert_eq!(max_key, Some("b"));
+        assert_eq!(seg.len(), 3);
+    }
 }
+#[derive(Debug)]
 pub(crate) struct MvccColumns {
     pub commit_ts: Vec<Timestamp>,
     pub tombstone: Vec<bool>,

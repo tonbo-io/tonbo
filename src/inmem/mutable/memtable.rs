@@ -552,6 +552,54 @@ mod tests {
     }
 
     #[test]
+    fn sealed_segment_row_iter_matches_versions() {
+        let mut layout = DynMem::new();
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+
+        let insert = |layout: &mut DynMem, val: i32, ts: u64, tomb: bool| {
+            let batch: RecordBatch = build_batch(
+                schema.clone(),
+                vec![DynRow(vec![
+                    Some(DynCell::Str("k".into())),
+                    Some(DynCell::I32(val)),
+                ])],
+            )
+            .expect("batch");
+            layout
+                .insert_batch_with_ts(extractor.as_ref(), batch, Timestamp::new(ts), move |_| tomb)
+                .expect("insert");
+        };
+
+        // NOTE: tombstoned versions are materialised as all-null rows during sealing. That matches
+        // the current immutable representation but raises an open question: do we really expect
+        // user schemas to allow nulls solely so tombstones can be encoded this way?
+        insert(&mut layout, 1, 10, false);
+        insert(&mut layout, 2, 20, true);
+        insert(&mut layout, 3, 30, false);
+
+        let segment = layout
+            .seal_into_immutable(&schema)
+            .expect("sealed")
+            .expect("segment");
+
+        let rows: Vec<(u64, bool)> = segment
+            .row_iter()
+            .map(|entry| (entry.commit_ts.get(), entry.tombstone))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(30, false), (20, true), (10, false)],
+            "row iterator should preserve newest→oldest MVCC ordering"
+        );
+        assert_eq!(segment.len(), 3);
+    }
+
+    #[test]
     fn insert_batch_with_ts_preserves_metadata() {
         let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
