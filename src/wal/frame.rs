@@ -8,7 +8,7 @@ use crc32c::crc32c;
 
 use crate::{
     mvcc::Timestamp,
-    wal::{WalError, WalPayload, WalResult},
+    wal::{WalError, WalPayload, WalResult, split_tombstone_column},
 };
 
 /// Maximum supported frame version.
@@ -369,9 +369,12 @@ fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
         ));
     }
 
+    let (stripped, tombstones) = split_tombstone_column(batch)?;
+
     Ok(WalEvent::DynAppend {
         provisional_id,
-        batch,
+        batch: stripped,
+        tombstones,
     })
 }
 
@@ -427,8 +430,10 @@ pub enum WalEvent {
     DynAppend {
         /// Provisional identifier.
         provisional_id: u64,
-        /// Record batch payload.
+        /// Record batch payload (without `_tombstone` column).
         batch: RecordBatch,
+        /// Tombstone bitmap associated with the batch.
+        tombstones: Vec<bool>,
     },
     /// Commit the transaction at the supplied timestamp.
     TxnCommit {
@@ -450,7 +455,7 @@ pub enum WalEvent {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Int32Array, StringArray};
+    use arrow_array::{Int32Array, RecordBatch, StringArray};
     use typed_arrow::arrow_schema::{DataType, Field, Schema};
 
     use super::*;
@@ -558,7 +563,7 @@ mod tests {
     #[test]
     fn encode_payload_dyn_batch_round_trip() {
         let base = sample_batch();
-        let wal_batch = crate::wal::batch_with_tombstones(&base, Some(&[true, false, true]))
+        let wal_batch = crate::wal::append_tombstone_column(&base, Some(&[true, false, true]))
             .expect("wal batch");
         let user_expected = base.clone();
         let commit_ts = Timestamp::new(42);
@@ -581,12 +586,14 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id: decoded_id,
                 batch: decoded_batch,
+                tombstones,
             } => {
                 assert_eq!(decoded_id, provisional_id);
-                let (stripped, tombstones) = crate::wal::strip_tombstone_column(decoded_batch)
-                    .expect("strip tombstones failed");
-                assert_eq!(tombstones, Some(vec![true, false, true]));
-                assert_eq!(stripped.schema().as_ref(), user_expected.schema().as_ref());
+                assert_eq!(tombstones, vec![true, false, true]);
+                assert_eq!(
+                    decoded_batch.schema().as_ref(),
+                    user_expected.schema().as_ref()
+                );
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -608,7 +615,7 @@ mod tests {
     #[test]
     fn decode_append_rejects_truncated_payload() {
         let wal_batch =
-            crate::wal::batch_with_tombstones(&sample_batch(), None).expect("wal batch");
+            crate::wal::append_tombstone_column(&sample_batch(), None).expect("wal batch");
         let frames = encode_payload(
             WalPayload::DynBatch {
                 batch: wal_batch,

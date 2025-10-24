@@ -20,7 +20,7 @@ use crate::{
     mvcc::{CommitClock, Timestamp},
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
-    wal::{WalConfig, WalHandle, frame::WalEvent, replay::Replayer, strip_tombstone_column},
+    wal::{WalConfig, WalHandle, frame::WalEvent, replay::Replayer},
 };
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
@@ -66,20 +66,18 @@ where
         use std::collections::HashMap;
 
         let mut last_commit_ts: Option<Timestamp> = None;
-        let mut pending: HashMap<u64, Vec<(RecordBatch, Option<Vec<bool>>)>> = HashMap::new();
-
+        let mut pending: HashMap<u64, Vec<(RecordBatch, Vec<bool>)>> = HashMap::new();
         for event in events {
             match event {
                 WalEvent::DynAppend {
                     provisional_id,
                     batch,
+                    tombstones,
                 } => {
-                    let (data_batch, tombstones) =
-                        strip_tombstone_column(batch).map_err(KeyExtractError::from)?;
                     pending
                         .entry(provisional_id)
                         .or_default()
-                        .push((data_batch, tombstones));
+                        .push((batch, tombstones));
                 }
                 WalEvent::TxnCommit {
                     provisional_id,
@@ -87,23 +85,7 @@ where
                 } => {
                     if let Some(batches) = pending.remove(&provisional_id) {
                         for (batch, tombstones) in batches {
-                            if let Some(bits) = tombstones {
-                                let bitmap = bits.clone();
-                                self.mem.insert_batch_with_ts(
-                                    self.mode.extractor.as_ref(),
-                                    batch,
-                                    commit_ts,
-                                    move |row| bitmap[row],
-                                )?;
-                            } else {
-                                self.mem.insert_batch_with_ts(
-                                    self.mode.extractor.as_ref(),
-                                    batch,
-                                    commit_ts,
-                                    |_| false,
-                                )?;
-                            }
-                            self.maybe_seal_after_insert()?;
+                            apply_dyn_wal_batch(self, batch, tombstones, commit_ts)?;
                         }
                         last_commit_ts = Some(match last_commit_ts {
                             Some(prev) => prev.max(commit_ts),
@@ -147,6 +129,23 @@ where
             self.last_seal_at = Some(Instant::now());
         }
         Ok(())
+    }
+
+    /// Ingest a batch along with its tombstone bitmap, routing through the WAL when enabled.
+    pub async fn ingest_with_tombstones(
+        &mut self,
+        batch: RecordBatch,
+        tombstones: Vec<bool>,
+    ) -> Result<(), KeyExtractError> {
+        insert_dyn_wal_batch(self, batch, tombstones).await
+    }
+
+    /// Ingest multiple batches, each paired with a tombstone bitmap.
+    pub async fn ingest_many_with_tombstones(
+        &mut self,
+        batches: Vec<(RecordBatch, Vec<bool>)>,
+    ) -> Result<(), KeyExtractError> {
+        insert_dyn_wal_batches(self, batches).await
     }
 }
 
@@ -276,6 +275,88 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     }
 }
 
+async fn insert_dyn_wal_batch<E>(
+    db: &mut DB<DynMode, E>,
+    batch: RecordBatch,
+    tombstones: Vec<bool>,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    validate_record_batch_schema(db, &batch)?;
+    validate_tombstone_bitmap(&batch, &tombstones)?;
+    let commit_ts = db.next_commit_ts();
+    if let Some(handle) = db.wal_handle().cloned() {
+        // TODO: await the WAL ticket once durability handling lands.
+        handle
+            .append(&batch, &tombstones, commit_ts)
+            .await
+            .map_err(KeyExtractError::from)?;
+    }
+    apply_dyn_wal_batch(db, batch, tombstones, commit_ts)
+}
+
+async fn insert_dyn_wal_batches<E>(
+    db: &mut DB<DynMode, E>,
+    batches: Vec<(RecordBatch, Vec<bool>)>,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    for (batch, tombstones) in batches {
+        insert_dyn_wal_batch(db, batch, tombstones).await?;
+    }
+    Ok(())
+}
+
+fn apply_dyn_wal_batch<E>(
+    db: &mut DB<DynMode, E>,
+    batch: RecordBatch,
+    tombstones: Vec<bool>,
+    commit_ts: Timestamp,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    validate_record_batch_schema(db, &batch)?;
+    validate_tombstone_bitmap(&batch, &tombstones)?;
+    let bits = tombstones;
+    db.mem
+        .insert_batch_with_ts(db.mode.extractor.as_ref(), batch, commit_ts, move |row| {
+            bits[row]
+        })?;
+    db.maybe_seal_after_insert()?;
+    Ok(())
+}
+
+fn validate_record_batch_schema<E>(
+    db: &DB<DynMode, E>,
+    batch: &RecordBatch,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    if db.mode.schema.as_ref() != batch.schema().as_ref() {
+        return Err(KeyExtractError::SchemaMismatch {
+            expected: db.mode.schema.clone(),
+            actual: batch.schema(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_tombstone_bitmap(
+    batch: &RecordBatch,
+    tombstones: &[bool],
+) -> Result<(), KeyExtractError> {
+    if batch.num_rows() != tombstones.len() {
+        return Err(KeyExtractError::TombstoneLengthMismatch {
+            expected: batch.num_rows(),
+            actual: tombstones.len(),
+        });
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -290,7 +371,7 @@ mod tests {
         inmem::{mutable::DynMem, policy::BatchesThreshold},
         test_util::build_batch,
         wal::{
-            WalPayload, batch_with_tombstones,
+            WalPayload, append_tombstone_column,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
         },
     };
@@ -299,6 +380,79 @@ mod tests {
         fn inspect_versions(&self, key: &KeyDyn) -> Option<Vec<(Timestamp, bool)>> {
             self.0.inspect_versions(key)
         }
+    }
+
+    #[test]
+    fn ingest_tombstone_length_mismatch() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+
+        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
+        let executor = Arc::new(BlockingExecutor::default());
+        let mut db: DB<DynMode, BlockingExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+
+        let err = block_on(db.ingest_with_tombstones(batch, vec![])).expect_err("length mismatch");
+        assert!(matches!(
+            err,
+            KeyExtractError::TombstoneLengthMismatch {
+                expected: 1,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn ingest_batch_with_tombstones_marks_versions_and_visibility() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+        let executor = Arc::new(BlockingExecutor::default());
+        let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+        let mut db: DB<DynMode, BlockingExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+
+        let rows = vec![
+            DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))]),
+        ];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+        let result = block_on(db.ingest_with_tombstones(batch, vec![false, true]));
+        result.expect("ingest");
+
+        let chain_k1 = db
+            .mem
+            .inspect_versions(&KeyDyn::from("k1"))
+            .expect("chain k1");
+        assert_eq!(chain_k1.len(), 1);
+        assert!(!chain_k1[0].1);
+
+        let chain_k2 = db
+            .mem
+            .inspect_versions(&KeyDyn::from("k2"))
+            .expect("chain k2");
+        assert_eq!(chain_k2.len(), 1);
+        assert!(chain_k2[0].1);
+
+        let all: RangeSet<KeyDyn> = RangeSet::all();
+        let visible: Vec<String> = db
+            .scan_mutable_rows(&all)
+            .map(|row| match &row.0[0] {
+                Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
+                _ => panic!("unexpected cell variant"),
+            })
+            .collect();
+        assert_eq!(visible, vec!["k1".to_string()]);
     }
 
     #[test]
@@ -527,7 +681,7 @@ mod tests {
         .expect("batch");
 
         let wal_batch =
-            batch_with_tombstones(&batch.clone(), Some(&[true])).expect("batch with tombstone");
+            append_tombstone_column(&batch, Some(&[true])).expect("batch with tombstone");
         let payload = WalPayload::DynBatch {
             batch: wal_batch,
             commit_ts: Timestamp::new(42),
@@ -584,4 +738,3 @@ mod tests {
         fs::remove_dir_all(&wal_dir).expect("cleanup");
     }
 }
-// duplicates removed (moved above tests)

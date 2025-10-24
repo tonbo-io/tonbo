@@ -30,7 +30,7 @@ impl Replayer {
                 .collect(),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(err) => {
-                return Err(WalError::Backend(format!(
+                return Err(WalError::Storage(format!(
                     "failed to read wal dir {}: {}",
                     dir.display(),
                     err
@@ -43,7 +43,7 @@ impl Replayer {
         let mut events = Vec::new();
         for entry in entries {
             let data = fs::read(&entry).map_err(|err| {
-                WalError::Backend(format!(
+                WalError::Storage(format!(
                     "failed to read wal segment {}: {}",
                     entry.display(),
                     err
@@ -87,9 +87,8 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
-            WalPayload, batch_with_tombstones,
+            WalPayload,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
-            strip_tombstone_column,
         },
     };
 
@@ -117,7 +116,8 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch = batch_with_tombstones(&batch, Some(&[false])).expect("wal batch");
+        let wal_batch =
+            crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
         let payload = WalPayload::DynBatch {
             batch: wal_batch.clone(),
             commit_ts: Timestamp::new(42),
@@ -141,11 +141,11 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
+                tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
-                let (stripped, bits) = strip_tombstone_column(decoded.clone()).expect("strip");
-                assert_eq!(bits, Some(vec![false]));
-                assert_eq!(stripped.num_rows(), 1);
+                assert_eq!(*tombstones, vec![false]);
+                assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }
