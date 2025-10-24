@@ -247,6 +247,52 @@ pub(crate) fn split_tombstone_column(batch: RecordBatch) -> WalResult<(RecordBat
     Ok((stripped, bitmap))
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+
+    use super::*;
+    use crate::inmem::immutable::memtable::MVCC_TOMBSTONE_COL;
+
+    fn int_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let data = Arc::new(Int32Array::from(vec![1, 2])) as _;
+        RecordBatch::try_new(schema, vec![data]).expect("batch")
+    }
+
+    #[test]
+    fn append_tombstone_rejects_length_mismatch() {
+        let batch = int_batch();
+        let err = append_tombstone_column(&batch, Some(&[true])).expect_err("length mismatch");
+        assert!(
+            matches!(err, WalError::Codec(msg) if msg.contains("tombstone bitmap length mismatch"))
+        );
+    }
+
+    #[test]
+    fn append_tombstone_rejects_existing_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
+        ]));
+        let data = Arc::new(Int32Array::from(vec![1])) as _;
+        let tombstones = Arc::new(BooleanArray::from(vec![false])) as _;
+        let batch = RecordBatch::try_new(schema, vec![data, tombstones]).expect("batch");
+        let err = append_tombstone_column(&batch, None).expect_err("existing column");
+        assert!(matches!(err, WalError::Codec(msg) if msg.contains("already contains _tombstone")));
+    }
+
+    #[test]
+    fn split_tombstone_requires_column() {
+        let batch = int_batch();
+        let err = split_tombstone_column(batch).expect_err("missing column");
+        assert!(matches!(err, WalError::Codec(msg) if msg.contains("_tombstone column missing")));
+    }
+}
+
 struct WalHandleInner<E>
 where
     E: Executor + Timer,

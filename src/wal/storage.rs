@@ -1,15 +1,20 @@
 //! Storage glue that relies directly on fusio traits.
 
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use fusio::{
-    DynFs,
+    DynFs, Read,
     dynamic::fs::DynFile,
+    error::Error as FusioError,
     fs::OpenOptions,
     path::{Path, PathPart},
 };
+use futures::StreamExt;
 
-use crate::wal::{WalError, WalResult};
+use crate::wal::{
+    WalError, WalResult,
+    frame::{FRAME_HEADER_SIZE, FrameHeader},
+};
 
 /// Shared storage facade for WAL segments backed by fusio.
 #[derive(Clone)]
@@ -81,12 +86,136 @@ impl WalStorage {
             .truncate(false)
     }
 
+    /// Provide default options for read-only access.
+    pub fn read_options() -> OpenOptions {
+        OpenOptions::default().read(true).write(false)
+    }
+
     fn segment_path(&self, seq: u64) -> WalResult<Path> {
         let filename = format!("wal-{seq:020}.tonwal");
         let part = PathPart::parse(&filename).map_err(|err| {
             WalError::Storage(format!("invalid wal segment name {filename}: {err}"))
         })?;
         Ok(self.root.child(part))
+    }
+
+    /// Enumerate existing WAL segments along with their sizes.
+    pub async fn list_segments(&self) -> WalResult<Vec<SegmentDescriptor>> {
+        let mut entries = Vec::new();
+        let mut stream = match self.fs.list(&self.root).await {
+            Ok(stream) => stream,
+            Err(FusioError::Io(err)) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(entries);
+            }
+            Err(err) => {
+                return Err(WalError::Storage(format!(
+                    "failed to list wal dir {}: {}",
+                    self.root.as_ref(),
+                    err
+                )));
+            }
+        };
+
+        while let Some(meta_result) = stream.next().await {
+            let meta = meta_result.map_err(|err| {
+                WalError::Storage(format!(
+                    "failed to read wal metadata under {}: {}",
+                    self.root.as_ref(),
+                    err
+                ))
+            })?;
+            if let Some(seq) = segment_sequence(meta.path.filename()) {
+                let path = meta.path;
+                let file = self
+                    .fs
+                    .open_options(&path, Self::read_options())
+                    .await
+                    .map_err(|err| {
+                        WalError::Storage(format!(
+                            "failed to open wal segment {} for size: {}",
+                            path, err
+                        ))
+                    })?;
+                let size = file
+                    .size()
+                    .await
+                    .map_err(|err| backend_err("determine wal segment size", err))?
+                    as usize;
+                entries.push(SegmentDescriptor {
+                    seq,
+                    path,
+                    bytes: size,
+                });
+            }
+        }
+
+        entries.sort_by_key(|entry| entry.seq);
+        Ok(entries)
+    }
+
+    /// Inspect the on-disk WAL tail, returning metadata about the active segment and frame
+    /// sequence.
+    pub async fn tail_metadata(&self) -> WalResult<Option<TailMetadata>> {
+        let mut segments = self.list_segments().await?;
+        if segments.is_empty() {
+            return Ok(None);
+        }
+
+        let active = segments.pop().expect("segments.pop matches prior is_empty");
+        let completed = segments;
+        let last_frame_seq = self.last_frame_seq(&active.path).await?;
+
+        Ok(Some(TailMetadata {
+            active,
+            completed,
+            last_frame_seq,
+        }))
+    }
+
+    async fn last_frame_seq(&self, path: &Path) -> WalResult<Option<u64>> {
+        let mut file = self
+            .fs
+            .open_options(path, Self::read_options())
+            .await
+            .map_err(|err| {
+                WalError::Storage(format!(
+                    "failed to open wal segment {} for tail read: {}",
+                    path, err
+                ))
+            })?;
+        let (read_res, data) = file.read_to_end_at(Vec::new(), 0).await;
+        read_res.map_err(|err| {
+            WalError::Storage(format!(
+                "failed to read wal segment {} for tail: {}",
+                path, err
+            ))
+        })?;
+
+        let mut offset = 0usize;
+        let mut last_seq = None;
+        while offset < data.len() {
+            let slice = &data[offset..];
+            let header = match FrameHeader::decode_from(slice) {
+                Ok((header, _)) => header,
+                Err(WalError::Corrupt(reason))
+                    if reason == "frame header truncated"
+                        || reason == "frame payload truncated" =>
+                {
+                    break;
+                }
+                Err(err) => return Err(err),
+            };
+
+            let payload_end = offset + FRAME_HEADER_SIZE + header.len as usize;
+            if payload_end > data.len() {
+                break;
+            }
+
+            last_seq = Some(header.seq);
+            offset = payload_end;
+        }
+
+        Ok(last_seq)
     }
 }
 
@@ -112,11 +241,50 @@ impl WalSegment {
     }
 }
 
+/// Descriptor describing an on-disk WAL segment.
+#[derive(Clone, Debug)]
+pub struct SegmentDescriptor {
+    /// Sequence embedded in the file name.
+    pub seq: u64,
+    /// Path to the segment file.
+    pub path: Path,
+    /// Reported size of the segment in bytes.
+    pub bytes: usize,
+}
+
+/// Snapshot describing the WAL tail state.
+///
+/// The writer relies on this bundle to resume cleanly after restart: `active`
+/// is the segment it should keep appending to, `completed` lists older
+/// segments so retention can trim them, and `last_frame_seq` records the last
+/// fully decoded frame so new writes continue with the next sequence number.
+pub struct TailMetadata {
+    /// Active segment that new frames will append to.
+    pub active: SegmentDescriptor,
+    /// Completed segments ordered from oldest to newest.
+    pub completed: Vec<SegmentDescriptor>,
+    /// Sequence of the last fully decoded frame (if any).
+    pub last_frame_seq: Option<u64>,
+}
+
+fn segment_sequence(filename: Option<&str>) -> Option<u64> {
+    let raw = filename?;
+    let trimmed = raw.strip_prefix("wal-")?.strip_suffix(".tonwal")?;
+    if trimmed.len() != 20 {
+        return None;
+    }
+    trimmed.parse().ok()
+}
+
+fn backend_err(action: &str, err: FusioError) -> WalError {
+    WalError::Storage(format!("failed to {action}: {err}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use fusio::{Read, Write, fs::OpenOptions, impls::mem::fs::InMemoryFs, path::Path};
+    use fusio::{Read, Write, impls::mem::fs::InMemoryFs, path::Path};
     use futures::executor::block_on;
 
     use super::*;
@@ -157,7 +325,7 @@ mod tests {
 
             let mut reopened = storage
                 .fs()
-                .open_options(&segment_path, OpenOptions::default())
+                .open_options(&segment_path, WalStorage::read_options())
                 .await
                 .expect("reopen for read");
             let (read_res, contents) = reopened.read_to_end_at(Vec::new(), 0).await;
@@ -170,7 +338,7 @@ mod tests {
                 .expect("remove succeeds");
             let reopen_result = storage
                 .fs()
-                .open_options(&segment_path, OpenOptions::default())
+                .open_options(&segment_path, WalStorage::read_options())
                 .await;
             assert!(reopen_result.is_err(), "segment should be gone");
         });
@@ -198,12 +366,109 @@ mod tests {
 
             let mut reader = storage
                 .fs()
-                .open_options(&path, OpenOptions::default())
+                .open_options(&path, WalStorage::read_options())
                 .await
                 .expect("open for read");
             let (read_res, contents) = reader.read_to_end_at(Vec::new(), 0).await;
             read_res.expect("read succeeds");
             assert_eq!(contents, b"abcdef");
+        });
+    }
+
+    #[test]
+    fn list_segments_reports_sequence_and_size() {
+        block_on(async {
+            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+            let root = Path::parse("wal").expect("valid wal root");
+            let storage = WalStorage::new(Arc::clone(&fs), root.clone());
+
+            let mut first = storage.open_segment(1).await.expect("open first");
+            let (write_res, _) = first.file_mut().write_all(b"abc".to_vec()).await;
+            write_res.expect("write first");
+            first.file_mut().flush().await.expect("flush first");
+            drop(first);
+
+            let mut second = storage.open_segment(2).await.expect("open second");
+            let (write_res, _) = second.file_mut().write_all(b"defghi".to_vec()).await;
+            write_res.expect("write second");
+            second.file_mut().flush().await.expect("flush second");
+            drop(second);
+
+            let segments = storage.list_segments().await.expect("list segments");
+            assert_eq!(segments.len(), 2);
+            assert_eq!(segments[0].seq, 1);
+            assert_eq!(segments[0].bytes, 3);
+            assert_eq!(segments[1].seq, 2);
+            assert_eq!(segments[1].bytes, 6);
+            assert!(
+                segments[0]
+                    .path
+                    .as_ref()
+                    .ends_with("wal-00000000000000000001.tonwal")
+            );
+            assert!(
+                segments[1]
+                    .path
+                    .as_ref()
+                    .ends_with("wal-00000000000000000002.tonwal")
+            );
+        });
+    }
+
+    #[test]
+    fn tail_metadata_reports_last_frame_sequence() {
+        use arrow_array::{Int32Array, RecordBatch, StringArray};
+        use arrow_schema::{DataType, Field, Schema};
+
+        block_on(async {
+            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+            let root = Path::parse("wal-tail").expect("valid wal root");
+            let storage = WalStorage::new(Arc::clone(&fs), root.clone());
+
+            storage.ensure_dir(&root).await.expect("ensure dir");
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, false),
+                Field::new("value", DataType::Int32, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a"])) as _,
+                    Arc::new(Int32Array::from(vec![1])) as _,
+                ],
+            )
+            .expect("batch");
+
+            let wal_batch =
+                crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
+            let payload = crate::wal::WalPayload::DynBatch {
+                batch: wal_batch,
+                commit_ts: crate::mvcc::Timestamp::new(42),
+            };
+            let frames = crate::wal::frame::encode_payload(payload, 7).expect("encode");
+
+            let mut seq = crate::wal::frame::INITIAL_FRAME_SEQ;
+            let mut bytes = Vec::new();
+            for frame in frames {
+                bytes.extend_from_slice(&frame.into_bytes(seq));
+                seq += 1;
+            }
+
+            let mut segment = storage.open_segment(5).await.expect("open segment");
+            let (write_res, _) = segment.file_mut().write_all(bytes).await;
+            write_res.expect("write wal");
+            segment.file_mut().flush().await.expect("flush");
+            drop(segment);
+
+            let tail = storage.tail_metadata().await.expect("tail metadata");
+            let tail = tail.expect("existing tail");
+            assert_eq!(tail.active.seq, 5);
+            assert!(tail.completed.is_empty());
+            assert_eq!(
+                tail.last_frame_seq,
+                Some(crate::wal::frame::INITIAL_FRAME_SEQ + 1)
+            );
         });
     }
 }

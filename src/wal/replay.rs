@@ -2,12 +2,13 @@
 
 use std::{io, sync::Arc};
 
-use fusio::{DynFs, Read, error::Error as FusioError, fs::OpenOptions, path::Path as FusioPath};
+use fusio::{DynFs, Read, error::Error as FusioError, path::Path as FusioPath};
 use futures::{StreamExt, executor::block_on};
 
 use crate::wal::{
     WalConfig, WalError, WalResult,
     frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
+    storage::WalStorage,
 };
 
 /// Scans WAL segments on disk and yields decoded events.
@@ -80,7 +81,7 @@ impl Replayer {
             let path_display = path.to_string();
             let mut file = self
                 .fs
-                .open_options(&path, OpenOptions::default())
+                .open_options(&path, WalStorage::read_options())
                 .await
                 .map_err(|err| {
                     WalError::Storage(format!(
@@ -100,29 +101,31 @@ impl Replayer {
             let mut offset: usize = 0;
             while offset < data.len() {
                 let slice = &data[offset..];
-        let header = match FrameHeader::decode_from(slice) {
-            Ok((header, _)) => header,
-            Err(WalError::Corrupt(reason))
-                if reason == "frame header truncated" || reason == "frame payload truncated" =>
-            {
-                // Treat a truncated tail (common for crash-at-end scenarios) as EOF so recovery
-                // returns the events observed before the partial frame. Any other corruption
-                // surfaces as an error to avoid silently skipping valid transactions further in
-                // the log.
-                return Ok(events);
-            }
-            Err(err) => return Err(err),
-        };
+                let header = match FrameHeader::decode_from(slice) {
+                    Ok((header, _)) => header,
+                    Err(WalError::Corrupt(reason))
+                        if reason == "frame header truncated"
+                            || reason == "frame payload truncated" =>
+                    {
+                        // Treat a truncated tail (common for crash-at-end scenarios) as EOF so
+                        // recovery returns the events observed before the
+                        // partial frame. Any other corruption surfaces as
+                        // an error to avoid silently skipping valid transactions further in
+                        // the log.
+                        return Ok(events);
+                    }
+                    Err(err) => return Err(err),
+                };
                 let payload_start = offset + FRAME_HEADER_SIZE;
                 let payload_end = payload_start + header.len as usize;
                 if payload_end > data.len() {
                     return Ok(events);
                 }
                 let payload = &data[payload_start..payload_end];
-        match decode_frame(header.frame_type, payload) {
-            Ok(event) => events.push(event),
-            Err(err) => return Err(err),
-        }
+                match decode_frame(header.frame_type, payload) {
+                    Ok(event) => events.push(event),
+                    Err(err) => return Err(err),
+                }
                 offset = payload_end;
             }
         }
