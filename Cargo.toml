@@ -5,7 +5,7 @@ edition = "2024"
 resolver = "2"
 
 [dependencies]
-fusio = { version = "0.4.2", features = ["dyn", "fs", "tokio", "executor"] }
+fusio = { version = "0.4.2", features = ["dyn", "fs", "executor-tokio"] }
 fusio-parquet = { version = "0.4.2" }
 once_cell = "1"
 typed-arrow = { version = "0.4.1", features = ["ext-hooks"] }
@@ -21,4 +21,4 @@ futures = "0.3"
 
 
 [dev-dependencies]
-futures = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
