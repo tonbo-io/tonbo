@@ -1,0 +1,305 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js light">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Configuration - The Tonbo Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+        <!-- MathJax -->
+        <script async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('no-js')
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add('js');
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var html = document.querySelector('html');
+            var sidebar = null;
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">What is Tonbo?</a></li><li class="chapter-item expanded "><a href="../start.html"><strong aria-hidden="true">1.</strong> Getting Started</a></li><li class="chapter-item expanded "><div><strong aria-hidden="true">2.</strong> Usage</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="../usage/tonbo.html"><strong aria-hidden="true">2.1.</strong> Tonbo</a></li><li class="chapter-item expanded "><a href="../usage/python.html"><strong aria-hidden="true">2.2.</strong> Python Binding</a></li><li class="chapter-item expanded "><a href="../usage/conf.html" class="active"><strong aria-hidden="true">2.3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../usage/advance.html"><strong aria-hidden="true">2.4.</strong> Advance</a></li><li class="chapter-item expanded "><a href="../usage/faq.html"><strong aria-hidden="true">2.5.</strong> FAQ</a></li></ol></li><li class="chapter-item expanded "><a href="../examples/index.html"><strong aria-hidden="true">3.</strong> Examples</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../examples/declare.html"><strong aria-hidden="true">3.1.</strong> Using Tonbo</a></li><li class="chapter-item expanded "><a href="../examples/wasm.html"><strong aria-hidden="true">3.2.</strong> Using under Wasm</a></li></ol></li><li class="chapter-item expanded "><div><strong aria-hidden="true">4.</strong> Contribution</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="../contribution/build.html"><strong aria-hidden="true">4.1.</strong> Building</a></li><li class="chapter-item expanded "><a href="../contribution/pr.html"><strong aria-hidden="true">4.2.</strong> Submitting PR</a></li><li class="chapter-item expanded "><a href="../contribution/composite_primary_keys.html"><strong aria-hidden="true">4.3.</strong> Composite Primary Keys</a></li></ol></li><li class="chapter-item expanded "><a href="../tonbolite/index.html"><strong aria-hidden="true">5.</strong> TonboLite</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../tonbolite/start.html"><strong aria-hidden="true">5.1.</strong> Getting Started</a></li><li class="chapter-item expanded "><a href="../tonbolite/build.html"><strong aria-hidden="true">5.2.</strong> Building and Testing</a></li><li class="chapter-item expanded "><a href="../tonbolite/usage.html"><strong aria-hidden="true">5.3.</strong> Usage</a></li></ol></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky bordered">
+                    <div class="left-buttons">
+                        <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </button>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">The Tonbo Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/tonbo-io/tonbo" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="configuration"><a class="header" href="#configuration">Configuration</a></h1>
+<ul>
+<li><a href="#path-configuration">Path Configuration</a></li>
+<li><a href="#manifest-configuration">Manifest Configuration</a></li>
+<li><a href="#wal-configuration">WAL Configuration</a></li>
+<li><a href="#compaction-configuration">Compaction Configuration</a></li>
+<li><a href="#sstable-configuration">SSTable Configuration</a></li>
+</ul>
+<p>Tonbo provides a configuration struct <code>DbOption</code> for setting up the database. This section will introduce the configuration options available in Tonbo.</p>
+<h2 id="path-configuration"><a class="header" href="#path-configuration">Path Configuration</a></h2>
+<p>Tonbo will use local disk as the default storage option(For local is the tokio file, for wasm is the OPFS). If you want to change the default storage backends  <code>DbOption::base_path</code>.</p>
+<pre><code class="language-rust">pub fn base_fs(mut self, base_fs: FsOptions) -&gt; DbOption;</code></pre>
+<p><code>FsOptions</code> is the configuration options for the file system. Tonbo provides two kinds of file system options: <code>FsOptions::Local</code> and <code>FsOptions::S3</code>.</p>
+<ul>
+<li><code>FsOptions::Local</code>: This is required the feature <code>tokio</code>/<code>wasm</code> to be enabled.</li>
+<li><code>FsOptions::S3{...}</code>: This is required the feature <code>aws</code> and <code>tokio-http</code>/<code>wasm-http</code> to be enabled. You can use this <code>FsOptions</code> to configure the S3 storage.</li>
+</ul>
+<pre><code class="language-rust">pub enum FsOptions {
+    #[cfg(any(feature = &quot;tokio&quot;, feature = &quot;wasm&quot;))]
+    Local,
+    #[cfg(feature = &quot;aws&quot;)]
+    S3 {
+        bucket: String,
+        credential: Option&lt;AwsCredential&gt;,
+        endpoint: Option&lt;String&gt;,
+        region: Option&lt;String&gt;,
+        sign_payload: Option&lt;bool&gt;,
+        checksum: Option&lt;bool&gt;,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AwsCredential {
+    /// AWS_ACCESS_KEY_ID
+    pub key_id: String,
+    /// AWS_SECRET_ACCESS_KEY
+    pub secret_key: String,
+    /// AWS_SESSION_TOKEN
+    pub token: Option&lt;String&gt;,
+}</code></pre>
+<ul>
+<li><code>bucket</code>: The S3 bucket</li>
+<li><code>credential</code>: The credential configuration for S3
+<ul>
+<li><code>key_id</code>: The S3 access key</li>
+<li><code>secret_key</code>: The S3 secret access key</li>
+<li><code>token</code>: is the security token for the aws S3</li>
+</ul>
+</li>
+<li><code>endpoint</code>: The S3 endpoint</li>
+<li><code>region</code>: The S3 region</li>
+<li><code>sign_payload</code>: Whether to sign payload for the aws S3</li>
+<li><code>checksum</code>: Whether to enable checksum for the aws S3</li>
+</ul>
+<p>If you want to set specific storage options for SSTables, you can use <code>DbOption::level_path</code>. This method allows you to specify the storage options for each level of SSTables. If you don't specify the storage options for a level, Tonbo will use the default storage options(that is base fs).</p>
+<pre><code class="language-rust">pub fn level_path(
+    mut self,
+    level: usize,
+    path: Path,
+    fs_options: FsOptions,
+) -&gt; Result&lt;DbOption, ExceedsMaxLevel&gt;;</code></pre>
+<h2 id="manifest-configuration"><a class="header" href="#manifest-configuration">Manifest Configuration</a></h2>
+<p>Manifest is used to store the metadata of the database. Whenever the compaction is triggered, the manifest will be updated accordingly. But when time goes by, the manifest file will become large, which will increase the time of recovery. Tonbo will rewrite the manifest file if metadata too much, you can use <code>DbOption::version_log_snapshot_threshold</code> to configure</p>
+<pre><code class="language-rust">pub fn version_log_snapshot_threshold(self, version_log_snapshot_threshold: u32) -&gt; DbOption;</code></pre>
+<p>If you want to persist metadata files to S3, you can configure <code>DbOption::base_fs</code> with <code>FsOptions::S3{...}</code>. This will enable Tonbo to upload metadata files and WAL files to the specified S3 bucket.</p>
+<blockquote>
+<p><strong>Note</strong>: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest metadata is uploaded, you can use <code>DB::flush</code> to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust <code>DbOption::version_log_snapshot_threshold</code> to a smaller value. The default value is 200.</p>
+</blockquote>
+<h2 id="wal-configuration"><a class="header" href="#wal-configuration">WAL Configuration</a></h2>
+<p>Tonbo use WAL(Write-ahead log) to ensure data durability and consistency. It is a mechanism that ensures that data is written to the log before being written to the database. This helps to prevent data loss in case of a system failure.</p>
+<p>Tonbo also provides a buffer to improve performance. If you want to flush wal buffer, you can call <code>DbOption::flush_wal</code>. The default buffer size is 4KB. But If you don't want to use wal buffer, you can set the buffer to 0.</p>
+<pre><code class="language-rust">pub fn wal_buffer_size(self, wal_buffer_size: usize) -&gt; DbOption;</code></pre>
+<p>If you don't want to use WAL, you can disable it by setting the <code>DbOption::disable_wal</code>. But please ensure that losing data is acceptable for you.</p>
+<pre><code class="language-rust">pub fn disable_wal(self) -&gt; DbOption;</code></pre>
+<h2 id="compaction-configuration"><a class="header" href="#compaction-configuration">Compaction Configuration</a></h2>
+<p>When memtable reaches the maximum size, we will turn it into a immutable which is read only memtable. But when the number of immutable table reaches the maximum size, we will compact them to SSTables. You can set the <code>DbOption::immutable_chunk_num</code> to control the number of files for compaction.</p>
+<pre><code class="language-rust">/// len threshold of `immutables` when minor compaction is triggered
+pub fn immutable_chunk_num(self, immutable_chunk_num: usize) -&gt; DbOption;</code></pre>
+<p>When the number of files in level L exceeds its limit, we also compact them in a background thread. Tonbo use the <code>major_threshold_with_sst_size</code> and <code>level_sst_magnification</code> to determine when to trigger major compaction. The calculation is as follows:</p>
+<p>\[ major\_threshold\_with\_sst\_size * level\_sst\_magnification^{level} \]</p>
+<p><code>major_threshold_with_sst_size</code> is default to 4 and <code>level_sst_magnification</code> is default to 10, which means that the default trigger threshold for level1 is 40 files and 400 for level2.</p>
+<p>You can adjust the <code>major_threshold_with_sst_size</code> and <code>level_sst_magnification</code> to control the compaction behavior.</p>
+<pre><code class="language-rust">/// threshold for the number of `parquet` when major compaction is triggered
+pub fn major_threshold_with_sst_size(self, major_threshold_with_sst_size: usize) -&gt; DbOption
+
+/// magnification that triggers major compaction between different levels
+pub fn level_sst_magnification(self, level_sst_magnification: usize) -&gt; DbOption;</code></pre>
+<p>You can also change the default SSTable size by setting the <code>DbOption::max_sst_file_size</code>, but we found that the default size is good enough for most use cases.</p>
+<pre><code class="language-rust">/// Maximum size of each parquet
+pub fn max_sst_file_size(self, max_sst_file_size: usize) -&gt; DbOption</code></pre>
+<h2 id="sstable-configuration"><a class="header" href="#sstable-configuration">SSTable Configuration</a></h2>
+<p>Tonbo use <a href="https://github.com/apache/parquet-rs">parquet</a> to store data which means you can set <code>WriterProperties</code> for parquet file. You can use <code>DbOption::write_parquet_option</code> to set specific settings for Parquet.</p>
+<pre><code class="language-rust">/// specific settings for Parquet
+pub fn write_parquet_option(self, write_parquet_properties: WriterProperties) -&gt; DbOption</code></pre>
+<p>Here is an example of how to use <code>DbOption::write_parquet_option</code>:</p>
+<pre><code class="language-rust">let db_option = DbOption::default().write_parquet_option(
+    WriterProperties::builder()
+        .set_compression(Compression::LZ4)
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .set_bloom_filter_enabled(true)
+        .build(),
+);</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../usage/python.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next" href="../usage/advance.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../usage/python.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next" href="../usage/advance.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,458 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js light">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Composite Primary Keys - The Tonbo Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+        <!-- MathJax -->
+        <script async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('no-js')
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add('js');
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var html = document.querySelector('html');
+            var sidebar = null;
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">What is Tonbo?</a></li><li class="chapter-item expanded "><a href="../start.html"><strong aria-hidden="true">1.</strong> Getting Started</a></li><li class="chapter-item expanded "><div><strong aria-hidden="true">2.</strong> Usage</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="../usage/tonbo.html"><strong aria-hidden="true">2.1.</strong> Tonbo</a></li><li class="chapter-item expanded "><a href="../usage/python.html"><strong aria-hidden="true">2.2.</strong> Python Binding</a></li><li class="chapter-item expanded "><a href="../usage/conf.html"><strong aria-hidden="true">2.3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../usage/advance.html"><strong aria-hidden="true">2.4.</strong> Advance</a></li><li class="chapter-item expanded "><a href="../usage/faq.html"><strong aria-hidden="true">2.5.</strong> FAQ</a></li></ol></li><li class="chapter-item expanded "><a href="../examples/index.html"><strong aria-hidden="true">3.</strong> Examples</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../examples/declare.html"><strong aria-hidden="true">3.1.</strong> Using Tonbo</a></li><li class="chapter-item expanded "><a href="../examples/wasm.html"><strong aria-hidden="true">3.2.</strong> Using under Wasm</a></li></ol></li><li class="chapter-item expanded "><div><strong aria-hidden="true">4.</strong> Contribution</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="../contribution/build.html"><strong aria-hidden="true">4.1.</strong> Building</a></li><li class="chapter-item expanded "><a href="../contribution/pr.html"><strong aria-hidden="true">4.2.</strong> Submitting PR</a></li><li class="chapter-item expanded "><a href="../contribution/composite_primary_keys.html" class="active"><strong aria-hidden="true">4.3.</strong> Composite Primary Keys</a></li></ol></li><li class="chapter-item expanded "><a href="../tonbolite/index.html"><strong aria-hidden="true">5.</strong> TonboLite</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../tonbolite/start.html"><strong aria-hidden="true">5.1.</strong> Getting Started</a></li><li class="chapter-item expanded "><a href="../tonbolite/build.html"><strong aria-hidden="true">5.2.</strong> Building and Testing</a></li><li class="chapter-item expanded "><a href="../tonbolite/usage.html"><strong aria-hidden="true">5.3.</strong> Usage</a></li></ol></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky bordered">
+                    <div class="left-buttons">
+                        <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </button>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">The Tonbo Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/tonbo-io/tonbo" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="rfc-composite-primary-keys"><a class="header" href="#rfc-composite-primary-keys">RFC: Composite Primary Keys</a></h1>
+<p>This document outlines a practical, incremental plan to add composite (multi-column) primary key support to Tonbo while maintaining backward compatibility. It explains design goals, changes required across the codebase, and a step-by-step implementation and validation plan.</p>
+<h2 id="current-status-2025-08-11"><a class="header" href="#current-status-2025-08-11">Current Status (2025-08-11)</a></h2>
+<ul>
+<li>Phase 1: Completed. Plural <code>Schema</code> APIs, fixed projections, and Parquet writer configuration are implemented for single-PK schemas.
+<ul>
+<li><code>Schema</code> now exposes <code>primary_key_indices()</code> and <code>primary_key_paths_and_sorting()</code> (src/record/mod.rs). Macro-generated single-PK schemas return one-element slices.</li>
+<li>Read paths build fixed projections as <code>[0, 1] ∪ PKs</code> using <code>primary_key_indices()</code> (src/lib.rs, src/transaction.rs).</li>
+<li><code>DbOption::new</code> configures sorting columns (<code>_ts</code> then PKs) and enables stats + bloom filters for each PK column path (src/option.rs).</li>
+</ul>
+</li>
+<li>Phase 2: Not implemented. Composite key types under <code>src/record/key/composite/</code> are placeholders; derive macro still accepts only a single <code>#[record(primary_key)]</code> and generates a single-field key. No multi-PK trybuild/integration tests.</li>
+<li>Phase 3: Not implemented. <code>DynSchema</code> remains single-PK (stores one <code>primary_index_arrow</code>, one <code>pk_path</code>, and sorting with a single PK column).</li>
+</ul>
+<h2 id="goals"><a class="header" href="#goals">Goals</a></h2>
+<ul>
+<li>Support multi-column primary keys with lexicographic ordering of PK components.</li>
+<li>Preserve existing single-column PK behavior and public APIs (backward compatible).</li>
+<li>Keep zero-copy reads and projection pushdown guarantees for PK columns.</li>
+<li>Ensure on-disk layout (Parquet) remains sorted by <code>_ts</code> then PK(s), with statistics/bloom filters enabled for PK columns.</li>
+<li>Make it easy to use via the <code>#[derive(Record)]</code> macro by allowing multiple <code>#[record(primary_key)]</code> fields.</li>
+</ul>
+<h2 id="non-goals-for-this-rfc"><a class="header" href="#non-goals-for-this-rfc">Non-Goals (for this RFC)</a></h2>
+<ul>
+<li>Foreign keys, cascades, or relational constraints.</li>
+<li>Secondary indexes.</li>
+<li>Schema migrations for existing data files.</li>
+<li>Composite keys in dynamic records in the first phase (can be added subsequently).</li>
+</ul>
+<h2 id="high-level-design"><a class="header" href="#high-level-design">High-Level Design</a></h2>
+<ol>
+<li>Schema trait changes (completed)</li>
+</ol>
+<ul>
+<li>Now: <code>Schema</code> exposes <code>primary_key_indices()</code> and <code>primary_key_path()</code>.</li>
+<li><code>primary_key_index()</code> was removed in favor of the slice-based <code>primary_key_indices()</code>.</li>
+<li>Additive helper: <code>primary_key_paths_and_sorting()</code> returns all PK column paths plus sorting columns.</li>
+<li>For single-column PKs, implementations return a one-element slice from <code>primary_key_indices()</code>.</li>
+</ul>
+<ol start="2">
+<li>Composite key type(s)</li>
+</ol>
+<ul>
+<li>Introduce a composite key in <code>src/record/key/composite/</code> with lexicographic <code>Ord</code>:
+<ul>
+<li>Option A (preferred): The macro generates a record-specific key struct, e.g., <code>UserKey { k1: u64, k2: String }</code> and <code>UserKeyRef&lt;'r&gt; { ... }</code>.</li>
+<li>Option B (interim): Provide generic tuple implementations for <code>(K1, K2)</code>, <code>(K1, K2, K3)</code>, … up to a small N. Each implements <code>Key</code> and <code>KeyRef</code> with lexicographic <code>Ord</code>, plus <code>Encode</code>/<code>Decode</code>, <code>Hash</code>, <code>Clone</code>.</li>
+</ul>
+</li>
+<li>For string/bytes components, <code>KeyRef</code> holds borrowed forms, mirroring current single-PK behavior.</li>
+</ul>
+<ol start="3">
+<li>Macro updates (tonbo_macros)</li>
+</ol>
+<ul>
+<li>Allow multiple <code>#[record(primary_key)]</code> fields. Order of appearance in struct determines comparison order (later we can add <code>order = i</code> if needed).</li>
+<li>Generate:
+<ul>
+<li>Record-specific key struct and ref struct (Option A), or map to tuple (Option B).</li>
+<li><code>type Key = &lt;GeneratedKey&gt;</code> in <code>Schema</code> impl.</li>
+<li><code>fn key(&amp;self) -&gt; &lt;GeneratedKeyRef&gt;</code> in <code>Record</code> impl.</li>
+<li><code>fn primary_key_indices(&amp;self) -&gt; Vec&lt;usize&gt;</code> in <code>Schema</code> impl (indices are offset by 2 for <code>_null</code>, <code>_ts</code>).</li>
+</ul>
+</li>
+<li>Ensure <code>RecordRef::from_record_batch</code> and projection logic always keep all PK columns, even if they are not listed in the projection.</li>
+<li>Keep encoding/arrays builders unchanged in signature; they already append values per-field.</li>
+</ul>
+<ol start="4">
+<li>Projections and read paths</li>
+</ol>
+<ul>
+<li>Replace single-index assumptions with multi-index collections:
+<ul>
+<li>Use <code>[0, 1] ∪ primary_key_indices()</code> to build fixed projections in <code>src/lib.rs</code> and <code>src/transaction.rs</code>.</li>
+<li>In all <code>RecordRef::projection</code> usages, ensure all PK columns are always retained (already implied by fixed mask).</li>
+</ul>
+</li>
+</ul>
+<ol start="5">
+<li>Parquet writer configuration</li>
+</ol>
+<ul>
+<li>In <code>DbOption::new</code>, use <code>primary_key_paths_and_sorting()</code> to:
+<ul>
+<li>Enable stats and bloom filters for each PK column path via <code>.set_column_statistics_enabled()</code> and <code>.set_column_bloom_filter_enabled()</code> (invoke once per path).</li>
+<li>Set sorting columns as <code>[ SortingColumn(_ts, …), SortingColumn(pk1, …), SortingColumn(pk2, …), … ]</code>.</li>
+</ul>
+</li>
+</ul>
+<ol start="6">
+<li>Dynamic records (phase 2)</li>
+</ol>
+<ul>
+<li>Extend <code>DynSchema</code> to track <code>primary_indices: Vec&lt;usize&gt;</code> in metadata (replacing the single <code>primary_key_index</code>).</li>
+<li>Update <code>DynRecordRef::new</code> and readers to honor multiple PK indices.</li>
+<li>Ensure tombstone writes (row == None) still populate all PK columns from <code>Ts.key</code> so ordering/lookups remain correct.</li>
+<li>Define a composite key wrapper for <code>Value</code>/<code>ValueRef</code> (or generate a per-dyn-schema composite type if feasible). Initially out-of-scope for phase 1.</li>
+</ul>
+<h2 id="step-by-step-plan"><a class="header" href="#step-by-step-plan">Step-by-Step Plan</a></h2>
+<p>Phase 1: Core plumbing (single-PK stays working)</p>
+<ol>
+<li>
+<p>Extend <code>Schema</code> trait</p>
+<ul>
+<li>Add <code>primary_key_indices()</code> and <code>primary_key_paths_and_sorting()</code> with default impls wrapping existing methods.</li>
+<li>Update call sites in <code>DbOption::new</code>, <code>src/lib.rs</code>, and <code>src/transaction.rs</code> to use the plural forms.</li>
+<li>Acceptance: All tests pass; no behavior change for single-PK users.</li>
+</ul>
+</li>
+<li>
+<p>Fixed projection refactor</p>
+<ul>
+<li>Replace single <code>primary_key_index</code> usage with iteration over <code>primary_key_indices()</code> to construct <code>fixed_projection</code> = <code>[0, 1] ∪ PKs</code>.</li>
+<li>Acceptance: Existing tests and scan/get projections still behave identically for single-PK.</li>
+</ul>
+</li>
+<li>
+<p>Parquet writer properties</p>
+<ul>
+<li>Replace single <code>primary_key_path()</code> usage with plural variant to configure stats, bloom filters, and sorting columns for <code>_ts</code> plus all PK components.</li>
+<li>Acceptance: Files write successfully; read paths unchanged.</li>
+</ul>
+</li>
+</ol>
+<p>Phase 2: Macro + key types</p>
+<ol start="4">
+<li>
+<p>Composite key data structure</p>
+<ul>
+<li>Implement composite key(s) in <code>src/record/key/composite/</code> with <code>Encode</code>/<code>Decode</code>, <code>Ord</code>, <code>Hash</code>, <code>Key</code>/<code>KeyRef</code>.</li>
+<li>Start with tuples <code>(K1, K2)</code>, <code>(K1, K2, K3)</code> etc. (Option B) for faster delivery; later switch default macro to per-record key type (Option A).</li>
+<li>Acceptance: Unit tests confirm lexicographic ordering and encode/decode round-trip for composite keys.</li>
+</ul>
+</li>
+<li>
+<p>Update <code>#[derive(Record)]</code></p>
+<ul>
+<li>Allow multiple <code>#[record(primary_key)]</code> fields and generate:
+<ul>
+<li><code>type Key = (&lt;K1&gt;, &lt;K2&gt;, …)</code> (Option B) or <code>&lt;RecordName&gt;Key</code> (Option A).</li>
+<li><code>fn key(&amp;self) -&gt; (&lt;K1Ref&gt;, &lt;K2Ref&gt;, …)</code>.</li>
+<li><code>fn primary_key_indices(&amp;self) -&gt; Vec&lt;usize&gt;</code> with +2 offset.</li>
+<li>Ensure <code>from_record_batch</code> and projection retain all PK columns.</li>
+</ul>
+</li>
+<li>Acceptance: trybuild tests covering multi-PK compile and run; single-PK tests unchanged.</li>
+</ul>
+</li>
+<li>
+<p>Integration tests</p>
+<ul>
+<li>Add end-to-end tests: insert/get/remove, range scans, projection, and ordering on 2+ PK fields (e.g., <code>tenant_id: u64, name: String</code>).</li>
+<li>Acceptance: All new tests pass.</li>
+</ul>
+</li>
+</ol>
+<p>Phase 3: Dynamic records (optional)</p>
+<ol start="7">
+<li><code>DynSchema</code> multi-PK
+<ul>
+<li>Store <code>primary_indices</code> metadata; update dynamic arrays/refs to keep all PK columns in projections.</li>
+<li>Provide a composite <code>ValueRef</code> key wrapper for in-memory operations.</li>
+<li>Ensure tombstones populate PK components from <code>Ts.key</code> in builders (e.g., <code>DynRecordBuilder::push</code>).</li>
+<li>Acceptance: dynamic tests mirroring integration scenarios pass, including tombstone rows retaining all PK components.</li>
+</ul>
+</li>
+</ol>
+<h2 id="code-touchpoints"><a class="header" href="#code-touchpoints">Code Touchpoints</a></h2>
+<ul>
+<li>Traits/APIs: <code>src/record/mod.rs</code> (Schema), <code>src/option.rs</code> (DbOption::new)</li>
+<li>Read paths: <code>src/lib.rs</code> (get/scan/package), <code>src/transaction.rs</code> (get/scan)</li>
+<li>Macro codegen: <code>tonbo_macros/src/record.rs</code>, <code>tonbo_macros/src/keys.rs</code>, <code>tonbo_macros/src/data_type.rs</code></li>
+<li>Key types: <code>src/record/key/composite/</code></li>
+<li>Dynamic (phase 3): <code>src/record/dynamic/*</code> (incl. tombstone handling in <code>DynRecordBuilder::push</code>)</li>
+</ul>
+<h2 id="testing-strategy"><a class="header" href="#testing-strategy">Testing Strategy</a></h2>
+<ul>
+<li>
+<p>Unit tests:</p>
+<ul>
+<li>Composite key <code>Ord</code>, <code>Eq</code>, <code>Hash</code>, <code>Encode</code>/<code>Decode</code> round-trip.</li>
+<li><code>Schema</code> default impl compatibility.</li>
+</ul>
+</li>
+<li>
+<p>trybuild tests:</p>
+<ul>
+<li>Multiple <code>#[record(primary_key)]</code> in a struct compiles and generates expected APIs.</li>
+<li>Reject nullable PK components.</li>
+</ul>
+</li>
+<li>
+<p>Integration tests:</p>
+<ul>
+<li>Insert/get/remove by composite key; range scans across composite key ranges; projection keeps PK columns.</li>
+<li>WAL/compaction unaffected (basic smoke tests).</li>
+</ul>
+</li>
+<li>
+<p>(Optional) Property tests: ordering equivalence vs. native tuple lexicographic ordering when Option B is used.</p>
+</li>
+<li>
+<p>Tombstones:</p>
+<ul>
+<li>For both single- and multi-column PKs, verify that tombstone rows (row == None) keep all PK column values populated from <code>Ts.key</code> in Arrow arrays and through <code>RecordRef::from_record_batch</code>.</li>
+</ul>
+</li>
+</ul>
+<h2 id="backward-compatibility--migration"><a class="header" href="#backward-compatibility--migration">Backward Compatibility &amp; Migration</a></h2>
+<ul>
+<li>All existing single-PK code continues to work without changes due to default-impl fallbacks.</li>
+<li>Users opting into composite PKs need only annotate multiple fields with <code>#[record(primary_key)]</code>.</li>
+<li>No on-disk migration is required for existing tables; new tables with composite PKs will write Parquet sorting columns for all PK components.</li>
+</ul>
+<h2 id="risks-and-mitigations"><a class="header" href="#risks-and-mitigations">Risks and Mitigations</a></h2>
+<ul>
+<li>API surface increase: keep new APIs additive with conservative defaults.</li>
+<li>Projection bugs: comprehensive tests to ensure PK columns are always included.</li>
+<li>Performance: lexicographic compare is standard; Arrow array lengths are uniform, so no extra bounds checks needed.</li>
+<li>Dynamic records complexity: staged to a later phase to avoid blocking initial delivery.</li>
+</ul>
+<h2 id="example-target-macro-ux"><a class="header" href="#example-target-macro-ux">Example (target macro UX)</a></h2>
+<pre><code class="language-rust">#[derive(Record, Debug)]
+pub struct User {
+    #[record(primary_key)]
+    pub tenant_id: u64,
+    #[record(primary_key)]
+    pub name: String,
+    pub email: Option&lt;String&gt;,
+    pub age: u8,
+}
+
+// Generated (conceptually):
+// type Key = (u64, String);
+// fn key(&amp;self) -&gt; (u64, &amp;str);
+// fn primary_key_indices(&amp;self) -&gt; Vec&lt;usize&gt; { vec![2, 3] }</code></pre>
+<h2 id="delivery-checklist"><a class="header" href="#delivery-checklist">Delivery Checklist</a></h2>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Add Schema plural APIs and refactor call sites.</li>
+<li><input disabled="" type="checkbox"/>
+Implement composite key types (tuples first).</li>
+<li><input disabled="" type="checkbox"/>
+Enable multiple PK fields in macro; generate composite key/ref and PK indices.</li>
+<li><input disabled="" type="checkbox"/>
+Update projection logic to retain all PK columns.</li>
+<li><input disabled="" type="checkbox"/>
+Configure Parquet sorting/statistics for all PK components.</li>
+<li><input disabled="" type="checkbox"/>
+Add unit/trybuild/integration tests.</li>
+<li><input disabled="" type="checkbox"/>
+Update user guide (mention composite PK support and examples).</li>
+<li><input disabled="" type="checkbox"/>
+Ensure tombstone rows keep PK component values (builders/readers), validated by tests.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../contribution/pr.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next" href="../tonbolite/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../contribution/pr.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next" href="../tonbolite/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

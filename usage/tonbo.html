@@ -1,0 +1,412 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js light">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Tonbo - The Tonbo Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+        <!-- MathJax -->
+        <script async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('no-js')
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add('js');
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var html = document.querySelector('html');
+            var sidebar = null;
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">What is Tonbo?</a></li><li class="chapter-item expanded "><a href="../start.html"><strong aria-hidden="true">1.</strong> Getting Started</a></li><li class="chapter-item expanded "><div><strong aria-hidden="true">2.</strong> Usage</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="../usage/tonbo.html" class="active"><strong aria-hidden="true">2.1.</strong> Tonbo</a></li><li class="chapter-item expanded "><a href="../usage/python.html"><strong aria-hidden="true">2.2.</strong> Python Binding</a></li><li class="chapter-item expanded "><a href="../usage/conf.html"><strong aria-hidden="true">2.3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../usage/advance.html"><strong aria-hidden="true">2.4.</strong> Advance</a></li><li class="chapter-item expanded "><a href="../usage/faq.html"><strong aria-hidden="true">2.5.</strong> FAQ</a></li></ol></li><li class="chapter-item expanded "><a href="../examples/index.html"><strong aria-hidden="true">3.</strong> Examples</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../examples/declare.html"><strong aria-hidden="true">3.1.</strong> Using Tonbo</a></li><li class="chapter-item expanded "><a href="../examples/wasm.html"><strong aria-hidden="true">3.2.</strong> Using under Wasm</a></li></ol></li><li class="chapter-item expanded "><div><strong aria-hidden="true">4.</strong> Contribution</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="../contribution/build.html"><strong aria-hidden="true">4.1.</strong> Building</a></li><li class="chapter-item expanded "><a href="../contribution/pr.html"><strong aria-hidden="true">4.2.</strong> Submitting PR</a></li><li class="chapter-item expanded "><a href="../contribution/composite_primary_keys.html"><strong aria-hidden="true">4.3.</strong> Composite Primary Keys</a></li></ol></li><li class="chapter-item expanded "><a href="../tonbolite/index.html"><strong aria-hidden="true">5.</strong> TonboLite</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="../tonbolite/start.html"><strong aria-hidden="true">5.1.</strong> Getting Started</a></li><li class="chapter-item expanded "><a href="../tonbolite/build.html"><strong aria-hidden="true">5.2.</strong> Building and Testing</a></li><li class="chapter-item expanded "><a href="../tonbolite/usage.html"><strong aria-hidden="true">5.3.</strong> Usage</a></li></ol></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky bordered">
+                    <div class="left-buttons">
+                        <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </button>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">The Tonbo Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/tonbo-io/tonbo" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="tonbo-api"><a class="header" href="#tonbo-api">Tonbo API</a></h1>
+<h4 id="dboption"><a class="header" href="#dboption">DbOption</a></h4>
+<p><code>DbOption</code> is a struct that contains configuration options for the database. Here are some configuration options you can set:</p>
+<pre><code class="language-rust">// Creates a new `DbOption` instance with the given path and schema.
+// The path is the default path that the database will use.
+async fn new(option: DbOption, executor: E, schema: R::Schema) -&gt; Result&lt;Self, DbError&lt;R&gt;&gt;;
+
+// Sets the path of the database.
+fn path(self, path: impl Into&lt;Path&gt;) -&gt; Self;
+
+/// disable the write-ahead log. This may risk of data loss during downtime
+pub fn disable_wal(self) -&gt; Self;
+
+/// Maximum size of WAL buffer, default value is 4KB
+/// If set to 0, the WAL buffer will be disabled.
+pub fn wal_buffer_size(self, wal_buffer_size: usize) -&gt; Self;</code></pre>
+<p>If you want to learn more about <code>DbOption</code>, you can refer to the <a href="conf.html">Configuration section</a>.</p>
+<blockquote>
+<p><strong>Note:</strong> You should make sure the path exists before creating <code>DBOption</code>.</p>
+</blockquote>
+<h4 id="executor"><a class="header" href="#executor">Executor</a></h4>
+<p>Tonbo provides an <code>Executor</code> trait that you can implement to execute asynchronous tasks. Tonbo has implemented <code>TokioExecutor</code>(for local disk) and <code>OpfsExecutor</code>(for WASM) for users. You can also customize yourself Executor, here is an example implementation of the <code>Executor</code> trait:</p>
+<pre><code class="language-rust">pub struct TokioExecutor {
+    handle: Handle,
+}
+
+impl TokioExecutor {
+    pub fn current() -&gt; Self {
+        Self {
+            handle: Handle::current(),
+        }
+    }
+}
+
+impl Executor for TokioExecutor {
+    fn spawn&lt;F&gt;(&amp;self, future: F)
+    where
+        F: Future&lt;Output = ()&gt; + MaybeSend + 'static,
+    {
+        self.handle.spawn(future);
+    }
+}</code></pre>
+<h3 id="query"><a class="header" href="#query">Query</a></h3>
+<p>You can use <code>get</code> method to get a record by key and you should pass a closure that takes a <code>TransactionEntry</code> instance and returns a <code>Option</code> type. You can use <code>TransactionEntry::get</code> to get a <code>UserRef</code> instance. This <code>UserRef</code> instance is a struct that tonbo generates for you. All fields except primary key are <code>Option</code> type, because you may not have set them when you create the record.</p>
+<p>You can use <code>scan</code> method to scan all records that in the specified range. <code>scan</code> method will return a <code>Stream</code> instance and you can iterate all records by using this stream.</p>
+<pre><code class="language-rust">/// get the record with `key` as the primary key and process it using closure `f`
+let age = db.get(&amp;&quot;Alice&quot;.into(),
+    |entry| {
+        // entry.get() will get a `UserRef`
+        let user = entry.get();
+        println!(&quot;{:#?}&quot;, user);
+        user.age
+    })
+    .await
+    .unwrap();
+
+let mut scan = db
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .await
+    .unwrap();
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of UserRef
+    // ......
+}
+
+// Reverse scan (descending order)
+let mut reverse_scan = db
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .reverse() // scan in descending order
+    .limit(100) // limit results
+    .await
+    .unwrap();
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // newest records first
+    // ......
+}</code></pre>
+<h3 id="insertremove"><a class="header" href="#insertremove">Insert/Remove</a></h3>
+<p>You can use <code>db.insert(record)</code> or <code>db.insert_batch(records)</code> to insert new records into the database and use <code>db.remove(key)</code> to remove a record from the database. Here is an example of updating the state of database:</p>
+<pre><code class="language-rust">let user = User {
+    name: &quot;Alice&quot;.into(),
+    email: Some(&quot;alice@gmail.com&quot;.into()),
+    age: 22,
+    bytes: Bytes::from(vec![0, 1, 2]),
+};
+
+/// insert a single tonbo record
+db.insert(user).await.unwrap();
+
+/// insert a sequence of data as a single batch
+db.insert_batch(&quot;Alice&quot;.into()).await.unwrap();
+
+/// remove the specified record from the database
+db.remove(&quot;Alice&quot;.into()).await.unwrap();</code></pre>
+<h3 id="transaction"><a class="header" href="#transaction">Transaction</a></h3>
+<p>Tonbo supports transactions when using a <code>Transaction</code>. You can use <code>db.transaction()</code> to create a transaction, and use <code>txn.commit()</code> to commit the transaction.</p>
+<p>Note that Tonbo provides optimistic concurrency control to ensure data consistency which means that if a transaction conflicts with another transaction when committing, Tonbo will fail with a <code>CommitError</code>.</p>
+<p>Here is an example of how to use transactions:</p>
+<pre><code class="language-rust">// create transaction
+let txn = db.transaction().await;
+
+let name = &quot;Alice&quot;.into();
+
+txn.insert(User { /* ... */ });
+let _user = txn.get(&amp;name, Projection::Parts(vec![&quot;email&quot;, &quot;bytes&quot;])).await.unwrap();
+
+let upper = &quot;Blob&quot;.into();
+// range scan of user
+let mut scan = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    // tonbo supports pushing down projection
+    .projection(&amp;[&quot;email&quot;, &quot;bytes&quot;])
+    // push down limitation
+    .limit(1)
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of UserRef
+    // ......
+}</code></pre>
+<h4 id="query-1"><a class="header" href="#query-1">Query</a></h4>
+<p>Transactions support easily reading the state of keys that are currently batched in a given transaction but not yet committed.</p>
+<p>You can use <code>get</code> method to get a record by key, and <code>get</code> method will return a <code>UserRef</code> instance. This <code>UserRef</code> instance is a struct that tonbo generates for you in the compile time. All fields except primary key are <code>Option</code> type, because you may not have set them when you create the record. You can also pass a <code>Projection</code> to specify which fields you want to get. <code>Projection::All</code> will get all fields, <code>Projection::Parts(Vec&lt;&amp;str&gt;)</code> will get only primary key, <code>email</code> and <code>bytes</code> fields(other fields will be <code>None</code>).</p>
+<p>You can use <code>scan</code> method to scan all records that in the specified range. <code>scan</code> method will return a <code>Scan</code> instance. You can use <code>take</code> method to get a <code>Stream</code> instance and iterate all records that satisfied. Tonbo also supports pushing down filters and projections. You can use <code>Scan::projection(vec![&quot;id&quot;, &quot;email&quot;])</code> to specify which fields you want to get and use <code>Scan::limit(10)</code> to limit the number of records you want to get.</p>
+<pre><code class="language-rust">let txn = db.transaction().await;
+
+let _user = txn.get(&amp;name, Projection::Parts(vec![&quot;email&quot;])).await.unwrap();
+
+let mut scan_stream = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    // tonbo supports pushing down projection
+    .projection(&amp;[&quot;email&quot;, &quot;bytes&quot;])
+    // push down limitation
+    .limit(10)
+    .take()
+    .await
+    .unwrap();
+while let Some(entry) = scan_stream.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of UserRef
+    // ......
+}</code></pre>
+<h4 id="insertremove-1"><a class="header" href="#insertremove-1">Insert/Remove</a></h4>
+<p>You can use <code>txn.insert(record)</code> to insert a new record into the database and use <code>txn.remove(key)</code> to remove a record from the database. Tonbo will use a B-Tree to store all data that you modified(insert/remove). All your modifications will be committed to the database when only you call <code>txn.commit()</code> successfully. If conflict happens, Tonbo will return an error and all your modifications will be rollback.</p>
+<p>Here is an example of how to use transaction to update the state of database:</p>
+<pre><code class="language-rust">
+let mut txn = db.transaction().await;
+txn.insert(User {
+    id: 10,
+    name: &quot;John&quot;.to_string(),
+    email: Some(&quot;john@example.com&quot;.to_string()),
+});
+txn.remove(&quot;Alice&quot;.into());
+txn.commit().await.unwrap();</code></pre>
+<p>After create <code>DB</code>, you can execute <code>insert</code>, <code>remove</code>, <code>get</code> and other operations now. But remember that you will get a <strong><code>UserRef</code> instance</strong> rather than the <code>User</code>, if you get record from tonbo. This is a struct that tonbo generates for you in the compile time. It may look like:</p>
+<h2 id="using-s3-backends"><a class="header" href="#using-s3-backends">Using S3 backends</a></h2>
+<p>Tonbo supports various storage backends, such as OPFS, S3, and maybe more in the future. Tonbo wiil use local storage by default. If you want to use S3 storage for specific level, you can use <code>DbOption::level_path(FsOptions::S3)</code> so that all files in that level will be pushed to S3.</p>
+<pre><code class="language-rust">use tonbo::option::{ AwsCredential, FsOptions, Path };
+use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
+
+#[tokio::main]
+async fn main() {
+    let fs_option = FsOptions::S3 {
+        bucket: &quot;wasm-data&quot;.to_string(),
+        credential: Some(AwsCredential {
+            key_id: &quot;key_id&quot;.to_string(),
+            secret_key: &quot;secret_key&quot;.to_string(),
+            token: None,
+        }),
+        endpoint: None,
+        sign_payload: None,
+        checksum: None,
+        region: Some(&quot;region&quot;.to_string()),
+    };
+
+    let options = DbOption::new(Path::from_filesystem_path(&quot;s3_path&quot;).unwrap(), &amp;UserSchema)
+        .level_path(2, &quot;l2&quot;, fs_option);
+
+    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::default(), UserSchema)
+        .await
+        .unwrap();
+}</code></pre>
+<p>If you want to persist metadata files to S3, you can configure <code>DbOption::base_fs</code> with <code>FsOptions::S3{...}</code>. This will enable Tonbo to upload metadata files and WAL files to the specified S3 bucket.</p>
+<blockquote>
+<p><strong>Note</strong>: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest WAL is uploaded, you can use <code>DB::flush_wal</code>. If you want to ensure the latest metadata is uploaded, you can use <code>DB::flush</code> to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust <code>DbOption::version_log_snapshot_threshold</code> to a smaller value. The default value is 200.</p>
+</blockquote>
+<p>See more details in <a href="./conf.html#manifest-configuration">Configuration</a>.</p>
+<blockquote>
+<p><strong>Note</strong>: If you want to use S3 in WASM, please configure CORS rules for the bucket before using. Here is an example of CORS configuration:</p>
+<pre><code class="language-json">[
+    {
+        &quot;AllowedHeaders&quot;: [
+            &quot;*&quot;
+        ],
+        &quot;AllowedMethods&quot;: [
+            &quot;GET&quot;,
+            &quot;PUT&quot;,
+            &quot;DELETE&quot;,
+            &quot;HEAD&quot;
+        ],
+        &quot;AllowedOrigins&quot;: [
+            &quot;*&quot;
+        ],
+        &quot;ExposeHeaders&quot;: []
+    }
+]
+</code></pre>
+<p>For more details, please refer to <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/ManageCorsUsing.html">AWS documentation</a>.</p>
+</blockquote>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../start.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next" href="../usage/python.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../start.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next" href="../usage/python.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

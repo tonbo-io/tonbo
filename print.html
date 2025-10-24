@@ -1,0 +1,1844 @@
+<!DOCTYPE HTML>
+<html lang="en" class="sidebar-visible no-js light">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>The Tonbo Guide</title>
+        <meta name="robots" content="noindex" />
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff" />
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+        <!-- MathJax -->
+        <script async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('no-js')
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add('js');
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var html = document.querySelector('html');
+            var sidebar = null;
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="introduction.html">What is Tonbo?</a></li><li class="chapter-item expanded "><a href="start.html"><strong aria-hidden="true">1.</strong> Getting Started</a></li><li class="chapter-item expanded "><div><strong aria-hidden="true">2.</strong> Usage</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="usage/tonbo.html"><strong aria-hidden="true">2.1.</strong> Tonbo</a></li><li class="chapter-item expanded "><a href="usage/python.html"><strong aria-hidden="true">2.2.</strong> Python Binding</a></li><li class="chapter-item expanded "><a href="usage/conf.html"><strong aria-hidden="true">2.3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="usage/advance.html"><strong aria-hidden="true">2.4.</strong> Advance</a></li><li class="chapter-item expanded "><a href="usage/faq.html"><strong aria-hidden="true">2.5.</strong> FAQ</a></li></ol></li><li class="chapter-item expanded "><a href="examples/index.html"><strong aria-hidden="true">3.</strong> Examples</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="examples/declare.html"><strong aria-hidden="true">3.1.</strong> Using Tonbo</a></li><li class="chapter-item expanded "><a href="examples/wasm.html"><strong aria-hidden="true">3.2.</strong> Using under Wasm</a></li></ol></li><li class="chapter-item expanded "><div><strong aria-hidden="true">4.</strong> Contribution</div></li><li><ol class="section"><li class="chapter-item expanded "><a href="contribution/build.html"><strong aria-hidden="true">4.1.</strong> Building</a></li><li class="chapter-item expanded "><a href="contribution/pr.html"><strong aria-hidden="true">4.2.</strong> Submitting PR</a></li><li class="chapter-item expanded "><a href="contribution/composite_primary_keys.html"><strong aria-hidden="true">4.3.</strong> Composite Primary Keys</a></li></ol></li><li class="chapter-item expanded "><a href="tonbolite/index.html"><strong aria-hidden="true">5.</strong> TonboLite</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="tonbolite/start.html"><strong aria-hidden="true">5.1.</strong> Getting Started</a></li><li class="chapter-item expanded "><a href="tonbolite/build.html"><strong aria-hidden="true">5.2.</strong> Building and Testing</a></li><li class="chapter-item expanded "><a href="tonbolite/usage.html"><strong aria-hidden="true">5.3.</strong> Usage</a></li></ol></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle"></div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky bordered">
+                    <div class="left-buttons">
+                        <button id="sidebar-toggle" class="icon-button" type="button" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </button>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">The Tonbo Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/tonbo-io/tonbo" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="what-is-tonbo"><a class="header" href="#what-is-tonbo">What is Tonbo?</a></h1>
+<p><a href="https://github.com/tonbo-io/tonbo">Tonbo</a> is an in-process KV database that can be embedded in data-intensive applications written in Rust, Python, or JavaScript (WebAssembly / Deno). It is designed for analytical processing. Tonbo can efficiently write data in real time in edge environments such as browsers and AWS Lambda, with the data stored in memory, on local disks, or in S3 using Apache Parquet format.</p>
+<h2 id="build-with-schema"><a class="header" href="#build-with-schema">Build with schema</a></h2>
+<p>Building data-intensive applications in Rust using Tonbo is convenient. You just need to declare the dependency in your <code>Cargo.toml</code> file and then create the embedded database. Tonbo supports:</p>
+<pre><code class="language-rust">#[derive(tonbo::Record)]
+pub struct User {
+    #[record(primary_key)]
+    name: String,
+    email: Option&lt;String&gt;,
+    age: u8,
+}
+
+async fn main() {
+    let db = tonbo::DB::new(&quot;./db_path/users&quot;.into(), TokioExecutor::default())
+        .await
+        .unwrap();
+}</code></pre>
+<h2 id="all-in-parquet"><a class="header" href="#all-in-parquet">All in Parquet</a></h2>
+<p>Tonbo organizes all stored data as Apache Parquet files. At each level, these files can reside in memory, on disk, or in S3. This design lets users process their data without any vendor lock-in, including with Tonbo.</p>
+<pre><code>			╔═tonbo═════════════════════════════════════════════════════╗
+			║                                                           ║
+			║    ┌──────╂─client storage─┐  ┌──────╂─client storage─┐   ║
+			║    │ ┏━━━━▼━━━━┓           │  │ ┏━━━━▼━━━━┓           │   ║
+			║    │ ┃ parquet ┃           │  │ ┃ parquet ┃           │   ║
+			║    │ ┗━━━━┳━━━━┛           │  │ ┗━━━━┳━━━━┛           │   ║
+			║    └──────╂────────────────┘  └──────╂────────────────┘   ║
+			║           ┣━━━━━━━━━━━━━━━━━━━━━━━━━━┛                    ║
+			║    ┌──────╂────────────────────────────────server ssd─┐   ║
+			║    │      ┣━━━━━━━━━━━┓                               │   ║
+			║    │ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓                          │   ║
+			║    │ ┃ parquet ┃ ┃ parquet ┃                          │   ║
+			║    │ ┗━━━━┳━━━━┛ ┗━━━━┳━━━━┛                          │   ║
+			║    └──────╂───────────╂───────────────────────────────┘   ║
+			║    ┌──────╂───────────╂────────object storage service─┐   ║
+			║    │      ┣━━━━━━━━━━━╋━━━━━━━━━━━┳━━━━━━━━━━━┓       │   ║
+			║    │ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓ ┏━━━━▼━━━━┓  │   ║
+			║    │ ┃ parquet ┃ ┃ parquet ┃ ┃ parquet ┃ ┃ parquet ┃  │   ║
+			║    │ ┗━━━━━━━━━┛ ┗━━━━━━━━━┛ ┗━━━━━━━━━┛ ┗━━━━━━━━━┛  │   ║
+			║    └──────────────────────────────────────────────────┘   ║
+			║                                                           ║
+			╚═══════════════════════════════════════════════════════════╝
+</code></pre>
+<h2 id="easy-to-be-integrated"><a class="header" href="#easy-to-be-integrated">Easy to be integrated</a></h2>
+<p>Compared to other analytical databases, Tonbo is extremely lightweight—only 1.3MB when compressed. In addition to being embedded directly as a KV database within applications, Tonbo can also serve as an analytical enhancement for existing OLTP databases.</p>
+<p>For example, <a href="https://github.com/tonbo-io/tonbolite">Tonbolite</a> is a SQLite plugin built on Tonbo that provides SQLite with highly compressed, analytical-ready tables using Arrow/Parquet to boost query efficiency. Moreover, it can run alongside SQLite in various environments such as browsers and Linux:</p>
+<pre><code>sqlite&gt; .load target/release/libsqlite_tonbo
+
+sqlite&gt; CREATE VIRTUAL TABLE temp.tonbo USING tonbo(
+    create_sql = 'create table tonbo(id bigint primary key, name varchar, like int)',
+    path = 'db_path/tonbo'
+);
+
+sqlite&gt; insert into tonbo (id, name, like) values (0, 'tonbo', 100);
+
+sqlite&gt; select * from tonbo;
+0|tonbo|100
+</code></pre>
+<p>We are committed to providing the most convenient and efficient real-time analytical database for edge-first scenarios. In addition to Tonbolite, we will offer the following based on Tonbo:</p>
+<ol>
+<li>Time-series data writing and querying for observability and other scenarios.</li>
+<li>Real-time index building and search based on BM25 or vectors.</li>
+</ol>
+<p>We are passionate about establishing Tonbo as an open-source, community-contributed project and are dedicated to building a community around it to develop features for all use cases.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
+<ul>
+<li><a href="start.html#installation">Installation</a>
+<ul>
+<li><a href="start.html#prerequisite">Prerequisite</a></li>
+<li><a href="start.html#installation-1">Installation</a></li>
+</ul>
+</li>
+<li><a href="start.html#using-tonbo">Using Tonbo</a>
+<ul>
+<li><a href="start.html#defining-schema">Defining Schema</a></li>
+<li><a href="start.html#creating-database">Creating database</a></li>
+<li><a href="start.html#operations-on-database">Operations on Database</a></li>
+<li><a href="start.html#insert">Insert</a></li>
+<li><a href="start.html#remove">Remove</a></li>
+<li><a href="start.html#get">Get</a></li>
+<li><a href="start.html#scan">Scan</a>
+<ul>
+<li><a href="start.html#using-transaction">Using transaction</a></li>
+</ul>
+</li>
+<li><a href="start.html#persistence">Persistence</a></li>
+<li><a href="start.html#using-with-s3">Using with S3</a></li>
+</ul>
+</li>
+<li><a href="start.html#what-next">What next?</a></li>
+</ul>
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<h3 id="prerequisite"><a class="header" href="#prerequisite">Prerequisite</a></h3>
+<p>To get started with Tonbo, ensure that Rust is installed on your system. If you haven't installed it yet, please follow the <a href="https://www.rust-lang.org/tools/install">installation instructions</a>.</p>
+<h3 id="installation-1"><a class="header" href="#installation-1">Installation</a></h3>
+<p>Tonbo supports various target platforms (native, AWS Lambda, browsers, etc.) and storage backends (memory, local disk, S3, etc.). Built on asynchronous Rust, Tonbo improves database operation efficiency, which means you must configure an async runtime for your target platform.</p>
+<p>For native platforms, <a href="https://github.com/tokio-rs/tokio">Tokio</a> is the most popular async runtime in Rust. To use Tonbo with Tokio, ensure the tokio feature is enabled in your <code>Cargo.toml</code> file (enabled by default):</p>
+<pre><code class="language-toml">tokio = { version = &quot;1&quot;, features = [&quot;full&quot;] }
+tonbo = { git = &quot;https://github.com/tonbo-io/tonbo&quot; }
+</code></pre>
+<p>For browser targets using OPFS as the storage backend, disable the <code>tokio</code> feature and enable the <code>wasm</code> feature because Tokio is incompatible with OPFS. Since <code>tokio</code> is enabled by default, you must disable default features. If you plan to use S3 as the backend, also enable the <code>wasm-http</code> feature:</p>
+<pre><code class="language-toml">tonbo = { git = &quot;https://github.com/tonbo-io/tonbo&quot;, default-features = false, features = [
+    &quot;wasm&quot;,
+    &quot;wasm-http&quot;,
+] }
+</code></pre>
+<h2 id="using-tonbo"><a class="header" href="#using-tonbo">Using Tonbo</a></h2>
+<h3 id="defining-schema"><a class="header" href="#defining-schema">Defining Schema</a></h3>
+<p>Tonbo offers an ORM-like macro that simplifies working with column families. Use the Record macro to define your column family's schema, and Tonbo will automatically generate all necessary code at compile time:</p>
+<pre><code class="language-rust">use tonbo::Record;
+
+#[derive(Record, Debug)]
+pub struct User {
+    #[record(primary_key)]
+    name: String,
+    email: Option&lt;String&gt;,
+    age: u8,
+}</code></pre>
+<p>Further explanation of this example:</p>
+<ul>
+<li><code>Record</code>: This attribute marks the struct as a Tonbo schema definition, meaning it represents the structure of a column family.</li>
+<li><code>#[record(primary_key)]</code>: This attribute designates the corresponding field as the primary key. Note that Tonbo currently does not support compound primary keys, so the primary key must be unique.</li>
+<li><code>Option</code>: When a field is wrapped in Option, it indicates that the field is nullable.</li>
+</ul>
+<p>Tonbo supports the following data types:</p>
+<ul>
+<li>Number types: i8, i16, i32, i64, u8, u16, u32, u64</li>
+<li>Boolean type: bool</li>
+<li>String type: String</li>
+<li>Bytes type: bytes::Bytes</li>
+</ul>
+<h3 id="creating-database"><a class="header" href="#creating-database">Creating database</a></h3>
+<p>After defining your schema, you can create a <code>DB</code> instance using a customized <code>DbOption</code>.</p>
+<pre><code class="language-rust">use std::fs;
+use tonbo::Path;
+use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
+
+#[tokio::main]
+async fn main() {
+    // make sure the path exists
+    fs::create_dir_all(&quot;./db_path/users&quot;).unwrap();
+
+    let options = DbOption::new(
+        Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
+        &amp;UserSchema,
+    );
+    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::default(), UserSchema)
+        .await
+        .unwrap();
+}</code></pre>
+<p>Tonbo automatically generates the <code>UserSchema</code> struct at compile time, so you don’t need to handle it manually. However, ensure that the specified path exists before creating your DBOption.</p>
+<p>When using Tonbo in a WASM environment, use <code>Path::from_opfs_path</code> instead of <code>Path::from_filesystem_path</code>.</p>
+<h3 id="operations-on-database"><a class="header" href="#operations-on-database">Operations on Database</a></h3>
+<p>After creating the DB, you can perform operations like <code>insert</code>, <code>remove</code>, and <code>get</code>. However, when you retrieve a record from Tonbo, you'll receive a <code>UserRef</code> instance—not a direct <code>User</code> instance. The <code>UserRef</code> struct, which implements the <code>RecordRef</code> trait, is automatically generated by Tonbo at compile time. It might look something like this:</p>
+<pre><code class="language-rust">#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct UserRef&lt;'r&gt; {
+    pub name: &amp;'r str,
+    pub email: Option&lt;&amp;'r str&gt;,
+    pub age: Option&lt;u8&gt;,
+}
+impl RecordRef for UserRef&lt;'_&gt; {
+    // ......
+}</code></pre>
+<h3 id="insert"><a class="header" href="#insert">Insert</a></h3>
+<p><code>DB::insert</code> takes a <code>Record</code> instance—specifically, an instance of the struct you've defined with <code>#[derive(Record)]</code>:</p>
+<pre><code class="language-rust">db.insert(User { /* ... */ }).await.unwrap();</code></pre>
+<h3 id="remove"><a class="header" href="#remove">Remove</a></h3>
+<p><code>DB::remove</code> accepts a Key, where the type of the key is defined by the field annotated with <code>#[record(primary_key)]</code>. This method removes the record associated with the provided key:</p>
+<pre><code class="language-rust">db.remove(&quot;Alice&quot;.into()).await.unwrap();</code></pre>
+<h3 id="get"><a class="header" href="#get">Get</a></h3>
+<p><code>DB::get</code> accepts a <code>Key</code> and processes the corresponding record using a closure that receives a <code>TransactionEntry</code>. Within the closure, you can call <code>TransactionEntry::get</code> to retrieve the record as a <code>RecordRef</code> instance:</p>
+<pre><code class="language-rust">let age = db.get(&amp;&quot;Alice&quot;.into(),
+    |entry| {
+        // entry.get() will get a `UserRef`
+        let user = entry.get();
+        println!(&quot;{:#?}&quot;, user);
+        user.age
+    })
+    .await
+    .unwrap();</code></pre>
+<h3 id="scan"><a class="header" href="#scan">Scan</a></h3>
+<p>Similar to <code>DB::get</code>, <code>DB::scan</code> accepts a closure that processes a <code>TransactionEntry</code>. However, instead of a single key, <code>DB::scan</code> operates over a range of keys, applying the closure to every record that falls within that range:</p>
+<pre><code class="language-rust">let lower = &quot;Alice&quot;.into();
+let upper = &quot;Bob&quot;.into();
+let stream = db
+    .scan(
+        (Bound::Included(&amp;lower), Bound::Excluded(&amp;upper)),
+        |entry| {
+            let record_ref = entry.get();
+
+            record_ref.age
+        },
+    )
+    .await;
+let mut stream = std::pin::pin!(stream);
+while let Some(data) = stream.next().await.transpose().unwrap() {
+    // ...
+}</code></pre>
+<h4 id="using-transaction"><a class="header" href="#using-transaction">Using transaction</a></h4>
+<p>Tonbo supports transaction. You can also push down filter, limit and projection operators in query.</p>
+<pre><code class="language-rust">// create transaction
+let txn = db.transaction().await;
+
+let name = &quot;Alice&quot;.into();
+
+txn.insert(User { /* ... */ });
+let user = txn.get(&amp;name, Projection::All).await.unwrap();
+
+let upper = &quot;Blob&quot;.into();
+// range scan of user
+let mut scan = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of UserRef
+    // ......
+}
+
+// reverse scan of user (descending order) 
+let mut reverse_scan = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .reverse() // scan in descending order
+    .limit(10) // optionally limit results
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // records in reverse order
+    // ......
+}</code></pre>
+<h3 id="persistence"><a class="header" href="#persistence">Persistence</a></h3>
+<p>Tonbo employs a Log-Structured Merge Tree (LSM) as its underlying data structure, meaning that some data may reside in memory. To persist this in-memory data, use the flush method.</p>
+<p>When Write-Ahead Logging (WAL) is enabled, data is automatically written to disk. However, since Tonbo buffers WAL data by default, you should call the <code>flush_wal</code> method to ensure all data is recovered. If you prefer not to use WAL buffering, you can disable it by setting <code>wal_buffer_size</code> to 0:</p>
+<pre><code class="language-rust">let options = DbOption::new(
+    Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
+    &amp;UserSchema,
+).wal_buffer_size(0);</code></pre>
+<p>If you don't want to use WAL, you can disable it by setting the <code>DbOption::disable_wal</code>.</p>
+<pre><code class="language-rust">let options = DbOption::new(
+    Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
+    &amp;UserSchema,
+).disable_wal(true);</code></pre>
+<blockquote>
+<p><strong>Note</strong>: If you disable WAL, there is nothing to do with <code>flush_wal</code>. You need to call <code>flush</code> method to persist the memory data.</p>
+<p>Conversely, if WAL is enabled and <code>wal_buffer_size</code> is set to 0, WAL data is flushed to disk immediately, so calling <code>flush_wal</code> is unnecessary.</p>
+</blockquote>
+<h3 id="using-with-s3"><a class="header" href="#using-with-s3">Using with S3</a></h3>
+<p>If you want to use Tonbo with S3, you can configure <code>DbOption</code> to determine which portions of your data are stored in S3 and which remain on the local disk. The example below demonstrates how to set up this configuration:</p>
+<pre><code class="language-rust">let s3_option = FsOptions::S3 {
+    bucket: &quot;bucket&quot;.to_string(),
+    credential: Some(AwsCredential {
+        key_id: &quot;key_id&quot;.to_string(),
+        secret_key: &quot;secret_key&quot;.to_string(),
+        token: None,
+    }),
+    endpoint: None,
+    sign_payload: None,
+    checksum: None,
+    region: Some(&quot;region&quot;.to_string()),
+};
+let options = DbOption::new(
+    Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
+    &amp;UserSchema,
+).level_path(2, &quot;l2&quot;, s3_option.clone())
+).level_path(3, &quot;l3&quot;, s3_option);</code></pre>
+<p>In this example, data for level 2 and level 3 will be stored in S3, while all other levels remain on the local disk. If there is data in level 2 and level 3, you can verify and access it in S3:</p>
+<pre><code class="language-bash">s3://bucket/l2/
+├── xxx.parquet
+├── ......
+s3://bucket/l3/
+├── xxx.parquet
+├── ......
+</code></pre>
+<p>For more configuration options, please refer to the <a href="./usage/conf.html">Configuration</a> section.</p>
+<h2 id="what-next"><a class="header" href="#what-next">What next?</a></h2>
+<ul>
+<li>To learn more about tonbo in Rust or in WASM, you can refer to <a href="./usage/tonbo.html">Tonbo API</a></li>
+<li>To use tonbo in python, you can refer to <a href="./usage/python.html">Python API</a></li>
+<li>To learn more about tonbo in brower, you can refer to <a href="./usage/wasm.html">WASM API</a></li>
+<li>To learn more configuration about tonbo, you can refer to <a href="./usage/conf.html">Configuration</a></li>
+<li>There are some data structures for runtime schema, you can use them to <a href="./usage/advance.html">expole tonbo</a>. You can also refer to our <a href="https://github.com/tonbo-io/tonbo/tree/main/bindings/python">python</a>, <a href="https://github.com/tonbo-io/tonbo/tree/main/bindings/js">wasm</a> bindings and <a href="https://github.com/tonbo-io/tonbolite">Tonbolite(a SQLite extension)</a></li>
+<li>To learn more about tonbo by examples, you can refer to <a href="https://github.com/tonbo-io/tonbo/tree/main/examples">examples</a></li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="tonbo-api"><a class="header" href="#tonbo-api">Tonbo API</a></h1>
+<h4 id="dboption"><a class="header" href="#dboption">DbOption</a></h4>
+<p><code>DbOption</code> is a struct that contains configuration options for the database. Here are some configuration options you can set:</p>
+<pre><code class="language-rust">// Creates a new `DbOption` instance with the given path and schema.
+// The path is the default path that the database will use.
+async fn new(option: DbOption, executor: E, schema: R::Schema) -&gt; Result&lt;Self, DbError&lt;R&gt;&gt;;
+
+// Sets the path of the database.
+fn path(self, path: impl Into&lt;Path&gt;) -&gt; Self;
+
+/// disable the write-ahead log. This may risk of data loss during downtime
+pub fn disable_wal(self) -&gt; Self;
+
+/// Maximum size of WAL buffer, default value is 4KB
+/// If set to 0, the WAL buffer will be disabled.
+pub fn wal_buffer_size(self, wal_buffer_size: usize) -&gt; Self;</code></pre>
+<p>If you want to learn more about <code>DbOption</code>, you can refer to the <a href="usage/conf.html">Configuration section</a>.</p>
+<blockquote>
+<p><strong>Note:</strong> You should make sure the path exists before creating <code>DBOption</code>.</p>
+</blockquote>
+<h4 id="executor"><a class="header" href="#executor">Executor</a></h4>
+<p>Tonbo provides an <code>Executor</code> trait that you can implement to execute asynchronous tasks. Tonbo has implemented <code>TokioExecutor</code>(for local disk) and <code>OpfsExecutor</code>(for WASM) for users. You can also customize yourself Executor, here is an example implementation of the <code>Executor</code> trait:</p>
+<pre><code class="language-rust">pub struct TokioExecutor {
+    handle: Handle,
+}
+
+impl TokioExecutor {
+    pub fn current() -&gt; Self {
+        Self {
+            handle: Handle::current(),
+        }
+    }
+}
+
+impl Executor for TokioExecutor {
+    fn spawn&lt;F&gt;(&amp;self, future: F)
+    where
+        F: Future&lt;Output = ()&gt; + MaybeSend + 'static,
+    {
+        self.handle.spawn(future);
+    }
+}</code></pre>
+<h3 id="query"><a class="header" href="#query">Query</a></h3>
+<p>You can use <code>get</code> method to get a record by key and you should pass a closure that takes a <code>TransactionEntry</code> instance and returns a <code>Option</code> type. You can use <code>TransactionEntry::get</code> to get a <code>UserRef</code> instance. This <code>UserRef</code> instance is a struct that tonbo generates for you. All fields except primary key are <code>Option</code> type, because you may not have set them when you create the record.</p>
+<p>You can use <code>scan</code> method to scan all records that in the specified range. <code>scan</code> method will return a <code>Stream</code> instance and you can iterate all records by using this stream.</p>
+<pre><code class="language-rust">/// get the record with `key` as the primary key and process it using closure `f`
+let age = db.get(&amp;&quot;Alice&quot;.into(),
+    |entry| {
+        // entry.get() will get a `UserRef`
+        let user = entry.get();
+        println!(&quot;{:#?}&quot;, user);
+        user.age
+    })
+    .await
+    .unwrap();
+
+let mut scan = db
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .await
+    .unwrap();
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of UserRef
+    // ......
+}
+
+// Reverse scan (descending order)
+let mut reverse_scan = db
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    .reverse() // scan in descending order
+    .limit(100) // limit results
+    .await
+    .unwrap();
+while let Some(entry) = reverse_scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // newest records first
+    // ......
+}</code></pre>
+<h3 id="insertremove"><a class="header" href="#insertremove">Insert/Remove</a></h3>
+<p>You can use <code>db.insert(record)</code> or <code>db.insert_batch(records)</code> to insert new records into the database and use <code>db.remove(key)</code> to remove a record from the database. Here is an example of updating the state of database:</p>
+<pre><code class="language-rust">let user = User {
+    name: &quot;Alice&quot;.into(),
+    email: Some(&quot;alice@gmail.com&quot;.into()),
+    age: 22,
+    bytes: Bytes::from(vec![0, 1, 2]),
+};
+
+/// insert a single tonbo record
+db.insert(user).await.unwrap();
+
+/// insert a sequence of data as a single batch
+db.insert_batch(&quot;Alice&quot;.into()).await.unwrap();
+
+/// remove the specified record from the database
+db.remove(&quot;Alice&quot;.into()).await.unwrap();</code></pre>
+<h3 id="transaction"><a class="header" href="#transaction">Transaction</a></h3>
+<p>Tonbo supports transactions when using a <code>Transaction</code>. You can use <code>db.transaction()</code> to create a transaction, and use <code>txn.commit()</code> to commit the transaction.</p>
+<p>Note that Tonbo provides optimistic concurrency control to ensure data consistency which means that if a transaction conflicts with another transaction when committing, Tonbo will fail with a <code>CommitError</code>.</p>
+<p>Here is an example of how to use transactions:</p>
+<pre><code class="language-rust">// create transaction
+let txn = db.transaction().await;
+
+let name = &quot;Alice&quot;.into();
+
+txn.insert(User { /* ... */ });
+let _user = txn.get(&amp;name, Projection::Parts(vec![&quot;email&quot;, &quot;bytes&quot;])).await.unwrap();
+
+let upper = &quot;Blob&quot;.into();
+// range scan of user
+let mut scan = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    // tonbo supports pushing down projection
+    .projection(&amp;[&quot;email&quot;, &quot;bytes&quot;])
+    // push down limitation
+    .limit(1)
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of UserRef
+    // ......
+}</code></pre>
+<h4 id="query-1"><a class="header" href="#query-1">Query</a></h4>
+<p>Transactions support easily reading the state of keys that are currently batched in a given transaction but not yet committed.</p>
+<p>You can use <code>get</code> method to get a record by key, and <code>get</code> method will return a <code>UserRef</code> instance. This <code>UserRef</code> instance is a struct that tonbo generates for you in the compile time. All fields except primary key are <code>Option</code> type, because you may not have set them when you create the record. You can also pass a <code>Projection</code> to specify which fields you want to get. <code>Projection::All</code> will get all fields, <code>Projection::Parts(Vec&lt;&amp;str&gt;)</code> will get only primary key, <code>email</code> and <code>bytes</code> fields(other fields will be <code>None</code>).</p>
+<p>You can use <code>scan</code> method to scan all records that in the specified range. <code>scan</code> method will return a <code>Scan</code> instance. You can use <code>take</code> method to get a <code>Stream</code> instance and iterate all records that satisfied. Tonbo also supports pushing down filters and projections. You can use <code>Scan::projection(vec![&quot;id&quot;, &quot;email&quot;])</code> to specify which fields you want to get and use <code>Scan::limit(10)</code> to limit the number of records you want to get.</p>
+<pre><code class="language-rust">let txn = db.transaction().await;
+
+let _user = txn.get(&amp;name, Projection::Parts(vec![&quot;email&quot;])).await.unwrap();
+
+let mut scan_stream = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    // tonbo supports pushing down projection
+    .projection(&amp;[&quot;email&quot;, &quot;bytes&quot;])
+    // push down limitation
+    .limit(10)
+    .take()
+    .await
+    .unwrap();
+while let Some(entry) = scan_stream.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of UserRef
+    // ......
+}</code></pre>
+<h4 id="insertremove-1"><a class="header" href="#insertremove-1">Insert/Remove</a></h4>
+<p>You can use <code>txn.insert(record)</code> to insert a new record into the database and use <code>txn.remove(key)</code> to remove a record from the database. Tonbo will use a B-Tree to store all data that you modified(insert/remove). All your modifications will be committed to the database when only you call <code>txn.commit()</code> successfully. If conflict happens, Tonbo will return an error and all your modifications will be rollback.</p>
+<p>Here is an example of how to use transaction to update the state of database:</p>
+<pre><code class="language-rust">
+let mut txn = db.transaction().await;
+txn.insert(User {
+    id: 10,
+    name: &quot;John&quot;.to_string(),
+    email: Some(&quot;john@example.com&quot;.to_string()),
+});
+txn.remove(&quot;Alice&quot;.into());
+txn.commit().await.unwrap();</code></pre>
+<p>After create <code>DB</code>, you can execute <code>insert</code>, <code>remove</code>, <code>get</code> and other operations now. But remember that you will get a <strong><code>UserRef</code> instance</strong> rather than the <code>User</code>, if you get record from tonbo. This is a struct that tonbo generates for you in the compile time. It may look like:</p>
+<h2 id="using-s3-backends"><a class="header" href="#using-s3-backends">Using S3 backends</a></h2>
+<p>Tonbo supports various storage backends, such as OPFS, S3, and maybe more in the future. Tonbo wiil use local storage by default. If you want to use S3 storage for specific level, you can use <code>DbOption::level_path(FsOptions::S3)</code> so that all files in that level will be pushed to S3.</p>
+<pre><code class="language-rust">use tonbo::option::{ AwsCredential, FsOptions, Path };
+use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
+
+#[tokio::main]
+async fn main() {
+    let fs_option = FsOptions::S3 {
+        bucket: &quot;wasm-data&quot;.to_string(),
+        credential: Some(AwsCredential {
+            key_id: &quot;key_id&quot;.to_string(),
+            secret_key: &quot;secret_key&quot;.to_string(),
+            token: None,
+        }),
+        endpoint: None,
+        sign_payload: None,
+        checksum: None,
+        region: Some(&quot;region&quot;.to_string()),
+    };
+
+    let options = DbOption::new(Path::from_filesystem_path(&quot;s3_path&quot;).unwrap(), &amp;UserSchema)
+        .level_path(2, &quot;l2&quot;, fs_option);
+
+    let db = DB::&lt;User, TokioExecutor&gt;::new(options, TokioExecutor::default(), UserSchema)
+        .await
+        .unwrap();
+}</code></pre>
+<p>If you want to persist metadata files to S3, you can configure <code>DbOption::base_fs</code> with <code>FsOptions::S3{...}</code>. This will enable Tonbo to upload metadata files and WAL files to the specified S3 bucket.</p>
+<blockquote>
+<p><strong>Note</strong>: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest WAL is uploaded, you can use <code>DB::flush_wal</code>. If you want to ensure the latest metadata is uploaded, you can use <code>DB::flush</code> to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust <code>DbOption::version_log_snapshot_threshold</code> to a smaller value. The default value is 200.</p>
+</blockquote>
+<p>See more details in <a href="usage/./conf.html#manifest-configuration">Configuration</a>.</p>
+<blockquote>
+<p><strong>Note</strong>: If you want to use S3 in WASM, please configure CORS rules for the bucket before using. Here is an example of CORS configuration:</p>
+<pre><code class="language-json">[
+    {
+        &quot;AllowedHeaders&quot;: [
+            &quot;*&quot;
+        ],
+        &quot;AllowedMethods&quot;: [
+            &quot;GET&quot;,
+            &quot;PUT&quot;,
+            &quot;DELETE&quot;,
+            &quot;HEAD&quot;
+        ],
+        &quot;AllowedOrigins&quot;: [
+            &quot;*&quot;
+        ],
+        &quot;ExposeHeaders&quot;: []
+    }
+]
+</code></pre>
+<p>For more details, please refer to <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/ManageCorsUsing.html">AWS documentation</a>.</p>
+</blockquote>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="tonbo-python-binding"><a class="header" href="#tonbo-python-binding">Tonbo Python Binding</a></h1>
+<h2 id="record"><a class="header" href="#record"><code>@Record</code></a></h2>
+<p>Tonbo provides ORM-like macro for ease of use, you can use <code>@Record</code> to define schema of column family.</p>
+<pre><code class="language-py">@Record
+class User:
+   id = Column(DataType.Int64, name=&quot;id&quot;, primary_key=True)
+   age = Column(DataType.Int16, name=&quot;age&quot;, nullable=True)
+   name = Column(DataType.String, name=&quot;name&quot;, nullable=False)
+</code></pre>
+<div class="warning">
+<p>This is a bad thing that you should pay attention to.</p>
+<p>Warning blocks should be used sparingly in documentation, to avoid &quot;warning
+fatigue,&quot; where people are trained to ignore them because they usually don't
+matter for what they're doing.</p>
+</div>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h2 id="example"><a class="header" href="#example">Example</a></h2>
+<pre><code class="language-python">from tonbo import DbOption, Column, DataType, Record, TonboDB, Bound
+from tonbo.fs import from_filesystem_path
+import asyncio
+
+@Record
+class User:
+   id = Column(DataType.Int64, name=&quot;id&quot;, primary_key=True)
+   age = Column(DataType.Int16, name=&quot;age&quot;, nullable=True)
+   name = Column(DataType.String, name=&quot;name&quot;, nullable=False)
+
+async def main():
+    db = TonboDB(DbOption(from_filesystem_path(&quot;db_path/user&quot;)), User())
+    await db.insert(User(id=18, age=175, name=&quot;Alice&quot;))
+    record = await db.get(18)
+    print(record)
+
+    # use transcaction
+    txn = await db.transaction()
+    result = await txn.get(18)
+    scan = await txn.scan(Bound.Included(18), None, limit=10, projection=[&quot;id&quot;, &quot;name&quot;])
+
+    async for record in scan:
+        print(record)
+
+asyncio.run(main())
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="configuration-1"><a class="header" href="#configuration-1">Configuration</a></h1>
+<ul>
+<li><a href="usage/conf.html#path-configuration">Path Configuration</a></li>
+<li><a href="usage/conf.html#manifest-configuration">Manifest Configuration</a></li>
+<li><a href="usage/conf.html#wal-configuration">WAL Configuration</a></li>
+<li><a href="usage/conf.html#compaction-configuration">Compaction Configuration</a></li>
+<li><a href="usage/conf.html#sstable-configuration">SSTable Configuration</a></li>
+</ul>
+<p>Tonbo provides a configuration struct <code>DbOption</code> for setting up the database. This section will introduce the configuration options available in Tonbo.</p>
+<h2 id="path-configuration"><a class="header" href="#path-configuration">Path Configuration</a></h2>
+<p>Tonbo will use local disk as the default storage option(For local is the tokio file, for wasm is the OPFS). If you want to change the default storage backends  <code>DbOption::base_path</code>.</p>
+<pre><code class="language-rust">pub fn base_fs(mut self, base_fs: FsOptions) -&gt; DbOption;</code></pre>
+<p><code>FsOptions</code> is the configuration options for the file system. Tonbo provides two kinds of file system options: <code>FsOptions::Local</code> and <code>FsOptions::S3</code>.</p>
+<ul>
+<li><code>FsOptions::Local</code>: This is required the feature <code>tokio</code>/<code>wasm</code> to be enabled.</li>
+<li><code>FsOptions::S3{...}</code>: This is required the feature <code>aws</code> and <code>tokio-http</code>/<code>wasm-http</code> to be enabled. You can use this <code>FsOptions</code> to configure the S3 storage.</li>
+</ul>
+<pre><code class="language-rust">pub enum FsOptions {
+    #[cfg(any(feature = &quot;tokio&quot;, feature = &quot;wasm&quot;))]
+    Local,
+    #[cfg(feature = &quot;aws&quot;)]
+    S3 {
+        bucket: String,
+        credential: Option&lt;AwsCredential&gt;,
+        endpoint: Option&lt;String&gt;,
+        region: Option&lt;String&gt;,
+        sign_payload: Option&lt;bool&gt;,
+        checksum: Option&lt;bool&gt;,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AwsCredential {
+    /// AWS_ACCESS_KEY_ID
+    pub key_id: String,
+    /// AWS_SECRET_ACCESS_KEY
+    pub secret_key: String,
+    /// AWS_SESSION_TOKEN
+    pub token: Option&lt;String&gt;,
+}</code></pre>
+<ul>
+<li><code>bucket</code>: The S3 bucket</li>
+<li><code>credential</code>: The credential configuration for S3
+<ul>
+<li><code>key_id</code>: The S3 access key</li>
+<li><code>secret_key</code>: The S3 secret access key</li>
+<li><code>token</code>: is the security token for the aws S3</li>
+</ul>
+</li>
+<li><code>endpoint</code>: The S3 endpoint</li>
+<li><code>region</code>: The S3 region</li>
+<li><code>sign_payload</code>: Whether to sign payload for the aws S3</li>
+<li><code>checksum</code>: Whether to enable checksum for the aws S3</li>
+</ul>
+<p>If you want to set specific storage options for SSTables, you can use <code>DbOption::level_path</code>. This method allows you to specify the storage options for each level of SSTables. If you don't specify the storage options for a level, Tonbo will use the default storage options(that is base fs).</p>
+<pre><code class="language-rust">pub fn level_path(
+    mut self,
+    level: usize,
+    path: Path,
+    fs_options: FsOptions,
+) -&gt; Result&lt;DbOption, ExceedsMaxLevel&gt;;</code></pre>
+<h2 id="manifest-configuration"><a class="header" href="#manifest-configuration">Manifest Configuration</a></h2>
+<p>Manifest is used to store the metadata of the database. Whenever the compaction is triggered, the manifest will be updated accordingly. But when time goes by, the manifest file will become large, which will increase the time of recovery. Tonbo will rewrite the manifest file if metadata too much, you can use <code>DbOption::version_log_snapshot_threshold</code> to configure</p>
+<pre><code class="language-rust">pub fn version_log_snapshot_threshold(self, version_log_snapshot_threshold: u32) -&gt; DbOption;</code></pre>
+<p>If you want to persist metadata files to S3, you can configure <code>DbOption::base_fs</code> with <code>FsOptions::S3{...}</code>. This will enable Tonbo to upload metadata files and WAL files to the specified S3 bucket.</p>
+<blockquote>
+<p><strong>Note</strong>: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest metadata is uploaded, you can use <code>DB::flush</code> to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust <code>DbOption::version_log_snapshot_threshold</code> to a smaller value. The default value is 200.</p>
+</blockquote>
+<h2 id="wal-configuration"><a class="header" href="#wal-configuration">WAL Configuration</a></h2>
+<p>Tonbo use WAL(Write-ahead log) to ensure data durability and consistency. It is a mechanism that ensures that data is written to the log before being written to the database. This helps to prevent data loss in case of a system failure.</p>
+<p>Tonbo also provides a buffer to improve performance. If you want to flush wal buffer, you can call <code>DbOption::flush_wal</code>. The default buffer size is 4KB. But If you don't want to use wal buffer, you can set the buffer to 0.</p>
+<pre><code class="language-rust">pub fn wal_buffer_size(self, wal_buffer_size: usize) -&gt; DbOption;</code></pre>
+<p>If you don't want to use WAL, you can disable it by setting the <code>DbOption::disable_wal</code>. But please ensure that losing data is acceptable for you.</p>
+<pre><code class="language-rust">pub fn disable_wal(self) -&gt; DbOption;</code></pre>
+<h2 id="compaction-configuration"><a class="header" href="#compaction-configuration">Compaction Configuration</a></h2>
+<p>When memtable reaches the maximum size, we will turn it into a immutable which is read only memtable. But when the number of immutable table reaches the maximum size, we will compact them to SSTables. You can set the <code>DbOption::immutable_chunk_num</code> to control the number of files for compaction.</p>
+<pre><code class="language-rust">/// len threshold of `immutables` when minor compaction is triggered
+pub fn immutable_chunk_num(self, immutable_chunk_num: usize) -&gt; DbOption;</code></pre>
+<p>When the number of files in level L exceeds its limit, we also compact them in a background thread. Tonbo use the <code>major_threshold_with_sst_size</code> and <code>level_sst_magnification</code> to determine when to trigger major compaction. The calculation is as follows:</p>
+<p>\[ major\_threshold\_with\_sst\_size * level\_sst\_magnification^{level} \]</p>
+<p><code>major_threshold_with_sst_size</code> is default to 4 and <code>level_sst_magnification</code> is default to 10, which means that the default trigger threshold for level1 is 40 files and 400 for level2.</p>
+<p>You can adjust the <code>major_threshold_with_sst_size</code> and <code>level_sst_magnification</code> to control the compaction behavior.</p>
+<pre><code class="language-rust">/// threshold for the number of `parquet` when major compaction is triggered
+pub fn major_threshold_with_sst_size(self, major_threshold_with_sst_size: usize) -&gt; DbOption
+
+/// magnification that triggers major compaction between different levels
+pub fn level_sst_magnification(self, level_sst_magnification: usize) -&gt; DbOption;</code></pre>
+<p>You can also change the default SSTable size by setting the <code>DbOption::max_sst_file_size</code>, but we found that the default size is good enough for most use cases.</p>
+<pre><code class="language-rust">/// Maximum size of each parquet
+pub fn max_sst_file_size(self, max_sst_file_size: usize) -&gt; DbOption</code></pre>
+<h2 id="sstable-configuration"><a class="header" href="#sstable-configuration">SSTable Configuration</a></h2>
+<p>Tonbo use <a href="https://github.com/apache/parquet-rs">parquet</a> to store data which means you can set <code>WriterProperties</code> for parquet file. You can use <code>DbOption::write_parquet_option</code> to set specific settings for Parquet.</p>
+<pre><code class="language-rust">/// specific settings for Parquet
+pub fn write_parquet_option(self, write_parquet_properties: WriterProperties) -&gt; DbOption</code></pre>
+<p>Here is an example of how to use <code>DbOption::write_parquet_option</code>:</p>
+<pre><code class="language-rust">let db_option = DbOption::default().write_parquet_option(
+    WriterProperties::builder()
+        .set_compression(Compression::LZ4)
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .set_bloom_filter_enabled(true)
+        .build(),
+);</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="explore-tonbo"><a class="header" href="#explore-tonbo">Explore Tonbo</a></h1>
+<ul>
+<li><a href="usage/advance.html#dynrecord">DynRecord</a></li>
+<li><a href="usage/advance.html#operations">Operations</a>
+<ul>
+<li><a href="usage/advance.html#create-database">Create Database</a></li>
+<li><a href="usage/advance.html#insert">Insert</a></li>
+<li><a href="usage/advance.html#remove">Remove</a></li>
+<li><a href="usage/advance.html#query">Query</a></li>
+<li><a href="usage/advance.html#transaction">Transaction</a></li>
+</ul>
+</li>
+<li><a href="usage/advance.html#using-s3-backends">Using S3 backends</a></li>
+</ul>
+<p>Tonbo provide <code>DynRecord</code> to support dynamic schema. We have been using it to build Python and WASM bindings for Tonbo. You can find the source code <a href="https://github.com/tonbo-io/tonbo/tree/main/bindings">here</a>.</p>
+<p>Except using it in Python and WASM bindings for Tonbo, we have also used it to build a SQLite extension, <a href="https://github.com/tonbo-io/tonbolite">TonboLite</a>. This means that you can do more interesting things with tonbo such as building a PostgreSQL extension and integrating with datafusio.</p>
+<h2 id="dynrecord"><a class="header" href="#dynrecord">DynRecord</a></h2>
+<p><code>DynRecord</code> is just like the schema you defined by <code>#[derive(Record)]</code>, but the fields are not known at compile time. Therefore, before using it, you need to pass the schema and value by yourself. Here is the constructor of the <code>DynSchema</code>, the schema of <code>DynRecord</code>:</p>
+<pre><code class="language-rust">// constructor of DynSchema
+pub fn new(schema: Vec&lt;ValueDesc&gt;, primary_index: usize) -&gt; DynSchema;
+
+// constructor of ValueDesc
+pub fn new(name: String, datatype: DataType, is_nullable: bool) -&gt; ValueDesc;</code></pre>
+<ul>
+<li><code>ValueDesc</code>: represents a field of schema, which contains field name, field type.
+<ul>
+<li><code>name</code>: represents the name of the field.</li>
+<li><code>datatype</code>: represents the data type of the field.</li>
+<li><code>is_nullable</code>: represents whether the field can be nullable.</li>
+</ul>
+</li>
+<li><code>primary_index</code>: represents the index of the primary key field in the schema.</li>
+</ul>
+<pre><code class="language-rust">pub fn new(values: Vec&lt;Value&gt;, primary_index: usize) -&gt; DynRecord;
+
+pub fn new(
+    datatype: DataType,
+    name: String,
+    value: Arc&lt;dyn Any + Send + Sync&gt;,
+    is_nullable: bool,
+) -&gt; Value;
+</code></pre>
+<ul>
+<li><code>Value</code>: represents a field of schema and its value, which contains a field description and the value.
+<ul>
+<li><code>datatype</code>: represents the data type of the field.</li>
+<li><code>name</code>: represents the name of the field.</li>
+<li><code>is_nullable</code>: represents whether the field is nullable.</li>
+<li><code>value</code>: represents the value of the field.</li>
+</ul>
+</li>
+<li><code>primary_index</code>: represents the index of the primary key field in the schema.</li>
+</ul>
+<p>Now, tonbo support these types for dynamic schema:</p>
+<div class="table-wrapper"><table><thead><tr><th>Tonbo type</th><th>Rust type</th></tr></thead><tbody>
+<tr><td><code>UInt8</code>/<code>UInt16</code>/<code>UInt32</code>/<code>UInt64</code></td><td><code>u8</code>/<code>u16</code>/<code>u32</code>/<code>u64</code></td></tr>
+<tr><td><code>Int8</code>/<code>Int16</code>/<code>Int32</code>/<code>Int64</code></td><td><code>i8</code>/<code>i16</code>/<code>i32</code>/<code>i64</code></td></tr>
+<tr><td><code>Boolean</code></td><td><code>bool</code></td></tr>
+<tr><td><code>String</code></td><td><code>String</code></td></tr>
+<tr><td><code>Bytes</code></td><td><code>Vec&lt;u8&gt;</code></td></tr>
+</tbody></table>
+</div>
+<p>It allows you to define a schema at runtime and use it to create records. This is useful when you need to define a schema dynamically or when you need to define a schema that is not known at compile time.</p>
+<h2 id="operations"><a class="header" href="#operations">Operations</a></h2>
+<p>After creating <code>DynSchema</code>, you can use tonbo just like before. The only difference is that what you insert and get is the type of <code>DynRecord</code> and <code>DynRecordRef</code>.</p>
+<p>If you compare the usage with compile-time schema version, you will find that the usage is almost the same. The difference can be summarized into the following 5 points.</p>
+<ul>
+<li>Use <code>DynSchema</code> to replace <code>xxxSchema</code>(e.g. <code>UserSchema</code>)</li>
+<li>Use <code>DynRecord</code> instance to replace the instance you defined with <code>#[derive(Record)]</code></li>
+<li>All you get from database is <code>DynRecordRef</code> rather than <code>xxxRef</code>(e.g. <code>UserRef</code>)</li>
+<li>Use <code>Value</code> as the <code>Key</code> of <code>DynRecord</code>. For example, you should pass a <code>Value</code> instance the <code>DB::get</code> method.</li>
+<li>The value of <code>Value</code> should be the type of <code>Arc&lt;Option&lt;T&gt;&gt;</code> if the column can be nullable.</li>
+</ul>
+<p>But if you look at the code, you will find that both <code>DynSchema</code> and <code>xxxSchema</code> implement the <code>Schema</code> trait , both <code>DynRecord</code> and <code>xxxRecord</code> implement the <code>Record</code> trait and both <code>DynRecordRef</code> and <code>xxxRecordRef</code> implement the <code>RecordRef</code> trait. So there is only two difference between them</p>
+<h3 id="create-database"><a class="header" href="#create-database">Create Database</a></h3>
+<pre><code class="language-rust">#[tokio::main]
+async fn main() {
+    // make sure the path exists
+    fs::create_dir_all(&quot;./db_path/users&quot;).unwrap();
+
+    // build DynSchema
+    let descs = vec![
+        ValueDesc::new(&quot;name&quot;.to_string(), DataType::String, false),
+        ValueDesc::new(&quot;email&quot;.to_string(), DataType::String, false),
+        ValueDesc::new(&quot;age&quot;.to_string(), DataType::Int8, true),
+    ];
+    let schema = DynSchema::new(descs, 0);
+
+    let options = DbOption::new(
+        Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
+        &amp;schema,
+    );
+
+    let db = DB::&lt;DynRecord, TokioExecutor&gt;::new(options, TokioExecutor::default(), DynSchema)
+        .await
+        .unwrap();
+}</code></pre>
+<p>If you want to learn more about <code>DbOption</code>, you can refer to the <a href="usage/conf.html">Configuration section</a>.</p>
+<blockquote>
+<p><strong>Note:</strong> You should make sure the path exists before creating <code>DBOption</code>.</p>
+</blockquote>
+<h3 id="insert-1"><a class="header" href="#insert-1">Insert</a></h3>
+<p>You can use <code>db.insert(record)</code> or <code>db.insert_batch(records)</code> to insert new records into the database just like before. The difference is that you should build insert a <code>DynRecord</code> instance.</p>
+<p>Here is an example of how to build a <code>DynRecord</code> instance:</p>
+<pre><code class="language-rust">let mut columns = vec![
+    Value::new(
+        DataType::String,
+        &quot;name&quot;.to_string(),
+        Arc::new(&quot;Alice&quot;.to_string()),
+        false,
+    ),
+    Value::new(
+        DataType::String,
+        &quot;email&quot;.to_string(),
+        Arc::new(&quot;abc@tonbo.io&quot;.to_string()),
+        false,
+    ),
+    Value::new(
+        DataType::Int8,
+        &quot;age&quot;.to_string(),
+        Arc::new(Some(i as i8)),
+        true,
+    ),
+];
+let record = DynRecord::new(columns, 0);</code></pre>
+<ul>
+<li><code>Value::new</code> will create a new <code>Value</code> instance, which represents the value of the column in the schema. This method receives three parameters:
+<ul>
+<li>datatype: the data type of the field in the schema</li>
+<li>name: the name of the field in the schema</li>
+<li>value: the value of the column. This is the type of <code>Arc&lt;dyn Any&gt;</code>. But please be careful that <strong>the value should be the type of <code>Arc&lt;Option&lt;T&gt;&gt;</code> if the column can be nullable</strong>.</li>
+<li>nullable: whether the value is nullable</li>
+</ul>
+</li>
+</ul>
+<pre><code class="language-rust">/// insert a single tonbo record
+db.insert(record).await.unwrap();</code></pre>
+<h3 id="remove-1"><a class="header" href="#remove-1">Remove</a></h3>
+<p>You and use <code>db.remove(key)</code> to remove a record from the database. This method receives a <code>Key</code>, which is the primary key of the record. But all columns in the record is a <code>Value</code>, so you can not use it like <code>db.remove(&quot;Alice&quot;.into()).await.unwrap();</code>. Instead, you should pass a <code>Value</code> to <code>db.remove</code>.</p>
+<pre><code class="language-rust">let key = Value::new(
+    DataType::String,
+    &quot;name&quot;.to_string(),
+    Arc::new(&quot;Alice&quot;.to_string()),
+    false,
+);
+
+db.remove(key).await.unwrap();</code></pre>
+<h3 id="query-2"><a class="header" href="#query-2">Query</a></h3>
+<p>You can use <code>get</code> method to get a record by key and you should pass a closure that takes a <code>TransactionEntry</code> instance and returns a <code>Option</code> type. You can use <code>TransactionEntry::get</code> to get a <code>DynRecordRef</code> instance.</p>
+<p>You can use <code>scan</code> method to scan all records that in the specified range. <code>scan</code> method will return a <code>Stream</code> instance and you can iterate all records by using this stream.</p>
+<pre><code class="language-rust">/// get the record with `key` as the primary key and process it using closure `f`
+let age = db.get(key,
+    |entry| {
+        // entry.get() will get a `DynRecordRef`
+        let record_ref = entry.get();
+        println!(&quot;{:#?}&quot;, record_ref);
+        record_ref.age
+    })
+    .await
+    .unwrap();
+
+let mut scan = db
+    .scan((Bound::Included(&amp;lower_key), Bound::Excluded(&amp;upper_key)))
+    .await
+    .unwrap();
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of DynRecordRef
+    // ......
+}</code></pre>
+<h3 id="transaction-1"><a class="header" href="#transaction-1">Transaction</a></h3>
+<p>Tonbo supports transactions when using a <code>Transaction</code>. You can use <code>db.transaction()</code> to create a transaction, and use <code>txn.commit()</code> to commit the transaction.</p>
+<p>Note that Tonbo provides optimistic concurrency control to ensure data consistency which means that if a transaction conflicts with another transaction when committing, Tonbo will fail with a <code>CommitError</code>.</p>
+<p>Here is an example of how to use transactions:</p>
+<pre><code class="language-rust">// create transaction
+let txn = db.transaction().await;
+
+let name = Value::new(
+    DataType::String,
+    &quot;name&quot;.to_string(),
+    Arc::new(&quot;Alice&quot;.to_string()),
+    false,
+);
+let upper = Value::new(
+    DataType::String,
+    &quot;name&quot;.to_string(),
+    Arc::new(&quot;Bob&quot;.to_string()),
+    false,
+);
+
+txn.insert(DynRecord::new(/* */));
+let _record_ref = txn.get(&amp;name, Projection::Parts(vec![&quot;email&quot;, &quot;bytes&quot;])).await.unwrap();
+
+// range scan of user
+let mut scan = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    // tonbo supports pushing down projection
+    .projection(&amp;[&quot;email&quot;, &quot;bytes&quot;])
+    // push down limitation
+    .limit(1)
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    let data = entry.value(); // type of DynRecordRef
+    // ......
+}</code></pre>
+<p>For more detail about transactions, please refer to the <a href="usage/../transactions.html">Transactions</a> section.</p>
+<h2 id="using-s3-backends-1"><a class="header" href="#using-s3-backends-1">Using S3 backends</a></h2>
+<p>Using S3 as the backend storage is also similar to the usage of <a href="usage/./tonbo.html#using-s3-backends">compile-time version</a>.</p>
+<pre><code class="language-rust">use tonbo::option::{ AwsCredential, FsOptions, Path };
+use tonbo::{executor::tokio::TokioExecutor, DbOption, DB};
+
+#[tokio::main]
+async fn main() {
+    let fs_option = FsOptions::S3 {
+        bucket: &quot;wasm-data&quot;.to_string(),
+        credential: Some(AwsCredential {
+            key_id: &quot;key_id&quot;.to_string(),
+            secret_key: &quot;secret_key&quot;.to_string(),
+            token: None,
+        }),
+        endpoint: None,
+        sign_payload: None,
+        checksum: None,
+        region: Some(&quot;region&quot;.to_string()),
+    };
+
+    let descs = vec![
+        ValueDesc::new(&quot;name&quot;.to_string(), DataType::String, false),
+        ValueDesc::new(&quot;email&quot;.to_string(), DataType::String, false),
+        ValueDesc::new(&quot;age&quot;.to_string(), DataType::Int8, true),
+    ];
+    let schema = DynSchema::new(descs, 0);
+    let options = DbOption::new(Path::from_filesystem_path(&quot;s3_path&quot;).unwrap(), &amp;schema)
+        .level_path(2, &quot;l2&quot;, fs_option);
+
+
+    let db = DB::&lt;DynRecord, TokioExecutor&gt;::new(options, TokioExecutor::default(), schema)
+        .await
+        .unwrap();
+}</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="faq"><a class="header" href="#faq">FAQ</a></h1>
+<h2 id="failed-to-run-custom-build-command-for-ring-in-macos"><a class="header" href="#failed-to-run-custom-build-command-for-ring-in-macos">Failed to run custom build command for <code>ring</code> in macOS</a></h2>
+<p>Apple Clang is a fork of Clang that is specialized to Apple's wishes. It doesn't support wasm32-unknown-unknown. You need to download and use llvm.org Clang instead. You can refer to this <a href="https://github.com/briansmith/ring/issues/1824">issue</a> for more information.</p>
+<pre><code class="language-bash">brew install llvm
+echo 'export PATH=&quot;/opt/homebrew/opt/llvm/bin:$PATH&quot;' &gt;&gt; ~/.zshrc
+</code></pre>
+<h2 id="why-my-data-is-not-recovered-and-the-size-of-log-file-and-wal-file-is-0"><a class="header" href="#why-my-data-is-not-recovered-and-the-size-of-log-file-and-wal-file-is-0">Why my data is not recovered and the size of log file and WAL file is 0?</a></h2>
+<p>As Tonbo uses buffer for WAL, so it may not be persisted before exiting. You can use <code>DB::flush_wal</code> to ensure WAL is persisted or use <code>DB::flush</code> to trigger compaction manually.</p>
+<p>If you don't want to use WAL buffer, you can set <code>DbOption::wal_buffer_size</code> to 0. See more details in <a href="usage/./conf.html#wal-configuration">Configuration</a>.</p>
+<h2 id="how-to-persist-metadata-files-to-s3--why-metadata-files-are-not-persisted-in-serverless-environment-like-aws-lambda"><a class="header" href="#how-to-persist-metadata-files-to-s3--why-metadata-files-are-not-persisted-in-serverless-environment-like-aws-lambda">How to persist metadata files to S3? / Why metadata files are not persisted in serverless environment like AWS Lambda</a></h2>
+<p>If you want to persist metadata files to S3, you can configure <code>DbOption::base_fs</code> with <code>FsOptions::S3{...}</code>. This will enable Tonbo to upload metadata files and WAL files to the specified S3 bucket.</p>
+<blockquote>
+<p><strong>Note</strong>: This will not guarantee the latest metadata will be uploaded to S3. If you want to ensure the latest WAL is uploaded, you can use <code>DB::flush_wal</code>. If you want to ensure the latest metadata is uploaded, you can use <code>DB::flush</code> to trigger upload manually. If you want tonbo to trigger upload more frequently, you can adjust <code>DbOption::version_log_snapshot_threshold</code> to a smaller value. The default value is 200.</p>
+</blockquote>
+<p>See more details in <a href="usage/./conf.html#manifest-configuration">Configuration</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><div style="break-before: page; page-break-before: always;"></div><h1 id="using-tonbo-1"><a class="header" href="#using-tonbo-1">Using Tonbo</a></h1>
+<p>define your schema</p>
+<pre><code class="language-rust">use tonbo::Record;
+
+/// Use macro to define schema of column family just like ORM
+/// It provides type-safe read &amp; write API
+#[derive(Record, Debug)]
+pub struct User {
+    #[record(primary_key)]
+    name: String,
+    email: Option&lt;String&gt;,
+    age: u8,
+    bytes: Bytes,
+}</code></pre>
+<pre><code class="language-rust">use std::ops::Bound;
+
+use bytes::Bytes;
+use fusio::path::Path;
+use futures_util::stream::StreamExt;
+use tokio::fs;
+use tonbo::{executor::tokio::TokioExecutor, DbOption, Projection, Record, DB};
+
+
+#[tokio::main]
+async fn main() {
+    // make sure the path exists
+    let _ = fs::create_dir_all(&quot;./db_path/users&quot;).await;
+
+    let options = DbOption::new(
+        Path::from_filesystem_path(&quot;./db_path/users&quot;).unwrap(),
+        &amp;UserSchema,
+    );
+    // pluggable async runtime and I/O
+    let db = DB::new(options, TokioExecutor::default(), UserSchema)
+        .await
+        .unwrap();
+
+    // insert with owned value
+    db.insert(User {
+        name: &quot;Alice&quot;.into(),
+        email: Some(&quot;alice@gmail.com&quot;.into()),
+        age: 22,
+        bytes: Bytes::from(vec![0, 1, 2]),
+    })
+    .await
+    .unwrap();
+
+    {
+        // tonbo supports transaction
+        let txn = db.transaction().await;
+
+        // get from primary key
+        let name = &quot;Alice&quot;.into();
+
+        // get the zero-copy reference of record without any allocations.
+        let user = txn
+            .get(
+                &amp;name,
+                // tonbo supports pushing down projection
+                Projection::All,
+            )
+            .await
+            .unwrap();
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().get().age, Some(22));
+
+        {
+            let upper = &quot;Blob&quot;.into();
+            // range scan of user
+            let mut scan = txn
+                .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+                // tonbo supports pushing down projection
+                .projection(vec![1, 3])
+                // push down limitation
+                .limit(1)
+                .take()
+                .await
+                .unwrap();
+            while let Some(entry) = scan.next().await.transpose().unwrap() {
+                assert_eq!(
+                    entry.value(),
+                    Some(UserRef {
+                        name: &quot;Alice&quot;,
+                        email: Some(&quot;alice@gmail.com&quot;),
+                        age: None,
+                        bytes: Some(&amp;[0, 1, 2]),
+                    })
+                );
+            }
+        }
+
+        // commit transaction
+        txn.commit().await.unwrap();
+    }
+}</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="using-under-wasm"><a class="header" href="#using-under-wasm">Using under Wasm</a></h1>
+<p>This is the Wasm example of tonbo showing how to use tonbo under Wasm.</p>
+<h2 id="cargotoml"><a class="header" href="#cargotoml"><code>Cargo.toml</code></a></h2>
+<p>Since only limited features of tokio can be used in wasm, we need to disable tokio and use <code>wasm</code> feature in tonbo.</p>
+<pre><code class="language-toml">fusio = { git = &quot;https://github.com/tonbo-io/fusio.git&quot;, rev = &quot;216eb446fb0a0c6e5e85bfac51a6f6ed8e5ed606&quot;, package = &quot;fusio&quot;, version = &quot;0.3.3&quot;, features = [
+  &quot;dyn&quot;,
+  &quot;fs&quot;,
+] }
+tonbo = { git = &quot;https://github.com/tonbo-io/tonbo&quot;, default-features = false, features = [&quot;wasm&quot;] }
+</code></pre>
+<h2 id="create-db"><a class="header" href="#create-db">Create DB</a></h2>
+<p>Tonbo provide <a href="https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system">OPFS(origin private file system)</a> as storage backend, but the path is a little different. You should use <code>Path::from_opfs_path</code> or <code>Path::parse</code> rather than <code>Path::from_filesystem_path</code> and it is not permitted to use paths that temporarily step outside the sandbox with something like <code>../foo</code> or <code>./bar</code>.</p>
+<pre><code class="language-rust">use fusio::path::Path;
+use tonbo::{executor::opfs::OpfsExecutor, DbOption, DB};
+
+async fn main() {
+
+    let options = DbOption::new(
+        Path::from_opfs_path(&quot;db_path/users&quot;).unwrap(),
+        &amp;UserSchema,
+    );
+    let db = DB::&lt;User, OpfsExecutor&gt;::new(options, OpfsExecutor::new(), UserSchema)
+        .await
+        .unwrap();
+}</code></pre>
+<h2 id="operations-on-db"><a class="header" href="#operations-on-db">Operations on DB</a></h2>
+<p>After create <code>DB</code> instance, you can operate it as usual</p>
+<pre><code class="language-rust">let txn = db.transaction().await;
+
+// get from primary key
+let name = &quot;Alice&quot;.into();
+
+let user = txn.get(&amp;name, Projection::All).await.unwrap();
+
+let upper = &quot;Blob&quot;.into();
+// range scan of user
+let mut scan = txn
+    .scan((Bound::Included(&amp;name), Bound::Excluded(&amp;upper)))
+    // tonbo supports pushing down projection
+    .projection(vec![1])
+    // push down limitation
+    .limit(1)
+    .take()
+    .await
+    .unwrap();
+
+while let Some(entry) = scan.next().await.transpose().unwrap() {
+    assert_eq!(
+        entry.value(),
+        Some(UserRef {
+            name: &quot;Alice&quot;,
+            email: Some(&quot;alice@gmail.com&quot;),
+            age: None,
+        })
+    );
+}</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="building-and-testing"><a class="header" href="#building-and-testing">Building and Testing</a></h1>
+<ul>
+<li><a href="contribution/build.html#building-and-testing-for-rust">Building and Testing for Rust</a>
+<ul>
+<li><a href="contribution/build.html#building-and-testing-with-non-wasm">Building and Testing with Non-WASM</a></li>
+<li><a href="contribution/build.html#building-and-testing-with-wasm">Building and Testing with WASM</a></li>
+</ul>
+</li>
+<li><a href="contribution/build.html#building-and-testing-for-python">Building and Testing for Python</a>
+<ul>
+<li><a href="contribution/build.html#building">Building</a></li>
+<li><a href="contribution/build.html#testing">Testing</a></li>
+</ul>
+</li>
+<li><a href="contribution/build.html#building-and-testing-for-javascript">Building and Testing for JavaScript</a></li>
+</ul>
+<p>To get started using tonbo you should make sure you have <a href="https://www.rust-lang.org/tools/install">Rust</a> installed on your system. If you haven't alreadly done yet, try following the instructions <a href="https://www.rust-lang.org/tools/install">here</a>.</p>
+<h2 id="building-and-testing-for-rust"><a class="header" href="#building-and-testing-for-rust">Building and Testing for Rust</a></h2>
+<h3 id="building-and-testing-with-non-wasm"><a class="header" href="#building-and-testing-with-non-wasm">Building and Testing with Non-WASM</a></h3>
+<p>To use local disk as storage backend, you should import <a href="https://github.com/tokio-rs/tokio">tokio</a> crate and enable &quot;tokio&quot; feature (enabled by default)</p>
+<pre><code class="language-bash">cargo build
+</code></pre>
+<p>If you build Tonbo successfully, you can run the tests with:</p>
+<pre><code class="language-bash">cargo test
+</code></pre>
+<h3 id="building-and-testing-with-wasm"><a class="header" href="#building-and-testing-with-wasm">Building and Testing with WASM</a></h3>
+<p>If you want to build tonbo under wasm, you should add wasm32-unknown-unknown target first.</p>
+<pre><code class="language-bash"># add wasm32-unknown-unknown target
+rustup target add wasm32-unknown-unknown
+# build under wasm
+cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
+</code></pre>
+<p>Before running the tests, make sure you have installed <a href="https://github.com/rustwasm/wasm-pack">wasm-pack</a> and run <code>wasm-pack build</code> to build the wasm module. If you build successfully, you can run the tests with:</p>
+<pre><code class="language-bash">wasm-pack test --chrome --headless --test wasm --no-default-features --features aws,bytes,opfs
+</code></pre>
+<h2 id="building-and-testing-for-python"><a class="header" href="#building-and-testing-for-python">Building and Testing for Python</a></h2>
+<h3 id="building"><a class="header" href="#building">Building</a></h3>
+<p>We use the <a href="https://github.com/PyO3/pyo3">pyo3</a> to generate a native Python module and use <a href="https://github.com/PyO3/maturin">maturin</a> to build Rust-based Python packages.</p>
+<p>First, follow the commands below to build a new Python virtualenv, and install maturin into the virtualenv using Python's package manager, pip:</p>
+<pre><code class="language-bash"># setup virtualenv
+python -m venv .env
+# activate venv
+source .env/bin/activate
+
+# install maturin
+pip install maturin
+# build bindings
+maturin develop
+
+</code></pre>
+<p>Whenever Rust code changes run:</p>
+<pre><code class="language-bash">maturin develop
+</code></pre>
+<h3 id="testing"><a class="header" href="#testing">Testing</a></h3>
+<p>If you want to run tests, you need to build with &quot;test&quot; options:</p>
+<pre><code class="language-base">maturin develop -E test
+</code></pre>
+<p>After building successfully, you can run the tests with:</p>
+<pre><code class="language-bash"># run tests except benchmarks(This need duckdb to be installed)
+pytest --ignore=tests/bench -v .
+
+# run all tests
+pip install duckdb
+python -m pytest
+</code></pre>
+<h2 id="building-and-testing-for-javascript"><a class="header" href="#building-and-testing-for-javascript">Building and Testing for JavaScript</a></h2>
+<p>To build tonbo for JavaScript, you should install <a href="https://github.com/rustwasm/wasm-pack">wasm-pack</a>. If you haven't already done so, try following the instructions <a href="https://rustwasm.github.io/wasm-pack/installer/">here</a>.</p>
+<pre><code class="language-bash"># add wasm32-unknown-unknown target
+rustup target add wasm32-unknown-unknown
+# build under wasm
+wasm-pack build --target web
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="submitting-a-pull-request"><a class="header" href="#submitting-a-pull-request">Submitting a Pull Request</a></h1>
+<p>Thanks for your contribution! The Tonbo project welcomes contribution of various types -- new features, bug fixes and reports, typo fixes, etc. If you want to contribute to the Tonbo project, you will need to pass necessary checks. If you have any question, feel free to start a new discussion or issue, or ask in the Tonbo <a href="https://discord.gg/j27XVFVmJM">Discord</a>.</p>
+<h2 id="running-tests-and-checks"><a class="header" href="#running-tests-and-checks">Running Tests and Checks</a></h2>
+<p>This is a Rust project, so <a href="https://rustup.rs/">rustup</a> and <a href="https://doc.rust-lang.org/cargo/">cargo</a> are the best place to start.</p>
+<ul>
+<li><code>cargo check</code> to analyze the current package and report errors.</li>
+<li><code>cargo +nightly fmt</code> to format the current code.</li>
+<li><code>cargo build</code> to compile the current package.</li>
+<li><code>cargo clippy</code> to catch common mistakes and improve code.</li>
+<li><code>cargo test</code> to run unit tests.</li>
+<li><code>cargo bench</code> to run benchmark tests.</li>
+</ul>
+<blockquote>
+<p><strong>Note</strong>: If you have any changes to <em>bindings/python</em>, please make sure to run checks and tests before submitting your PR. If you don not know how to build and  run tests, please refer to the <a href="contribution/./build.html#building-tonbo-for-python">Building Tonbo for Python</a> section.</p>
+</blockquote>
+<h2 id="pull-request-title"><a class="header" href="#pull-request-title">Pull Request title</a></h2>
+<p>As described in <a href="https://gist.github.com/joshbuchea/6f47e86d2510bce28f8e7f42ae84c716">here</a>, a valid PR title should begin with one of the following prefixes:</p>
+<ul>
+<li>feat: new feature for the user, not a new feature for build script</li>
+<li>fix: bug fix for the user, not a fix to a build script</li>
+<li>doc: changes to the documentation</li>
+<li>style: formatting, missing semi colons, etc; no production code change</li>
+<li>refactor: refactoring production code, eg. renaming a variable</li>
+<li>test: adding missing tests, refactoring tests; no production code change</li>
+<li>chore: updating grunt tasks etc; no production code change</li>
+</ul>
+<p>Here is an example of a valid PR title:</p>
+<pre><code>feat: add float type
+^--^  ^------------^
+|     |
+|     +-&gt; Summary in present tense.
+|
++-------&gt; Type: chore, docs, feat, fix, refactor, style, or test.
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="rfc-composite-primary-keys"><a class="header" href="#rfc-composite-primary-keys">RFC: Composite Primary Keys</a></h1>
+<p>This document outlines a practical, incremental plan to add composite (multi-column) primary key support to Tonbo while maintaining backward compatibility. It explains design goals, changes required across the codebase, and a step-by-step implementation and validation plan.</p>
+<h2 id="current-status-2025-08-11"><a class="header" href="#current-status-2025-08-11">Current Status (2025-08-11)</a></h2>
+<ul>
+<li>Phase 1: Completed. Plural <code>Schema</code> APIs, fixed projections, and Parquet writer configuration are implemented for single-PK schemas.
+<ul>
+<li><code>Schema</code> now exposes <code>primary_key_indices()</code> and <code>primary_key_paths_and_sorting()</code> (src/record/mod.rs). Macro-generated single-PK schemas return one-element slices.</li>
+<li>Read paths build fixed projections as <code>[0, 1] ∪ PKs</code> using <code>primary_key_indices()</code> (src/lib.rs, src/transaction.rs).</li>
+<li><code>DbOption::new</code> configures sorting columns (<code>_ts</code> then PKs) and enables stats + bloom filters for each PK column path (src/option.rs).</li>
+</ul>
+</li>
+<li>Phase 2: Not implemented. Composite key types under <code>src/record/key/composite/</code> are placeholders; derive macro still accepts only a single <code>#[record(primary_key)]</code> and generates a single-field key. No multi-PK trybuild/integration tests.</li>
+<li>Phase 3: Not implemented. <code>DynSchema</code> remains single-PK (stores one <code>primary_index_arrow</code>, one <code>pk_path</code>, and sorting with a single PK column).</li>
+</ul>
+<h2 id="goals"><a class="header" href="#goals">Goals</a></h2>
+<ul>
+<li>Support multi-column primary keys with lexicographic ordering of PK components.</li>
+<li>Preserve existing single-column PK behavior and public APIs (backward compatible).</li>
+<li>Keep zero-copy reads and projection pushdown guarantees for PK columns.</li>
+<li>Ensure on-disk layout (Parquet) remains sorted by <code>_ts</code> then PK(s), with statistics/bloom filters enabled for PK columns.</li>
+<li>Make it easy to use via the <code>#[derive(Record)]</code> macro by allowing multiple <code>#[record(primary_key)]</code> fields.</li>
+</ul>
+<h2 id="non-goals-for-this-rfc"><a class="header" href="#non-goals-for-this-rfc">Non-Goals (for this RFC)</a></h2>
+<ul>
+<li>Foreign keys, cascades, or relational constraints.</li>
+<li>Secondary indexes.</li>
+<li>Schema migrations for existing data files.</li>
+<li>Composite keys in dynamic records in the first phase (can be added subsequently).</li>
+</ul>
+<h2 id="high-level-design"><a class="header" href="#high-level-design">High-Level Design</a></h2>
+<ol>
+<li>Schema trait changes (completed)</li>
+</ol>
+<ul>
+<li>Now: <code>Schema</code> exposes <code>primary_key_indices()</code> and <code>primary_key_path()</code>.</li>
+<li><code>primary_key_index()</code> was removed in favor of the slice-based <code>primary_key_indices()</code>.</li>
+<li>Additive helper: <code>primary_key_paths_and_sorting()</code> returns all PK column paths plus sorting columns.</li>
+<li>For single-column PKs, implementations return a one-element slice from <code>primary_key_indices()</code>.</li>
+</ul>
+<ol start="2">
+<li>Composite key type(s)</li>
+</ol>
+<ul>
+<li>Introduce a composite key in <code>src/record/key/composite/</code> with lexicographic <code>Ord</code>:
+<ul>
+<li>Option A (preferred): The macro generates a record-specific key struct, e.g., <code>UserKey { k1: u64, k2: String }</code> and <code>UserKeyRef&lt;'r&gt; { ... }</code>.</li>
+<li>Option B (interim): Provide generic tuple implementations for <code>(K1, K2)</code>, <code>(K1, K2, K3)</code>, … up to a small N. Each implements <code>Key</code> and <code>KeyRef</code> with lexicographic <code>Ord</code>, plus <code>Encode</code>/<code>Decode</code>, <code>Hash</code>, <code>Clone</code>.</li>
+</ul>
+</li>
+<li>For string/bytes components, <code>KeyRef</code> holds borrowed forms, mirroring current single-PK behavior.</li>
+</ul>
+<ol start="3">
+<li>Macro updates (tonbo_macros)</li>
+</ol>
+<ul>
+<li>Allow multiple <code>#[record(primary_key)]</code> fields. Order of appearance in struct determines comparison order (later we can add <code>order = i</code> if needed).</li>
+<li>Generate:
+<ul>
+<li>Record-specific key struct and ref struct (Option A), or map to tuple (Option B).</li>
+<li><code>type Key = &lt;GeneratedKey&gt;</code> in <code>Schema</code> impl.</li>
+<li><code>fn key(&amp;self) -&gt; &lt;GeneratedKeyRef&gt;</code> in <code>Record</code> impl.</li>
+<li><code>fn primary_key_indices(&amp;self) -&gt; Vec&lt;usize&gt;</code> in <code>Schema</code> impl (indices are offset by 2 for <code>_null</code>, <code>_ts</code>).</li>
+</ul>
+</li>
+<li>Ensure <code>RecordRef::from_record_batch</code> and projection logic always keep all PK columns, even if they are not listed in the projection.</li>
+<li>Keep encoding/arrays builders unchanged in signature; they already append values per-field.</li>
+</ul>
+<ol start="4">
+<li>Projections and read paths</li>
+</ol>
+<ul>
+<li>Replace single-index assumptions with multi-index collections:
+<ul>
+<li>Use <code>[0, 1] ∪ primary_key_indices()</code> to build fixed projections in <code>src/lib.rs</code> and <code>src/transaction.rs</code>.</li>
+<li>In all <code>RecordRef::projection</code> usages, ensure all PK columns are always retained (already implied by fixed mask).</li>
+</ul>
+</li>
+</ul>
+<ol start="5">
+<li>Parquet writer configuration</li>
+</ol>
+<ul>
+<li>In <code>DbOption::new</code>, use <code>primary_key_paths_and_sorting()</code> to:
+<ul>
+<li>Enable stats and bloom filters for each PK column path via <code>.set_column_statistics_enabled()</code> and <code>.set_column_bloom_filter_enabled()</code> (invoke once per path).</li>
+<li>Set sorting columns as <code>[ SortingColumn(_ts, …), SortingColumn(pk1, …), SortingColumn(pk2, …), … ]</code>.</li>
+</ul>
+</li>
+</ul>
+<ol start="6">
+<li>Dynamic records (phase 2)</li>
+</ol>
+<ul>
+<li>Extend <code>DynSchema</code> to track <code>primary_indices: Vec&lt;usize&gt;</code> in metadata (replacing the single <code>primary_key_index</code>).</li>
+<li>Update <code>DynRecordRef::new</code> and readers to honor multiple PK indices.</li>
+<li>Ensure tombstone writes (row == None) still populate all PK columns from <code>Ts.key</code> so ordering/lookups remain correct.</li>
+<li>Define a composite key wrapper for <code>Value</code>/<code>ValueRef</code> (or generate a per-dyn-schema composite type if feasible). Initially out-of-scope for phase 1.</li>
+</ul>
+<h2 id="step-by-step-plan"><a class="header" href="#step-by-step-plan">Step-by-Step Plan</a></h2>
+<p>Phase 1: Core plumbing (single-PK stays working)</p>
+<ol>
+<li>
+<p>Extend <code>Schema</code> trait</p>
+<ul>
+<li>Add <code>primary_key_indices()</code> and <code>primary_key_paths_and_sorting()</code> with default impls wrapping existing methods.</li>
+<li>Update call sites in <code>DbOption::new</code>, <code>src/lib.rs</code>, and <code>src/transaction.rs</code> to use the plural forms.</li>
+<li>Acceptance: All tests pass; no behavior change for single-PK users.</li>
+</ul>
+</li>
+<li>
+<p>Fixed projection refactor</p>
+<ul>
+<li>Replace single <code>primary_key_index</code> usage with iteration over <code>primary_key_indices()</code> to construct <code>fixed_projection</code> = <code>[0, 1] ∪ PKs</code>.</li>
+<li>Acceptance: Existing tests and scan/get projections still behave identically for single-PK.</li>
+</ul>
+</li>
+<li>
+<p>Parquet writer properties</p>
+<ul>
+<li>Replace single <code>primary_key_path()</code> usage with plural variant to configure stats, bloom filters, and sorting columns for <code>_ts</code> plus all PK components.</li>
+<li>Acceptance: Files write successfully; read paths unchanged.</li>
+</ul>
+</li>
+</ol>
+<p>Phase 2: Macro + key types</p>
+<ol start="4">
+<li>
+<p>Composite key data structure</p>
+<ul>
+<li>Implement composite key(s) in <code>src/record/key/composite/</code> with <code>Encode</code>/<code>Decode</code>, <code>Ord</code>, <code>Hash</code>, <code>Key</code>/<code>KeyRef</code>.</li>
+<li>Start with tuples <code>(K1, K2)</code>, <code>(K1, K2, K3)</code> etc. (Option B) for faster delivery; later switch default macro to per-record key type (Option A).</li>
+<li>Acceptance: Unit tests confirm lexicographic ordering and encode/decode round-trip for composite keys.</li>
+</ul>
+</li>
+<li>
+<p>Update <code>#[derive(Record)]</code></p>
+<ul>
+<li>Allow multiple <code>#[record(primary_key)]</code> fields and generate:
+<ul>
+<li><code>type Key = (&lt;K1&gt;, &lt;K2&gt;, …)</code> (Option B) or <code>&lt;RecordName&gt;Key</code> (Option A).</li>
+<li><code>fn key(&amp;self) -&gt; (&lt;K1Ref&gt;, &lt;K2Ref&gt;, …)</code>.</li>
+<li><code>fn primary_key_indices(&amp;self) -&gt; Vec&lt;usize&gt;</code> with +2 offset.</li>
+<li>Ensure <code>from_record_batch</code> and projection retain all PK columns.</li>
+</ul>
+</li>
+<li>Acceptance: trybuild tests covering multi-PK compile and run; single-PK tests unchanged.</li>
+</ul>
+</li>
+<li>
+<p>Integration tests</p>
+<ul>
+<li>Add end-to-end tests: insert/get/remove, range scans, projection, and ordering on 2+ PK fields (e.g., <code>tenant_id: u64, name: String</code>).</li>
+<li>Acceptance: All new tests pass.</li>
+</ul>
+</li>
+</ol>
+<p>Phase 3: Dynamic records (optional)</p>
+<ol start="7">
+<li><code>DynSchema</code> multi-PK
+<ul>
+<li>Store <code>primary_indices</code> metadata; update dynamic arrays/refs to keep all PK columns in projections.</li>
+<li>Provide a composite <code>ValueRef</code> key wrapper for in-memory operations.</li>
+<li>Ensure tombstones populate PK components from <code>Ts.key</code> in builders (e.g., <code>DynRecordBuilder::push</code>).</li>
+<li>Acceptance: dynamic tests mirroring integration scenarios pass, including tombstone rows retaining all PK components.</li>
+</ul>
+</li>
+</ol>
+<h2 id="code-touchpoints"><a class="header" href="#code-touchpoints">Code Touchpoints</a></h2>
+<ul>
+<li>Traits/APIs: <code>src/record/mod.rs</code> (Schema), <code>src/option.rs</code> (DbOption::new)</li>
+<li>Read paths: <code>src/lib.rs</code> (get/scan/package), <code>src/transaction.rs</code> (get/scan)</li>
+<li>Macro codegen: <code>tonbo_macros/src/record.rs</code>, <code>tonbo_macros/src/keys.rs</code>, <code>tonbo_macros/src/data_type.rs</code></li>
+<li>Key types: <code>src/record/key/composite/</code></li>
+<li>Dynamic (phase 3): <code>src/record/dynamic/*</code> (incl. tombstone handling in <code>DynRecordBuilder::push</code>)</li>
+</ul>
+<h2 id="testing-strategy"><a class="header" href="#testing-strategy">Testing Strategy</a></h2>
+<ul>
+<li>
+<p>Unit tests:</p>
+<ul>
+<li>Composite key <code>Ord</code>, <code>Eq</code>, <code>Hash</code>, <code>Encode</code>/<code>Decode</code> round-trip.</li>
+<li><code>Schema</code> default impl compatibility.</li>
+</ul>
+</li>
+<li>
+<p>trybuild tests:</p>
+<ul>
+<li>Multiple <code>#[record(primary_key)]</code> in a struct compiles and generates expected APIs.</li>
+<li>Reject nullable PK components.</li>
+</ul>
+</li>
+<li>
+<p>Integration tests:</p>
+<ul>
+<li>Insert/get/remove by composite key; range scans across composite key ranges; projection keeps PK columns.</li>
+<li>WAL/compaction unaffected (basic smoke tests).</li>
+</ul>
+</li>
+<li>
+<p>(Optional) Property tests: ordering equivalence vs. native tuple lexicographic ordering when Option B is used.</p>
+</li>
+<li>
+<p>Tombstones:</p>
+<ul>
+<li>For both single- and multi-column PKs, verify that tombstone rows (row == None) keep all PK column values populated from <code>Ts.key</code> in Arrow arrays and through <code>RecordRef::from_record_batch</code>.</li>
+</ul>
+</li>
+</ul>
+<h2 id="backward-compatibility--migration"><a class="header" href="#backward-compatibility--migration">Backward Compatibility &amp; Migration</a></h2>
+<ul>
+<li>All existing single-PK code continues to work without changes due to default-impl fallbacks.</li>
+<li>Users opting into composite PKs need only annotate multiple fields with <code>#[record(primary_key)]</code>.</li>
+<li>No on-disk migration is required for existing tables; new tables with composite PKs will write Parquet sorting columns for all PK components.</li>
+</ul>
+<h2 id="risks-and-mitigations"><a class="header" href="#risks-and-mitigations">Risks and Mitigations</a></h2>
+<ul>
+<li>API surface increase: keep new APIs additive with conservative defaults.</li>
+<li>Projection bugs: comprehensive tests to ensure PK columns are always included.</li>
+<li>Performance: lexicographic compare is standard; Arrow array lengths are uniform, so no extra bounds checks needed.</li>
+<li>Dynamic records complexity: staged to a later phase to avoid blocking initial delivery.</li>
+</ul>
+<h2 id="example-target-macro-ux"><a class="header" href="#example-target-macro-ux">Example (target macro UX)</a></h2>
+<pre><code class="language-rust">#[derive(Record, Debug)]
+pub struct User {
+    #[record(primary_key)]
+    pub tenant_id: u64,
+    #[record(primary_key)]
+    pub name: String,
+    pub email: Option&lt;String&gt;,
+    pub age: u8,
+}
+
+// Generated (conceptually):
+// type Key = (u64, String);
+// fn key(&amp;self) -&gt; (u64, &amp;str);
+// fn primary_key_indices(&amp;self) -&gt; Vec&lt;usize&gt; { vec![2, 3] }</code></pre>
+<h2 id="delivery-checklist"><a class="header" href="#delivery-checklist">Delivery Checklist</a></h2>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Add Schema plural APIs and refactor call sites.</li>
+<li><input disabled="" type="checkbox"/>
+Implement composite key types (tuples first).</li>
+<li><input disabled="" type="checkbox"/>
+Enable multiple PK fields in macro; generate composite key/ref and PK indices.</li>
+<li><input disabled="" type="checkbox"/>
+Update projection logic to retain all PK columns.</li>
+<li><input disabled="" type="checkbox"/>
+Configure Parquet sorting/statistics for all PK components.</li>
+<li><input disabled="" type="checkbox"/>
+Add unit/trybuild/integration tests.</li>
+<li><input disabled="" type="checkbox"/>
+Update user guide (mention composite PK support and examples).</li>
+<li><input disabled="" type="checkbox"/>
+Ensure tombstone rows keep PK component values (builders/readers), validated by tests.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="tonbolite"><a class="header" href="#tonbolite">TonboLite</a></h1>
+<p>TonboLite is a WASM compatible SQLite extension that allows users to create tables which supports analytical processing directly in SQLite. Its storage engine is powered by our open-source embedded key-value database, <a href="https://github.com/tonbo-io/tonbo">Tonbo</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="getting-started-1"><a class="header" href="#getting-started-1">Getting Started</a></h1>
+<h2 id="installation-2"><a class="header" href="#installation-2">Installation</a></h2>
+<h3 id="prerequisite-1"><a class="header" href="#prerequisite-1">Prerequisite</a></h3>
+<p>To get started using tonbo you should make sure you have <a href="https://www.rust-lang.org/tools/install">Rust</a> installed on your system. If you haven't alreadly done yet, try following the instructions <a href="https://www.rust-lang.org/tools/install">here</a>.</p>
+<h3 id="building-1"><a class="header" href="#building-1">Building</a></h3>
+<p>To build TonboLite as an extension, you should enable loadable_extension features</p>
+<pre><code class="language-sh">cargo build --release --features loadable_extension
+</code></pre>
+<p>Once building successfully, you will get a file named libsqlite_tonbo.dylib(<code>.dll</code> on windows, <code>.so</code> on most other unixes) in <em>target/release/</em></p>
+<pre><code class="language-bash">target/release/
+├── build
+├── deps
+├── incremental
+├── libsqlite_tonbo.d
+├── libsqlite_tonbo.dylib
+└── libsqlite_tonbo.rlib
+</code></pre>
+<h2 id="loading-tonbolite"><a class="header" href="#loading-tonbolite">Loading TonboLite</a></h2>
+<p>SQLite provide <a href="https://www.sqlite.org/cli.html#loading_extensions"><code>.load</code></a> command to load a SQLite extension. So, you can load TonboLite extension by running the following command:</p>
+<pre><code class="language-bash">.load target/release/libsqlite_tonbo
+</code></pre>
+<h2 id="creating-table"><a class="header" href="#creating-table">Creating Table</a></h2>
+<p>After loading TonboLite extension successfully, you can <a href="https://www.sqlite.org/vtab.html">SQLite Virtual Table</a> syntax to create a table:</p>
+<pre><code class="language-sql">CREATE VIRTUAL TABLE temp.tonbo USING tonbo(
+    create_sql = 'create table tonbo(id bigint primary key, name varchar, like int)',
+    path = 'db_path/tonbo'
+);
+</code></pre>
+<ul>
+<li><code>create_sql</code> is a SQL statement that will be executed to create the table.</li>
+<li><code>path</code> is the path to the database file.</li>
+</ul>
+<h2 id="inserting-data"><a class="header" href="#inserting-data">Inserting Data</a></h2>
+<p>After creating a table, you can start to insert data into it using the normal <code>INSERT INTO</code> statement:</p>
+<pre><code class="language-sql">INSERT INTO tonbo(id, name, like) VALUES(1, 'tonbo', 100);
+</code></pre>
+<h2 id="querying-data"><a class="header" href="#querying-data">Querying Data</a></h2>
+<p>After inserting data, you can query them by using the <code>SELECT</code> statement:</p>
+<pre><code class="language-sql">SELECT * FROM tonbo;
+
+1|tonbo|100
+</code></pre>
+<h2 id="updating-data"><a class="header" href="#updating-data">Updating Data</a></h2>
+<p>You can update data in the table using the <code>UPDATE</code> statement:</p>
+<pre><code class="language-sql">UPDATE tonbo SET like = 123 WHERE id = 1;
+
+SELECT * FROM tonbo;
+1|tonbo|123
+</code></pre>
+<h2 id="deleting-data"><a class="header" href="#deleting-data">Deleting Data</a></h2>
+<p>You can also delete data by using the <code>DELETE</code> statement:</p>
+<pre><code class="language-sql">DELETE FROM tonbo WHERE id = 1;
+</code></pre>
+<h2 id="coding-with-extension"><a class="header" href="#coding-with-extension">Coding with extension</a></h2>
+<p>TonboLite extension can also be used in any place that supports loading SQLite extensions. Here is an example of using TonboLite extension in Python:</p>
+<pre><code class="language-py">import sqlite3
+
+conn = sqlite3.connect(&quot;:memory&quot;)
+conn.enable_load_extension(True)
+# Load the tonbolite extension
+conn.load_extension(&quot;target/release/libsqlite_tonbo.dylib&quot;)
+con.enable_load_extension(False)
+
+conn.execute(&quot;CREATE VIRTUAL TABLE temp.tonbo USING tonbo(&quot;
+                &quot;create_sql = 'create table tonbo(id bigint primary key, name varchar, like int)', &quot;
+                &quot;path = 'db_path/tonbo'&quot;
+             &quot;)&quot;)
+conn.execute(&quot;INSERT INTO tonbo (id, name, like) VALUES (0, 'lol', 1)&quot;)
+conn.execute(&quot;INSERT INTO tonbo (id, name, like) VALUES (1, 'lol', 100)&quot;)
+rows = conn.execute(&quot;SELECT * FROM tonbo;&quot;)
+for row in rows:
+    print(row)
+# ......
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="building-tonbolite"><a class="header" href="#building-tonbolite">Building TonboLite</a></h1>
+<h3 id="build-as-extension"><a class="header" href="#build-as-extension">Build as Extension</a></h3>
+<p>To build TonboLite as an extension, you should enable loadable_extension features</p>
+<pre><code class="language-sh">cargo build --release --features loadable_extension
+</code></pre>
+<p>Once building successfully, you will get a file named libsqlite_tonbo.dylib(<code>.dll</code> on windows, <code>.so</code> on most other unixes) in <em>target/release/</em></p>
+<h3 id="build-on-rust"><a class="header" href="#build-on-rust">Build on Rust</a></h3>
+<pre><code class="language-sh">cargo build
+</code></pre>
+<h3 id="build-on-wasm"><a class="header" href="#build-on-wasm">Build on Wasm</a></h3>
+<p>To use TonboLite in wasm, it takes a few steps to build.</p>
+<ol>
+<li>Add wasm32-unknown-unknown target</li>
+</ol>
+<pre><code class="language-sh">rustup target add wasm32-unknown-unknown
+</code></pre>
+<ol start="2">
+<li>Override toolchain with nightly</li>
+</ol>
+<pre><code class="language-sh">rustup override set nightly
+</code></pre>
+<ol start="3">
+<li>Build with <a href="https://github.com/rustwasm/wasm-pack">wasm-pack</a></li>
+</ol>
+<pre><code class="language-sh">wasm-pack build --target web --no-default-features --features wasm
+</code></pre>
+<p>Once you build successfully, you will get a <em>pkg</em> folder containing compiled js and wasm files. Copy it to your project and then you can start to use it.</p>
+<pre><code class="language-js">const tonbo = await import(&quot;./pkg/sqlite_tonbo.js&quot;);
+await tonbo.default();
+
+// start to use TonboLite ...
+</code></pre>
+<div class="warning">
+<p>TonboLite should be used in a <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts">secure context</a> and <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated">cross-origin isolated</a>, since it uses <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer"><code>SharedArrayBuffer</code></a> to share memory. Please refer to <a href="https://web.dev/articles/coop-coep">this article</a> for a detailed explanation.</p>
+</div>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="usage"><a class="header" href="#usage">Usage</a></h1>
+<ul>
+<li><a href="tonbolite/usage.html#using-as-extension">Using as Extension</a>
+<ul>
+<li><a href="tonbolite/usage.html#loading-tonbolite-extension">Loading TonboLite Extension</a></li>
+<li><a href="tonbolite/usage.html#create-table">Create Table</a></li>
+<li><a href="tonbolite/usage.html#selectinsertupdatedelete">Select/Insert/Update/Delete</a></li>
+<li><a href="tonbolite/usage.html#flush">Flush</a></li>
+</ul>
+</li>
+<li><a href="tonbolite/usage.html#using-in-rust">Using in Rust</a></li>
+<li><a href="tonbolite/usage.html#using-in-javascript">Using in JavaScript</a></li>
+</ul>
+<h2 id="using-as-extension"><a class="header" href="#using-as-extension">Using as Extension</a></h2>
+<p>If you do not know how to build TonboLite, please refer to the <a href="tonbolite/./build.html">Building</a> section.</p>
+<h3 id="loading-tonbolite-extension"><a class="header" href="#loading-tonbolite-extension">Loading TonboLite Extension</a></h3>
+<p>Once building successfully, you will get a file named libsqlite_tonbo.dylib(.dll on windows, .so on most other unixes) in <em>target/release/</em>(or <em>target/debug/</em>).</p>
+<p>SQLite provide <a href="https://www.sqlite.org/cli.html#loading_extensions"><code>.load</code></a> command to load a SQLite extension. So, you can load TonboLite extension by running the following command:</p>
+<pre><code class="language-bash">.load target/release/libsqlite_tonbo
+</code></pre>
+<p>Or you can load TonboLite extension in Python or other languages.</p>
+<pre><code class="language-py">import sqlite3
+
+conn = sqlite3.connect(&quot;:memory&quot;)
+conn.enable_load_extension(True)
+# Load the tonbolite extension
+conn.load_extension(&quot;target/release/libsqlite_tonbo.dylib&quot;)
+con.enable_load_extension(False)
+
+# ......
+</code></pre>
+<p>After loading TonboLite successfully, you can start to use it.</p>
+<h3 id="create-table"><a class="header" href="#create-table">Create Table</a></h3>
+<p>Unlike Normal <code>CREATE TABLE</code> statement, TonboLite use <a href="https://www.sqlite.org/vtab.html">SQLite Virtual Table</a> syntax to create a table:</p>
+<pre><code class="language-sql">CREATE VIRTUAL TABLE temp.tonbo USING tonbo(
+    create_sql = 'create table tonbo(id bigint primary key, name varchar, like int)',
+    path = 'db_path/tonbo'
+);
+</code></pre>
+<h3 id="selectinsertupdatedelete"><a class="header" href="#selectinsertupdatedelete">Select/Insert/Update/Delete</a></h3>
+<p>you can execute SQL statements just like normal SQL in the SQLite. Here is an example:</p>
+<pre><code class="language-sql">sqlite&gt; .load target/release/libsqlite_tonbo
+
+sqlite&gt; CREATE VIRTUAL TABLE temp.tonbo USING tonbo(
+    create_sql = 'create table tonbo(id bigint primary key, name varchar, like int)',
+    path = 'db_path/tonbo'
+);
+sqlite&gt; insert into tonbo (id, name, like) values (0, 'tonbo', 100);
+sqlite&gt; insert into tonbo (id, name, like) values (1, 'sqlite', 200);
+
+sqlite&gt; select * from tonbo;
+0|tonbo|100
+1|sqlite|200
+
+sqlite&gt; update tonbo set like = 123 where id = 0;
+
+sqlite&gt; select * from tonbo;
+0|tonbo|123
+1|sqlite|200
+
+sqlite&gt; delete from tonbo where id = 0;
+
+sqlite&gt; select * from tonbo;
+1|sqlite|200
+</code></pre>
+<h3 id="flush"><a class="header" href="#flush">Flush</a></h3>
+<p>TonboLite use LSM tree to store data, and it use a WAL buffer size to improve performance, so you may need to flush data to disk manually. But SQLite don't provide flush interface, so we choose to implement it in the <a href="https://www.sqlite.org/pragma.html#pragma_quick_check"><code>pragma quick_check</code></a>.</p>
+<pre><code class="language-sql">PRAGMA tonbo.quick_check;
+</code></pre>
+<h2 id="using-in-rust"><a class="header" href="#using-in-rust">Using in Rust</a></h2>
+<p>To use TonboLite in your application, you can import TonboLite in the <em>Cargo.toml</em> file.</p>
+<pre><code class="language-toml">tonbolite = { git = &quot;https://github.com/tonbo-io/tonbolite&quot; }
+</code></pre>
+<p>You can create use TonboLite just like in <a href="https://github.com/rusqlite/rusqlite">Rusqlite</a>, but you should create table using <a href="https://www.sqlite.org/vtab.html">SQLite Virtual Table</a> syntax:</p>
+<pre><code class="language-rust">let _ = std::fs::create_dir_all(&quot;./db_path/test&quot;);
+
+let db = rusqlite::Connection::open_in_memory()?;
+crate::load_module(&amp;db)?;
+
+db.execute_batch(
+    &quot;CREATE VIRTUAL TABLE temp.tonbo USING tonbo(
+            create_sql = 'create table tonbo(id bigint primary key, name varchar, like int)',
+            path = 'db_path/test'
+    );&quot;
+).unwrap();
+
+db.execute(
+    &quot;INSERT INTO tonbo (id, name, like) VALUES (1, 'lol', 12)&quot;,
+    [],
+).unwrap();
+
+let mut stmt = db.prepare(&quot;SELECT * FROM tonbo;&quot;)?;
+let _rows = stmt.query([])?;</code></pre>
+<p>for more usage, you can refer to <a href="https://docs.rs/rusqlite">Rusqlite</a>.</p>
+<p>One difference is that TonboLite extends <a href="https://www.sqlite.org/pragma.html#pragma_quick_check"><code>pragma quick_check</code></a> to flush WAL to disk. You can use it like this:</p>
+<pre><code class="language-rust">db.pragma(None, &quot;quick_check&quot;, &quot;tonbo&quot;, |_r| -&gt; rusqlite::Result&lt;()&gt; {
+    Ok(())
+}).unwrap();</code></pre>
+<h2 id="using-in-javascript"><a class="header" href="#using-in-javascript">Using in JavaScript</a></h2>
+<p>To use TonboLite in wasm, can should enable <em>wasm</em> feature.</p>
+<pre><code class="language-toml">tonbolite = { git = &quot;https://github.com/tonbo-io/tonbolite&quot;, default-features = false, features = [&quot;wasm&quot;] }
+</code></pre>
+<p>After building successfully, you will get a <em>pkg</em> folder containing compiled js and wasm files. Copy it to your project and then you can start to use it. If you don't know how to build TonboLite on wasm, you can refer to <a href="tonbolite/build.html#build-on-wasm">TonboLite</a>.</p>
+<p>Here is an example of how to use TonboLite in JavaScript:</p>
+<pre><code class="language-javascript">const tonbo = await import(&quot;./pkg/sqlite_tonbo.js&quot;);
+await tonbo.default();
+
+const db = new TonboLite('db_path/test');
+await db.create(`CREATE VIRTUAL TABLE temp.tonbo USING tonbo(
+  create_sql ='create table tonbo(id bigint primary key, name varchar, like int)',
+  path = 'db_path/tonbo'
+);`);
+
+await db.insert('INSERT INTO tonbo (id, name, like) VALUES (1, \'lol\', 12)');
+await conn.delete(&quot;DELETE FROM tonbo WHERE id = 4&quot;);
+await conn.update(&quot;UPDATE tonbo SET name = 'tonbo' WHERE id = 6&quot;);
+
+const rows = await db.select('SELECT * FROM tonbo limit 10;');
+console.log(rows);
+
+await db.flush();
+</code></pre>
+<div class="warning">
+<p>TonboLite should be used in a <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts">secure context</a> and <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated">cross-origin isolated</a>, since it uses <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer"><code>SharedArrayBuffer</code></a> to share memory. Please refer to <a href="https://web.dev/articles/coop-coep">this article</a> for a detailed explanation.</p>
+</div>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            MathJax.Hub.Register.StartupHook('End', function() {
+                window.setTimeout(window.print, 100);
+            });
+        });
+        </script>
+
+    </div>
+    </body>
+</html>
