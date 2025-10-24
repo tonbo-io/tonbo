@@ -100,22 +100,29 @@ impl Replayer {
             let mut offset: usize = 0;
             while offset < data.len() {
                 let slice = &data[offset..];
-                let header = match FrameHeader::decode_from(slice) {
-                    Ok((header, _)) => header,
-                    Err(WalError::Corrupt(_)) => return Ok(events),
-                    Err(err) => return Err(err),
-                };
+        let header = match FrameHeader::decode_from(slice) {
+            Ok((header, _)) => header,
+            Err(WalError::Corrupt(reason))
+                if reason == "frame header truncated" || reason == "frame payload truncated" =>
+            {
+                // Treat a truncated tail (common for crash-at-end scenarios) as EOF so recovery
+                // returns the events observed before the partial frame. Any other corruption
+                // surfaces as an error to avoid silently skipping valid transactions further in
+                // the log.
+                return Ok(events);
+            }
+            Err(err) => return Err(err),
+        };
                 let payload_start = offset + FRAME_HEADER_SIZE;
                 let payload_end = payload_start + header.len as usize;
                 if payload_end > data.len() {
                     return Ok(events);
                 }
                 let payload = &data[payload_start..payload_end];
-                match decode_frame(header.frame_type, payload) {
-                    Ok(event) => events.push(event),
-                    Err(WalError::Corrupt(_)) | Err(WalError::Codec(_)) => return Ok(events),
-                    Err(err) => return Err(err),
-                }
+        match decode_frame(header.frame_type, payload) {
+            Ok(event) => events.push(event),
+            Err(err) => return Err(err),
+        }
                 offset = payload_end;
             }
         }
