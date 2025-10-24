@@ -1,6 +1,7 @@
 //! Asynchronous WAL writer task and queue plumbing.
 
 use std::{
+    collections::VecDeque,
     pin::Pin,
     sync::{
         Arc,
@@ -27,7 +28,7 @@ use crate::wal::{
     WalAck, WalConfig, WalError, WalPayload, WalResult, WalSyncPolicy,
     frame::{self, Frame, encode_payload},
     metrics::WalMetrics,
-    storage::{WalSegment, WalStorage},
+    storage::{SegmentDescriptor, WalSegment, WalStorage},
 };
 
 // Wrapper around executor-specific sleep futures so we can store them in the timer slot.
@@ -156,7 +157,9 @@ where
         initial_segment_seq,
     )
     .await?;
-    ctx.next_frame_seq = initial_frame_seq.max(frame::INITIAL_FRAME_SEQ);
+    ctx.next_frame_seq = ctx
+        .next_frame_seq
+        .max(initial_frame_seq.max(frame::INITIAL_FRAME_SEQ));
 
     let mut timer: SleepSlot = None;
 
@@ -253,19 +256,20 @@ where
     E: Executor + Timer,
 {
     exec: Arc<E>,
-    #[allow(dead_code)]
     storage: WalStorage,
     cfg: WalConfig,
     fs_tag: FileSystemTag,
     metrics: Arc<E::RwLock<WalMetrics>>,
     queue_depth: Arc<AtomicUsize>,
-    #[allow(dead_code)]
     segment_seq: u64,
     segment: WalSegment,
     segment_bytes: usize,
     bytes_since_sync: usize,
     last_sync: Instant,
+    last_flush: Instant,
     next_frame_seq: u64,
+    next_segment_seq: u64,
+    completed_segments: VecDeque<SegmentMeta>,
 }
 
 impl<E> WriterContext<E>
@@ -281,15 +285,38 @@ where
         segment_seq: u64,
     ) -> WalResult<Self> {
         let fs_tag = storage.fs().file_system();
-        let mut segment = storage.open_segment(segment_seq).await?;
-        let existing_bytes = {
-            let file = segment.file_mut();
-            file.size()
-                .await
-                .map_err(|err| backend_err("determine wal segment size", err))?
-        } as usize;
 
-        Ok(Self {
+        let mut completed_segments = VecDeque::new();
+        let tail = storage.tail_metadata().await?;
+
+        let mut next_frame_seq = frame::INITIAL_FRAME_SEQ;
+        let (segment_seq, mut segment_bytes, next_segment_seq) = if let Some(tail) = tail {
+            for descriptor in tail.completed.into_iter() {
+                completed_segments.push_back(SegmentMeta::from_descriptor(descriptor));
+            }
+            if let Some(last_seq) = tail.last_frame_seq {
+                next_frame_seq = last_seq.saturating_add(1);
+            }
+            (
+                tail.active.seq,
+                tail.active.bytes,
+                tail.active.seq.saturating_add(1),
+            )
+        } else {
+            (segment_seq, 0usize, segment_seq.saturating_add(1))
+        };
+
+        let mut segment = storage.open_segment(segment_seq).await?;
+        if segment_bytes == 0 {
+            segment_bytes = {
+                let file = segment.file_mut();
+                file.size()
+                    .await
+                    .map_err(|err| backend_err("determine wal segment size", err))?
+            } as usize;
+        }
+
+        let mut ctx = Self {
             exec,
             storage,
             cfg,
@@ -298,11 +325,16 @@ where
             queue_depth,
             segment_seq,
             segment,
-            segment_bytes: existing_bytes,
+            segment_bytes,
             bytes_since_sync: 0,
             last_sync: Instant::now(),
-            next_frame_seq: frame::INITIAL_FRAME_SEQ,
-        })
+            last_flush: Instant::now(),
+            next_frame_seq,
+            next_segment_seq,
+            completed_segments,
+        };
+        ctx.enforce_retention_limit().await?;
+        Ok(ctx)
     }
 
     async fn handle_enqueue(
@@ -325,7 +357,8 @@ where
         self.segment_bytes = self.segment_bytes.saturating_add(bytes_written);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(bytes_written);
 
-        self.flush_if_needed().await?;
+        self.flush_if_needed(false).await?;
+        let rotation = self.maybe_rotate().await?;
         let sync_outcome = self.maybe_sync().await?;
 
         if bytes_written > 0 {
@@ -339,10 +372,16 @@ where
             bytes_flushed: bytes_written,
             elapsed: enqueued_at.elapsed(),
         };
+        let sync_performed = rotation.sync_performed || sync_outcome.performed;
+        let timer_directive = if rotation.sync_performed {
+            TimerDirective::Cancel
+        } else {
+            sync_outcome.timer_directive
+        };
         Ok(HandleOutcome {
             ack,
-            sync_performed: sync_outcome.performed,
-            timer_directive: sync_outcome.timer_directive,
+            sync_performed,
+            timer_directive,
         })
     }
 
@@ -356,13 +395,19 @@ where
         Ok(len)
     }
 
-    async fn flush_if_needed(&mut self) -> WalResult<()> {
-        // For the MVP we flush on every enqueue to keep semantics simple.
-        self.segment
-            .file_mut()
-            .flush()
-            .await
-            .map_err(|err| backend_err("flush wal segment", err))
+    async fn flush_if_needed(&mut self, force: bool) -> WalResult<()> {
+        let should_flush = force
+            || self.cfg.flush_interval.is_zero()
+            || self.last_flush.elapsed() >= self.cfg.flush_interval;
+        if should_flush {
+            self.segment
+                .file_mut()
+                .flush()
+                .await
+                .map_err(|err| backend_err("flush wal segment", err))?;
+            self.last_flush = Instant::now();
+        }
+        Ok(())
     }
 
     async fn maybe_sync(&mut self) -> WalResult<SyncOutcome> {
@@ -412,6 +457,57 @@ where
         }
     }
 
+    async fn maybe_rotate(&mut self) -> WalResult<RotationOutcome> {
+        if self.cfg.segment_max_bytes == 0 || self.segment_bytes < self.cfg.segment_max_bytes {
+            return Ok(RotationOutcome {
+                sync_performed: false,
+            });
+        }
+        if self.segment_bytes == 0 {
+            return Ok(RotationOutcome {
+                sync_performed: false,
+            });
+        }
+
+        self.flush_if_needed(true).await?;
+
+        let mut sync_performed = false;
+        if !matches!(self.cfg.sync, WalSyncPolicy::Disabled) {
+            self.sync_all().await?;
+            self.bytes_since_sync = 0;
+            self.last_sync = Instant::now();
+            sync_performed = true;
+        }
+
+        let old_path = self.segment.path().clone();
+        let old_bytes = self.segment_bytes;
+
+        let new_seq = self.next_segment_seq;
+        let mut new_segment = self.storage.open_segment(new_seq).await?;
+        let new_bytes = {
+            let file = new_segment.file_mut();
+            file.size()
+                .await
+                .map_err(|err| backend_err("determine wal segment size", err))?
+        } as usize;
+
+        let old_segment = std::mem::replace(&mut self.segment, new_segment);
+        drop(old_segment);
+
+        self.segment_seq = new_seq;
+        self.segment_bytes = new_bytes;
+        self.next_segment_seq = new_seq.saturating_add(1);
+        self.last_flush = Instant::now();
+
+        self.completed_segments.push_back(SegmentMeta {
+            path: old_path,
+            bytes: old_bytes,
+        });
+        self.enforce_retention_limit().await?;
+
+        Ok(RotationOutcome { sync_performed })
+    }
+
     async fn sync_data(&mut self) -> WalResult<()> {
         let path = self.segment.path().clone();
         perform_sync(self.fs_tag, &path, SyncVariant::Data).await
@@ -423,7 +519,7 @@ where
     }
 
     async fn flush_and_sync_for_shutdown(&mut self) -> WalResult<bool> {
-        self.flush_if_needed().await?;
+        self.flush_if_needed(true).await?;
         if !matches!(self.cfg.sync, WalSyncPolicy::Disabled) {
             self.sync_all().await?;
             self.bytes_since_sync = 0;
@@ -447,6 +543,24 @@ where
         let depth = self.queue_depth.load(Ordering::SeqCst);
         let mut guard = self.metrics.write().await;
         guard.record_queue_depth(depth);
+    }
+
+    fn total_retained_bytes(&self) -> usize {
+        let completed: usize = self.completed_segments.iter().map(|meta| meta.bytes).sum();
+        completed.saturating_add(self.segment_bytes)
+    }
+
+    async fn enforce_retention_limit(&mut self) -> WalResult<()> {
+        if let Some(limit) = self.cfg.retention_bytes {
+            while self.total_retained_bytes() > limit {
+                if let Some(evicted) = self.completed_segments.pop_front() {
+                    self.storage.remove_segment(&evicted.path).await?;
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn current_frame_seq(&self) -> u64 {
@@ -557,6 +671,10 @@ struct SyncOutcome {
     timer_directive: TimerDirective,
 }
 
+struct RotationOutcome {
+    sync_performed: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum TimerDirective {
     None,
@@ -567,6 +685,21 @@ enum TimerDirective {
 struct TimerEvent {
     sync_performed: bool,
     reschedule: Option<Duration>,
+}
+
+#[derive(Clone, Debug)]
+struct SegmentMeta {
+    path: fusio::path::Path,
+    bytes: usize,
+}
+
+impl SegmentMeta {
+    fn from_descriptor(descriptor: SegmentDescriptor) -> Self {
+        Self {
+            path: descriptor.path,
+            bytes: descriptor.bytes,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -966,5 +1099,111 @@ mod tests {
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
+    }
+
+    #[test]
+    fn segment_rotation_enforces_retention() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal-rotation-retention").expect("path");
+        let storage_reader = WalStorage::new(Arc::clone(&fs), root.clone());
+        let storage_writer = WalStorage::new(fs, root.clone());
+
+        let cfg = WalConfig {
+            queue_size: 4,
+            segment_max_bytes: 1,
+            retention_bytes: Some(1),
+            sync: WalSyncPolicy::Disabled,
+            ..WalConfig::default()
+        };
+
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage_writer,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        let mut enqueue_payload = |seq: u64, commit_ts: u64| {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            queue_depth.fetch_add(1, Ordering::SeqCst);
+            sender
+                .try_send(WriterMsg::queued(
+                    seq,
+                    WalPayload::DynBatch {
+                        batch: append_tombstone_column(&sample_batch(), None).expect("wal batch"),
+                        commit_ts: Timestamp::new(commit_ts),
+                    },
+                    Instant::now(),
+                    ack_tx,
+                ))
+                .expect("send payload");
+
+            let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
+            let ack_cell_clone = Rc::clone(&ack_cell);
+            spawner
+                .spawn_local(async move {
+                    let ack = ack_rx.await.expect("oneshot ack");
+                    *ack_cell_clone.borrow_mut() = Some(ack);
+                })
+                .expect("spawn ack listener");
+
+            ack_cell
+        };
+
+        let ack1_cell = enqueue_payload(10, 1);
+        let ack2_cell = enqueue_payload(11, 2);
+
+        sender.close_channel();
+        pool.run();
+
+        let ack1 = ack1_cell
+            .borrow()
+            .clone()
+            .expect("ack1 result")
+            .expect("ack1 ok");
+        let ack2 = ack2_cell
+            .borrow()
+            .clone()
+            .expect("ack2 result")
+            .expect("ack2 ok");
+        assert!(ack2.seq > ack1.seq);
+
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+
+        let segments = futures::executor::block_on(storage_reader.list_segments())
+            .expect("list segments after rotation");
+        assert_eq!(
+            segments.len(),
+            1,
+            "retention should keep only latest segment"
+        );
+        assert!(
+            segments[0]
+                .path
+                .as_ref()
+                .ends_with("wal-00000000000000000002.tonwal")
+        );
     }
 }

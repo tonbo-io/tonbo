@@ -7,7 +7,6 @@
 use std::{
     fmt,
     marker::PhantomData,
-    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -61,10 +60,10 @@ impl Default for WalSyncPolicy {
 }
 
 /// Configuration for enabling the WAL on a `DB` instance.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WalConfig {
     /// Directory in which WAL segments are created.
-    pub dir: PathBuf,
+    pub dir: Path,
     /// Maximum size for a single WAL segment before rotation.
     pub segment_max_bytes: usize,
     /// Flush interval for the writer's buffer.
@@ -75,18 +74,37 @@ pub struct WalConfig {
     pub retention_bytes: Option<usize>,
     /// Capacity of the writer's bounded queue.
     pub queue_size: usize,
+    /// Filesystem implementation backing the WAL directory.
+    pub filesystem: Arc<dyn DynFs>,
 }
 
 impl Default for WalConfig {
     fn default() -> Self {
+        let dir = Path::parse("wal").expect("static wal path");
         Self {
-            dir: PathBuf::from("wal"),
+            dir,
             segment_max_bytes: 64 * 1024 * 1024,
             flush_interval: Duration::from_millis(10),
             sync: WalSyncPolicy::default(),
             retention_bytes: None,
             queue_size: 65_536,
+            filesystem: Arc::new(TokioFs),
         }
+    }
+}
+
+impl fmt::Debug for WalConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fs_tag = self.filesystem.file_system();
+        f.debug_struct("WalConfig")
+            .field("dir", &self.dir)
+            .field("segment_max_bytes", &self.segment_max_bytes)
+            .field("flush_interval", &self.flush_interval)
+            .field("sync", &self.sync)
+            .field("retention_bytes", &self.retention_bytes)
+            .field("queue_size", &self.queue_size)
+            .field("filesystem", &fs_tag)
+            .finish()
     }
 }
 
@@ -227,6 +245,52 @@ pub(crate) fn split_tombstone_column(batch: RecordBatch) -> WalResult<(RecordBat
     .map_err(|err| WalError::Codec(err.to_string()))?;
 
     Ok((stripped, bitmap))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+
+    use super::*;
+    use crate::inmem::immutable::memtable::MVCC_TOMBSTONE_COL;
+
+    fn int_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let data = Arc::new(Int32Array::from(vec![1, 2])) as _;
+        RecordBatch::try_new(schema, vec![data]).expect("batch")
+    }
+
+    #[test]
+    fn append_tombstone_rejects_length_mismatch() {
+        let batch = int_batch();
+        let err = append_tombstone_column(&batch, Some(&[true])).expect_err("length mismatch");
+        assert!(
+            matches!(err, WalError::Codec(msg) if msg.contains("tombstone bitmap length mismatch"))
+        );
+    }
+
+    #[test]
+    fn append_tombstone_rejects_existing_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
+        ]));
+        let data = Arc::new(Int32Array::from(vec![1])) as _;
+        let tombstones = Arc::new(BooleanArray::from(vec![false])) as _;
+        let batch = RecordBatch::try_new(schema, vec![data, tombstones]).expect("batch");
+        let err = append_tombstone_column(&batch, None).expect_err("existing column");
+        assert!(matches!(err, WalError::Codec(msg) if msg.contains("already contains _tombstone")));
+    }
+
+    #[test]
+    fn split_tombstone_requires_column() {
+        let batch = int_batch();
+        let err = split_tombstone_column(batch).expect_err("missing column");
+        assert!(matches!(err, WalError::Codec(msg) if msg.contains("_tombstone column missing")));
+    }
 }
 
 struct WalHandleInner<E>
@@ -428,10 +492,7 @@ where
     E: Executor + Timer,
 {
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
-        let fs: Arc<dyn DynFs> = Arc::new(TokioFs);
-        let wal_root = Path::from_filesystem_path(&cfg.dir)
-            .map_err(|err| WalError::Storage(err.to_string()))?;
-        let storage = storage::WalStorage::new(fs, wal_root);
+        let storage = storage::WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
 
         let metrics = Arc::new(E::rw_lock(WalMetrics::default()));
         let writer = writer::spawn_writer(
@@ -445,7 +506,7 @@ where
         let (sender, queue_depth, join) = writer.into_parts();
         let handle = WalHandle::from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
 
-        self.set_wal_config(Some(cfg));
+        self.set_wal_config(Some(cfg.clone()));
         self.set_wal_handle(Some(handle.clone()));
         Ok(handle)
     }
