@@ -12,6 +12,7 @@ use fusio::executor::{Executor, Timer};
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
+    fs::FileId,
     inmem::{
         immutable::Immutable,
         mutable::MutableLayout,
@@ -32,6 +33,7 @@ pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
     immutables: Vec<Immutable<M>>,
+    immutable_wal_ids: Vec<Option<Vec<FileId>>>,
     // Sealing policy and last seal timestamp
     policy: Box<dyn SealPolicy + Send + Sync>,
     last_seal_at: Option<Instant>,
@@ -126,7 +128,7 @@ where
         let stats = self.mem.build_stats(since);
         if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
             if let Some(seg) = self.mem.seal_into_immutable(&self.mode.schema)? {
-                self.immutables.push(seg);
+                self.add_immutable(seg);
             }
             self.last_seal_at = Some(Instant::now());
         }
@@ -163,6 +165,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
             mode,
             mem,
             immutables: Vec::new(),
+            immutable_wal_ids: Vec::new(),
             policy: crate::inmem::policy::default_policy(),
             last_seal_at: None,
             executor,
@@ -268,8 +271,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable<M>, SsTableError>
     where
-        M: Sized,
-        M::Key: Clone,
+        M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
     {
         if self.immutables.is_empty() {
             return Err(SsTableError::NoImmutableSegments);
@@ -278,10 +280,23 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         for seg in &self.immutables {
             builder.add_immutable(seg)?;
         }
+        let wal_ids_flat: Vec<FileId> = self
+            .immutable_wal_ids
+            .iter()
+            .filter_map(|ids| ids.as_ref())
+            .flat_map(|ids| ids.clone())
+            .collect();
+        let wal_ids = if wal_ids_flat.is_empty() {
+            None
+        } else {
+            Some(wal_ids_flat)
+        };
+        builder.set_wal_ids(wal_ids);
+
         match builder.finish().await {
             Ok(table) => {
-                // TODO: capture WAL ids alongside the flushed descriptor when WAL is wired up.
                 self.immutables.clear();
+                self.immutable_wal_ids.clear();
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -296,6 +311,14 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     #[allow(dead_code)]
     pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
         self.immutables.push(seg);
+        self.immutable_wal_ids.push(None);
+    }
+
+    /// Record the WAL identifiers for the most recently sealed immutable.
+    pub fn set_last_immutable_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
+        if let Some(slot) = self.immutable_wal_ids.last_mut() {
+            *slot = wal_ids;
+        }
     }
 
     /// Set or replace the sealing policy used by this DB.
