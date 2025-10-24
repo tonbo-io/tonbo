@@ -26,6 +26,10 @@ impl Replayer {
     }
 
     /// Iterate through WAL segments and produce events.
+    ///
+    /// The public API stays synchronous for callers such as `DB::recover_with_wal`,
+    /// but we delegate to the async helper internally because `DynFs::list`,
+    /// `open_options`, and `read_to_end_at` are async-only fusio primitives.
     pub fn scan(&self) -> WalResult<Vec<WalEvent>> {
         block_on(self.scan_async())
     }
@@ -35,6 +39,11 @@ impl Replayer {
         &self.cfg
     }
 
+    /// Async implementation detail used by [`scan`].
+    ///
+    /// Fusio exposes filesystem accessors (`list`, `open_options`, `read_to_end_at`)
+    /// exclusively as async operations, so we stage their usage inside this future
+    /// and have the public entry point (`scan`) synchronously `block_on` it.
     async fn scan_async(&self) -> WalResult<Vec<WalEvent>> {
         let mut entries = Vec::<(u64, FusioPath)>::new();
         let mut stream = match self.fs.list(&self.cfg.dir).await {
@@ -126,11 +135,11 @@ fn segment_sequence(path: &FusioPath) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
-    use tokio::runtime::Runtime;
+    use fusio::{Write, impls::mem::fs::InMemoryFs};
 
     use super::*;
     use crate::{
@@ -138,31 +147,15 @@ mod tests {
         wal::{
             WalPayload,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
+            storage::WalStorage,
         },
     };
 
-    fn with_tokio_runtime<F, R>(f: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        let runtime = Runtime::new().expect("tokio runtime");
-        let guard = runtime.enter();
-        let result = f();
-        drop(guard);
-        runtime.shutdown_timeout(Duration::from_secs(0));
-        result
-    }
-
     #[test]
     fn replayer_returns_logged_events() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "tonbo-wal-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&temp_dir).expect("create wal dir");
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let wal_root = FusioPath::parse("wal-test").expect("wal path");
+        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -190,13 +183,25 @@ mod tests {
             bytes.extend_from_slice(&frame.into_bytes(seq));
             seq += 1;
         }
-        fs::write(temp_dir.join("wal-00000000000000000001.tonwal"), bytes)
-            .expect("write wal segment");
+        let storage_clone = storage.clone();
+        let wal_root_for_write = wal_root.clone();
+        let bytes_for_write = bytes;
+        futures::executor::block_on(async move {
+            storage_clone
+                .ensure_dir(&wal_root_for_write)
+                .await
+                .expect("ensure dir");
+            let mut segment = storage_clone.open_segment(1).await.expect("open segment");
+            let (write_res, _buf) = segment.file_mut().write_all(bytes_for_write).await;
+            write_res.expect("write wal");
+            segment.file_mut().flush().await.expect("flush");
+        });
 
         let mut cfg = WalConfig::default();
-        cfg.dir = FusioPath::from_filesystem_path(&temp_dir).expect("wal dir path");
+        cfg.dir = wal_root;
+        cfg.filesystem = fs;
         let replayer = Replayer::new(cfg);
-        let events = with_tokio_runtime(|| replayer.scan()).expect("scan");
+        let events = replayer.scan().expect("scan");
         assert_eq!(events.len(), 2);
 
         match &events[0] {
@@ -222,20 +227,21 @@ mod tests {
             }
             ref other => panic!("unexpected event: {other:?}"),
         }
-
-        fs::remove_dir_all(&temp_dir).expect("cleanup");
     }
 
     #[test]
     fn replayer_stops_after_truncated_tail() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "tonbo-wal-truncated-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&temp_dir).expect("create wal dir");
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let wal_root = FusioPath::parse("wal-truncated").expect("wal path");
+        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+        let storage_clone = storage.clone();
+        let wal_root_for_dir = wal_root.clone();
+        futures::executor::block_on(async move {
+            storage_clone
+                .ensure_dir(&wal_root_for_dir)
+                .await
+                .expect("ensure dir");
+        });
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -259,21 +265,26 @@ mod tests {
         let frames = encode_payload(payload, 9).expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
-        let mut bytes = Vec::new();
         let append_bytes = frames[0].clone().into_bytes(seq);
-        bytes.extend_from_slice(&append_bytes);
         seq += 1;
         let mut commit_bytes = frames[1].clone().into_bytes(seq);
         commit_bytes.truncate(commit_bytes.len() - 3);
-        bytes.extend_from_slice(&commit_bytes);
 
-        fs::write(temp_dir.join("wal-00000000000000000005.tonwal"), bytes)
-            .expect("write wal segment");
+        let storage_clone = storage.clone();
+        futures::executor::block_on(async move {
+            let mut segment = storage_clone.open_segment(5).await.expect("open segment");
+            let (res, _buf) = segment.file_mut().write_all(append_bytes).await;
+            res.expect("write append");
+            let (res_commit, _buf) = segment.file_mut().write_all(commit_bytes).await;
+            res_commit.expect("write truncated commit");
+            segment.file_mut().flush().await.expect("flush");
+        });
 
         let mut cfg = WalConfig::default();
-        cfg.dir = FusioPath::from_filesystem_path(&temp_dir).expect("wal dir path");
+        cfg.dir = wal_root;
+        cfg.filesystem = fs;
         let replayer = Replayer::new(cfg);
-        let events = with_tokio_runtime(|| replayer.scan()).expect("scan succeeds");
+        let events = replayer.scan().expect("scan succeeds");
 
         assert_eq!(events.len(), 1, "commit frame should be ignored");
         match &events[0] {
@@ -288,7 +299,5 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
-
-        fs::remove_dir_all(&temp_dir).expect("cleanup");
     }
 }
