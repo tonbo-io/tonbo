@@ -8,12 +8,14 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
 
 use crate::{
     db::DB,
     mode::Mode,
     ondisk::sstable::{SsTable, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
+    record::extract::KeyDyn,
 };
 
 /// Naïve minor-compaction driver that flushes once a segment threshold is hit.
@@ -55,8 +57,7 @@ impl MinorCompactor {
         config: Arc<SsTableConfig>,
     ) -> Result<Option<SsTable<M>>, SsTableError>
     where
-        M: Mode + Sized,
-        M::Key: Clone,
+        M: Mode<ImmLayout = RecordBatch, Key = KeyDyn> + Sized,
         E: Executor + Timer + Send + Sync,
     {
         if db.num_immutable_segments() < self.segment_threshold {
@@ -75,7 +76,6 @@ mod tests {
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{disk::LocalFs, dynamic::DynFs, executor::BlockingExecutor, path::Path};
-    use futures::executor::block_on;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::MinorCompactor;
@@ -102,6 +102,15 @@ mod tests {
             Path::from("/tmp/tonbo-compaction-test"),
         ));
         (cfg, db)
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(future)
     }
 
     #[test]
@@ -136,5 +145,8 @@ mod tests {
         assert_eq!(descriptor.id().raw(), 9);
         assert_eq!(descriptor.level(), 0);
         assert_eq!(descriptor.stats().map(|s| s.rows), Some(1));
+        let stats = descriptor.stats().expect("descriptor stats");
+        assert_eq!(stats.rows, 1);
+        assert!(stats.bytes > 0);
     }
 }
