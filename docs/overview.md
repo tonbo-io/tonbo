@@ -1,4 +1,4 @@
-# Tonbo Project Overview
+# Overview
 
 **Tonbo** is an **open-source, Arrow-native embedded database** designed for **serverless and edge-first online data analytics**.
 It provides a lightweight, in-process engine that lets developers run analytical queries **close to their applications** — whether in cloud functions, edge runtimes, or browser environments — while keeping data stored in **open formats (Apache Arrow and Parquet)** on **object storage**.
@@ -30,7 +30,7 @@ It ensures that Tonbo can read and write Arrow- and Parquet-based data efficient
 
 - **Unified durability semantics:**
   A consistent durability model defines when data is visible and safe across backends.
-  Local disks use `fsync`/`fdatasync`, while S3 maps to “multipart complete” commits; both follow the same contract (`Flush → Data → All → Commit`).
+  Local disks use `fsync`/`fdatasync`, while S3 maps to “multipart complete” commits; both follow the same contract (`Flush -> Data -> All -> Commit`).
 
 ### Why It Matters
 
@@ -85,7 +85,7 @@ durable global state, stateless execution, and deterministic recovery—all buil
 
 ```
      +---------------------- Tonbo Storage Engine ----------------------+
-     |   Write-Ahead Log (WAL)   →   Append-only Segments (SSTables)    |
+     |   Write-Ahead Log (WAL)   ->   Append-only Segments (SSTables)    |
      |                                +   Conditional Manifest          |
      +------------------------------------------------------------------+
                                      |
@@ -99,10 +99,10 @@ Tonbo adopts a **columnar LSM (Log-Structured Merge) Tree** architecture tailore
 
 It forms the backbone of Tonbo’s serverless engine:
 
-- **Write path** → append-only, durable to object storage via Fusio.
-- **Read path** → read and scan data,  let users describe what data they want and supports skip data efficiently.
-- **Compaction path** → columnar merge of Parquet segments with preserved statistics and filters.
-- **Manifest path** → atomic snapshot lineage managed across distributed write / read process.
+- **Write path** -> append-only, durable to object storage via Fusio.
+- **Read path** -> read and scan data,  let users describe what data they want and supports skip data efficiently.
+- **Compaction path** -> columnar merge of Parquet segments with preserved statistics and filters.
+- **Manifest path** -> atomic snapshot lineage managed across distributed write / read process.
 
 ### Why It Matters
 
@@ -118,17 +118,19 @@ In short, the merge-tree turns object storage from a passive file system into an
 
 ### Conceptual Diagram
 
-                    +------------- Tonbo Merge-Tree Engine -------------+
-                    |                                                  |
-        Write Path  |  WAL → MemTable(mutable→immutable) → L0 SSTables |
-                    |               ↑                   ↓              |
-        Read Path   |   Snapshot ← Manifest ← Compaction Scheduler     |
-                    |                   ↓                              |
-                    |          L1..Ln SSTables (Parquet on S3)         |
-                    +--------------------------------------------------+
+```
+                    +------------- Tonbo Merge-Tree Engine ---------------+
+                    |                                                     |
+        Write Path  |  WAL -> MemTable(mutable->immutable) -> L0 SSTables |
+                    |               ^                   ^                 |
+        Read Path   |   Snapshot <- Manifest <- Compaction Scheduler      |
+                    |                   v                                 |
+                    |          L1..Ln SSTables (Parquet on S3)            |
+                    +-----------------------------------------------------+
                                          |
                                    Object Storage
                 Immutable Parquet Segments + Conditional Manifest Versions
+```
 
 ### Data Model
 
@@ -148,7 +150,7 @@ Tonbo’s merge-tree storage model organizes data into several logical component
 - **Manifest**
   The manifest is the database’s versioned metadata log. It tracks all SST files and their levels, deleted WALs, and checkpoints, maintaining atomic snapshot lineage. Updates to the manifest use conditional commits on object storage, ensuring atomic visibility across distributed processes.
 
-Together, these layers define Tonbo’s logical data model: mutable writes flow through WAL → MemTable → immutable flush → SsTable → Manifest, forming an append-only, versioned architecture optimized for object storage and serverless execution.
+Together, these layers define Tonbo’s logical data model: mutable writes flow through WAL -> MemTable -> immutable flush -> SsTable -> Manifest, forming an append-only, versioned architecture optimized for object storage and serverless execution.
 
 ### Write Path
 
@@ -196,7 +198,7 @@ Tonbo’s GC is **manifest-driven and snapshot-safe**, designed for object stora
 - **Reachability by manifest:** only delete WAL/SST objects **not referenced** by the HEAD manifest or any **retained versions** (time-travel).
 - **Snapshot grace:** respect active snapshot timestamps so **no in-use object** is collected.
 - **Write-new only:** incomplete/unpublished objects are never visible and can be safely removed; GC targets **superseded SSTs**, **old WAL fragments**, and **orphaned uploads**.
-- **Asynchronous & idempotent:** runs in the background (via compactor or a small GC worker) as a simple **plan → sweep** routine; safe to retry, no local state.
+- **Asynchronous & idempotent:** runs in the background (via compactor or a small GC worker) as a simple **plan -> sweep** routine; safe to retry, no local state.
 - **Serverless-friendly:** correctness lives in **object storage + manifest**; GC reduces read amplification and object/list costs without centralized coordination.
 
 ### Read Path
@@ -212,6 +214,52 @@ Resolve a **snapshot manifest** (HEAD or a specific version), then build a minim
 - ranges & optional indexes (bloom/inverted/vector),
   producing the exact set of objects/row-groups/columns for Phase 2.
 
+```
+================= Phase 1: Plan & Prune =================
+
++----------------------------+
+| Manifest Snapshot          |
+| (HEAD or specific version) |
++-----+----------------------+
+      |
+      v
++-----+------+
+|   Planner  |
+| normalize  |
+| predicates |
++-----+------+
+      |
+      |
+      |        +-----------------------------+       +-----------------------------+
+      |        | Sources                     |       | Sidecar Indexes             |
+      |        | Txn / Mem / Imm / L0..Ln    |       | vector / inverted / bitmap  |
+      |        | metadata + file statistics  |       +-------------+---------------+
+      |        +-----------+-----------------+                     |
+      |                    |                                       |
+      |                    |                                       |
+      |                    |                                       |
+      |                    |                                       |
+      |                    |                                       |
+      |                    |                                       |
+      |                    |                                       |
+      +--------+-----------+---------------------------------------+
+               |
+               v
+      +--------+--------+
+      |     Pruner       |
+      |  levels / stats  |
+      |  page indexes    |
+      |  PK range filter |
+      +--------+--------+
+                  |
+                  v
+      +--------+--------+
+      |   PLAN (RowSet,  |
+      |   Projection,    |
+      |   Residuals)     |
+      +------------------+
+```
+
 **Phase 2 — Merge & Materialize (columnar streaming)**
 Open only the planned sources and perform a **k-way, heap-driven async merge** across txn/mutable/immutable and L0..Ln:
 
@@ -220,37 +268,46 @@ Open only the planned sources and perform a **k-way, heap-driven async merge** a
 - support **early termination** (e.g., `LIMIT n`) and backpressure,
 - stream **only needed column chunks**, then package into Arrow `RecordBatch`es.
 
-```mermaid
-flowchart LR
-  %% Phase 1
-  subgraph P1["Phase 1: Plan & Prune"]
-    M["Manifest snapshot (HEAD or version)"]
-    P["Planner"]
-    R["Pruner (levels, min/max, stats, indexes, projection)"]
-    M --> P --> R --> PLAN["Scan Plan (sources, row-groups, columns)"]
-  end
+```
+==================== Phase 2: Merge & Materialize ====================
 
-  %% Phase 2
-  subgraph P2["Phase 2: Merge & Materialize"]
-    O["Open planned objects via Fusio"]
-    MS["MergeStream (k-way, MVCC, order, LIMIT, backpressure)"]
-    PKG["PackageStream (columnar packer)"]
-    RB["Arrow RecordBatches"]
-    PLAN --> O --> MS --> PKG --> RB
-  end
-
-  SRC["SST L0..Ln + in-memory tables"] --> R
-  RB --> CONS["Consumer (Tonbo API / DataFusion / Postgres FDW)"]
-
++-----------+-----------+
+| Open planned objects  |
+| via Fusio             |
++-----------+-----------+
+            |
+            v
++-----------------------+
+| MergeStream           |
+| k-way, MVCC, ordered  |
+| early LIMIT, backpress|
++-----------+-----------+
+            |
+            v
++-----------------------+
+| PackageStream         |
+| columnar packer       |
++-----------+-----------+
+            |
+            v
++-----------------------+
+| Arrow RecordBatches   |
++-----------+-----------+
+            |
+            v
++-----------------------+
+| Consumer              |
+| (Tonbo API / DF / FDW)|
++-----------------------+
 ```
 
 #### Scan Pipeline
 
 ```
-Selected sources (txn / mutable / immutable / L0..Ln)
-          │
-          ▼
-   MergeStream  ──(k-way, MVCC, ordered, LIMIT/backpressure)──►  PackageStream  ──►  Arrow RecordBatches
+Selected sources (txn/mutable/immutable/L0..Ln)
+          |
+          v
+MergeStream --(k-way, MVCC, ordered, LIMIT/backpressure)--> PackageStream --> Arrow RecordBatches
 ```
 
 #### Why this design
@@ -259,7 +316,7 @@ The two-phase plan+scan **cuts object-storage bytes and tail latency**, and the 
 
 ## MVCC
 
-Tonbo’s MVCC is built for serverless, object-storage–native operation: all durable state is **append-only** (WAL fragments, Parquet SSTs) and **visibility is defined by the manifest** via **conditional (CAS) commits**. (For read planning/execution, see **6.2 Read Path**.)
+Tonbo’s MVCC is built for serverless, object-storage–native operation: all durable state is **append-only** (WAL fragments, Parquet SSTs) and **visibility is defined by the manifest** via **conditional (CAS) commits**.
 
 ### Core Model
 
@@ -270,7 +327,7 @@ Tonbo’s MVCC is built for serverless, object-storage–native operation: all d
 
 ### Write & Publish
 
-- **Durability**: append to **WAL fragment** (immutable object) → apply to **Mutable MemTable** → on freeze/flush, create **L0 SSTs** and **CAS-publish** manifest edits.
+- **Durability**: append to **WAL fragment** (immutable object) -> apply to **Mutable MemTable** -> on freeze/flush, create **L0 SSTs** and **CAS-publish** manifest edits.
 - **Idempotent publish**: manifest CAS makes retries safe; incomplete uploads remain invisible.
 
 ### Transactions
@@ -299,6 +356,43 @@ Tonbo’s MVCC is built for serverless, object-storage–native operation: all d
 - **Append-only data** (WAL/SST) + **conditional publish** (CAS).
 - **Monotonic `Ts` + latest-wins** under a snapshot.
 - **Readers/Writers stateless**; durability and ordering live in object storage + manifest.
+
+## Checkpoints, Snapshots & Catalog Versioning
+
+Tonbo makes **time-travel, rollback, and dataset freezing** first-class by publishing **data and catalog (schema & indexes)** together at a checkpoint. Reads are **snapshot-consistent** for both planes.
+
+### Primitives
+
+* **Snapshot (read)**: a stable `(manifest_version, read_ts, schema_set)` view; sessions pin it for reproducible scans.
+* **Checkpoint (write)**: `flush -> L0 -> CAS publish` atomically switches **SST visibility + catalog edits**; may attach a **tag** (e.g., `episode:123`, `schema:users@v7`).
+* **Time travel**: address by **version / tag / timestamp** within retention; **pins** keep important versions from GC.
+* **Export / restore**: materialize a tagged version; optionally move `HEAD` back to a prior version.
+
+### Catalog-aware DDL
+
+* **Additive (safe)**: add NULLable columns, widen types, add indexes -> publish at checkpoint; old files read missing cols as NULL/default.
+* **Destructive** (drop/rename/narrow/vector-dim change):
+  * **Soft drop (default)**: hide in catalog at checkpoint; background compaction rewrites; old snapshots remain readable until GC.
+  * **Hard drop (compliance)**: checkpoint carries a rewrite plan; compactor rewrites immediately; tighten retention to retire prior versions early.
+
+### Sidecar indexes
+
+* Vector / inverted / bitmap indexes are **versioned with SST generations** and carry the snapshot’s `schema_id`; rebuild when schema requires.
+* Indexes are **snapshot-aware** (no per-row MVCC), switching at checkpoint boundaries for efficiency.
+
+### Ops defaults
+
+* Retention window (e.g., 7–30 days); **pin** episodes/releases.
+* Checkpoint before destructive DDL and at episode/task boundaries.
+* Compaction publishes new versions; old versions readable until GC.
+
+### Why this matters
+
+* **Reproducible reads**: evaluation/audit see the exact **data+schema** used.
+* **Safe rollback**: one operation flips both planes back.
+* **Dataset freezing**: tag and export stable cuts for fine-tune/A/B runs.
+
+> This unified layer is the **first step** toward agent-grade version control: practical snapshots/time-travel, atomic checkpoints, catalog awareness, and pinned tags—while keeping the online path **append-only + CAS-atomic**.
 
 ## Data & File Formats
 
@@ -330,11 +424,11 @@ Tonbo runs on **async Rust** with a **Fusio-based Executor / Timer / FS** stack,
 
 - **OPFS (browser, WASM)**
   First-class storage backend. Core ops (`open/read_at/write_all/size/close`) map to OPFS handles.
-  Durability mapping: `Flush/Data/All` → flush/close (browsers don’t expose `fsync`); `Commit` & `DirSync` → no-op.
+  Durability mapping: `Flush/Data/All` -> flush/close (browsers don’t expose `fsync`); `Commit` & `DirSync` -> no-op.
 
 - **Deno**
   Prefer **OPFS** (same paths, e.g. `Path::from_opfs_path("...")`).
-  If OPFS is unavailable, fall back to **Deno FS** (sandboxed local dir) **or** go fully remote with **S3/R2** via `wasm-http` (where `Commit` = multipart-complete → visible).
+  If OPFS is unavailable, fall back to **Deno FS** (sandboxed local dir) **or** go fully remote with **S3/R2** via `wasm-http` (where `Commit` = multipart-complete -> visible).
 
 - **Config sketch**
   - Browser/Deno (with OPFS): `DbOption::new(...).base_fs(OPFS)`
@@ -345,7 +439,70 @@ Tonbo runs on **async Rust** with a **Fusio-based Executor / Timer / FS** stack,
 
 ## Query
 
-> To be done
+Arrow-native, **pushdown-first**, **snapshot-consistent** query layer. It resolves a manifest snapshot, plans precisely, scans minimally, and streams Arrow `RecordBatches` across edge and serverless runtimes. One small core serves multiple interfaces.
+
+### Plan -> Scan
+
+```
+PG FDW     DataFusion     JS/Python
+   \          |              /
+    \         |             /
+     +-------------------------+
+     |   Predicate Adapter     |
+     +-------------------------+
+                 |
+     +-------------------------+
+     | PLAN: resolve snapshot  |
+     | prune -> RowSet+Proj+RS |
+     +-------------------------+
+          ^                 ^
+          |                 |
++----------------+   +------------------+
+| Manifest       |   | Sidecar Indexes  |
+| (HEAD/version) |   | (vector/inv/bm)  |
++----------------+   +------------------+
+                 |
+     +-------------------------+
+     | SCAN: k-way merge       |
+     | page prune, early LIMIT |
+     | residual recheck (SV)   |
+     +-------------------------+
+                 |
+     +-------------------------+
+     | Arrow RecordBatches     |
+     +-------------------------+
+```
+
+### Sources & precedence
+
+```
+[ Snapshot: manifest + read_ts ]
+             |
+     +---+---+---+---+---+
+     |   |   |   |   |   |
+   Txn  Mut Imm  L0  L1..Ln
+     \    \   \  /     /
+      \    \   \/     /
+       \    \  /\    /
+        +--------------+
+        | Merge & MVCC |
+        | latest-wins  |
+        +--------------+
+               |
+   +---------------------------+
+   | Ordered stream (PK sort) |
+   | with early LIMIT         |
+   +---------------------------+
+```
+
+### Key points
+
+- **Interfaces:** Postgres FDW, DataFusion `TableProvider`, lightweight JS and Python SDK — all adapt into one shared predicate model.
+- **Execution:** Two phases — **Plan** builds RowSet and projection and marks residuals; **Scan** does k-way merge across sources with page pruning, projection, early LIMIT, and residual recheck.
+- **Pushdown:** Filter, projection, limit, order by primary key. Filters classified as **Eq**, **Neq**, **In**, etc.; exact parts drive RowSet and Parquet page pruning.
+- **Pruning & indexes:** Uses manifest snapshot, primary key ranges, segment and column stats, Parquet page indexes; optional sidecar indexes such as vector, inverted, bitmap produce RowSets intersected with PK.
+- **Correctness:** Manifest-defined snapshot plus read timestamp; append-only WAL and SST with CAS publishes; compaction rewrites only; time-travel within GC window.
+- **Performance:** Columnar only-read, larger Parquet pages for object storage efficiency, cached plans and RowSets, tunable batch size, simple stats-based hints; heavy aggregations and joins live in callers.
 
 ## Manifest
 
@@ -358,7 +515,7 @@ Tonbo’s **manifest** is the authoritative source of truth that coordinates **s
 - **Coordination hub:** writers/compactors/GC advertise and claim work via manifest-adjacent records (plans, leases) using CAS.
 - **Recovery anchor:** after crashes, reload the last good manifest and continue; incomplete objects remain invisible.
 
-### Data Model (conceptual)
+### Data Model
 
 - **Version (V\_n):** lists visible SST scopes per level (L0..Ln), referenced WAL generations, optional sidecar indexes, and watermarks (timestamps).
 - **HEAD:** a pointer to the current Version (V\_n). Moving HEAD is an **atomic** operation (CAS).
@@ -377,7 +534,7 @@ Tonbo’s **manifest** is the authoritative source of truth that coordinates **s
 ### Interoperability with Serverless Roles
 
 - **Reader (stateless):** fetch HEAD (or a specific version), execute two-phase read on the referenced SSTs; zero dependence on local state.
-- **Writer (stateless):** persist WAL fragment → produce L0 SSTs → **CAS** `Add{L0,...}` (+ optional WAL retire hints). Retries are safe at the manifest boundary.
+- **Writer (stateless):** persist WAL fragment -> produce L0 SSTs -> **CAS** `Add{L0,...}` (+ optional WAL retire hints). Retries are safe at the manifest boundary.
 - **Compactor (long-lived):** claim a plan (CAS), read referenced SSTs, build new SSTs, then **atomically** publish `Add{L+1,...} + Remove{L,...}`. Readers on older snapshots remain correct until GC.
 
 ### Guarantees
@@ -389,7 +546,7 @@ Tonbo’s **manifest** is the authoritative source of truth that coordinates **s
 
 ### Why it fits distributed serverless
 
-- **No central coordinator:** correctness is enforced by **object-store CAS** (e.g., ETag/If-Match) and immutable uploads (MPU complete → visible).
+- **No central coordinator:** correctness is enforced by **object-store CAS** (e.g., ETag/If-Match) and immutable uploads (MPU complete -> visible).
 - **Stateless scale-out:** any node can read, write, or compact; the manifest serializes visibility without shared process state.
 - **Resilience by construction:** crashes leave HEAD unchanged; incomplete or orphaned objects are invisible until a clean publish.
 
@@ -410,7 +567,7 @@ Compactor ─┘       │   V_n     │               +------------------+
 
 
 
-## Serverless Execution Topology (Reader • Writer • Compactor)
+## Serverless Execution Topology
 
 Tonbo runs as a **manifest-orchestrated** system over **object storage**. The **manifest** on S3 is the control plane; data lives as **immutable WAL fragments and Parquet SSTs**. Compute roles are decoupled: **Readers** and **Writers** are **stateless** (safe for edge/FaaS), while the **Compactor** is a **long-lived, state-minimal service** that advances merges and cleanup. All coordination happens through **conditional (CAS) manifest commits**—no central coordinator is required.
 
@@ -425,9 +582,9 @@ Tonbo runs as a **manifest-orchestrated** system over **object storage**. The **
 
 ### Lifecycle at a Glance
 
-- **Write path:** WAL fragment (object) → MemTable → freeze → **Minor compaction** to L0 SSTs (direct to S3) → **CAS manifest update**.
-- **Read path:** Resolve manifest snapshot → parallel, columnar scans with pushdown → optional local caching.
-- **Compaction path (background):** Select L/L+1 SSTs → merge → upload new SSTs → **CAS manifest update** → GC old objects.
+- **Write path:** WAL fragment (object) -> MemTable -> freeze -> **Minor compaction** to L0 SSTs (direct to S3) -> **CAS manifest update**.
+- **Read path:** Resolve manifest snapshot -> parallel, columnar scans with pushdown -> optional local caching.
+- **Compaction path (background):** Select L/L+1 SSTs -> merge -> upload new SSTs -> **CAS manifest update** -> GC old objects.
 
 ### Why this fits Edge Compute & Shared Storage
 
@@ -438,17 +595,17 @@ Tonbo runs as a **manifest-orchestrated** system over **object storage**. The **
 - **High-throughput analytics:** columnar layout + statistics/filters + pushdown leverage object storage bandwidth and concurrency.
 
 ### Conceptual Diagram
-
+```
         +---------------------- Compute Roles -----------------------+
         |  Reader (stateless)  |  Writer (stateless)                 |
-        |  snapshot + pushdown |  WAL → L0 flush → CAS publish       |
+        |  snapshot + pushdown |  WAL -> L0 flush -> CAS publish     |
         +----------|-----------+-----------|-------------------------+
                    |                       |
                    v                       v
-        +------------------------- Object Storage -------------------------+
-        |   WAL fragments (immutable)  |   Parquet SSTs (L0..Ln) | Manifest |
+        +------------------------- Object Storage ---------------------------+
+        |   WAL fragments (immutable)  |   Parquet SSTs (L0..Ln)  | Manifest |
         |         append-only          |     write-new only       |  (CAS)   |
-        +-------------------^-------------------------^-----------+---------+
+        +-------------------^-------------------------^-----------+----------+
                             |                         |
                             |                         |
                  +----------+-----------+             |
@@ -458,3 +615,4 @@ Tonbo runs as a **manifest-orchestrated** system over **object storage**. The **
                  |  merge & publish via |
                  |  CAS manifest        |
                  +----------------------+
+```
