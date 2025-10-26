@@ -95,6 +95,10 @@ impl DynSchema {
         }
     }
 
+    pub fn primary_index(&self) -> usize {
+        self.primary_index_arrow
+    }
+
     /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
     pub fn from_arrow_schema(
         arrow_schema: ArrowSchema,

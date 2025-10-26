@@ -13,7 +13,7 @@ mod test {
         record,
         record::Record,
         version::{edit::VersionEdit, TransactionTs},
-        CompactionExecutor, DbOption, Path, DB,
+        CompactionExecutor, DbOption, Path, ProjectionMask, DB,
     };
     use tonbo_macros::Record;
 

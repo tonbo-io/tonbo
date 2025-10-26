@@ -5,7 +5,7 @@ mod tests {
     use fusio::path::Path;
     use futures_util::StreamExt;
     use tempfile::TempDir;
-    use tonbo::{executor::tokio::TokioExecutor, DbOption, Record, DB};
+    use tonbo::{executor::tokio::TokioExecutor, DbOption, ProjectionMask, Record, DB};
 
     const WRITE_TIMES: usize = 500_000;
     const STRING_SIZE: usize = 50;
