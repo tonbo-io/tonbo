@@ -137,7 +137,7 @@ In short, the merge-tree turns object storage from a passive file system into an
 Tonbo’s merge-tree storage model organizes data into several logical components that together maintain durability, consistency, and efficient read/write performance.
 
 - **MemTable**
-  - *Mutable*: an in-memory, ordered key–value structure (implemented with a skipmap) that handles live writes and reads. Each insert or delete is first appended to the WAL, then applied here for immediate visibility. When the memtable reaches its size threshold, it becomes immutable.
+  - *Mutable*: an in-memory, ordered key–value structure that handles live writes and reads. Each insert or delete is first appended to the WAL, then applied here for immediate visibility. When the memtable reaches its size threshold, it becomes immutable.
   - *Immutable*: a frozen snapshot of a memtable, converted to Arrow columnar format for efficient read and scan. It supports range queries and projection via index and Arrow record batches.
 
 - **SsTable**
