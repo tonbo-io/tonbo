@@ -287,11 +287,11 @@ where
     validate_tombstone_bitmap(&batch, &tombstones)?;
     let commit_ts = db.next_commit_ts();
     if let Some(handle) = db.wal_handle().cloned() {
-        // TODO: await the WAL ticket once durability handling lands.
-        handle
+        let ticket = handle
             .append(&batch, &tombstones, commit_ts)
             .await
             .map_err(KeyExtractError::from)?;
+        ticket.durable().await.map_err(KeyExtractError::from)?;
     }
     apply_dyn_wal_batch(db, batch, tombstones, commit_ts)
 }

@@ -18,5 +18,4 @@ arrow-array = "56.2.0"
 arrow-schema = "56.2.0"
 arrow-select = "56.2.0"
 futures = "0.3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
-
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

@@ -120,11 +120,11 @@ impl Mode for DynMode {
                     batch: wal_batch,
                     commit_ts,
                 };
-                // TODO: await the WAL ticket once durability handling lands.
-                handle
+                let ticket = handle
                     .submit(payload)
                     .await
                     .map_err(KeyExtractError::from)?;
+                ticket.durable().await.map_err(KeyExtractError::from)?;
             }
             db.insert_into_mutable(batch, commit_ts)?;
             db.maybe_seal_after_insert()?;
