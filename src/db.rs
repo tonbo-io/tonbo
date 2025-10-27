@@ -286,11 +286,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
             .filter_map(|ids| ids.as_ref())
             .flat_map(|ids| ids.clone())
             .collect();
-        let wal_ids = if wal_ids_flat.is_empty() {
-            None
-        } else {
-            Some(wal_ids_flat)
-        };
+        let wal_ids = (!wal_ids_flat.is_empty()).then_some(wal_ids_flat);
         builder.set_wal_ids(wal_ids);
 
         match builder.finish().await {
