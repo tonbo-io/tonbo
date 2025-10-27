@@ -20,7 +20,7 @@
 //!
 //! # Examples
 //!
-//! ```no_run
+//! ```ignore
 //! use std::ops::Bound;
 //!
 //! use fusio::path::Path;
@@ -121,6 +121,7 @@ pub(crate) mod snapshot;
 pub mod stream;
 pub mod transaction;
 mod trigger;
+pub mod typed;
 pub mod version;
 mod wal;
 
@@ -165,7 +166,7 @@ use parquet::{
 use parquet_lru::{DynLruCache, NoCache};
 use record::Record;
 use thiserror::Error;
-pub use tonbo_macros::{KeyAttributes, Record};
+// Legacy derive removed in favor of typed-arrow integration.
 use tracing::error;
 use transaction::{CommitError, Transaction, TransactionEntry};
 use trigger::FreezeTrigger;

@@ -1,6 +1,7 @@
-use tonbo_macros::Record;
+use tonbo::typed as t;
 
-#[derive(Record, Debug)]
+#[t::record]
+#[derive(Debug)]
 pub struct User {
     name: String,
     email: Option<String>,
