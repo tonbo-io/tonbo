@@ -2,13 +2,12 @@
 
 use std::{io, sync::Arc};
 
-use fusio::{DynFs, Read, error::Error as FusioError, path::Path as FusioPath};
-use futures::{StreamExt, executor::block_on};
+use fusio::{DynFs, Read, error::Error as FusioError, fs::OpenOptions, path::Path as FusioPath};
+use futures::StreamExt;
 
 use crate::wal::{
     WalConfig, WalError, WalResult,
     frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
-    storage::WalStorage,
 };
 
 /// Scans WAL segments on disk and yields decoded events.
@@ -27,25 +26,7 @@ impl Replayer {
     }
 
     /// Iterate through WAL segments and produce events.
-    ///
-    /// The public API stays synchronous for callers such as `DB::recover_with_wal`,
-    /// but we delegate to the async helper internally because `DynFs::list`,
-    /// `open_options`, and `read_to_end_at` are async-only fusio primitives.
-    pub fn scan(&self) -> WalResult<Vec<WalEvent>> {
-        block_on(self.scan_async())
-    }
-
-    /// Access the configuration.
-    pub fn config(&self) -> &WalConfig {
-        &self.cfg
-    }
-
-    /// Async implementation detail used by [`scan`].
-    ///
-    /// Fusio exposes filesystem accessors (`list`, `open_options`, `read_to_end_at`)
-    /// exclusively as async operations, so we stage their usage inside this future
-    /// and have the public entry point (`scan`) synchronously `block_on` it.
-    async fn scan_async(&self) -> WalResult<Vec<WalEvent>> {
+    pub async fn scan(&self) -> WalResult<Vec<WalEvent>> {
         let mut entries = Vec::<(u64, FusioPath)>::new();
         let mut stream = match self.fs.list(&self.cfg.dir).await {
             Ok(stream) => stream,
@@ -81,7 +62,7 @@ impl Replayer {
             let path_display = path.to_string();
             let mut file = self
                 .fs
-                .open_options(&path, WalStorage::read_options())
+                .open_options(&path, OpenOptions::default())
                 .await
                 .map_err(|err| {
                     WalError::Storage(format!(
@@ -131,6 +112,11 @@ impl Replayer {
         }
 
         Ok(events)
+    }
+
+    /// Access the configuration.
+    pub fn config(&self) -> &WalConfig {
+        &self.cfg
     }
 }
 
@@ -211,7 +197,7 @@ mod tests {
         cfg.dir = wal_root;
         cfg.filesystem = fs;
         let replayer = Replayer::new(cfg);
-        let events = replayer.scan().expect("scan");
+        let events = futures::executor::block_on(replayer.scan()).expect("scan");
         assert_eq!(events.len(), 2);
 
         match &events[0] {
@@ -294,7 +280,7 @@ mod tests {
         cfg.dir = wal_root;
         cfg.filesystem = fs;
         let replayer = Replayer::new(cfg);
-        let events = replayer.scan().expect("scan succeeds");
+        let events = futures::executor::block_on(replayer.scan()).expect("scan succeeds");
 
         assert_eq!(events.len(), 1, "commit frame should be ignored");
         match &events[0] {

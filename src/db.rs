@@ -183,7 +183,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         db.set_wal_config(Some(wal_cfg.clone()));
 
         let replayer = Replayer::new(wal_cfg);
-        let events = replayer.scan().map_err(KeyExtractError::from)?;
+        let events = replayer.scan().await.map_err(KeyExtractError::from)?;
 
         let last_commit_ts = M::replay_wal(&mut db, events)?;
         if let Some(ts) = last_commit_ts {
