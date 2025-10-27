@@ -405,7 +405,9 @@ where
             self.staged,
             usize::try_from(bytes_written).unwrap_or(usize::MAX),
         );
-        Ok(SsTable::new(self.descriptor.with_stats(stats)))
+        Ok(SsTable::new(
+            self.descriptor.with_stats(stats).with_wal_ids(self.wal_ids),
+        ))
     }
 
     #[cfg(test)]
@@ -639,6 +641,15 @@ mod tests {
         ImmutableMemTable::new(batch, index, mvcc)
     }
 
+    fn tokio_block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(future)
+    }
+
     #[test]
     fn parquet_writer_accumulates_segment_stats() {
         let schema = Arc::new(Schema::new(vec![
@@ -701,5 +712,28 @@ mod tests {
             ParquetTableWriter::new(test_config(schema), descriptor);
         let result = futures::executor::block_on(writer.finish());
         assert!(matches!(result, Err(SsTableError::NoImmutableSegments)));
+    }
+
+    #[test]
+    fn finish_threads_wal_ids_into_descriptor() {
+        use std::str::FromStr;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let descriptor = SsTableDescriptor::new(SsTableId::new(11), 0);
+        let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+            ParquetTableWriter::new(test_config(schema.clone()), descriptor);
+
+        let wal_ids = vec![FileId::from_str("01HV6Z2Z8Q4W5X6Y7Z8A9BCDEF").expect("valid ulid")];
+        writer.set_wal_ids(Some(wal_ids.clone()));
+
+        let segment = sample_segment(vec![("k".into(), 1)], vec![42], vec![false]);
+        writer.stage_immutable(&segment).expect("stage segment");
+
+        let table = tokio_block_on(writer.finish()).expect("finish");
+        let recorded = table.descriptor().wal_ids().expect("descriptor wal ids");
+        assert_eq!(recorded, wal_ids.as_slice());
     }
 }
