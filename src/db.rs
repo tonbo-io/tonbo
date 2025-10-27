@@ -183,7 +183,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         db.set_wal_config(Some(wal_cfg.clone()));
 
         let replayer = Replayer::new(wal_cfg);
-        let events = replayer.scan().map_err(KeyExtractError::from)?;
+        let events = replayer.scan().await.map_err(KeyExtractError::from)?;
 
         let last_commit_ts = M::replay_wal(&mut db, events)?;
         if let Some(ts) = last_commit_ts {
@@ -656,7 +656,12 @@ mod tests {
 
     #[test]
     fn recover_replays_commit_timestamps_and_advances_clock() {
-        use std::{fs, time::SystemTime};
+        use std::{
+            fs,
+            time::{Duration, SystemTime},
+        };
+
+        use tokio::runtime::Runtime;
 
         let wal_dir = std::env::temp_dir().join(format!(
             "tonbo-replay-test-{}",
@@ -693,16 +698,19 @@ mod tests {
             bytes.extend_from_slice(&frame.into_bytes(seq));
             seq += 1;
         }
-        fs::write(wal_dir.join("000001.wal"), bytes).expect("write wal");
+        fs::write(wal_dir.join("wal-00000000000000000001.tonwal"), bytes).expect("write wal");
 
         let extractor =
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
         let mut cfg = WalConfig::default();
-        cfg.dir = wal_dir.clone();
+        cfg.dir = fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path");
         let executor = Arc::new(BlockingExecutor::default());
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let mut db: DB<DynMode, BlockingExecutor> =
-            block_on(DB::recover_with_wal(config, executor.clone(), cfg)).expect("recover");
+        let runtime = Runtime::new().expect("tokio runtime");
+        let mut db: DB<DynMode, BlockingExecutor> = runtime
+            .block_on(DB::recover_with_wal(config, executor.clone(), cfg))
+            .expect("recover");
+        runtime.shutdown_timeout(Duration::from_secs(0));
 
         // Replayed version retains commit_ts 42 and tombstone state.
         let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");

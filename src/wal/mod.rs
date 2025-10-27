@@ -7,7 +7,6 @@
 use std::{
     fmt,
     marker::PhantomData,
-    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -61,10 +60,10 @@ impl Default for WalSyncPolicy {
 }
 
 /// Configuration for enabling the WAL on a `DB` instance.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WalConfig {
     /// Directory in which WAL segments are created.
-    pub dir: PathBuf,
+    pub dir: Path,
     /// Maximum size for a single WAL segment before rotation.
     pub segment_max_bytes: usize,
     /// Flush interval for the writer's buffer.
@@ -75,18 +74,37 @@ pub struct WalConfig {
     pub retention_bytes: Option<usize>,
     /// Capacity of the writer's bounded queue.
     pub queue_size: usize,
+    /// Filesystem implementation backing the WAL directory.
+    pub filesystem: Arc<dyn DynFs>,
 }
 
 impl Default for WalConfig {
     fn default() -> Self {
+        let dir = Path::parse("wal").expect("static wal path");
         Self {
-            dir: PathBuf::from("wal"),
+            dir,
             segment_max_bytes: 64 * 1024 * 1024,
             flush_interval: Duration::from_millis(10),
             sync: WalSyncPolicy::default(),
             retention_bytes: None,
             queue_size: 65_536,
+            filesystem: Arc::new(TokioFs),
         }
+    }
+}
+
+impl fmt::Debug for WalConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fs_tag = self.filesystem.file_system();
+        f.debug_struct("WalConfig")
+            .field("dir", &self.dir)
+            .field("segment_max_bytes", &self.segment_max_bytes)
+            .field("flush_interval", &self.flush_interval)
+            .field("sync", &self.sync)
+            .field("retention_bytes", &self.retention_bytes)
+            .field("queue_size", &self.queue_size)
+            .field("filesystem", &fs_tag)
+            .finish()
     }
 }
 
@@ -428,10 +446,7 @@ where
     E: Executor + Timer,
 {
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
-        let fs: Arc<dyn DynFs> = Arc::new(TokioFs);
-        let wal_root = Path::from_filesystem_path(&cfg.dir)
-            .map_err(|err| WalError::Storage(err.to_string()))?;
-        let storage = storage::WalStorage::new(fs, wal_root);
+        let storage = storage::WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
 
         let metrics = Arc::new(E::rw_lock(WalMetrics::default()));
         let writer = writer::spawn_writer(
@@ -445,7 +460,7 @@ where
         let (sender, queue_depth, join) = writer.into_parts();
         let handle = WalHandle::from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
 
-        self.set_wal_config(Some(cfg));
+        self.set_wal_config(Some(cfg.clone()));
         self.set_wal_handle(Some(handle.clone()));
         Ok(handle)
     }
