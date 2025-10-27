@@ -24,7 +24,7 @@ use crate::{
 pub struct Transaction {
     txn: Option<transaction::Transaction<'static, DynRecord, TokioExecutor>>,
     desc: Arc<Vec<Column>>,
-    primary_key_index: usize,
+    primary_key_indices: Arc<Vec<usize>>,
 }
 
 impl Transaction {
@@ -32,12 +32,12 @@ impl Transaction {
         txn: transaction::Transaction<'txn, DynRecord, TokioExecutor>,
         desc: Arc<Vec<Column>>,
     ) -> Self {
-        let primary_key_index = desc
+        let primary_key_indices = desc
             .iter()
             .enumerate()
-            .find(|(_idx, col)| col.primary_key)
-            .unwrap()
-            .0;
+            .filter(|(_idx, col)| col.primary_key)
+            .map(|(idx, _col)| idx)
+            .collect();
         Transaction {
             txn: Some(unsafe {
                 transmute::<
@@ -46,7 +46,7 @@ impl Transaction {
                 >(txn)
             }),
             desc,
-            primary_key_index,
+            primary_key_indices: Arc::new(primary_key_indices),
         }
     }
 
@@ -81,7 +81,11 @@ impl Transaction {
             return Err(repeated_commit_err());
         }
 
-        let col_desc = self.desc.get(self.primary_key_index).unwrap();
+        // TODO: handle multiple primary keys
+        let col_desc = self
+            .desc
+            .get(*self.primary_key_indices.get(0).unwrap())
+            .unwrap();
         let col = to_col(py, col_desc, key);
         let desc = self.desc.clone();
 
@@ -136,7 +140,7 @@ impl Transaction {
                 }
             }
         }
-        let record = DynRecord::new(cols, self.primary_key_index);
+        let record = DynRecord::new(cols, self.primary_key_indices.as_ref().to_vec());
         self.txn.as_mut().unwrap().insert(record);
         Ok(())
     }
@@ -149,7 +153,11 @@ impl Transaction {
             return Err(repeated_commit_err());
         }
 
-        let col_desc = self.desc.get(self.primary_key_index).unwrap();
+        // TODO: handle multiple primary keys
+        let col_desc = self
+            .desc
+            .get(*self.primary_key_indices.get(0).unwrap())
+            .unwrap();
         let col = to_col(py, col_desc, key);
 
         self.txn.as_mut().unwrap().remove(col);
@@ -181,7 +189,10 @@ impl Transaction {
                 &'static transaction::Transaction<'_, DynRecord, TokioExecutor>,
             >(txn)
         };
-        let col_desc = self.desc.get(self.primary_key_index).unwrap();
+        let col_desc = self
+            .desc
+            .get(*self.primary_key_indices.get(0).unwrap())
+            .unwrap();
         let projection = self.projection(projection);
         let schema = self.desc.clone();
 

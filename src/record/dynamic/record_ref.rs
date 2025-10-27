@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem, sync::Arc};
+use std::{mem, sync::Arc};
 
 use arrow::{
     array::{Array, AsArray},
@@ -16,16 +16,14 @@ use crate::{
 pub struct DynRecordRef<'r> {
     pub columns: Vec<ValueRef<'r>>,
     // XXX: log encode should keep the same behavior
-    pub primary_index: usize,
-    _marker: PhantomData<&'r ()>,
+    pub primary_indices: Vec<usize>,
 }
 
 impl<'r> DynRecordRef<'r> {
-    pub(crate) fn new(columns: Vec<ValueRef<'r>>, primary_index: usize) -> Self {
+    pub(crate) fn new(columns: Vec<ValueRef<'r>>, primary_indices: Vec<usize>) -> Self {
         Self {
             columns,
-            primary_index,
-            _marker: PhantomData,
+            primary_indices,
         }
     }
 }
@@ -36,7 +34,10 @@ impl Encode for DynRecordRef<'_> {
         W: Write,
     {
         (self.columns.len() as u32).encode(writer).await?;
-        (self.primary_index as u32).encode(writer).await?;
+        (self.primary_indices.len() as u32).encode(writer).await?;
+        for idx in self.primary_indices.iter() {
+            (*idx as u32).encode(writer).await?;
+        }
         for col in self.columns.iter() {
             col.encode(writer).await?;
         }
@@ -44,7 +45,8 @@ impl Encode for DynRecordRef<'_> {
     }
 
     fn size(&self) -> usize {
-        let mut size = 2 * mem::size_of::<u32>();
+        let mut size =
+            2 * mem::size_of::<u32>() + self.primary_indices.len() * mem::size_of::<u32>();
         for col in self.columns.iter() {
             size += col.size();
         }
@@ -56,8 +58,9 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
     type Record = DynRecord;
 
     fn key(self) -> <<<Self::Record as Record>::Schema as Schema>::Key as Key>::Ref<'r> {
+        // TODO: handle multiple primary keys
         self.columns
-            .get(self.primary_index)
+            .get(self.primary_indices[0])
             .cloned()
             .expect("The primary key must exist")
     }
@@ -71,11 +74,15 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
         let null = record_batch.column(0).as_boolean().value(offset);
         let metadata = full_schema.metadata();
 
-        let primary_index = metadata
-            .get("primary_key_index")
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
+        let pk_user_indices: Vec<usize> = metadata
+            .get(crate::magic::PK_USER_INDICES)
+            .map(|s| {
+                s.split(',')
+                    .filter(|p| !p.is_empty())
+                    .filter_map(|p| p.parse::<usize>().ok())
+                    .collect()
+            })
+            .expect("primary key user index must exist in schema metadata");
         let ts = record_batch
             .column(1)
             .as_primitive::<arrow::datatypes::UInt32Type>()
@@ -107,15 +114,15 @@ impl<'r> RecordRef<'r> for DynRecordRef<'r> {
 
         let record = DynRecordRef {
             columns,
-            primary_index,
-            _marker: PhantomData,
+            primary_indices: pk_user_indices,
         };
         OptionRecordRef::new(ts, record, null)
     }
 
     fn projection(&mut self, projection_mask: &parquet::arrow::ProjectionMask) {
         for (idx, col) in self.columns.iter_mut().enumerate() {
-            if idx != self.primary_index && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
+            if !self.primary_indices.contains(&idx)
+                && !projection_mask.leaf_included(idx + USER_COLUMN_OFFSET)
             {
                 *col = ValueRef::Null;
             }
@@ -144,7 +151,7 @@ mod tests {
             ("foo_opt", Float32, true),
             ("bar", Float64, false),
             ("bar_opt", Float64, true),
-            2
+            [2]
         );
         let values = vec![
             Value::Boolean(true),
@@ -155,7 +162,7 @@ mod tests {
             Value::Float64(3.234),
             Value::Float64(13.234),
         ];
-        let record = DynRecord::new(values, 2);
+        let record = DynRecord::new(values, vec![2]);
         {
             // test project all
             let mut record_ref = record.as_record_ref();
@@ -202,7 +209,7 @@ mod tests {
             ("email", Utf8, true),
             ("adress", Utf8, true),
             ("data", Binary, true),
-            2
+            [2]
         );
         let values = vec![
             Value::Boolean(true),
@@ -213,7 +220,7 @@ mod tests {
             Value::Null,
             Value::Binary(b"hello,tonbo".to_vec()),
         ];
-        let record = DynRecord::new(values, 2);
+        let record = DynRecord::new(values, vec![2]);
         {
             // test project all
             let mut record_ref = record.as_record_ref();
@@ -272,7 +279,7 @@ mod tests {
                 DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                 true
             ),
-            2
+            [2]
         );
         let values = vec![
             Value::Boolean(true),
@@ -282,7 +289,7 @@ mod tests {
             Value::Timestamp(1717507203442, TimeUnit::Millisecond),
             Value::Null,
         ];
-        let record = DynRecord::new(values, 2);
+        let record = DynRecord::new(values, vec![2]);
         {
             // test project all
             let mut record_ref = record.as_record_ref();

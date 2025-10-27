@@ -460,7 +460,7 @@ mod tests {
                 DynamicField::new("age".to_string(), ArrayDataType::Int8, false),
                 DynamicField::new("height".to_string(), ArrayDataType::Int16, true),
             ][..],
-            0,
+            &[0],
         );
         let option = DbOption::new(
             Path::from_filesystem_path(temp_dir.path()).unwrap(),
@@ -480,7 +480,7 @@ mod tests {
         mutable
             .insert(
                 LogType::Full,
-                DynRecord::new(vec![Value::Int8(1_i8), Value::Int16(1236_i16)], 0),
+                DynRecord::new(vec![Value::Int8(1_i8), Value::Int16(1236_i16)], vec![0]),
                 0_u32.into(),
             )
             .await

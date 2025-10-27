@@ -7,7 +7,7 @@ use arrow::{
 use parquet::{format::SortingColumn, schema::types::ColumnPath};
 use thiserror::Error;
 
-use super::{array::DynRecordImmutableArrays, DynRecord, Value};
+use super::{DynRecord, DynRecordImmutableArrays, Value};
 use crate::{magic, record::Schema};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -51,7 +51,7 @@ impl From<&Field> for DynamicField {
 
 #[derive(Debug)]
 pub struct DynSchema {
-    primary_index_arrow: usize,
+    primary_index_arrow: Vec<usize>,
     pk_paths: Vec<ColumnPath>,
     sorting: Vec<SortingColumn>,
     arrow_schema: Arc<ArrowSchema>,
@@ -65,9 +65,28 @@ pub enum SchemaError {
 }
 
 impl DynSchema {
-    pub fn new(schema: &[DynamicField], primary_index: usize) -> Self {
+    pub fn new(schema: &[DynamicField], primary_indices: &[usize]) -> Self {
         let mut metadata = HashMap::new();
-        metadata.insert("primary_key_index".to_string(), primary_index.to_string());
+
+        let pk_idx_str = primary_indices
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let full_pk_idx = primary_indices
+            .iter()
+            .map(|i| i + crate::magic::USER_COLUMN_OFFSET)
+            .collect::<Vec<_>>();
+        let full_pk_idx_str = full_pk_idx
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        metadata.insert(crate::magic::PK_USER_INDICES.to_string(), pk_idx_str);
+        // Sorting columns string: "1:desc:1;<full_pk_idx>:asc:1"
+        let sorting_str = format!("1:desc:1;{}:asc:1", full_pk_idx_str);
+        metadata.insert("tonbo.sorting_columns".to_string(), sorting_str);
+
         let arrow_schema = Arc::new(ArrowSchema::new_with_metadata(
             [
                 Field::new("_null", DataType::Boolean, false),
@@ -78,17 +97,22 @@ impl DynSchema {
             .collect::<Vec<_>>(),
             metadata,
         ));
-        let pk_paths = vec![ColumnPath::new(vec![
-            magic::TS.to_string(),
-            schema[primary_index].name.clone(),
-        ])];
-        let sorting = vec![
-            SortingColumn::new(1_i32, true, true),
-            SortingColumn::new((primary_index + 2) as i32, false, true),
-        ];
+        let pk_paths = vec![ColumnPath::new(
+            [magic::TS.to_string()]
+                .into_iter()
+                .chain(primary_indices.iter().map(|i| schema[*i].name.clone()))
+                .collect::<Vec<_>>(),
+        )];
+        let sorting =
+            [SortingColumn::new(1_i32, true, true)]
+                .into_iter()
+                .chain(primary_indices.iter().map(|i| {
+                    SortingColumn::new((*i + magic::USER_COLUMN_OFFSET) as i32, false, true)
+                }))
+                .collect::<Vec<_>>();
 
         Self {
-            primary_index_arrow: primary_index + 2,
+            primary_index_arrow: full_pk_idx,
             pk_paths,
             sorting,
             arrow_schema,
@@ -98,10 +122,27 @@ impl DynSchema {
     /// create [`DynSchema`] from [`arrow::datatypes::Schema`]
     pub fn from_arrow_schema(
         arrow_schema: ArrowSchema,
-        primary_index: usize,
+        primary_indices: &[usize],
     ) -> Result<Self, SchemaError> {
         let mut metadata = HashMap::new();
-        metadata.insert("primary_key_index".to_string(), primary_index.to_string());
+
+        let pk_idx_str = primary_indices
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let full_pk_idx = primary_indices
+            .iter()
+            .map(|i| i + crate::magic::USER_COLUMN_OFFSET)
+            .collect::<Vec<_>>();
+        let full_pk_idx_str = full_pk_idx
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        metadata.insert(crate::magic::PK_USER_INDICES.to_string(), pk_idx_str);
+        let sorting_str = format!("1:desc:1;{}:asc:1", full_pk_idx_str);
+        metadata.insert("tonbo.sorting_columns".to_string(), sorting_str);
 
         let arrow_schema = ArrowSchema::try_merge(vec![
             ArrowSchema::new_with_metadata(
@@ -123,17 +164,23 @@ impl DynSchema {
             fields_vec.push(col);
         }
 
-        let pk_paths = vec![ColumnPath::new(vec![
-            magic::TS.to_string(),
-            fields_vec[primary_index].name.clone(),
-        ])];
-        let sorting = vec![
-            SortingColumn::new(1_i32, true, true),
-            SortingColumn::new((primary_index + 2) as i32, false, true),
-        ];
+        let fields = arrow_schema.fields();
+        let pk_paths = vec![ColumnPath::new(
+            [magic::TS.to_string()]
+                .into_iter()
+                .chain(primary_indices.iter().map(|i| fields[*i].name().clone()))
+                .collect::<Vec<_>>(),
+        )];
+        let sorting =
+            [SortingColumn::new(1_i32, true, true)]
+                .into_iter()
+                .chain(primary_indices.iter().map(|i| {
+                    SortingColumn::new((*i + magic::USER_COLUMN_OFFSET) as i32, false, true)
+                }))
+                .collect::<Vec<_>>();
 
         Ok(Self {
-            primary_index_arrow: primary_index + 2,
+            primary_index_arrow: full_pk_idx,
             pk_paths,
             sorting,
             arrow_schema: Arc::new(arrow_schema),
@@ -153,7 +200,7 @@ impl Schema for DynSchema {
     }
 
     fn primary_key_indices(&self) -> &[usize] {
-        std::slice::from_ref(&self.primary_index_arrow)
+        self.primary_index_arrow.as_slice()
     }
 
     fn primary_key_paths_and_sorting(&self) -> (&[ColumnPath], &[SortingColumn]) {
@@ -181,31 +228,31 @@ impl Schema for DynSchema {
 ///     ("foo", Utf8, false),
 ///     ("bar", Int32, true),
 ///     ("baz", UInt64, true),
-///     0
+///     [0]
 /// );
 /// ```
 #[macro_export]
 macro_rules! dyn_schema {
-    ($(($name: expr, $type: ident, $nullable: expr )),*, $primary: literal) => {
+    ($(($name: expr, $type: ident, $nullable: expr )),*, [$($primary: expr),*]) => {
         {
             $crate::record::DynSchema::new(&[
                 $(
                     $crate::record::DynamicField::new($name.into(), $crate::arrow::datatypes::DataType::$type, $nullable),
                 )*
-            ][..], $primary)
+            ][..], &[$($primary),*])
         }
     }
 }
 
 #[macro_export]
 macro_rules! make_dyn_schema {
-    ($(($name: expr, $type: expr, $nullable: expr )),*, $primary: literal) => {
+    ($(($name: expr, $type: expr, $nullable: expr )),*, [$($primary: expr),*]) => {
         {
             $crate::record::DynSchema::new(&[
                 $(
                     $crate::record::DynamicField::new($name.into(), $type, $nullable),
                 )*
-            ][..], $primary)
+            ][..], &[$($primary),*])
         }
     }
 }
@@ -230,7 +277,7 @@ mod tests {
         ];
         let arrow_schema = Schema::new(fields.clone());
 
-        let dyn_schema = DynSchema::from_arrow_schema(arrow_schema.clone(), 0).unwrap();
+        let dyn_schema = DynSchema::from_arrow_schema(arrow_schema.clone(), &[0]).unwrap();
         for (expected, actual) in dyn_schema
             .arrow_schema
             .fields()
@@ -244,7 +291,12 @@ mod tests {
         // sufficient.
 
         let metadata = dyn_schema.arrow_schema.metadata();
-        let primary_key_index = metadata.get("primary_key_index");
+        let primary_key_index = metadata.get(crate::magic::PK_USER_INDICES);
         assert_eq!(primary_key_index, Some(&"0".into()));
+        // New keys present
+        assert_eq!(
+            metadata.get(crate::magic::PK_USER_INDICES),
+            Some(&"0".into())
+        );
     }
 }
