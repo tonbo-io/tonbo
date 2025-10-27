@@ -494,6 +494,18 @@ where
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
         let storage = storage::WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
 
+        let tail_metadata = block_on(storage.tail_metadata())?;
+        let next_payload_seq = tail_metadata
+            .as_ref()
+            .and_then(|meta| meta.last_provisional_id)
+            .map(|last| last.saturating_add(1))
+            .unwrap_or(frame::INITIAL_FRAME_SEQ);
+        let initial_frame_seq = tail_metadata
+            .as_ref()
+            .and_then(|meta| meta.last_frame_seq)
+            .map(|seq| seq.saturating_add(1))
+            .unwrap_or(frame::INITIAL_FRAME_SEQ);
+
         let metrics = Arc::new(E::rw_lock(WalMetrics::default()));
         let writer = writer::spawn_writer(
             Arc::clone(self.executor()),
@@ -501,10 +513,10 @@ where
             cfg.clone(),
             Arc::clone(&metrics),
             0,
-            frame::INITIAL_FRAME_SEQ,
+            initial_frame_seq,
         );
         let (sender, queue_depth, join) = writer.into_parts();
-        let handle = WalHandle::from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        let handle = WalHandle::from_parts(sender, queue_depth, join, next_payload_seq);
 
         self.set_wal_config(Some(cfg.clone()));
         self.set_wal_handle(Some(handle.clone()));

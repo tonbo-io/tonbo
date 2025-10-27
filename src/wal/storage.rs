@@ -163,16 +163,17 @@ impl WalStorage {
 
         let active = segments.pop().expect("segments.pop matches prior is_empty");
         let completed = segments;
-        let last_frame_seq = self.last_frame_seq(&active.path).await?;
+        let last_frame = self.last_frame_meta(&active.path).await?;
 
         Ok(Some(TailMetadata {
             active,
             completed,
-            last_frame_seq,
+            last_frame_seq: last_frame.as_ref().map(|meta| meta.seq),
+            last_provisional_id: last_frame.and_then(|meta| meta.provisional_id),
         }))
     }
 
-    async fn last_frame_seq(&self, path: &Path) -> WalResult<Option<u64>> {
+    async fn last_frame_meta(&self, path: &Path) -> WalResult<Option<FrameTailMeta>> {
         let mut file = self
             .fs
             .open_options(path, Self::read_options())
@@ -192,7 +193,7 @@ impl WalStorage {
         })?;
 
         let mut offset = 0usize;
-        let mut last_seq = None;
+        let mut last = None;
         while offset < data.len() {
             let slice = &data[offset..];
             let header = match FrameHeader::decode_from(slice) {
@@ -211,12 +212,34 @@ impl WalStorage {
                 break;
             }
 
-            last_seq = Some(header.seq);
+            let payload = &data[(offset + FRAME_HEADER_SIZE)..payload_end];
+            let provisional_id = match header.frame_type {
+                crate::wal::frame::FrameType::TxnAppend
+                | crate::wal::frame::FrameType::TxnCommit => {
+                    if payload.len() < 8 {
+                        break;
+                    }
+                    let mut id_bytes = [0u8; 8];
+                    id_bytes.copy_from_slice(&payload[..8]);
+                    Some(u64::from_le_bytes(id_bytes))
+                }
+                _ => None,
+            };
+
+            last = Some(FrameTailMeta {
+                seq: header.seq,
+                provisional_id,
+            });
             offset = payload_end;
         }
 
-        Ok(last_seq)
+        Ok(last)
     }
+}
+
+struct FrameTailMeta {
+    seq: u64,
+    provisional_id: Option<u64>,
 }
 
 /// Handle representing an opened WAL segment file.
@@ -265,6 +288,8 @@ pub struct TailMetadata {
     pub completed: Vec<SegmentDescriptor>,
     /// Sequence of the last fully decoded frame (if any).
     pub last_frame_seq: Option<u64>,
+    /// Provisional ID carried by the last complete frame (if any).
+    pub last_provisional_id: Option<u64>,
 }
 
 fn segment_sequence(filename: Option<&str>) -> Option<u64> {
@@ -469,6 +494,7 @@ mod tests {
                 tail.last_frame_seq,
                 Some(crate::wal::frame::INITIAL_FRAME_SEQ + 1)
             );
+            assert_eq!(tail.last_provisional_id, Some(7));
         });
     }
 }

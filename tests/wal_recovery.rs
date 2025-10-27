@@ -10,10 +10,12 @@ use fusio::{executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
     DB,
     mode::{DynMode, DynModeConfig},
+    mvcc::Timestamp,
     record::extract::{KeyDyn, dyn_extractor_for_field},
     scan::RangeSet,
     wal::{WalConfig, WalExt, WalSyncPolicy},
 };
+use tonbo::wal::frame::INITIAL_FRAME_SEQ;
 use typed_arrow_dyn::DynCell;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -207,6 +209,71 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     assert_eq!(rows_final, expected_final);
 
     drop(recovered_again);
+    fs::remove_dir_all(&wal_dir)?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_reenable_seeds_provisional_sequence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let wal_dir = std::env::temp_dir().join(format!(
+        "tonbo-wal-seq-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    fs::create_dir_all(&wal_dir)?;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    let extractor = dyn_extractor_for_field(0, &DataType::Utf8)?;
+    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+
+    let executor = Arc::new(TokioExecutor::default());
+    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
+
+    let mut wal_cfg = WalConfig::default();
+    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
+    let recovery_cfg = wal_cfg.clone();
+
+    db.enable_wal(wal_cfg.clone())?;
+
+    let initial_batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["user-initial"])) as _,
+            Arc::new(Int32Array::from(vec![1])) as _,
+        ],
+    )?;
+    db.ingest(initial_batch).await?;
+
+    db.disable_wal()?;
+    drop(db);
+
+    let extractor_recover = dyn_extractor_for_field(0, &DataType::Utf8)?;
+    let mode_config_recover = DynModeConfig::new(schema.clone(), extractor_recover)?;
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
+
+    recovered.enable_wal(wal_cfg.clone())?;
+
+    let wal_handle = recovered.wal().cloned().expect("wal handle");
+    let append_batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["user-new"])) as _,
+            Arc::new(Int32Array::from(vec![5])) as _,
+        ],
+    )?;
+    let ticket = wal_handle
+        .append(&append_batch, &[false], Timestamp::new(777))
+        .await?;
+    assert_eq!(ticket.seq, INITIAL_FRAME_SEQ.saturating_add(1));
+    ticket.durable().await?;
+
+    recovered.disable_wal()?;
+    drop(recovered);
     fs::remove_dir_all(&wal_dir)?;
 
     Ok(())
