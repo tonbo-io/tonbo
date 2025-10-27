@@ -3,7 +3,7 @@
 use std::{io, sync::Arc};
 
 use fusio::{DynFs, Read, error::Error as FusioError, fs::OpenOptions, path::Path as FusioPath};
-use futures::{StreamExt, executor::block_on};
+use futures::StreamExt;
 
 use crate::wal::{
     WalConfig, WalError, WalResult,
@@ -26,25 +26,7 @@ impl Replayer {
     }
 
     /// Iterate through WAL segments and produce events.
-    ///
-    /// The public API stays synchronous for callers such as `DB::recover_with_wal`,
-    /// but we delegate to the async helper internally because `DynFs::list`,
-    /// `open_options`, and `read_to_end_at` are async-only fusio primitives.
-    pub fn scan(&self) -> WalResult<Vec<WalEvent>> {
-        block_on(self.scan_async())
-    }
-
-    /// Access the configuration.
-    pub fn config(&self) -> &WalConfig {
-        &self.cfg
-    }
-
-    /// Async implementation detail used by [`scan`].
-    ///
-    /// Fusio exposes filesystem accessors (`list`, `open_options`, `read_to_end_at`)
-    /// exclusively as async operations, so we stage their usage inside this future
-    /// and have the public entry point (`scan`) synchronously `block_on` it.
-    async fn scan_async(&self) -> WalResult<Vec<WalEvent>> {
+    pub async fn scan(&self) -> WalResult<Vec<WalEvent>> {
         let mut entries = Vec::<(u64, FusioPath)>::new();
         let mut stream = match self.fs.list(&self.cfg.dir).await {
             Ok(stream) => stream,
@@ -100,34 +82,41 @@ impl Replayer {
             let mut offset: usize = 0;
             while offset < data.len() {
                 let slice = &data[offset..];
-        let header = match FrameHeader::decode_from(slice) {
-            Ok((header, _)) => header,
-            Err(WalError::Corrupt(reason))
-                if reason == "frame header truncated" || reason == "frame payload truncated" =>
-            {
-                // Treat a truncated tail (common for crash-at-end scenarios) as EOF so recovery
-                // returns the events observed before the partial frame. Any other corruption
-                // surfaces as an error to avoid silently skipping valid transactions further in
-                // the log.
-                return Ok(events);
-            }
-            Err(err) => return Err(err),
-        };
+                let header = match FrameHeader::decode_from(slice) {
+                    Ok((header, _)) => header,
+                    Err(WalError::Corrupt(reason))
+                        if reason == "frame header truncated"
+                            || reason == "frame payload truncated" =>
+                    {
+                        // Treat a truncated tail (common for crash-at-end scenarios) as EOF so
+                        // recovery returns the events observed before the
+                        // partial frame. Any other corruption surfaces as
+                        // an error to avoid silently skipping valid transactions further in
+                        // the log.
+                        return Ok(events);
+                    }
+                    Err(err) => return Err(err),
+                };
                 let payload_start = offset + FRAME_HEADER_SIZE;
                 let payload_end = payload_start + header.len as usize;
                 if payload_end > data.len() {
                     return Ok(events);
                 }
                 let payload = &data[payload_start..payload_end];
-        match decode_frame(header.frame_type, payload) {
-            Ok(event) => events.push(event),
-            Err(err) => return Err(err),
-        }
+                match decode_frame(header.frame_type, payload) {
+                    Ok(event) => events.push(event),
+                    Err(err) => return Err(err),
+                }
                 offset = payload_end;
             }
         }
 
         Ok(events)
+    }
+
+    /// Access the configuration.
+    pub fn config(&self) -> &WalConfig {
+        &self.cfg
     }
 }
 
@@ -208,7 +197,7 @@ mod tests {
         cfg.dir = wal_root;
         cfg.filesystem = fs;
         let replayer = Replayer::new(cfg);
-        let events = replayer.scan().expect("scan");
+        let events = futures::executor::block_on(replayer.scan()).expect("scan");
         assert_eq!(events.len(), 2);
 
         match &events[0] {
@@ -291,7 +280,7 @@ mod tests {
         cfg.dir = wal_root;
         cfg.filesystem = fs;
         let replayer = Replayer::new(cfg);
-        let events = replayer.scan().expect("scan succeeds");
+        let events = futures::executor::block_on(replayer.scan()).expect("scan succeeds");
 
         assert_eq!(events.len(), 1, "commit frame should be ignored");
         match &events[0] {
