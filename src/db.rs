@@ -66,25 +66,33 @@ where
         use std::collections::HashMap;
 
         let mut last_commit_ts: Option<Timestamp> = None;
-        let mut pending: HashMap<u64, Vec<(RecordBatch, Vec<bool>)>> = HashMap::new();
+        let mut pending: HashMap<u64, Vec<(RecordBatch, Vec<bool>, Option<Timestamp>)>> =
+            HashMap::new();
         for event in events {
             match event {
                 WalEvent::DynAppend {
                     provisional_id,
                     batch,
+                    commit_ts,
                     tombstones,
                 } => {
                     pending
                         .entry(provisional_id)
                         .or_default()
-                        .push((batch, tombstones));
+                        .push((batch, tombstones, commit_ts));
                 }
                 WalEvent::TxnCommit {
                     provisional_id,
                     commit_ts,
                 } => {
                     if let Some(batches) = pending.remove(&provisional_id) {
-                        for (batch, tombstones) in batches {
+                        for (batch, tombstones, hinted_ts) in batches {
+                            if let Some(hint) = hinted_ts {
+                                debug_assert_eq!(
+                                    hint, commit_ts,
+                                    "commit timestamp derived from append payload diverged"
+                                );
+                            }
                             apply_dyn_wal_batch(self, batch, tombstones, commit_ts)?;
                         }
                         last_commit_ts = Some(match last_commit_ts {
@@ -371,7 +379,7 @@ mod tests {
         inmem::{mutable::DynMem, policy::BatchesThreshold},
         test_util::build_batch,
         wal::{
-            WalPayload, append_tombstone_column,
+            WalPayload,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
         },
     };
@@ -685,12 +693,7 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch =
-            append_tombstone_column(&batch, Some(&[true])).expect("batch with tombstone");
-        let payload = WalPayload::DynBatch {
-            batch: wal_batch,
-            commit_ts: Timestamp::new(42),
-        };
+        let payload = WalPayload::new(batch.clone(), vec![true], Timestamp::new(42));
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();

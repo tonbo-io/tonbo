@@ -166,12 +166,7 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch =
-            crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
-        let payload = WalPayload::DynBatch {
-            batch: wal_batch.clone(),
-            commit_ts: Timestamp::new(42),
-        };
+        let payload = WalPayload::new(batch.clone(), vec![false], Timestamp::new(42));
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
@@ -204,10 +199,12 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
+                commit_ts,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
                 assert_eq!(*tombstones, vec![false]);
+                assert_eq!(*commit_ts, Some(Timestamp::new(42)));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -252,12 +249,7 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch =
-            crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
-        let payload = WalPayload::DynBatch {
-            batch: wal_batch.clone(),
-            commit_ts: Timestamp::new(42),
-        };
+        let payload = WalPayload::new(batch.clone(), vec![false], Timestamp::new(42));
         let frames = encode_payload(payload, 9).expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
@@ -287,10 +279,12 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
+                commit_ts,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 9);
                 assert_eq!(*tombstones, vec![false]);
+                assert_eq!(*commit_ts, Some(Timestamp::new(42)));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),

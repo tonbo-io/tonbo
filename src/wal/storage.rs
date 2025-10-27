@@ -465,12 +465,11 @@ mod tests {
             )
             .expect("batch");
 
-            let wal_batch =
-                crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
-            let payload = crate::wal::WalPayload::DynBatch {
-                batch: wal_batch,
-                commit_ts: crate::mvcc::Timestamp::new(42),
-            };
+            let payload = crate::wal::WalPayload::new(
+                batch.clone(),
+                vec![false],
+                crate::mvcc::Timestamp::new(42),
+            );
             let frames = crate::wal::frame::encode_payload(payload, 7).expect("encode");
 
             let mut seq = crate::wal::frame::INITIAL_FRAME_SEQ;
