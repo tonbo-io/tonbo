@@ -13,9 +13,8 @@ use tonbo::{
     mvcc::Timestamp,
     record::extract::{KeyDyn, dyn_extractor_for_field},
     scan::RangeSet,
-    wal::{WalConfig, WalExt, WalSyncPolicy},
+    wal::{WalConfig, WalExt, WalSyncPolicy, frame::INITIAL_FRAME_SEQ},
 };
-use tonbo::wal::frame::INITIAL_FRAME_SEQ;
 use typed_arrow_dyn::DynCell;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -215,8 +214,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wal_reenable_seeds_provisional_sequence(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::error::Error>> {
     let wal_dir = std::env::temp_dir().join(format!(
         "tonbo-wal-seq-{}",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
