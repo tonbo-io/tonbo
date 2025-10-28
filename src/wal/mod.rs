@@ -63,22 +63,24 @@ impl Default for WalSyncPolicy {
 
 /// Recovery behavior adopted when scanning existing WAL segments.
 ///
-/// These modes mirror RocksDB's recovery options so operators can select the desired trade-off
-/// between startup resilience and strict durability. Only point-in-time style recovery is
-/// implemented today; stricter or more lenient policies surface `WalError::Unimplemented`.
+/// See `docs/rfcs/0002-wal.md#recovery-modes` for a deeper discussion of the trade-offs. Only the
+/// point-in-time style semantics are implemented today; stricter or more lenient policies surface
+/// `WalError::Unimplemented`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalRecoveryMode {
     /// Stop replay at the first truncated or unreadable frame and surface the events committed up
-    /// to that point. This matches RocksDB's `kPointInTimeRecovery`.
+    /// to that point.
     PointInTime,
-    /// Ignore corruption detected at the tail of the active segment; treated the same as
-    /// `PointInTime` today. Equivalent to RocksDB's `kTolerateCorruptedTailRecords`.
+    /// Stop replay at the first truncated or unreadable frame, treating tail damage as the result
+    /// of an interrupted write rather than hard corruption. Equivalent to
+    /// [`WalRecoveryMode::PointInTime`] today, but reserved for future logic that may apply
+    /// tail-specific heuristics (for example, allowing zero-length CRC mismatches at the end of the
+    /// final segment).
     TolerateCorruptedTail,
-    /// Treat any I/O or codec error as fatal corruption, aborting replay immediately. Mirrors
-    /// RocksDB's `kAbsoluteConsistency` but is not yet implemented.
+    /// Treat any I/O or codec error as fatal corruption, aborting replay immediately. Not yet
+    /// implemented.
     AbsoluteConsistency,
-    /// Skip over corrupted frames and continue replaying subsequent data. Mirrors RocksDB's
-    /// `kSkipAnyCorruptedRecords` but is not yet implemented.
+    /// Skip over corrupted frames and continue replaying subsequent data. Not yet implemented.
     SkipCorrupted,
 }
 
