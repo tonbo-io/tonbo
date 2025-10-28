@@ -537,6 +537,16 @@ where
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_from_parts(
+        sender: mpsc::Sender<writer::WriterMsg>,
+        queue_depth: Arc<AtomicUsize>,
+        join: E::JoinHandle<WalResult<()>>,
+        start_seq: u64,
+    ) -> Self {
+        Self::from_parts(sender, queue_depth, join, start_seq)
+    }
 }
 
 /// Ticket returned after a successful submission.
