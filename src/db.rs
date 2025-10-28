@@ -413,7 +413,7 @@ fn validate_tombstone_bitmap(
 }
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
@@ -422,8 +422,7 @@ mod tests {
         executor::{BlockingExecutor, tokio::TokioExecutor},
         path::Path,
     };
-    use futures::{channel::mpsc, executor::block_on, StreamExt};
-    use std::time::Duration;
+    use futures::{StreamExt, channel::mpsc, executor::block_on};
     use tokio::sync::{Mutex, oneshot};
     use typed_arrow_dyn::{DynCell, DynRow};
 
@@ -536,7 +535,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ingest_waits_for_wal_durable_ack() {
-        use crate::wal::{frame, writer, WalAck, WalHandle};
+        use crate::wal::{WalAck, WalHandle, frame, writer};
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -583,7 +582,8 @@ mod tests {
 
         let mut db: DB<DynMode, TokioExecutor> =
             DB::new(config, Arc::clone(&executor)).expect("db");
-        let handle = WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        let handle =
+            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
         db.set_wal_handle(Some(handle));
 
         let mut ingest_future = Box::pin(db.ingest(batch));
