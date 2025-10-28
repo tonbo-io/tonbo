@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::inmem::immutable::keys::{BinKey, StrKey};
 
 /// A dynamically typed key used for runtime-schema indexing.
@@ -6,7 +8,7 @@ use crate::inmem::immutable::keys::{BinKey, StrKey};
 /// - Floating-point equality treats NaN == NaN to satisfy `Eq` for map keys.
 /// - External users can construct string/binary keys via `From<&str>`, `From<String>`,
 ///   `From<&[u8]>`, and `From<Vec<u8>>` without touching crate-internal key types.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum KeyDyn {
     /// UTF-8 string key.
     Str(StrKey),

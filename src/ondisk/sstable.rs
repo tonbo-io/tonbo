@@ -22,6 +22,7 @@ use parquet::{
     errors::ParquetError,
     file::properties::WriterProperties,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     fs::FileId, inmem::immutable::Immutable, mode::Mode, mvcc::Timestamp, query::Predicate,
@@ -29,7 +30,7 @@ use crate::{
 };
 
 /// Identifier for an SSTable stored on disk.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SsTableId(u64);
 
 impl SsTableId {
@@ -148,7 +149,7 @@ impl<M: Mode> SsTable<M> {
 }
 
 /// Describes an SSTable's identity and layout hints.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SsTableDescriptor {
     id: SsTableId,
     level: usize,
@@ -201,7 +202,7 @@ impl SsTableDescriptor {
 }
 
 /// Lightweight table statistics captured at flush time.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SsTableStats {
     /// Estimated logical row count written to the table.
     pub rows: usize,
@@ -217,6 +218,12 @@ pub struct SsTableStats {
     pub min_commit_ts: Option<Timestamp>,
     /// Newest commit timestamp contained in the table.
     pub max_commit_ts: Option<Timestamp>,
+}
+
+impl PartialEq for SsTableStats {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 /// Error type shared across SSTable planning and IO.

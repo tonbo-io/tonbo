@@ -30,6 +30,8 @@ tokio = { version = "1", features = [
     "time",
 ] }
 parquet = "56.2.0"
+serde = { version = "1", features = ["derive"] }
+fusio-manifest = "0.0.1"
 
 
 [dev-dependencies]
