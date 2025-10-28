@@ -7,7 +7,7 @@
 
 ## Summary
 
-Tonbo’s dynamic mode now owns an on-disk module (`ondisk::sstable`) that sketches out the write/read surfaces for Parquet-backed sorted string tables. The goal of this RFD is to capture the current scaffolding, align it with the legacy Tonbo design on `main`, and enumerate the remaining pieces required to turn sealed immutables into durable SSTables.
+Tonbo’s dynamic mode now owns an on-disk module (`ondisk::sstable`) that sketches out the write/read surfaces for Parquet-backed sorted string tables. The goal of this RFD is to capture the current scaffolding, align it with the legacy Tonbo design on `main`, and enumerate the remaining pieces required to turn sealed immutables into durable SSTables. This draft also calls out the forthcoming MVCC sidecar plan from RFC 0006 so the writer/manifest work tracks that direction.
 
 ## Motivation
 
@@ -57,7 +57,7 @@ impl<M: Mode> SsTableBuilder<M> {
 ```
 
 * Tracks target descriptor/config and aggregates MVCC-aware stats through `StagedTableStats` (min/max key, commit horizon, tombstone count).
-* `finish` now streams batches through `AsyncArrowWriter`, records byte size, and returns an `SsTable` handle populated with the enriched `SsTableStats`.
+* `finish` streams the user batch through `AsyncArrowWriter`, records byte size, and returns an `SsTable` handle populated with the enriched `SsTableStats`. A follow-up will add the MVCC sidecar writer described in RFC 0006.
 * `SsTableError::NoImmutableSegments` still guards empty flush attempts.
 * Future: extend writer with page indexes/compression tuning.
 
@@ -104,7 +104,7 @@ impl MinorCompactor {
 
 | Area | Legacy Tonbo | Current Scaffold | Notes |
 | --- | --- | --- | --- |
-| Writer | Real Parquet writer with range filters and LRU caching | `SsTableBuilder::add_immutable` collects stats; `finish` returns stub `SsTable` | Need to port `AsyncWriter`, compute byte sizes, and persist MVCC metadata. |
+| Writer | Real Parquet writer with range filters and LRU caching | `SsTableBuilder::add_immutable` collects stats; `finish` returns stub `SsTable` | Need to port `AsyncWriter`, compute byte sizes, and persist MVCC metadata via the forthcoming sidecar. |
 | Store wrapper | `ParquetStore` newtype | Inlined `fs` + `root` on `SsTableConfig` | Simpler config; future manifest can still derive full paths. |
 | Reader | Async `SsTable::scan/get` returning `SsTableScan` stream | Placeholder `SsTableReader`/`SsTableStream` | Requires row filter + ordering support once IO lands. |
 | DB flush | Handled by compaction pipeline in `main` | `DB::flush_immutables_with_descriptor` drains immutables and returns staged descriptor | Real writer + WAL/plumbing will extend this; manifest work can observe descriptors today. |
@@ -114,7 +114,7 @@ impl MinorCompactor {
 ## Execution Plan
 
 1. **Implement Writer IO**
-   * `ParquetTableWriter` now performs real Parquet writes (via `AsyncArrowWriter`) and records enriched stats; future work includes page indexes & compression tuning.
+   * `ParquetTableWriter` performs real Parquet writes (via `AsyncArrowWriter`) and records enriched stats today; extend it to emit the aligned MVCC sidecar per RFC 0006, then iterate on page indexes & compression tuning.
 2. **Hook Minor Compaction**
    * `DB::flush_immutables_with_descriptor` drains immutables on success and propagates WAL IDs into the descriptor.
    * `MinorCompactor` provides a baseline orchestrator; richer policies can replace it.
@@ -132,6 +132,7 @@ impl MinorCompactor {
 ## Hints
 
 * **Path Layout** – Match Tonbo main: write SSTables under `<level>/<sstable_id>.parquet` so the directory structure lines up with the existing compaction tooling.
+* **MVCC Sidecar** – For each data file, produce `<level>/<sstable_id>.mvcc.parquet` carrying `_commit_ts`/`_tombstone`; manifest descriptors reference both URIs atomically.
 * **Stats Scope** – Record byte size first to support leveled compaction heuristics, but keep `SsTableStats` open for additional metrics (row counts, bloom filters, custom policy hooks) so bespoke compactors can plug in later.
 * **Schema Fingerprints** – Leave schema identity tracking to the manifest/catalog layer; SST descriptors will reference entries maintained by the future manifest component.
 
