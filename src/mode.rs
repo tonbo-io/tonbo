@@ -105,7 +105,13 @@ impl Mode for DynMode {
     where
         E: Executor + Timer,
     {
-        async move {
+        async fn insert_impl<E>(
+            db: &mut DB<DynMode, E>,
+            batch: RecordBatch,
+        ) -> Result<(), KeyExtractError>
+        where
+            E: Executor + Timer,
+        {
             if db.schema().as_ref() != batch.schema().as_ref() {
                 return Err(KeyExtractError::SchemaMismatch {
                     expected: db.schema().clone(),
@@ -125,6 +131,8 @@ impl Mode for DynMode {
             db.maybe_seal_after_insert()?;
             Ok(())
         }
+
+        insert_impl(db, batch)
     }
 
     fn replay_wal<E>(

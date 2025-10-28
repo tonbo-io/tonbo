@@ -4,7 +4,7 @@
 //! trait-driven structure remains so that compile-time typed dispatch can be
 //! reintroduced without reshaping the API.
 
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -12,16 +12,20 @@ use fusio::executor::{Executor, Timer};
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
+    fs::FileId,
     inmem::{
         immutable::Immutable,
         mutable::MutableLayout,
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
     mvcc::{CommitClock, Timestamp},
+    ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
     wal::{WalConfig, WalHandle, frame::WalEvent, replay::Replayer},
 };
+
+type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, Vec<bool>, Option<Timestamp>)>>;
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
@@ -29,6 +33,7 @@ pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
     immutables: Vec<Immutable<M>>,
+    immutable_wal_ids: Vec<Option<Vec<FileId>>>,
     // Sealing policy and last seal timestamp
     policy: Box<dyn SealPolicy + Send + Sync>,
     last_seal_at: Option<Instant>,
@@ -63,11 +68,8 @@ where
         &mut self,
         events: Vec<WalEvent>,
     ) -> Result<Option<Timestamp>, KeyExtractError> {
-        use std::collections::HashMap;
-
         let mut last_commit_ts: Option<Timestamp> = None;
-        let mut pending: HashMap<u64, Vec<(RecordBatch, Vec<bool>, Option<Timestamp>)>> =
-            HashMap::new();
+        let mut pending: PendingWalBatches = HashMap::new();
         for event in events {
             match event {
                 WalEvent::DynAppend {
@@ -132,7 +134,7 @@ where
         let stats = self.mem.build_stats(since);
         if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
             if let Some(seg) = self.mem.seal_into_immutable(&self.mode.schema)? {
-                self.immutables.push(seg);
+                self.add_immutable(seg);
             }
             self.last_seal_at = Some(Instant::now());
         }
@@ -169,6 +171,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
             mode,
             mem,
             immutables: Vec::new(),
+            immutable_wal_ids: Vec::new(),
             policy: crate::inmem::policy::default_policy(),
             last_seal_at: None,
             executor,
@@ -202,7 +205,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     }
 
     /// Unified ingestion entry point using the mode's insertion contract.
-    pub async fn ingest<'a>(&'a mut self, input: M::InsertInput) -> Result<(), KeyExtractError>
+    pub async fn ingest(&mut self, input: M::InsertInput) -> Result<(), KeyExtractError>
     where
         M: Sized,
     {
@@ -244,7 +247,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 
     /// Allocate the next commit timestamp for WAL/autocommit flows.
     pub(crate) fn next_commit_ts(&mut self) -> Timestamp {
-        self.commit_clock.next()
+        self.commit_clock.alloc()
     }
 
     /// Access the active WAL handle, if any.
@@ -267,6 +270,41 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         self.immutables.len()
     }
 
+    /// Plan and flush immutable segments into a Parquet-backed SSTable.
+    pub async fn flush_immutables_with_descriptor(
+        &mut self,
+        config: Arc<SsTableConfig>,
+        descriptor: SsTableDescriptor,
+    ) -> Result<SsTable<M>, SsTableError>
+    where
+        M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
+    {
+        if self.immutables.is_empty() {
+            return Err(SsTableError::NoImmutableSegments);
+        }
+        let mut builder = SsTableBuilder::<M>::new(config, descriptor);
+        for seg in &self.immutables {
+            builder.add_immutable(seg)?;
+        }
+        let wal_ids_flat: Vec<FileId> = self
+            .immutable_wal_ids
+            .iter()
+            .filter_map(|ids| ids.as_ref())
+            .flat_map(|ids| ids.clone())
+            .collect();
+        let wal_ids = (!wal_ids_flat.is_empty()).then_some(wal_ids_flat);
+        builder.set_wal_ids(wal_ids);
+
+        match builder.finish().await {
+            Ok(table) => {
+                self.immutables.clear();
+                self.immutable_wal_ids.clear();
+                Ok(table)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     // Key-only merged scans have been removed.
 }
 
@@ -275,6 +313,14 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     #[allow(dead_code)]
     pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
         self.immutables.push(seg);
+        self.immutable_wal_ids.push(None);
+    }
+
+    /// Record the WAL identifiers for the most recently sealed immutable.
+    pub fn set_last_immutable_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
+        if let Some(slot) = self.immutable_wal_ids.last_mut() {
+            *slot = wal_ids;
+        }
     }
 
     /// Set or replace the sealing policy used by this DB.
@@ -370,25 +416,20 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::executor::BlockingExecutor;
+    use fusio::{disk::LocalFs, dynamic::DynFs, executor::BlockingExecutor, path::Path};
     use futures::executor::block_on;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        inmem::{mutable::DynMem, policy::BatchesThreshold},
+        inmem::policy::BatchesThreshold,
+        ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
             WalPayload,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
         },
     };
-
-    impl DynMem {
-        fn inspect_versions(&self, key: &KeyDyn) -> Option<Vec<(Timestamp, bool)>> {
-            self.0.inspect_versions(key)
-        }
-    }
 
     #[test]
     fn ingest_tombstone_length_mismatch() {
@@ -549,6 +590,29 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         assert!(DynModeConfig::from_metadata(schema_missing).is_err());
+    }
+
+    #[test]
+    fn flush_without_immutables_errors() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name config");
+        let executor = Arc::new(BlockingExecutor::default());
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, executor).expect("db init");
+
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sstable_cfg = Arc::new(SsTableConfig::new(
+            schema.clone(),
+            fs,
+            Path::from("/tmp/tonbo-flush-test"),
+        ));
+        let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
+
+        let result = block_on(db.flush_immutables_with_descriptor(sstable_cfg, descriptor.clone()));
+        assert!(matches!(result, Err(SsTableError::NoImmutableSegments)));
+        assert_eq!(db.num_immutable_segments(), 0);
     }
 
     #[test]

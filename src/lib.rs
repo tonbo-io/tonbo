@@ -33,3 +33,9 @@ pub mod wal;
 
 /// MVCC primitives shared across modules.
 pub mod mvcc;
+
+/// On-disk persistence scaffolding (SSTable skeletons).
+pub mod ondisk;
+
+/// Simple compaction orchestrators.
+pub mod compaction;

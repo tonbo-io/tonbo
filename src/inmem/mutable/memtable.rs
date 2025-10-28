@@ -43,7 +43,7 @@ impl VersionLoc {
 ///
 /// - Accepts `RecordBatch` inserts; each batch is stored as a sealed chunk.
 /// - Maintains per-key version chains ordered by commit timestamp.
-pub(crate) struct DynLayout {
+pub struct DynMem {
     /// Version chains per key (oldest..newest).
     versions: BTreeMap<KeyDyn, Vec<VersionLoc>>,
     /// Attached batches held until compaction.
@@ -51,7 +51,7 @@ pub(crate) struct DynLayout {
     metrics: MutableMemTableMetrics,
 }
 
-impl DynLayout {
+impl DynMem {
     /// Create an empty columnar mutable table for dynamic batches.
     pub(crate) fn new() -> Self {
         Self {
@@ -211,13 +211,13 @@ impl DynLayout {
     }
 }
 
-impl Default for DynLayout {
+impl Default for DynMem {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MutableLayout<KeyDyn> for DynLayout {
+impl MutableLayout<KeyDyn> for DynMem {
     fn approx_bytes(&self) -> usize {
         self.approx_bytes()
     }
@@ -225,7 +225,7 @@ impl MutableLayout<KeyDyn> for DynLayout {
 
 // ---- StatsProvider implementations ----
 
-impl StatsProvider for DynLayout {
+impl StatsProvider for DynMem {
     fn build_stats(&self, since_last_seal: Option<Duration>) -> MemStats {
         MemStats {
             entries: self.metrics.entries,
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn dyn_stats_and_scan() {
-        let mut m = DynLayout::new();
+        let mut m = DynMem::new();
         // Build a batch: id Utf8 is key
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn mvcc_scan_respects_read_ts() {
-        let mut m = DynLayout::new();
+        let mut m = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn seal_into_immutable_emits_mvcc_segments() {
-        let mut layout = DynLayout::new();
+        let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -552,8 +552,56 @@ mod tests {
     }
 
     #[test]
+    fn sealed_segment_row_iter_matches_versions() {
+        let mut layout = DynMem::new();
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+
+        let insert = |layout: &mut DynMem, val: i32, ts: u64, tomb: bool| {
+            let batch: RecordBatch = build_batch(
+                schema.clone(),
+                vec![DynRow(vec![
+                    Some(DynCell::Str("k".into())),
+                    Some(DynCell::I32(val)),
+                ])],
+            )
+            .expect("batch");
+            layout
+                .insert_batch_with_ts(extractor.as_ref(), batch, Timestamp::new(ts), move |_| tomb)
+                .expect("insert");
+        };
+
+        // NOTE: tombstoned versions are materialised as all-null rows during sealing. That matches
+        // the current immutable representation but raises an open question: do we really expect
+        // user schemas to allow nulls solely so tombstones can be encoded this way?
+        insert(&mut layout, 1, 10, false);
+        insert(&mut layout, 2, 20, true);
+        insert(&mut layout, 3, 30, false);
+
+        let segment = layout
+            .seal_into_immutable(&schema)
+            .expect("sealed")
+            .expect("segment");
+
+        let rows: Vec<(u64, bool)> = segment
+            .row_iter()
+            .map(|entry| (entry.commit_ts.get(), entry.tombstone))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(30, false), (20, true), (10, false)],
+            "row iterator should preserve newest→oldest MVCC ordering"
+        );
+        assert_eq!(segment.len(), 3);
+    }
+
+    #[test]
     fn insert_batch_with_ts_preserves_metadata() {
-        let mut layout = DynLayout::new();
+        let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
