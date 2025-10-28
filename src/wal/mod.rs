@@ -62,18 +62,30 @@ impl Default for WalSyncPolicy {
 }
 
 /// Recovery behavior adopted when scanning existing WAL segments.
+///
+/// These modes mirror RocksDB's recovery options so operators can select the desired trade-off
+/// between startup resilience and strict durability. Only point-in-time style recovery is
+/// implemented today; stricter or more lenient policies surface `WalError::Unimplemented`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalRecoveryMode {
     /// Stop replay at the first truncated or unreadable frame and surface the events committed up
-    /// to that point.
+    /// to that point. This matches RocksDB's `kPointInTimeRecovery`.
     PointInTime,
     /// Ignore corruption detected at the tail of the active segment; treated the same as
-    /// `PointInTime` today.
+    /// `PointInTime` today. Equivalent to RocksDB's `kTolerateCorruptedTailRecords`.
     TolerateCorruptedTail,
-    /// Treat any IO or codec error as fatal corruption. (Not yet implemented.)
+    /// Treat any I/O or codec error as fatal corruption, aborting replay immediately. Mirrors
+    /// RocksDB's `kAbsoluteConsistency` but is not yet implemented.
     AbsoluteConsistency,
-    /// Skip over corrupted frames and continue replaying subsequent data. (Not yet implemented.)
+    /// Skip over corrupted frames and continue replaying subsequent data. Mirrors RocksDB's
+    /// `kSkipAnyCorruptedRecords` but is not yet implemented.
     SkipCorrupted,
+}
+
+impl Default for WalRecoveryMode {
+    fn default() -> Self {
+        WalRecoveryMode::PointInTime
+    }
 }
 
 /// Configuration for enabling the WAL on a `DB` instance.
@@ -87,7 +99,7 @@ pub struct WalConfig {
     pub flush_interval: Duration,
     /// Durability policy applied after writes.
     pub sync: WalSyncPolicy,
-    /// Replay behavior adopted during recovery.
+    /// Replay behavior adopted during recovery (defaults to [`WalRecoveryMode::PointInTime`]).
     pub recovery: WalRecoveryMode,
     /// Soft cap on retained WAL bytes.
     pub retention_bytes: Option<usize>,
@@ -105,7 +117,7 @@ impl Default for WalConfig {
             segment_max_bytes: 64 * 1024 * 1024,
             flush_interval: Duration::from_millis(10),
             sync: WalSyncPolicy::default(),
-            recovery: WalRecoveryMode::PointInTime,
+            recovery: WalRecoveryMode::default(),
             retention_bytes: None,
             queue_size: 65_536,
             filesystem: Arc::new(TokioFs),

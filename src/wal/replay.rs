@@ -30,7 +30,12 @@ impl Replayer {
         use crate::wal::WalRecoveryMode;
 
         match self.cfg.recovery {
-            WalRecoveryMode::PointInTime | WalRecoveryMode::TolerateCorruptedTail => {}
+            WalRecoveryMode::PointInTime | WalRecoveryMode::TolerateCorruptedTail => {
+                // Both variants currently share the same implementation: stop at the first
+                // truncated or unreadable frame. `TolerateCorruptedTail` exists so
+                // we can later introduce tail-specific heuristics without breaking
+                // configuration semantics.
+            }
             WalRecoveryMode::AbsoluteConsistency => {
                 return Err(WalError::Unimplemented(
                     "wal recovery mode AbsoluteConsistency is not implemented",
