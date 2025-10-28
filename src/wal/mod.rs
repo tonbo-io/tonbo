@@ -61,6 +61,21 @@ impl Default for WalSyncPolicy {
     }
 }
 
+/// Recovery behavior adopted when scanning existing WAL segments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalRecoveryMode {
+    /// Stop replay at the first truncated or unreadable frame and surface the events committed up
+    /// to that point.
+    PointInTime,
+    /// Ignore corruption detected at the tail of the active segment; treated the same as
+    /// `PointInTime` today.
+    TolerateCorruptedTail,
+    /// Treat any IO or codec error as fatal corruption. (Not yet implemented.)
+    AbsoluteConsistency,
+    /// Skip over corrupted frames and continue replaying subsequent data. (Not yet implemented.)
+    SkipCorrupted,
+}
+
 /// Configuration for enabling the WAL on a `DB` instance.
 #[derive(Clone)]
 pub struct WalConfig {
@@ -72,6 +87,8 @@ pub struct WalConfig {
     pub flush_interval: Duration,
     /// Durability policy applied after writes.
     pub sync: WalSyncPolicy,
+    /// Replay behavior adopted during recovery.
+    pub recovery: WalRecoveryMode,
     /// Soft cap on retained WAL bytes.
     pub retention_bytes: Option<usize>,
     /// Capacity of the writer's bounded queue.
@@ -88,6 +105,7 @@ impl Default for WalConfig {
             segment_max_bytes: 64 * 1024 * 1024,
             flush_interval: Duration::from_millis(10),
             sync: WalSyncPolicy::default(),
+            recovery: WalRecoveryMode::PointInTime,
             retention_bytes: None,
             queue_size: 65_536,
             filesystem: Arc::new(TokioFs),
@@ -103,6 +121,7 @@ impl fmt::Debug for WalConfig {
             .field("segment_max_bytes", &self.segment_max_bytes)
             .field("flush_interval", &self.flush_interval)
             .field("sync", &self.sync)
+            .field("recovery", &self.recovery)
             .field("retention_bytes", &self.retention_bytes)
             .field("queue_size", &self.queue_size)
             .field("filesystem", &fs_tag)

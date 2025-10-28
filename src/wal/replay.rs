@@ -27,6 +27,22 @@ impl Replayer {
 
     /// Iterate through WAL segments and produce events.
     pub async fn scan(&self) -> WalResult<Vec<WalEvent>> {
+        use crate::wal::WalRecoveryMode;
+
+        match self.cfg.recovery {
+            WalRecoveryMode::PointInTime | WalRecoveryMode::TolerateCorruptedTail => {}
+            WalRecoveryMode::AbsoluteConsistency => {
+                return Err(WalError::Unimplemented(
+                    "wal recovery mode AbsoluteConsistency is not implemented",
+                ));
+            }
+            WalRecoveryMode::SkipCorrupted => {
+                return Err(WalError::Unimplemented(
+                    "wal recovery mode SkipCorrupted is not implemented",
+                ));
+            }
+        }
+
         let mut entries = Vec::<(u64, FusioPath)>::new();
         let mut stream = match self.fs.list(&self.cfg.dir).await {
             Ok(stream) => stream,
@@ -89,10 +105,9 @@ impl Replayer {
                             || reason == "frame payload truncated" =>
                     {
                         // Treat a truncated tail (common for crash-at-end scenarios) as EOF so
-                        // recovery returns the events observed before the
-                        // partial frame. Any other corruption surfaces as
-                        // an error to avoid silently skipping valid transactions further in
-                        // the log.
+                        // recovery returns the events observed before the partial frame. Any
+                        // other corruption surfaces as an error to avoid silently skipping valid
+                        // transactions further in the log.
                         return Ok(events);
                     }
                     Err(err) => return Err(err),
@@ -141,7 +156,7 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
-            WalPayload,
+            WalPayload, WalRecoveryMode,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
             storage::WalStorage,
         },
@@ -289,5 +304,23 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn replayer_rejects_unimplemented_recovery_mode() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let wal_root = FusioPath::parse("wal-unimplemented").expect("wal path");
+
+        let mut cfg = WalConfig::default();
+        cfg.dir = wal_root;
+        cfg.filesystem = fs;
+        cfg.recovery = WalRecoveryMode::AbsoluteConsistency;
+
+        let replayer = Replayer::new(cfg);
+        let err = futures::executor::block_on(replayer.scan()).expect_err("mode unimplemented");
+        assert!(matches!(
+            err,
+            WalError::Unimplemented("wal recovery mode AbsoluteConsistency is not implemented")
+        ));
     }
 }
