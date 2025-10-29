@@ -53,6 +53,11 @@ pub(crate) enum WriterMsg {
         /// Sender to resolve once durability is satisfied.
         ack_tx: oneshot::Sender<WalResult<WalAck>>,
     },
+    /// Force rotation of the active WAL segment.
+    Rotate {
+        /// Sender to notify once the rotation completes (or fails).
+        ack_tx: oneshot::Sender<WalResult<()>>,
+    },
 }
 
 impl WriterMsg {
@@ -169,6 +174,7 @@ where
         .max(initial_frame_seq.max(frame::INITIAL_FRAME_SEQ));
 
     let mut timer: SleepSlot = None;
+    ctx.recompute_timer(&mut timer);
 
     loop {
         if let Some(mut timer_future) = timer.as_mut() {
@@ -176,13 +182,14 @@ where
                 _ = timer_future => {
                     timer = None;
                     match ctx.handle_timer_elapsed().await {
-                        Ok(TimerEvent { sync_performed, reschedule }) => {
+                        Ok(TimerTickOutcome {
+                            sync_performed,
+                            rotation_performed: _,
+                        }) => {
                             if sync_performed {
                                 ctx.record_sync().await;
                             }
-                            if let Some(interval) = reschedule {
-                                timer = Some(ctx.schedule_timer(interval).fuse());
-                            }
+                            ctx.recompute_timer(&mut timer);
                         }
                         Err(err) => {
                             return Err(err);
@@ -201,6 +208,26 @@ where
                                     }
                                     ctx.apply_timer_directive(timer_directive, &mut timer);
                                     let _ = ack_tx.send(Ok(ack));
+                                }
+                                Err(err) => {
+                                    ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
+                                    let _ = ack_tx.send(Err(err.clone()));
+                                    return Err(err);
+                                }
+                            }
+                        }
+                        Some(WriterMsg::Rotate { ack_tx }) => {
+                            match ctx.handle_rotation_request().await {
+                                Ok(rotation) => {
+                                    if rotation.sync_performed {
+                                        ctx.record_sync().await;
+                                    }
+                                    if rotation.performed {
+                                        ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
+                                    } else {
+                                        ctx.recompute_timer(&mut timer);
+                                    }
+                                    let _ = ack_tx.send(Ok(()));
                                 }
                                 Err(err) => {
                                     ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
@@ -243,6 +270,25 @@ where
                         }
                     }
                 }
+                Some(WriterMsg::Rotate { ack_tx }) => {
+                    match ctx.handle_rotation_request().await {
+                        Ok(rotation) => {
+                            if rotation.sync_performed {
+                                ctx.record_sync().await;
+                            }
+                            if rotation.performed {
+                                ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
+                            } else {
+                                ctx.recompute_timer(&mut timer);
+                            }
+                            let _ = ack_tx.send(Ok(()));
+                        }
+                        Err(err) => {
+                            let _ = ack_tx.send(Err(err.clone()));
+                            return Err(err);
+                        }
+                    }
+                }
                 None => break,
             }
         }
@@ -271,6 +317,10 @@ where
     segment_seq: u64,
     segment: WalSegment,
     segment_bytes: usize,
+    segment_opened_at: Instant,
+    rotation_deadline: Option<Instant>,
+    next_sync_deadline: Option<Instant>,
+    scheduled_deadline: Option<Instant>,
     bytes_since_sync: usize,
     last_sync: Instant,
     last_flush: Instant,
@@ -333,6 +383,10 @@ where
             segment_seq,
             segment,
             segment_bytes,
+            segment_opened_at: Instant::now(),
+            rotation_deadline: None,
+            next_sync_deadline: None,
+            scheduled_deadline: None,
             bytes_since_sync: 0,
             last_sync: Instant::now(),
             last_flush: Instant::now(),
@@ -340,6 +394,15 @@ where
             next_segment_seq,
             completed_segments,
         };
+        if ctx.segment_bytes > 0 {
+            if let Some(max_age) = ctx.cfg.segment_max_age {
+                let now = Instant::now();
+                ctx.segment_opened_at = now;
+                if let Some(deadline) = now.checked_add(max_age) {
+                    ctx.rotation_deadline = Some(deadline);
+                }
+            }
+        }
         ctx.enforce_retention_limit().await?;
         Ok(ctx)
     }
@@ -350,6 +413,7 @@ where
         payload: WalPayload,
         enqueued_at: Instant,
     ) -> WalResult<HandleOutcome> {
+        let was_empty = self.segment_bytes == 0;
         let mut frames = encode_payload(payload, payload_seq)?;
         if frames.is_empty() {
             return Err(WalError::Corrupt("wal payload produced no frames"));
@@ -363,6 +427,18 @@ where
 
         self.segment_bytes = self.segment_bytes.saturating_add(bytes_written);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(bytes_written);
+
+        if was_empty && self.segment_bytes > 0 {
+            if let Some(max_age) = self.cfg.segment_max_age {
+                let now = Instant::now();
+                self.segment_opened_at = now;
+                if let Some(deadline) = now.checked_add(max_age) {
+                    self.rotation_deadline = Some(deadline);
+                } else {
+                    self.rotation_deadline = Some(Instant::now());
+                }
+            }
+        }
 
         self.flush_if_needed(false).await?;
         let rotation = self.maybe_rotate().await?;
@@ -380,7 +456,7 @@ where
             elapsed: enqueued_at.elapsed(),
         };
         let sync_performed = rotation.sync_performed || sync_outcome.performed;
-        let timer_directive = if rotation.sync_performed {
+        let timer_directive = if rotation.performed {
             TimerDirective::Cancel
         } else {
             sync_outcome.timer_directive
@@ -467,15 +543,21 @@ where
     async fn maybe_rotate(&mut self) -> WalResult<RotationOutcome> {
         if self.cfg.segment_max_bytes == 0 || self.segment_bytes < self.cfg.segment_max_bytes {
             return Ok(RotationOutcome {
+                performed: false,
                 sync_performed: false,
             });
         }
         if self.segment_bytes == 0 {
             return Ok(RotationOutcome {
+                performed: false,
                 sync_performed: false,
             });
         }
 
+        self.rotate_active_segment().await
+    }
+
+    async fn rotate_active_segment(&mut self) -> WalResult<RotationOutcome> {
         self.flush_if_needed(true).await?;
 
         let mut sync_performed = false;
@@ -504,7 +586,17 @@ where
         self.segment_seq = new_seq;
         self.segment_bytes = new_bytes;
         self.next_segment_seq = new_seq.saturating_add(1);
-        self.last_flush = Instant::now();
+        let now = Instant::now();
+        self.last_flush = now;
+        self.segment_opened_at = now;
+        self.rotation_deadline = None;
+        if self.segment_bytes > 0 {
+            if let Some(max_age) = self.cfg.segment_max_age {
+                if let Some(deadline) = now.checked_add(max_age) {
+                    self.rotation_deadline = Some(deadline);
+                }
+            }
+        }
 
         self.completed_segments.push_back(SegmentMeta {
             path: old_path,
@@ -512,7 +604,21 @@ where
         });
         self.enforce_retention_limit().await?;
 
-        Ok(RotationOutcome { sync_performed })
+        Ok(RotationOutcome {
+            performed: true,
+            sync_performed,
+        })
+    }
+
+    async fn handle_rotation_request(&mut self) -> WalResult<RotationOutcome> {
+        if self.segment_bytes == 0 {
+            return Ok(RotationOutcome {
+                performed: false,
+                sync_performed: false,
+            });
+        }
+
+        self.rotate_active_segment().await
     }
 
     async fn sync_data(&mut self) -> WalResult<()> {
@@ -574,41 +680,84 @@ where
         self.next_frame_seq.saturating_sub(1)
     }
 
-    fn schedule_timer(&self, interval: Duration) -> SleepFuture {
-        self.exec.sleep(interval)
-    }
-
-    fn apply_timer_directive(&self, directive: TimerDirective, timer_slot: &mut SleepSlot) {
+    fn apply_timer_directive(&mut self, directive: TimerDirective, timer_slot: &mut SleepSlot) {
         match directive {
             TimerDirective::None => {}
             TimerDirective::Cancel => {
-                *timer_slot = None;
+                self.next_sync_deadline = None;
             }
             TimerDirective::Schedule(interval) => {
-                if timer_slot.is_none() {
-                    *timer_slot = Some(self.schedule_timer(interval).fuse());
-                }
+                let now = Instant::now();
+                let deadline = now.checked_add(interval).unwrap_or(now);
+                self.next_sync_deadline = match self.next_sync_deadline {
+                    Some(existing) => Some(existing.min(deadline)),
+                    None => Some(deadline),
+                };
+            }
+        }
+        self.recompute_timer(timer_slot);
+    }
+
+    fn recompute_timer(&mut self, timer_slot: &mut SleepSlot) {
+        let next_deadline = Self::earliest_deadline(self.next_sync_deadline, self.rotation_deadline);
+
+        match next_deadline {
+            Some(deadline) => {
+                let now = Instant::now();
+                let duration = deadline.saturating_duration_since(now);
+                *timer_slot = Some(self.exec.sleep(duration).fuse());
+                self.scheduled_deadline = Some(deadline);
+            }
+            None => {
+                *timer_slot = None;
+                self.scheduled_deadline = None;
             }
         }
     }
 
-    async fn handle_timer_elapsed(&mut self) -> WalResult<TimerEvent> {
+    fn earliest_deadline(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (Some(x), None) => Some(x),
+            (None, Some(y)) => Some(y),
+            (None, None) => None,
+        }
+    }
+
+    async fn handle_timer_elapsed(&mut self) -> WalResult<TimerTickOutcome> {
+        self.scheduled_deadline = None;
         let mut sync_performed = false;
-        if self.bytes_since_sync > 0 {
-            self.sync_data().await?;
-            self.bytes_since_sync = 0;
-            self.last_sync = Instant::now();
-            sync_performed = true;
+        let mut rotation_performed = false;
+        let now = Instant::now();
+
+        if let Some(deadline) = self.rotation_deadline {
+            if deadline <= now {
+                if self.segment_bytes > 0 {
+                    let rotation = self.rotate_active_segment().await?;
+                    rotation_performed = rotation.performed;
+                    if rotation.sync_performed {
+                        sync_performed = true;
+                    }
+                }
+                self.rotation_deadline = None;
+            }
         }
 
-        let reschedule = match self.cfg.sync {
-            WalSyncPolicy::IntervalTime(interval) if self.bytes_since_sync > 0 => Some(interval),
-            _ => None,
-        };
+        if let Some(deadline) = self.next_sync_deadline {
+            if deadline <= now {
+                self.next_sync_deadline = None;
+                if self.bytes_since_sync > 0 {
+                    self.sync_data().await?;
+                    self.bytes_since_sync = 0;
+                    self.last_sync = Instant::now();
+                    sync_performed = true;
+                }
+            }
+        }
 
-        Ok(TimerEvent {
+        Ok(TimerTickOutcome {
             sync_performed,
-            reschedule,
+            rotation_performed,
         })
     }
 }
@@ -679,6 +828,7 @@ struct SyncOutcome {
 }
 
 struct RotationOutcome {
+    performed: bool,
     sync_performed: bool,
 }
 
@@ -689,9 +839,9 @@ enum TimerDirective {
     Schedule(Duration),
 }
 
-struct TimerEvent {
+struct TimerTickOutcome {
     sync_performed: bool,
-    reschedule: Option<Duration>,
+    rotation_performed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -718,7 +868,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        time::Instant,
+        time::{Duration, Instant},
     };
 
     use fusio::{DynFs, executor::BlockingExecutor, impls::mem::fs::InMemoryFs, path::Path};
@@ -1097,6 +1247,198 @@ mod tests {
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
+    }
+
+    #[test]
+    fn manual_rotation_creates_new_segment() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal-manual-rotation").expect("path");
+        let storage_reader = WalStorage::new(Arc::clone(&fs), root.clone());
+        let storage_writer = WalStorage::new(fs, root.clone());
+
+        let cfg = WalConfig {
+            queue_size: 4,
+            segment_max_bytes: 1024,
+            sync: WalSyncPolicy::Always,
+            ..WalConfig::default()
+        };
+
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage_writer,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                17,
+                sample_payload(&sample_batch(), 55),
+                Instant::now(),
+                ack_tx,
+            ))
+            .expect("send payload");
+
+        let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
+        let ack_cell_clone = Rc::clone(&ack_cell);
+        spawner
+            .spawn_local(async move {
+                let ack = ack_rx.await.expect("ack oneshot");
+                *ack_cell_clone.borrow_mut() = Some(ack);
+            })
+            .expect("spawn ack");
+
+        pool.run_until_stalled();
+
+        let (rotate_tx, rotate_rx) = oneshot::channel();
+        sender
+            .try_send(WriterMsg::Rotate { ack_tx: rotate_tx })
+            .expect("send rotate");
+
+        let rotate_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let rotate_cell_clone = Rc::clone(&rotate_cell);
+        spawner
+            .spawn_local(async move {
+                let res = rotate_rx.await.expect("rotate oneshot");
+                *rotate_cell_clone.borrow_mut() = Some(res);
+            })
+            .expect("spawn rotate listener");
+
+        pool.run_until_stalled();
+
+        sender.close_channel();
+        pool.run();
+
+        let ack = ack_cell
+            .borrow()
+            .clone()
+            .expect("ack result")
+            .expect("ack ok");
+        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+
+        let rotate_result = rotate_cell
+            .borrow()
+            .clone()
+            .expect("rotate result")
+            .expect("rotate ok");
+        assert_eq!(rotate_result, ());
+
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+
+        let segments = futures::executor::block_on(storage_reader.list_segments())
+            .expect("list segments after manual rotation");
+        assert!(segments.len() >= 2, "manual rotation should create a new segment");
+        assert_eq!(segments[0].seq, 0);
+        assert!(segments[0].bytes > 0, "sealed segment should retain written bytes");
+        assert_eq!(segments[1].seq, 1);
+    }
+
+    #[test]
+    fn time_based_rotation_seals_segment() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal-time-rotation").expect("path");
+        let storage_reader = WalStorage::new(Arc::clone(&fs), root.clone());
+        let storage_writer = WalStorage::new(fs, root.clone());
+
+        let cfg = WalConfig {
+            queue_size: 4,
+            segment_max_age: Some(Duration::from_millis(0)),
+            sync: WalSyncPolicy::Always,
+            ..WalConfig::default()
+        };
+
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage_writer,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                31,
+                sample_payload(&sample_batch(), 90),
+                Instant::now(),
+                ack_tx,
+            ))
+            .expect("send payload");
+
+        let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
+        let ack_cell_clone = Rc::clone(&ack_cell);
+        spawner
+            .spawn_local(async move {
+                let ack = ack_rx.await.expect("ack oneshot");
+                *ack_cell_clone.borrow_mut() = Some(ack);
+            })
+            .expect("spawn ack listener");
+
+        pool.run_until_stalled();
+        pool.run_until_stalled();
+
+        sender.close_channel();
+        pool.run();
+
+        let ack = ack_cell
+            .borrow()
+            .clone()
+            .expect("ack result")
+            .expect("ack ok");
+        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+
+        let segments = futures::executor::block_on(storage_reader.list_segments())
+            .expect("list segments after time rotation");
+        assert!(segments.len() >= 2, "time rotation should seal current segment");
+        assert!(segments[0].bytes > 0, "sealed segment should retain written bytes");
     }
 
     #[test]
