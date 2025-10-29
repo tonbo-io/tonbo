@@ -6,6 +6,10 @@
 - Unit tests live inline under `#[cfg(test)]`; add integration tests in `tests/` when needed.
 - All filesystem, object-store, and network I/O goes through `fusio`; do not reach for ad-hoc std APIs unless surfaced by `fusio`.
 
+## Development Styles
+- We are still in the early stages of the first public release, so incompatible updates are acceptable—feel free to make breaking changes whenever they are the better option.
+- Default to an adventurous mindset: bias toward bold refactors and experiments when they move the design forward, and document the rationale so everyone can follow along.
+
 ## Design Docs & RFCs
 
 - Start with `docs/overview.md` for architecture and component context.
@@ -28,6 +32,10 @@
   - `docs/rfcs/0002-wal.md` — write-ahead log format and durability.
   - `docs/rfcs/0003-mvcc.md` — timestamping, visibility, and snapshot rules.
   - `docs/rfcs/0004-storage-layout.md` — directory hierarchy and path schema.
+  - `docs/rfcs/0005-sstable-sketch.md` — SSTable skeleton for dynamic mode.
+  - `docs/rfcs/0006-mvcc-sidecar.md` — MVCC sidecar storage for immutable segments.
+  - `docs/rfcs/0007-manifest.md` — manifest module on top of fusio-manifest.
+- Migration overview: we are in the middle of the refactor; read `docs/rethink-summary.md` before diving in to stay aligned with the goals, execution plan, and live status table.
 
 ## Build, Test, and Development Commands
 
