@@ -3,7 +3,7 @@
 use std::{io, sync::Arc};
 
 use fusio::{
-    DynFs, Read,
+    DynFs, Read, Write,
     dynamic::fs::DynFile,
     error::Error as FusioError,
     fs::OpenOptions,
@@ -161,19 +161,55 @@ impl WalStorage {
             return Ok(None);
         }
 
-        let active = segments.pop().expect("segments.pop matches prior is_empty");
+        let mut active = segments.pop().expect("segments.pop matches prior is_empty");
         let completed = segments;
-        let last_frame = self.last_frame_meta(&active.path).await?;
+        let TailScan {
+            last,
+            file_len,
+            truncated,
+            buffer,
+        } = self.scan_tail(&active.path).await?;
+
+        let last_frame_seq = last.as_ref().map(|meta| meta.seq);
+        let last_provisional_id = last.as_ref().and_then(|meta| meta.provisional_id);
+        let last_valid_offset = last.as_ref().map(|meta| meta.end_offset);
+
+        let mut truncated_tail = truncated;
+        if !truncated_tail {
+            if let Some(offset) = last_valid_offset {
+                if offset < file_len {
+                    truncated_tail = true;
+                }
+            } else if file_len > 0 {
+                truncated_tail = true;
+            }
+        }
+
+        if truncated_tail {
+            let safe_len = last_valid_offset.unwrap_or(0);
+            let mut preserved = buffer.unwrap_or_else(Vec::new);
+            if preserved.len() > safe_len {
+                preserved.truncate(safe_len);
+            } else if preserved.len() < safe_len {
+                preserved.resize(safe_len, 0);
+            }
+            self.overwrite_segment(&active.path, preserved).await?;
+            active.bytes = safe_len;
+        } else {
+            active.bytes = file_len;
+        }
 
         Ok(Some(TailMetadata {
             active,
             completed,
-            last_frame_seq: last_frame.as_ref().map(|meta| meta.seq),
-            last_provisional_id: last_frame.and_then(|meta| meta.provisional_id),
+            last_frame_seq,
+            last_provisional_id,
+            last_valid_offset,
+            truncated_tail,
         }))
     }
 
-    async fn last_frame_meta(&self, path: &Path) -> WalResult<Option<FrameTailMeta>> {
+    async fn scan_tail(&self, path: &Path) -> WalResult<TailScan> {
         let mut file = self
             .fs
             .open_options(path, Self::read_options())
@@ -185,15 +221,17 @@ impl WalStorage {
                 ))
             })?;
         let (read_res, data) = file.read_to_end_at(Vec::new(), 0).await;
-        read_res.map_err(|err| {
+        let data = read_res.map(|_| data).map_err(|err| {
             WalError::Storage(format!(
                 "failed to read wal segment {} for tail: {}",
                 path, err
             ))
         })?;
 
+        let file_len = data.len();
         let mut offset = 0usize;
         let mut last = None;
+        let mut truncated = false;
         while offset < data.len() {
             let slice = &data[offset..];
             let header = match FrameHeader::decode_from(slice) {
@@ -202,6 +240,7 @@ impl WalStorage {
                     if reason == "frame header truncated"
                         || reason == "frame payload truncated" =>
                 {
+                    truncated = true;
                     break;
                 }
                 Err(err) => return Err(err),
@@ -209,6 +248,7 @@ impl WalStorage {
 
             let payload_end = offset + FRAME_HEADER_SIZE + header.len as usize;
             if payload_end > data.len() {
+                truncated = true;
                 break;
             }
 
@@ -217,6 +257,7 @@ impl WalStorage {
                 crate::wal::frame::FrameType::TxnAppend
                 | crate::wal::frame::FrameType::TxnCommit => {
                     if payload.len() < 8 {
+                        truncated = true;
                         break;
                     }
                     let mut id_bytes = [0u8; 8];
@@ -229,17 +270,73 @@ impl WalStorage {
             last = Some(FrameTailMeta {
                 seq: header.seq,
                 provisional_id,
+                end_offset: payload_end,
             });
             offset = payload_end;
         }
 
-        Ok(last)
+        if let Some(ref meta) = last {
+            if meta.end_offset < data.len() {
+                truncated = true;
+            }
+        } else if !data.is_empty() {
+            truncated = true;
+        }
+
+        let buffer = if truncated { Some(data) } else { None };
+
+        Ok(TailScan {
+            last,
+            file_len,
+            truncated,
+            buffer,
+        })
+    }
+
+    async fn overwrite_segment(&self, path: &Path, data: Vec<u8>) -> WalResult<()> {
+        let path_display = path.to_string();
+        let mut file = self
+            .fs
+            .open_options(path, OpenOptions::default().truncate(true))
+            .await
+            .map_err(|err| {
+                WalError::Storage(format!(
+                    "failed to truncate wal segment {}: {}",
+                    path_display, err
+                ))
+            })?;
+
+        if !data.is_empty() {
+            let (write_res, _buf) = file.write_all(data).await;
+            write_res.map_err(|err| {
+                WalError::Storage(format!(
+                    "failed to rewrite wal segment {}: {}",
+                    path_display, err
+                ))
+            })?;
+        }
+
+        file.flush().await.map_err(|err| {
+            WalError::Storage(format!(
+                "failed to flush wal segment {}: {}",
+                path_display, err
+            ))
+        })?;
+        Ok(())
     }
 }
 
 struct FrameTailMeta {
     seq: u64,
     provisional_id: Option<u64>,
+    end_offset: usize,
+}
+
+struct TailScan {
+    last: Option<FrameTailMeta>,
+    file_len: usize,
+    truncated: bool,
+    buffer: Option<Vec<u8>>,
 }
 
 /// Handle representing an opened WAL segment file.
@@ -290,6 +387,10 @@ pub struct TailMetadata {
     pub last_frame_seq: Option<u64>,
     /// Provisional ID carried by the last complete frame (if any).
     pub last_provisional_id: Option<u64>,
+    /// Byte offset immediately after the last fully decoded frame within the active segment.
+    pub last_valid_offset: Option<usize>,
+    /// Indicates whether truncated bytes were observed (and repaired) at the tail.
+    pub truncated_tail: bool,
 }
 
 fn segment_sequence(filename: Option<&str>) -> Option<u64> {
@@ -465,12 +566,11 @@ mod tests {
             )
             .expect("batch");
 
-            let wal_batch =
-                crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
-            let payload = crate::wal::WalPayload::DynBatch {
-                batch: wal_batch,
-                commit_ts: crate::mvcc::Timestamp::new(42),
-            };
+            let payload = crate::wal::WalPayload::new(
+                batch.clone(),
+                vec![false],
+                crate::mvcc::Timestamp::new(42),
+            );
             let frames = crate::wal::frame::encode_payload(payload, 7).expect("encode");
 
             let mut seq = crate::wal::frame::INITIAL_FRAME_SEQ;

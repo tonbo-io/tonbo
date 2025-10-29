@@ -25,7 +25,7 @@ use crate::{
     wal::{WalConfig, WalHandle, frame::WalEvent, replay::Replayer},
 };
 
-type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, Vec<bool>)>>;
+type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, Vec<bool>, Option<Timestamp>)>>;
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
@@ -70,25 +70,31 @@ where
     ) -> Result<Option<Timestamp>, KeyExtractError> {
         let mut last_commit_ts: Option<Timestamp> = None;
         let mut pending: PendingWalBatches = HashMap::new();
-
         for event in events {
             match event {
                 WalEvent::DynAppend {
                     provisional_id,
                     batch,
+                    commit_ts,
                     tombstones,
                 } => {
                     pending
                         .entry(provisional_id)
                         .or_default()
-                        .push((batch, tombstones));
+                        .push((batch, tombstones, commit_ts));
                 }
                 WalEvent::TxnCommit {
                     provisional_id,
                     commit_ts,
                 } => {
                     if let Some(batches) = pending.remove(&provisional_id) {
-                        for (batch, tombstones) in batches {
+                        for (batch, tombstones, hinted_ts) in batches {
+                            if let Some(hint) = hinted_ts {
+                                debug_assert_eq!(
+                                    hint, commit_ts,
+                                    "commit timestamp derived from append payload diverged"
+                                );
+                            }
                             apply_dyn_wal_batch(self, batch, tombstones, commit_ts)?;
                         }
                         last_commit_ts = Some(match last_commit_ts {
@@ -407,11 +413,17 @@ fn validate_tombstone_bitmap(
 }
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::{disk::LocalFs, dynamic::DynFs, executor::BlockingExecutor, path::Path};
-    use futures::executor::block_on;
+    use fusio::{
+        disk::LocalFs,
+        dynamic::DynFs,
+        executor::{BlockingExecutor, tokio::TokioExecutor},
+        path::Path,
+    };
+    use futures::{StreamExt, channel::mpsc, executor::block_on};
+    use tokio::sync::{Mutex, oneshot};
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
@@ -420,7 +432,7 @@ mod tests {
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
-            WalPayload, append_tombstone_column,
+            WalPayload,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
         },
     };
@@ -519,6 +531,79 @@ mod tests {
         assert_eq!(db.num_immutable_segments(), 0);
         block_on(db.ingest(batch)).expect("insert batch");
         assert_eq!(db.num_immutable_segments(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ingest_waits_for_wal_durable_ack() {
+        use crate::wal::{WalAck, WalHandle, frame, writer};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+        let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+
+        let executor = Arc::new(TokioExecutor::default());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let queue_depth = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ack_slot = Arc::new(Mutex::new(None));
+        let (ack_ready_tx, ack_ready_rx) = oneshot::channel();
+        let (release_ack_tx, release_ack_rx) = oneshot::channel();
+
+        let ack_slot_clone = Arc::clone(&ack_slot);
+        let join = executor.spawn(async move {
+            if let Some(writer::WriterMsg::Enqueue { ack_tx, .. }) = receiver.next().await {
+                {
+                    let mut slot = ack_slot_clone.lock().await;
+                    *slot = Some(ack_tx);
+                }
+                let _ = ack_ready_tx.send(());
+                let _ = release_ack_rx.await;
+                let ack = WalAck {
+                    seq: frame::INITIAL_FRAME_SEQ,
+                    bytes_flushed: 0,
+                    elapsed: Duration::from_millis(0),
+                };
+                let mut slot = ack_slot_clone.lock().await;
+                if let Some(sender) = slot.take() {
+                    let _ = sender.send(Ok(ack));
+                }
+            }
+            Ok(())
+        });
+
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+
+        let mut db: DB<DynMode, TokioExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+        let handle =
+            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        db.set_wal_handle(Some(handle));
+
+        let mut ingest_future = Box::pin(db.ingest(batch));
+        tokio::select! {
+            _ = ack_ready_rx => {}
+            res = &mut ingest_future => panic!("ingest finished early: {:?}", res),
+        }
+
+        release_ack_tx.send(()).expect("release ack");
+        ingest_future.await.expect("ingest after ack");
+
+        let ranges = RangeSet::<KeyDyn>::all();
+        let rows: Vec<_> = db
+            .scan_mutable_rows(&ranges)
+            .map(|row| match &row.0[0] {
+                Some(DynCell::Str(s)) => s.clone(),
+                _ => panic!("unexpected row"),
+            })
+            .collect();
+        assert_eq!(rows, vec!["k".to_string()]);
     }
 
     #[test]
@@ -751,12 +836,7 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch =
-            append_tombstone_column(&batch, Some(&[true])).expect("batch with tombstone");
-        let payload = WalPayload::DynBatch {
-            batch: wal_batch,
-            commit_ts: Timestamp::new(42),
-        };
+        let payload = WalPayload::new(batch.clone(), vec![true], Timestamp::new(42));
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();

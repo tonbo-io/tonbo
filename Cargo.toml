@@ -34,4 +34,5 @@ parquet = "56.2.0"
 
 [dev-dependencies]
 futures = "0.3"
-tokio = { version = "1.48", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+tempfile = "3"
