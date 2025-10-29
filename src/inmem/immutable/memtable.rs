@@ -1,13 +1,9 @@
-use std::{
-    collections::{
-        BTreeMap,
-        btree_map::{Iter as BTreeIter, Range as BTreeRange},
-    },
-    sync::Arc,
+use std::collections::{
+    BTreeMap,
+    btree_map::{Iter as BTreeIter, Range as BTreeRange},
 };
 
-use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::RecordBatch;
 
 use crate::{
     mvcc::Timestamp,
@@ -115,7 +111,7 @@ pub(crate) fn segment_from_batch_with_extractor(
     let commit_ts = vec![Timestamp::MIN; len];
     let tombstone = vec![false; len];
     let (batch, mvcc) =
-        attach_mvcc_columns(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
+        bundle_mvcc_sidecar(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
     Ok(ImmutableMemTable::new(batch, index, mvcc))
 }
 
@@ -155,24 +151,24 @@ pub(crate) fn segment_from_batch_with_key_name(
     segment_from_batch_with_key_col(batch, idx)
 }
 
-pub(crate) fn attach_mvcc_columns(
+pub(crate) fn bundle_mvcc_sidecar(
     batch: RecordBatch,
     commit_ts: Vec<Timestamp>,
     tombstone: Vec<bool>,
 ) -> Result<(RecordBatch, MvccColumns), arrow_schema::ArrowError> {
-    debug_assert_eq!(commit_ts.len(), tombstone.len());
-    let commit_array = UInt64Array::from_iter_values(commit_ts.iter().map(|ts| ts.get()));
-    let tombstone_array = BooleanArray::from(tombstone.clone());
-    let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
-    columns.push(Arc::new(commit_array) as ArrayRef);
-    columns.push(Arc::new(tombstone_array) as ArrayRef);
+    use arrow_schema::ArrowError;
 
-    let mut fields = batch.schema().fields().to_vec();
-    fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
-    fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
-    let schema = Arc::new(Schema::new(fields));
+    if commit_ts.len() != tombstone.len() {
+        return Err(ArrowError::ComputeError(
+            "commit_ts and tombstone length mismatch".to_string(),
+        ));
+    }
+    if commit_ts.len() != batch.num_rows() {
+        return Err(ArrowError::ComputeError(
+            "mvcc metadata length mismatch record batch".to_string(),
+        ));
+    }
 
-    let batch = RecordBatch::try_new(schema, columns)?;
     let mvcc = MvccColumns::new(commit_ts, tombstone);
     Ok((batch, mvcc))
 }
@@ -392,7 +388,7 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
         index.insert(KeyDyn::from("k"), VersionSlice::new(0, 4));
-        let (batch, mvcc) = attach_mvcc_columns(
+        let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![
                 Timestamp::new(40),
@@ -451,13 +447,21 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
         index.insert(KeyDyn::from("k"), VersionSlice::new(0, 3));
-        let (batch, mvcc) = attach_mvcc_columns(
+        let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
             vec![false, true, false],
         )
         .expect("mvcc columns");
         let seg = ImmutableMemTable::new(batch, index, mvcc);
+        let schema = seg.storage().schema();
+        assert!(
+            !schema
+                .fields()
+                .iter()
+                .any(|f| f.name() == MVCC_COMMIT_COL || f.name() == MVCC_TOMBSTONE_COL),
+            "unexpected _commit_ts column in immutable storage"
+        );
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
@@ -499,7 +503,7 @@ mod tests {
         let mut index = BTreeMap::new();
         index.insert(KeyDyn::from("a"), VersionSlice::new(0, 2));
         index.insert(KeyDyn::from("b"), VersionSlice::new(2, 1));
-        let (batch, mvcc) = attach_mvcc_columns(
+        let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
             vec![false, true, false],

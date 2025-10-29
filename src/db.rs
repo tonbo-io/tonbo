@@ -6,10 +6,12 @@
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch};
+use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use fusio::executor::{Executor, Timer};
-use fusio::mem::fs::InMemoryFs;
+use fusio::{
+    executor::{Executor, Timer},
+    mem::fs::InMemoryFs,
+};
 use fusio_manifest::{
     BackoffPolicy, BlockingExecutor as ManifestBlockingExecutor, CheckpointStoreImpl,
     HeadStoreImpl, LeaseStoreImpl, ManifestContext, SegmentStoreImpl,
@@ -32,10 +34,10 @@ use crate::{
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
-    wal::{WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer},
+    wal::{WalConfig, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer},
 };
 
-type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, Option<Timestamp>)>>;
+type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, Vec<bool>, Option<Timestamp>)>>;
 
 type InMemoryManifest = TonboManifest<
     HeadStoreImpl<InMemoryFs>,
@@ -455,8 +457,7 @@ where
             .map_err(KeyExtractError::from)?;
         ticket.durable().await.map_err(KeyExtractError::from)?;
     }
-    let tombstone_array = Arc::new(BooleanArray::from(tombstones)) as ArrayRef;
-    apply_dyn_wal_batch(db, batch, tombstone_array, commit_ts)
+    apply_dyn_wal_batch(db, batch, tombstones, commit_ts)
 }
 
 async fn insert_dyn_wal_batches<E>(
@@ -475,34 +476,17 @@ where
 fn apply_dyn_wal_batch<E>(
     db: &mut DB<DynMode, E>,
     batch: RecordBatch,
-    tombstones: ArrayRef,
+    tombstones: Vec<bool>,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
 where
     E: Executor + Timer,
 {
     validate_record_batch_schema(db, &batch)?;
-    let tombstones = tombstones
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| {
-            KeyExtractError::from(WalError::Codec("_tombstone column not boolean".into()))
-        })?
-        .clone();
-    if batch.num_rows() != tombstones.len() {
-        return Err(KeyExtractError::TombstoneLengthMismatch {
-            expected: batch.num_rows(),
-            actual: tombstones.len(),
-        });
-    }
-    if tombstones.null_count() > 0 {
-        return Err(KeyExtractError::from(WalError::Codec(
-            "tombstone column contained null".into(),
-        )));
-    }
+    validate_tombstone_bitmap(&batch, &tombstones)?;
     db.mem
         .insert_batch_with_ts(db.mode.extractor.as_ref(), batch, commit_ts, move |row| {
-            tombstones.value(row)
+            tombstones[row]
         })?;
     db.maybe_seal_after_insert()?;
     Ok(())
@@ -540,7 +524,7 @@ fn validate_tombstone_bitmap(
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use arrow_array::{ArrayRef, BooleanArray, UInt64Array};
+    use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
@@ -1027,13 +1011,8 @@ mod tests {
         )
         .expect("batch");
 
-        let commit: ArrayRef = Arc::new(UInt64Array::from(vec![
-            Timestamp::new(42).get();
-            batch.num_rows()
-        ]));
-        let tombstone: ArrayRef = Arc::new(BooleanArray::from(vec![true]));
         let payload =
-            WalPayload::new(batch.clone(), commit, tombstone, Timestamp::new(42)).expect("payload");
+            WalPayload::new(batch.clone(), vec![true], Timestamp::new(42)).expect("payload");
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();

@@ -603,7 +603,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        inmem::immutable::memtable::{ImmutableMemTable, VersionSlice, attach_mvcc_columns},
+        inmem::immutable::memtable::{ImmutableMemTable, VersionSlice, bundle_mvcc_sidecar},
         mvcc::Timestamp,
         record::extract::KeyDyn,
         test_util::build_batch,
@@ -642,7 +642,7 @@ mod tests {
         for (offset, key) in keys.into_iter().enumerate() {
             index.insert(KeyDyn::from(key), VersionSlice::new(offset as u32, 1));
         }
-        let (batch, mvcc) = attach_mvcc_columns(
+        let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             commits.into_iter().map(Timestamp::new).collect(),
             tombstones,

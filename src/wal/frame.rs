@@ -2,13 +2,13 @@
 
 use std::{convert::TryFrom, io::Cursor, mem::size_of};
 
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow_array::RecordBatch;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
 use crate::{
     mvcc::Timestamp,
-    wal::{WalError, WalPayload, WalResult, append_mvcc_columns, split_mvcc_columns},
+    wal::{WalError, WalPayload, WalResult},
 };
 
 /// Maximum supported frame version.
@@ -271,12 +271,10 @@ impl FrameHeader {
 pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec<Frame>> {
     let WalPayload {
         batch,
-        commit_ts_column,
-        tombstone_column,
+        tombstones,
         commit_ts,
     } = payload;
-    let wal_batch = append_mvcc_columns(&batch, &commit_ts_column, &tombstone_column)?;
-    let append = encode_txn_append_batch(provisional_id, wal_batch)?;
+    let append = encode_txn_append_batch(provisional_id, &batch, &tombstones, commit_ts)?;
     let commit = encode_txn_commit(provisional_id, commit_ts);
 
     Ok(vec![
@@ -285,7 +283,20 @@ pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec
     ])
 }
 
-fn encode_txn_append_batch(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
+fn encode_txn_append_batch(
+    provisional_id: u64,
+    batch: &RecordBatch,
+    tombstones: &[bool],
+    commit_ts: Timestamp,
+) -> WalResult<Vec<u8>> {
+    let row_count = u32::try_from(batch.num_rows())
+        .map_err(|_| WalError::Codec("record batch too large".into()))?;
+    if tombstones.len() != batch.num_rows() {
+        return Err(WalError::Codec(
+            "tombstone bitmap length mismatch record batch".to_string(),
+        ));
+    }
+
     let mut payload = Vec::with_capacity(TXN_APPEND_PREFIX_SIZE);
     payload.extend_from_slice(&provisional_id.to_le_bytes());
     payload.push(APPEND_MODE_DYN);
@@ -297,11 +308,23 @@ fn encode_txn_append_batch(provisional_id: u64, batch: RecordBatch) -> WalResult
     {
         let mut writer =
             StreamWriter::try_new(&mut ipc_buf, batch.schema().as_ref()).map_err(codec_err)?;
-        writer.write(&batch).map_err(codec_err)?;
+        writer.write(batch).map_err(codec_err)?;
         writer.finish().map_err(codec_err)?;
     }
 
+    let ipc_len =
+        u32::try_from(ipc_buf.len()).map_err(|_| WalError::Codec("ipc buffer too large".into()))?;
+    payload.extend_from_slice(&ipc_len.to_le_bytes());
     payload.extend_from_slice(&ipc_buf);
+
+    let packed = pack_tombstones(tombstones);
+    let packed_len = u32::try_from(packed.len())
+        .map_err(|_| WalError::Codec("tombstone bitmap too large".into()))?;
+
+    payload.extend_from_slice(&row_count.to_le_bytes());
+    payload.extend_from_slice(&packed_len.to_le_bytes());
+    payload.extend_from_slice(&packed);
+    payload.extend_from_slice(&commit_ts.get().to_le_bytes());
     Ok(payload)
 }
 
@@ -310,6 +333,39 @@ fn encode_txn_commit(provisional_id: u64, commit_ts: Timestamp) -> Vec<u8> {
     payload.extend_from_slice(&provisional_id.to_le_bytes());
     payload.extend_from_slice(&commit_ts.get().to_le_bytes());
     payload
+}
+
+fn pack_tombstones(values: &[bool]) -> Vec<u8> {
+    let mut bytes = vec![0u8; (values.len().saturating_add(7)) / 8];
+    for (idx, flag) in values.iter().enumerate() {
+        if *flag {
+            let byte = idx / 8;
+            let bit = idx % 8;
+            bytes[byte] |= 1 << bit;
+        }
+    }
+    bytes
+}
+
+fn unpack_tombstones(bytes: &[u8], rows: usize) -> WalResult<Vec<bool>> {
+    let expected = (rows.saturating_add(7)) / 8;
+    if bytes.len() != expected {
+        return Err(WalError::Codec(
+            "tombstone bitmap length mismatch".to_string(),
+        ));
+    }
+    let mut result = Vec::with_capacity(rows);
+    for idx in 0..rows {
+        let byte = idx / 8;
+        let bit = idx % 8;
+        let value = if expected == 0 {
+            false
+        } else {
+            ((bytes[byte] >> bit) & 1) == 1
+        };
+        result.push(value);
+    }
+    Ok(result)
 }
 
 /// Decode a single frame payload into a [`WalEvent`].
@@ -353,13 +409,18 @@ fn decode_txn_append(payload: &[u8]) -> WalResult<WalEvent> {
 }
 
 fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
-    if bytes.is_empty() {
-        return Err(WalError::Codec(
-            "txn append payload missing record batch".to_string(),
-        ));
+    if bytes.len() < 4 {
+        return Err(WalError::Corrupt("txn append payload truncated"));
     }
 
-    let mut reader = StreamReader::try_new(Cursor::new(bytes), None).map_err(codec_err)?;
+    let (ipc_len_bytes, rest) = bytes.split_at(4);
+    let ipc_len = u32::from_le_bytes(ipc_len_bytes.try_into().unwrap()) as usize;
+    if rest.len() < ipc_len {
+        return Err(WalError::Corrupt("txn append payload truncated"));
+    }
+    let (ipc_bytes, rest) = rest.split_at(ipc_len);
+
+    let mut reader = StreamReader::try_new(Cursor::new(ipc_bytes), None).map_err(codec_err)?;
     let batch = reader
         .next()
         .transpose()
@@ -371,13 +432,42 @@ fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
         ));
     }
 
-    let (stripped, commit_ts, commit_ts_column, tombstones) = split_mvcc_columns(batch)?;
+    if rest.len() < 8 {
+        return Err(WalError::Corrupt("txn append payload truncated"));
+    }
+    let (row_count_bytes, rest) = rest.split_at(4);
+    let (packed_len_bytes, rest) = rest.split_at(4);
+    let row_count = u32::from_le_bytes(row_count_bytes.try_into().unwrap()) as usize;
+    let packed_len = u32::from_le_bytes(packed_len_bytes.try_into().unwrap()) as usize;
+    if rest.len() < packed_len {
+        return Err(WalError::Corrupt("txn append payload truncated"));
+    }
+    let (packed_bytes, rest) = rest.split_at(packed_len);
+    let commit_ts = match rest.len() {
+        0 => None,
+        8 => {
+            let mut commit_ts_bytes = [0u8; 8];
+            commit_ts_bytes.copy_from_slice(rest);
+            Some(Timestamp::from(u64::from_le_bytes(commit_ts_bytes)))
+        }
+        _ => {
+            return Err(WalError::Corrupt(
+                "txn append payload contained unexpected trailer",
+            ));
+        }
+    };
+
+    let tombstones = unpack_tombstones(packed_bytes, row_count)?;
+    if batch.num_rows() != row_count {
+        return Err(WalError::Codec(
+            "tombstone bitmap row count mismatch record batch".to_string(),
+        ));
+    }
 
     Ok(WalEvent::DynAppend {
         provisional_id,
-        batch: stripped,
+        batch,
         commit_ts_hint: commit_ts,
-        commit_ts_column,
         tombstones,
     })
 }
@@ -438,10 +528,8 @@ pub enum WalEvent {
         batch: RecordBatch,
         /// Commit timestamp derived from the append payload (if available).
         commit_ts_hint: Option<Timestamp>,
-        /// Commit timestamp column recovered from the payload.
-        commit_ts_column: ArrayRef,
         /// Tombstone bitmap associated with the batch.
-        tombstones: ArrayRef,
+        tombstones: Vec<bool>,
     },
     /// Commit the transaction at the supplied timestamp.
     TxnCommit {
@@ -463,7 +551,7 @@ pub enum WalEvent {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
+    use arrow_array::{Int32Array, RecordBatch, StringArray};
     use typed_arrow::arrow_schema::{DataType, Field, Schema};
 
     use super::*;
@@ -568,28 +656,8 @@ mod tests {
         RecordBatch::try_new(schema, vec![ids, names]).expect("valid batch")
     }
 
-    fn commit_column(len: usize, ts: Timestamp) -> ArrayRef {
-        Arc::new(UInt64Array::from(vec![ts.get(); len])) as ArrayRef
-    }
-
-    fn tombstone_column(values: Vec<bool>) -> ArrayRef {
-        Arc::new(BooleanArray::from(values)) as ArrayRef
-    }
-
     fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
-        let commit = commit_column(batch.num_rows(), commit_ts);
-        let tombstone = tombstone_column(tombstones);
-        WalPayload::new(batch.clone(), commit, tombstone, commit_ts).expect("payload")
-    }
-
-    fn bools_from(array: &ArrayRef) -> Vec<bool> {
-        array
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .expect("boolean column")
-            .iter()
-            .map(|value| value.expect("non-null"))
-            .collect()
+        WalPayload::new(batch.clone(), tombstones, commit_ts).expect("payload")
     }
 
     #[test]
@@ -615,26 +683,16 @@ mod tests {
                 provisional_id: decoded_id,
                 batch: decoded_batch,
                 commit_ts_hint: append_ts,
-                commit_ts_column,
                 tombstones,
             } => {
                 assert_eq!(decoded_id, provisional_id);
                 assert_eq!(append_ts, Some(commit_ts));
-                assert_eq!(bools_from(&tombstones), vec![true, false, true]);
-                let commit_values = commit_ts_column
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .expect("u64 column");
-                assert_eq!(commit_values.len(), base.num_rows());
-                assert!(
-                    commit_values
-                        .iter()
-                        .all(|value| value.expect("non-null") == commit_ts.get())
-                );
+                assert_eq!(tombstones, vec![true, false, true]);
                 assert_eq!(
                     decoded_batch.schema().as_ref(),
                     user_expected.schema().as_ref()
                 );
+                assert_eq!(decoded_batch.num_rows(), user_expected.num_rows());
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -648,6 +706,75 @@ mod tests {
             } => {
                 assert_eq!(decoded_id, provisional_id);
                 assert_eq!(decoded_ts, commit_ts);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pack_tombstones_round_trip() {
+        let tombstones = vec![
+            true, false, true, false, true, false, true, false, true, true,
+        ];
+        let packed = pack_tombstones(&tombstones);
+        assert_eq!(packed, vec![0x55, 0x03]);
+        let unpacked =
+            unpack_tombstones(&packed, tombstones.len()).expect("unpack succeeds for packed bytes");
+        assert_eq!(unpacked, tombstones);
+    }
+
+    #[test]
+    fn encode_payload_handles_batches_larger_than_byte() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let ids = Arc::new(Int32Array::from((0..12).collect::<Vec<_>>())) as _;
+        let large_batch = RecordBatch::try_new(schema, vec![ids]).expect("large batch");
+        let tombstones: Vec<bool> = (0..12).map(|idx| idx % 3 == 0).collect();
+        let commit_ts = Timestamp::new(77);
+
+        let frames = encode_payload(wal_payload(&large_batch, tombstones.clone(), commit_ts), 11)
+            .expect("encode");
+
+        match decode_frame(frames[0].frame_type(), frames[0].payload())
+            .expect("decode append frame")
+        {
+            WalEvent::DynAppend {
+                provisional_id,
+                batch,
+                commit_ts_hint,
+                tombstones: decoded_tombstones,
+            } => {
+                assert_eq!(provisional_id, 11);
+                assert_eq!(commit_ts_hint, Some(commit_ts));
+                assert_eq!(decoded_tombstones, tombstones);
+                assert_eq!(batch.num_rows(), 12);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_dyn_append_allows_missing_commit_hint() {
+        let base = sample_batch();
+        let tombstones = vec![false, true, false];
+        let frames = encode_payload(
+            wal_payload(&base, tombstones.clone(), Timestamp::new(5)),
+            21,
+        )
+        .expect("encode");
+        let mut append_payload = frames[0].payload().to_vec();
+        append_payload.truncate(append_payload.len() - 8);
+
+        match decode_frame(FrameType::TxnAppend, &append_payload).expect("decode without commit") {
+            WalEvent::DynAppend {
+                provisional_id,
+                batch,
+                commit_ts_hint,
+                tombstones: decoded_tombstones,
+            } => {
+                assert_eq!(provisional_id, 21);
+                assert_eq!(commit_ts_hint, None);
+                assert_eq!(decoded_tombstones, tombstones);
+                assert_eq!(batch.num_rows(), base.num_rows());
             }
             other => panic!("unexpected event: {other:?}"),
         }

@@ -171,7 +171,7 @@ It begins when a user issues a write operation and ends once the data is durably
 
 #### WAL
 
-Tonbo’s WAL ensures durability before data enters the in-memory structures. Writes are first appended into a buffered sequence of log entries and grouped into **immutable fragments** (objects) suited for storage on S3-like backends. Each fragment is uploaded via Fusio’s async I/O layer and atomically published using conditional PUT/CAS, ensuring correct global ordering even in serverless, multi-writer environments. A lightweight WAL manifest tracks fragment sequence numbers, offsets, and visibility state, enabling reliable crash recovery: upon startup, Tonbo replays fragments into the MemTable before proceeding to flush/compaction. This design simulates a continuous append-only log over object storage—bridging the durability of a traditional WAL with the scalability of S3.
+Tonbo’s WAL ensures durability before data enters the in-memory structures. Writes are first appended into a buffered sequence of log entries and grouped into **immutable segments** (objects) suited for storage on S3-like backends. Each segment is uploaded via Fusio’s async I/O layer and atomically published using conditional PUT/CAS, ensuring correct global ordering even in serverless, multi-writer environments. A lightweight WAL manifest tracks segment sequence numbers, offsets, and visibility state, enabling reliable crash recovery: upon startup, Tonbo replays segments into the MemTable before proceeding to flush/compaction. This design simulates a continuous append-only log over object storage—bridging the durability of a traditional WAL with the scalability of S3.
 
 ### Compaction Path
 

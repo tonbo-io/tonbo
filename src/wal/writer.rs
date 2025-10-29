@@ -182,10 +182,7 @@ where
                 _ = timer_future => {
                     timer = None;
                     match ctx.handle_timer_elapsed().await {
-                        Ok(TimerTickOutcome {
-                            sync_performed,
-                            rotation_performed: _,
-                        }) => {
+                        Ok(TimerTickOutcome { sync_performed }) => {
                             if sync_performed {
                                 ctx.record_sync().await;
                             }
@@ -270,25 +267,23 @@ where
                         }
                     }
                 }
-                Some(WriterMsg::Rotate { ack_tx }) => {
-                    match ctx.handle_rotation_request().await {
-                        Ok(rotation) => {
-                            if rotation.sync_performed {
-                                ctx.record_sync().await;
-                            }
-                            if rotation.performed {
-                                ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
-                            } else {
-                                ctx.recompute_timer(&mut timer);
-                            }
-                            let _ = ack_tx.send(Ok(()));
+                Some(WriterMsg::Rotate { ack_tx }) => match ctx.handle_rotation_request().await {
+                    Ok(rotation) => {
+                        if rotation.sync_performed {
+                            ctx.record_sync().await;
                         }
-                        Err(err) => {
-                            let _ = ack_tx.send(Err(err.clone()));
-                            return Err(err);
+                        if rotation.performed {
+                            ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
+                        } else {
+                            ctx.recompute_timer(&mut timer);
                         }
+                        let _ = ack_tx.send(Ok(()));
                     }
-                }
+                    Err(err) => {
+                        let _ = ack_tx.send(Err(err.clone()));
+                        return Err(err);
+                    }
+                },
                 None => break,
             }
         }
@@ -394,13 +389,13 @@ where
             next_segment_seq,
             completed_segments,
         };
-        if ctx.segment_bytes > 0 {
-            if let Some(max_age) = ctx.cfg.segment_max_age {
-                let now = Instant::now();
-                ctx.segment_opened_at = now;
-                if let Some(deadline) = now.checked_add(max_age) {
-                    ctx.rotation_deadline = Some(deadline);
-                }
+        if ctx.segment_bytes > 0
+            && let Some(max_age) = ctx.cfg.segment_max_age
+        {
+            let now = Instant::now();
+            ctx.segment_opened_at = now;
+            if let Some(deadline) = now.checked_add(max_age) {
+                ctx.rotation_deadline = Some(deadline);
             }
         }
         ctx.enforce_retention_limit().await?;
@@ -428,15 +423,16 @@ where
         self.segment_bytes = self.segment_bytes.saturating_add(bytes_written);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(bytes_written);
 
-        if was_empty && self.segment_bytes > 0 {
-            if let Some(max_age) = self.cfg.segment_max_age {
-                let now = Instant::now();
-                self.segment_opened_at = now;
-                if let Some(deadline) = now.checked_add(max_age) {
-                    self.rotation_deadline = Some(deadline);
-                } else {
-                    self.rotation_deadline = Some(Instant::now());
-                }
+        if was_empty
+            && self.segment_bytes > 0
+            && let Some(max_age) = self.cfg.segment_max_age
+        {
+            let now = Instant::now();
+            self.segment_opened_at = now;
+            if let Some(deadline) = now.checked_add(max_age) {
+                self.rotation_deadline = Some(deadline);
+            } else {
+                self.rotation_deadline = Some(Instant::now());
             }
         }
 
@@ -590,12 +586,11 @@ where
         self.last_flush = now;
         self.segment_opened_at = now;
         self.rotation_deadline = None;
-        if self.segment_bytes > 0 {
-            if let Some(max_age) = self.cfg.segment_max_age {
-                if let Some(deadline) = now.checked_add(max_age) {
-                    self.rotation_deadline = Some(deadline);
-                }
-            }
+        if self.segment_bytes > 0
+            && let Some(max_age) = self.cfg.segment_max_age
+            && let Some(deadline) = now.checked_add(max_age)
+        {
+            self.rotation_deadline = Some(deadline);
         }
 
         self.completed_segments.push_back(SegmentMeta {
@@ -699,7 +694,8 @@ where
     }
 
     fn recompute_timer(&mut self, timer_slot: &mut SleepSlot) {
-        let next_deadline = Self::earliest_deadline(self.next_sync_deadline, self.rotation_deadline);
+        let next_deadline =
+            Self::earliest_deadline(self.next_sync_deadline, self.rotation_deadline);
 
         match next_deadline {
             Some(deadline) => {
@@ -727,38 +723,33 @@ where
     async fn handle_timer_elapsed(&mut self) -> WalResult<TimerTickOutcome> {
         self.scheduled_deadline = None;
         let mut sync_performed = false;
-        let mut rotation_performed = false;
         let now = Instant::now();
 
-        if let Some(deadline) = self.rotation_deadline {
-            if deadline <= now {
-                if self.segment_bytes > 0 {
-                    let rotation = self.rotate_active_segment().await?;
-                    rotation_performed = rotation.performed;
-                    if rotation.sync_performed {
-                        sync_performed = true;
-                    }
-                }
-                self.rotation_deadline = None;
-            }
-        }
-
-        if let Some(deadline) = self.next_sync_deadline {
-            if deadline <= now {
-                self.next_sync_deadline = None;
-                if self.bytes_since_sync > 0 {
-                    self.sync_data().await?;
-                    self.bytes_since_sync = 0;
-                    self.last_sync = Instant::now();
+        if let Some(deadline) = self.rotation_deadline
+            && deadline <= now
+        {
+            if self.segment_bytes > 0 {
+                let rotation = self.rotate_active_segment().await?;
+                if rotation.sync_performed {
                     sync_performed = true;
                 }
             }
+            self.rotation_deadline = None;
         }
 
-        Ok(TimerTickOutcome {
-            sync_performed,
-            rotation_performed,
-        })
+        if let Some(deadline) = self.next_sync_deadline
+            && deadline <= now
+        {
+            self.next_sync_deadline = None;
+            if self.bytes_since_sync > 0 {
+                self.sync_data().await?;
+                self.bytes_since_sync = 0;
+                self.last_sync = Instant::now();
+                sync_performed = true;
+            }
+        }
+
+        Ok(TimerTickOutcome { sync_performed })
     }
 }
 
@@ -841,7 +832,6 @@ enum TimerDirective {
 
 struct TimerTickOutcome {
     sync_performed: bool,
-    rotation_performed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -874,7 +864,7 @@ mod tests {
     use fusio::{DynFs, executor::BlockingExecutor, impls::mem::fs::InMemoryFs, path::Path};
     use futures::{channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
     use typed_arrow::{
-        arrow_array::{ArrayRef, BooleanArray, Int64Array, RecordBatch, UInt64Array},
+        arrow_array::{Int64Array, RecordBatch},
         arrow_schema::{DataType, Field, Schema},
     };
 
@@ -886,15 +876,17 @@ mod tests {
 
     fn sample_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-        let data: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2, 3]));
+        let data = Arc::new(Int64Array::from(vec![1_i64, 2, 3])) as _;
         RecordBatch::try_new(schema, vec![data]).expect("valid batch")
     }
 
     fn sample_payload(batch: &RecordBatch, commit_ts: u64) -> WalPayload {
-        let commit: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()]));
-        let tombstone: ArrayRef = Arc::new(BooleanArray::from(vec![false; batch.num_rows()]));
-        WalPayload::new(batch.clone(), commit, tombstone, Timestamp::new(commit_ts))
-            .expect("payload")
+        WalPayload::new(
+            batch.clone(),
+            vec![false; batch.num_rows()],
+            Timestamp::new(commit_ts),
+        )
+        .expect("payload")
     }
 
     #[test]
@@ -1351,9 +1343,15 @@ mod tests {
 
         let segments = futures::executor::block_on(storage_reader.list_segments())
             .expect("list segments after manual rotation");
-        assert!(segments.len() >= 2, "manual rotation should create a new segment");
+        assert!(
+            segments.len() >= 2,
+            "manual rotation should create a new segment"
+        );
         assert_eq!(segments[0].seq, 0);
-        assert!(segments[0].bytes > 0, "sealed segment should retain written bytes");
+        assert!(
+            segments[0].bytes > 0,
+            "sealed segment should retain written bytes"
+        );
         assert_eq!(segments[1].seq, 1);
     }
 
@@ -1437,8 +1435,14 @@ mod tests {
 
         let segments = futures::executor::block_on(storage_reader.list_segments())
             .expect("list segments after time rotation");
-        assert!(segments.len() >= 2, "time rotation should seal current segment");
-        assert!(segments[0].bytes > 0, "sealed segment should retain written bytes");
+        assert!(
+            segments.len() >= 2,
+            "time rotation should seal current segment"
+        );
+        assert!(
+            segments[0].bytes > 0,
+            "sealed segment should retain written bytes"
+        );
     }
 
     #[test]

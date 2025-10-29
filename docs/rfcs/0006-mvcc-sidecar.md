@@ -42,7 +42,7 @@
 
 ### 1. Immutable representation
 
-- Replace `attach_mvcc_columns` with `split_mvcc_sidecar(batch, commit_ts, tombstone)` returning the original `RecordBatch` plus `MvccColumns`.
+- Replace `attach_mvcc_columns` with `bundle_mvcc_sidecar(batch, commit_ts, tombstone)` returning the original `RecordBatch` plus `MvccColumns`.
 - Ensure `ImmutableMemTable` stores the original batch and MVCC vectors without modifying the schema; maintain index and iterators as today.
 
 ### 2. MVCC sidecar format
