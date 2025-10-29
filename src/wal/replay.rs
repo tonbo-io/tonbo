@@ -1,68 +1,68 @@
 //! Recovery helpers for scanning WAL segments.
 
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
-use fusio::{DynFs, Read, error::Error as FusioError, fs::OpenOptions, path::Path as FusioPath};
-use futures::StreamExt;
+use fusio::Read;
+#[cfg(test)]
+use fusio::{DynFs, path::Path as FusioPath};
 
 use crate::wal::{
     WalConfig, WalError, WalResult,
     frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
+    storage::WalStorage,
 };
 
 /// Scans WAL segments on disk and yields decoded events.
 pub struct Replayer {
     /// Configuration snapshot guiding where segments reside.
     cfg: WalConfig,
-    /// Filesystem interface backing the configured WAL directory.
-    fs: Arc<dyn DynFs>,
+    /// Storage facade shared with the WAL writer for filesystem access.
+    storage: WalStorage,
 }
 
 impl Replayer {
     /// Create a new replayer using the provided configuration.
     pub fn new(cfg: WalConfig) -> Self {
-        let fs = Arc::clone(&cfg.filesystem);
-        Self { cfg, fs }
+        let storage = WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
+        Self { cfg, storage }
     }
 
     /// Iterate through WAL segments and produce events.
     pub async fn scan(&self) -> WalResult<Vec<WalEvent>> {
-        let mut entries = Vec::<(u64, FusioPath)>::new();
-        let mut stream = match self.fs.list(&self.cfg.dir).await {
-            Ok(stream) => stream,
-            Err(FusioError::Io(err)) if err.kind() == io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(err) => {
-                return Err(WalError::Storage(format!(
-                    "failed to list wal dir {}: {}",
-                    self.cfg.dir.as_ref(),
-                    err
-                )));
-            }
-        };
+        use crate::wal::WalRecoveryMode;
 
-        while let Some(meta_result) = stream.next().await {
-            let meta = meta_result.map_err(|err| {
-                WalError::Storage(format!(
-                    "failed to read wal metadata under {}: {}",
-                    self.cfg.dir.as_ref(),
-                    err
-                ))
-            })?;
-            if let Some(seq) = segment_sequence(&meta.path) {
-                entries.push((seq, meta.path));
+        match self.cfg.recovery {
+            WalRecoveryMode::PointInTime | WalRecoveryMode::TolerateCorruptedTail => {
+                // Both variants currently share the same implementation: stop at the first
+                // truncated or unreadable frame. `TolerateCorruptedTail` exists so
+                // we can later introduce tail-specific heuristics without breaking
+                // configuration semantics.
+            }
+            WalRecoveryMode::AbsoluteConsistency => {
+                return Err(WalError::Unimplemented(
+                    "wal recovery mode AbsoluteConsistency is not implemented",
+                ));
+            }
+            WalRecoveryMode::SkipCorrupted => {
+                return Err(WalError::Unimplemented(
+                    "wal recovery mode SkipCorrupted is not implemented",
+                ));
             }
         }
 
-        entries.sort_by_key(|(seq, _)| *seq);
+        let segments = self.storage.list_segments().await?;
+        if segments.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let mut events = Vec::new();
-        for (_, path) in entries {
+        for segment in segments {
+            let path = segment.path;
             let path_display = path.to_string();
             let mut file = self
-                .fs
-                .open_options(&path, OpenOptions::default())
+                .storage
+                .fs()
+                .open_options(&path, WalStorage::read_options())
                 .await
                 .map_err(|err| {
                     WalError::Storage(format!(
@@ -89,10 +89,9 @@ impl Replayer {
                             || reason == "frame payload truncated" =>
                     {
                         // Treat a truncated tail (common for crash-at-end scenarios) as EOF so
-                        // recovery returns the events observed before the
-                        // partial frame. Any other corruption surfaces as
-                        // an error to avoid silently skipping valid transactions further in
-                        // the log.
+                        // recovery returns the events observed before the partial frame. Any
+                        // other corruption surfaces as an error to avoid silently skipping valid
+                        // transactions further in the log.
                         return Ok(events);
                     }
                     Err(err) => return Err(err),
@@ -120,28 +119,23 @@ impl Replayer {
     }
 }
 
-fn segment_sequence(path: &FusioPath) -> Option<u64> {
-    let filename = path.filename()?;
-    let trimmed = filename.strip_prefix("wal-")?.strip_suffix(".tonwal")?;
-    if trimmed.len() != 20 {
-        return None;
-    }
-    trimmed.parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::{Write, impls::mem::fs::InMemoryFs};
+    use fusio::{
+        Write,
+        impls::{disk::TokioFs, mem::fs::InMemoryFs},
+    };
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
         mvcc::Timestamp,
         wal::{
-            WalPayload,
+            WalPayload, WalRecoveryMode,
             frame::{INITIAL_FRAME_SEQ, encode_payload},
             storage::WalStorage,
         },
@@ -166,12 +160,7 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch =
-            crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
-        let payload = WalPayload::DynBatch {
-            batch: wal_batch.clone(),
-            commit_ts: Timestamp::new(42),
-        };
+        let payload = WalPayload::new(batch.clone(), vec![false], Timestamp::new(42));
         let frames = encode_payload(payload, 7).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
@@ -204,10 +193,12 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
+                commit_ts,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
                 assert_eq!(*tombstones, vec![false]);
+                assert_eq!(*commit_ts, Some(Timestamp::new(42)));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -252,12 +243,7 @@ mod tests {
         )
         .expect("batch");
 
-        let wal_batch =
-            crate::wal::append_tombstone_column(&batch, Some(&[false])).expect("wal batch");
-        let payload = WalPayload::DynBatch {
-            batch: wal_batch.clone(),
-            commit_ts: Timestamp::new(42),
-        };
+        let payload = WalPayload::new(batch.clone(), vec![false], Timestamp::new(42));
         let frames = encode_payload(payload, 9).expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
@@ -287,13 +273,95 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id,
                 batch: decoded,
+                commit_ts,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 9);
                 assert_eq!(*tombstones, vec![false]);
+                assert_eq!(*commit_ts, Some(Timestamp::new(42)));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replayer_reads_tokiofs_segments() {
+        let dir = tempdir().expect("tempdir");
+        let wal_dir = dir.path().join("wal");
+
+        let fs: Arc<dyn DynFs> = Arc::new(TokioFs);
+        let wal_root = FusioPath::from_filesystem_path(&wal_dir).expect("wal path");
+        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+
+        storage
+            .ensure_dir(storage.root())
+            .await
+            .expect("ensure dir");
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["tokio"])) as _,
+                Arc::new(Int32Array::from(vec![9])) as _,
+            ],
+        )
+        .expect("batch");
+
+        let payload = WalPayload::new(batch.clone(), vec![false], Timestamp::new(7));
+        let frames = encode_payload(payload, 11).expect("encode");
+
+        let mut seq = INITIAL_FRAME_SEQ;
+        let mut bytes = Vec::new();
+        for frame in frames {
+            bytes.extend_from_slice(&frame.into_bytes(seq));
+            seq += 1;
+        }
+
+        let mut segment = storage.open_segment(42).await.expect("segment");
+        let (write_res, _buf) = segment.file_mut().write_all(bytes).await;
+        write_res.expect("write");
+        segment.file_mut().flush().await.expect("flush");
+
+        let mut cfg = WalConfig::default();
+        cfg.dir = wal_root;
+        cfg.filesystem = fs;
+
+        let replayer = Replayer::new(cfg);
+        let events = replayer.scan().await.expect("scan");
+
+        assert_eq!(events.len(), 2);
+        match events[0] {
+            WalEvent::DynAppend { ref batch, .. } => {
+                assert_eq!(batch.num_rows(), 1);
+            }
+            ref other => panic!("unexpected event: {other:?}"),
+        }
+        match events[1] {
+            WalEvent::TxnCommit { .. } => {}
+            ref other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replayer_rejects_unimplemented_recovery_mode() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let wal_root = FusioPath::parse("wal-unimplemented").expect("wal path");
+
+        let mut cfg = WalConfig::default();
+        cfg.dir = wal_root;
+        cfg.filesystem = fs;
+        cfg.recovery = WalRecoveryMode::AbsoluteConsistency;
+
+        let replayer = Replayer::new(cfg);
+        let err = futures::executor::block_on(replayer.scan()).expect_err("mode unimplemented");
+        assert!(matches!(
+            err,
+            WalError::Unimplemented("wal recovery mode AbsoluteConsistency is not implemented")
+        ));
     }
 }

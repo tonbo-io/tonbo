@@ -8,7 +8,7 @@ use crc32c::crc32c;
 
 use crate::{
     mvcc::Timestamp,
-    wal::{WalError, WalPayload, WalResult, split_tombstone_column},
+    wal::{WalError, WalPayload, WalResult, append_mvcc_columns, split_mvcc_columns},
 };
 
 /// Maximum supported frame version.
@@ -269,21 +269,22 @@ impl FrameHeader {
 
 /// Encode a WAL payload into one or more frames using the provided provisional id.
 pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec<Frame>> {
-    match payload {
-        WalPayload::DynBatch { batch, commit_ts } => {
-            let append = encode_txn_append_dyn(provisional_id, batch)?;
-            let commit = encode_txn_commit(provisional_id, commit_ts);
-            Ok(vec![
-                Frame::new(FrameType::TxnAppend, append),
-                Frame::new(FrameType::TxnCommit, commit),
-            ])
-        }
-        WalPayload::TypedRows { .. } => Err(WalError::Unimplemented("typed wal payload encoding")),
-        WalPayload::Control { .. } => Err(WalError::Unimplemented("control wal payload encoding")),
-    }
+    let WalPayload {
+        batch,
+        tombstones,
+        commit_ts,
+    } = payload;
+    let wal_batch = append_mvcc_columns(&batch, commit_ts, Some(&tombstones))?;
+    let append = encode_txn_append_batch(provisional_id, wal_batch)?;
+    let commit = encode_txn_commit(provisional_id, commit_ts);
+
+    Ok(vec![
+        Frame::new(FrameType::TxnAppend, append),
+        Frame::new(FrameType::TxnCommit, commit),
+    ])
 }
 
-fn encode_txn_append_dyn(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
+fn encode_txn_append_batch(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
     let mut payload = Vec::with_capacity(TXN_APPEND_PREFIX_SIZE);
     payload.extend_from_slice(&provisional_id.to_le_bytes());
     payload.push(APPEND_MODE_DYN);
@@ -369,11 +370,12 @@ fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
         ));
     }
 
-    let (stripped, tombstones) = split_tombstone_column(batch)?;
+    let (stripped, commit_ts, tombstones) = split_mvcc_columns(batch)?;
 
     Ok(WalEvent::DynAppend {
         provisional_id,
         batch: stripped,
+        commit_ts,
         tombstones,
     })
 }
@@ -430,8 +432,10 @@ pub enum WalEvent {
     DynAppend {
         /// Provisional identifier.
         provisional_id: u64,
-        /// Record batch payload (without `_tombstone` column).
+        /// Record batch payload (without MVCC columns).
         batch: RecordBatch,
+        /// Commit timestamp derived from the append payload (if available).
+        commit_ts: Option<Timestamp>,
         /// Tombstone bitmap associated with the batch.
         tombstones: Vec<bool>,
     },
@@ -563,17 +567,13 @@ mod tests {
     #[test]
     fn encode_payload_dyn_batch_round_trip() {
         let base = sample_batch();
-        let wal_batch = crate::wal::append_tombstone_column(&base, Some(&[true, false, true]))
-            .expect("wal batch");
+        let tombstones = vec![true, false, true];
         let user_expected = base.clone();
         let commit_ts = Timestamp::new(42);
         let provisional_id = 7;
 
         let frames = encode_payload(
-            WalPayload::DynBatch {
-                batch: wal_batch,
-                commit_ts,
-            },
+            WalPayload::new(base.clone(), tombstones.clone(), commit_ts),
             provisional_id,
         )
         .expect("encode succeeds");
@@ -586,9 +586,11 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id: decoded_id,
                 batch: decoded_batch,
+                commit_ts: append_ts,
                 tombstones,
             } => {
                 assert_eq!(decoded_id, provisional_id);
+                assert_eq!(append_ts, Some(commit_ts));
                 assert_eq!(tombstones, vec![true, false, true]);
                 assert_eq!(
                     decoded_batch.schema().as_ref(),
@@ -614,13 +616,8 @@ mod tests {
 
     #[test]
     fn decode_append_rejects_truncated_payload() {
-        let wal_batch =
-            crate::wal::append_tombstone_column(&sample_batch(), None).expect("wal batch");
         let frames = encode_payload(
-            WalPayload::DynBatch {
-                batch: wal_batch,
-                commit_ts: Timestamp::new(1),
-            },
+            WalPayload::new(sample_batch(), vec![false, false, false], Timestamp::new(1)),
             9,
         )
         .expect("encode succeeds");
