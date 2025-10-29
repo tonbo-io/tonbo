@@ -7,10 +7,8 @@
 
 use std::{borrow::Borrow, cmp::Ordering};
 
-use typed_arrow::{
-    arrow_array::{BinaryArray, StringArray},
-    arrow_buffer::Buffer,
-};
+use arrow_array::{BinaryArray, StringArray};
+use arrow_buffer::Buffer;
 
 #[derive(Clone)]
 pub struct StrKey {
@@ -32,7 +30,7 @@ impl StrKey {
     }
 
     pub(crate) fn from_str(s: &str) -> Self {
-        let data: Buffer = Buffer::from(s.as_bytes());
+        let data = Buffer::from(s.as_bytes());
         let start = 0i32;
         let len = s.len() as i32;
         Self { data, start, len }
