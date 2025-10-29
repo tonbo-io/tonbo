@@ -724,7 +724,7 @@ mod tests {
     use fusio::{DynFs, executor::BlockingExecutor, impls::mem::fs::InMemoryFs, path::Path};
     use futures::{channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
     use typed_arrow::{
-        arrow_array::{ArrayRef, Int64Array, RecordBatch},
+        arrow_array::{ArrayRef, BooleanArray, Int64Array, RecordBatch, UInt64Array},
         arrow_schema::{DataType, Field, Schema},
     };
 
@@ -741,11 +741,10 @@ mod tests {
     }
 
     fn sample_payload(batch: &RecordBatch, commit_ts: u64) -> WalPayload {
-        WalPayload::new(
-            batch.clone(),
-            vec![false; batch.num_rows()],
-            Timestamp::new(commit_ts),
-        )
+        let commit: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()]));
+        let tombstone: ArrayRef = Arc::new(BooleanArray::from(vec![false; batch.num_rows()]));
+        WalPayload::new(batch.clone(), commit, tombstone, Timestamp::new(commit_ts))
+            .expect("payload")
     }
 
     #[test]
