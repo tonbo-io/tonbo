@@ -19,7 +19,6 @@ use arrow_schema::{DataType, Field};
 use fusio::{
     DynFs,
     executor::{Executor, JoinHandle, Timer},
-    impls::disk::TokioFs,
     path::Path,
 };
 use futures::{
@@ -122,7 +121,7 @@ impl Default for WalConfig {
             recovery: WalRecoveryMode::default(),
             retention_bytes: None,
             queue_size: 65_536,
-            filesystem: Arc::new(TokioFs),
+            filesystem: crate::fs::local_fs(),
         }
     }
 }

@@ -3,9 +3,10 @@ pub(crate) mod manager;
 use std::{
     fmt::{Display, Formatter},
     str::FromStr,
+    sync::Arc,
 };
 
-use fusio::{fs::OpenOptions, path::Path};
+use fusio::{DynFs, disk::LocalFs, fs::OpenOptions, path::Path};
 use once_cell::sync::OnceCell;
 use ulid::{DecodeError, Ulid};
 
@@ -28,6 +29,12 @@ pub fn generate_file_id() -> FileId {
         .expect("global file id generator lock should not fail");
 
     guard.generate().expect("generator should not fail")
+}
+
+/// Construct a local filesystem handle backed by the active fusio runtime.
+#[inline]
+pub fn local_fs() -> Arc<dyn DynFs> {
+    Arc::new(LocalFs {})
 }
 
 /// Logical file categories with known on-disk conventions.
