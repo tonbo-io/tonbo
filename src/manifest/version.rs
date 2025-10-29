@@ -75,7 +75,7 @@ fn apply_add_ssts(
 }
 
 fn apply_remove_ssts(
-    levels: &mut Vec<Vec<SstEntry>>,
+    levels: &mut [Vec<SstEntry>],
     level: u32,
     sst_ids: &[SsTableId],
 ) -> ManifestResult<()> {

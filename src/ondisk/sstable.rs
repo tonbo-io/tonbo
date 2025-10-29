@@ -25,8 +25,8 @@ use parquet::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    fs::FileId, inmem::immutable::Immutable, mode::Mode, mvcc::Timestamp, query::Predicate,
-    record::extract::KeyDyn, scan::RangeSet,
+    fs::FileId, inmem::immutable::Immutable, manifest::ManifestError, mode::Mode, mvcc::Timestamp,
+    query::Predicate, record::extract::KeyDyn, scan::RangeSet,
 };
 
 /// Identifier for an SSTable stored on disk.
@@ -153,7 +153,7 @@ impl<M: Mode> SsTable<M> {
 pub struct SsTableDescriptor {
     id: SsTableId,
     level: usize,
-    approximate_stats: Option<SsTableStats>,
+    stats: Option<SsTableStats>,
     wal_ids: Option<Vec<FileId>>,
 }
 
@@ -163,14 +163,14 @@ impl SsTableDescriptor {
         Self {
             id,
             level,
-            approximate_stats: None,
+            stats: None,
             wal_ids: None,
         }
     }
 
     /// Attach rough statistics computed during flush.
     pub fn with_stats(mut self, stats: SsTableStats) -> Self {
-        self.approximate_stats = Some(stats);
+        self.stats = Some(stats);
         self
     }
 
@@ -192,7 +192,7 @@ impl SsTableDescriptor {
 
     /// Optional statistics bundle.
     pub fn stats(&self) -> Option<&SsTableStats> {
-        self.approximate_stats.as_ref()
+        self.stats.as_ref()
     }
 
     /// WAL file identifiers that contributed to this table.
@@ -247,6 +247,9 @@ pub enum SsTableError {
     /// Invalid path component produced while building an SSTable destination.
     #[error("invalid sstable path component: {0}")]
     InvalidPath(String),
+    /// Manifest backend error
+    #[error("failure when persist into manifest: {0}")]
+    Manifest(#[from] ManifestError),
 }
 
 /// Scratchpad used while minor compaction plans an SST. Keeps provisional stats

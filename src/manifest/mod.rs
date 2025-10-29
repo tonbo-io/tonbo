@@ -9,7 +9,6 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use fusio_manifest::{
     BlockingExecutor, CheckpointStore, HeadStore, LeaseStore, SegmentIo,
-    context::ManifestContext,
     manifest::Manifest as FusioManifest,
     retention::DefaultRetention,
     snapshot::{ScanRange, Snapshot},
@@ -326,9 +325,9 @@ pub struct SstEntry {
     /// SST identifier
     pub sst_id: SsTableId,
     /// Mandatory statistics for the SST.
-    pub stats: SsTableStats,
+    pub stats: Option<SsTableStats>,
     /// Mandatory WAL segments composed to build the SST.
-    pub wal_segments: Vec<FileId>,
+    pub wal_segments: Option<Vec<FileId>>,
 }
 
 impl PartialEq for SstEntry {
@@ -427,7 +426,7 @@ where
     #[must_use]
     pub fn open(
         stores: Stores<HS, SS, CS, LS>,
-        ctx: Arc<ManifestContext<DefaultRetention, BlockingExecutor>>,
+        ctx: Arc<fusio_manifest::context::ManifestContext<DefaultRetention, BlockingExecutor>>,
     ) -> Self {
         Self {
             inner: FusioManifest::new_with_context(
@@ -521,6 +520,9 @@ where
         let next_txn = state.commit_timestamp.next();
         state.version_id = new_version_id;
         state.commit_timestamp = next_txn;
+
+        // Compute the WAL floor. Right now we always pick the earliest one since there is no WAL GC
+        // TODO: with WAL GC we need to change the floor algorithm
         let wal_floor = state
             .wal_segments
             .iter()
@@ -730,9 +732,9 @@ mod tests {
         let head = HeadStoreImpl::new(fs.clone(), "head.json");
         let segment = SegmentStoreImpl::new(fs.clone(), "segments");
         let checkpoint = CheckpointStoreImpl::new(fs.clone(), "");
-        let timer = BlockingExecutor::default();
+        let timer = BlockingExecutor;
         let lease = LeaseStoreImpl::new(fs, "", BackoffPolicy::default(), timer);
-        let context = Arc::new(ManifestContext::new(BlockingExecutor::default()));
+        let context = Arc::new(ManifestContext::new(BlockingExecutor));
         Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
     }
 
@@ -774,18 +776,18 @@ mod tests {
         };
         let sst_level0_a = SstEntry {
             sst_id: SsTableId::new(7),
-            stats: SsTableStats::default(),
-            wal_segments: vec![wal_segment.file_id],
+            stats: Some(SsTableStats::default()),
+            wal_segments: Some(vec![wal_segment.file_id.clone()]),
         };
         let sst_level0_b = SstEntry {
             sst_id: SsTableId::new(8),
-            stats: SsTableStats::default(),
-            wal_segments: vec![generate_file_id()],
+            stats: Some(SsTableStats::default()),
+            wal_segments: Some(vec![generate_file_id()]),
         };
         let sst_level1 = SstEntry {
             sst_id: SsTableId::new(21),
-            stats: SsTableStats::default(),
-            wal_segments: vec![generate_file_id()],
+            stats: Some(SsTableStats::default()),
+            wal_segments: Some(vec![generate_file_id()]),
         };
 
         // Simulate flush of immutables
@@ -973,8 +975,8 @@ mod tests {
                     level: 0,
                     entries: vec![SstEntry {
                         sst_id: SsTableId::new(11),
-                        stats: SsTableStats::default(),
-                        wal_segments: vec![generate_file_id()],
+                        stats: Some(SsTableStats::default()),
+                        wal_segments: Some(vec![generate_file_id()]),
                     }],
                 }],
             )
