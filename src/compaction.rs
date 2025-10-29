@@ -92,7 +92,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key field");
-        let executor = Arc::new(BlockingExecutor::default());
+        let executor = Arc::new(BlockingExecutor);
         let db = DB::new(config, executor).expect("db init");
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
