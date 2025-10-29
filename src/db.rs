@@ -385,11 +385,17 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
                     level: descriptor_ref.level() as u32,
                     entries: vec![sst_entry],
                 }];
+
                 if !wal_ids.is_empty() {
                     let wal_refs = manifest_ext::mock_wal_segments(&wal_ids);
-                    if !wal_refs.is_empty() {
-                        edits.push(VersionEdit::SetWalSegments { segments: wal_refs });
-                    }
+                    // For now just comput the floor WAL to be the latest one as we have
+                    // successfully persist them in parquet table writer
+                    let wal_floor = wal_refs
+                        .iter()
+                        .max_by_key(|segment| segment.seq)
+                        .cloned()
+                        .unwrap();
+                    edits.push(VersionEdit::SetWalSegment { segment: wal_floor });
                 }
                 self.manifest
                     .apply_version_edits(self.manifest_table, &edits)

@@ -299,8 +299,8 @@ pub struct VersionState {
     pub commit_timestamp: Timestamp,
     /// SST entries materialised for this version, grouped by compaction level.
     pub ssts: Vec<Vec<SstEntry>>,
-    /// WAL fragments referenced by this version.
-    pub wal_segments: Vec<WalSegmentRef>,
+    /// Floor WAL fragment referenced by this version.
+    pub wal_floor: Option<WalSegmentRef>,
     /// Upper bound for tombstones included in this version.
     pub tombstone_watermark: Option<u64>,
     // TODO: Add aggregated statistics for all SSTs
@@ -313,7 +313,7 @@ impl VersionState {
             version_id: VersionId::from(0),
             commit_timestamp: Timestamp::new(0),
             ssts: Vec::new(),
-            wal_segments: Vec::new(),
+            wal_floor: None,
             tombstone_watermark: None,
         }
     }
@@ -520,14 +520,8 @@ where
         let next_txn = state.commit_timestamp.next();
         state.version_id = new_version_id;
         state.commit_timestamp = next_txn;
+        let wal_floor = state.wal_floor.clone();
 
-        // Compute the WAL floor. Right now we always pick the earliest one since there is no WAL GC
-        // TODO: with WAL GC we need to change the floor algorithm
-        let wal_floor = state
-            .wal_segments
-            .iter()
-            .min_by_key(|segment| segment.seq)
-            .cloned();
         session.put(
             ManifestKey::TableVersion {
                 table_id: table,
@@ -796,8 +790,8 @@ mod tests {
                 level: 0,
                 entries: vec![sst_level0_a.clone(), sst_level0_b.clone()],
             },
-            VersionEdit::SetWalSegments {
-                segments: vec![wal_segment.clone()],
+            VersionEdit::SetWalSegment {
+                segment: wal_segment.clone(),
             },
             VersionEdit::SetTombstoneWatermark { watermark: 99 },
         ];
@@ -836,7 +830,7 @@ mod tests {
             latest_version.ssts[0].contains(&sst_level0_a)
                 && latest_version.ssts[0].contains(&sst_level0_b)
         );
-        assert_eq!(latest_version.wal_segments, vec![wal_segment.clone()]);
+        assert_eq!(latest_version.wal_floor, Some(wal_segment.clone()));
         assert_eq!(
             latest_version.tombstone_watermark,
             Some(99),
@@ -862,6 +856,12 @@ mod tests {
         assert_eq!(listed_versions[0], latest_version);
 
         // Now Simulate a compaction where it delete some sst files
+        let new_wal_segment = WalSegmentRef {
+            seq: 128,
+            file_id: generate_file_id(),
+            first_frame: 11,
+            last_frame: 42,
+        };
         let removal_edits = vec![
             VersionEdit::RemoveSsts {
                 level: 0,
@@ -870,6 +870,9 @@ mod tests {
             VersionEdit::AddSsts {
                 level: 1,
                 entries: vec![sst_level1.clone()],
+            },
+            VersionEdit::SetWalSegment {
+                segment: new_wal_segment.clone(),
             },
             VersionEdit::SetTombstoneWatermark { watermark: 111 },
         ];
@@ -907,9 +910,9 @@ mod tests {
             "level 1 should contain the newly added SST"
         );
         assert_eq!(
-            updated_version.wal_segments,
-            vec![wal_segment.clone()],
-            "wal segments should persist when not overwritten"
+            updated_version.wal_floor,
+            Some(new_wal_segment.clone()),
+            "wal floor should update to the latest segment when provided"
         );
         assert_eq!(
             updated_version.tombstone_watermark,
@@ -918,8 +921,8 @@ mod tests {
         );
         assert_eq!(
             snapshot_after.head.wal_floor,
-            Some(wal_segment.clone()),
-            "wal floor should remain pinned to retained segments"
+            Some(new_wal_segment.clone()),
+            "table head should reflect the newest wal segment"
         );
         assert_eq!(
             snapshot_after.head.current_version,
@@ -944,6 +947,11 @@ mod tests {
             Some(111),
             "newest version should expose latest watermark"
         );
+        assert_eq!(
+            listed_versions_after[0].wal_floor,
+            Some(new_wal_segment.clone()),
+            "newest version should expose updated wal segment"
+        );
         assert!(
             listed_versions_after[0]
                 .ssts
@@ -961,6 +969,11 @@ mod tests {
             limited_versions[0].version_id,
             VersionId::from(2),
             "limit should return only the newest version"
+        );
+        assert_eq!(
+            limited_versions[0].wal_floor,
+            Some(new_wal_segment),
+            "limited view should still include latest wal segment ref"
         );
     }
 

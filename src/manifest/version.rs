@@ -21,9 +21,9 @@ pub enum VersionEdit {
         sst_ids: Vec<SsTableId>,
     },
     /// Replace the WAL segments referenced by the version.
-    SetWalSegments {
+    SetWalSegment {
         /// Complete set of WAL fragments backing the version.
-        segments: Vec<WalSegmentRef>,
+        segment: WalSegmentRef,
     },
     /// Update the tombstone watermark.
     SetTombstoneWatermark {
@@ -41,8 +41,8 @@ pub(super) fn apply_edits(state: &mut VersionState, edits: &[VersionEdit]) -> Ma
             VersionEdit::RemoveSsts { level, sst_ids } => {
                 apply_remove_ssts(&mut state.ssts, *level, sst_ids)?
             }
-            VersionEdit::SetWalSegments { segments } => {
-                state.wal_segments = segments.clone();
+            VersionEdit::SetWalSegment { segment } => {
+                state.wal_floor = Some(segment.clone());
             }
             VersionEdit::SetTombstoneWatermark { watermark } => {
                 state.tombstone_watermark = Some(*watermark);
