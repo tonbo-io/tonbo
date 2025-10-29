@@ -40,7 +40,7 @@ fn main() {
     // Create DB from metadata
     let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
     let mut db: DB<DynMode, BlockingExecutor> =
-        DB::new(config, Arc::new(BlockingExecutor::default())).expect("composite ok");
+        DB::new(config, Arc::new(BlockingExecutor)).expect("composite ok");
 
     // Build a batch with three rows
     let rows = vec![

@@ -14,7 +14,7 @@ This RFC introduces a Tonbo-specific manifest module built on the `fusio-manifes
 ## Goals
 
 1. Provide an authoritative manifest per table recording active SSTs, WAL retention cutoffs, schema/versioning information, and aggregated stats.
-2. Expose transactional APIs (e.g., `apply_version_edit`, `snapshot_latest`, `list_versions`) backed by fusio-manifest sessions so writers/compactors publish atomically.
+2. Expose transactional APIs (e.g., `apply_version_edits`, `snapshot_latest`, `list_versions`) backed by fusio-manifest sessions so writers/compactors publish atomically.
 3. Tie WAL and SST garbage collection to manifest state by persisting referenced WAL segment ranges and computing safe `wal_floor` watermarks.
 4. Support fast crash recovery by loading the manifest HEAD and replaying WAL only above the recorded floor, adopting orphan segments via fusio-manifest.
 5. Remain runtime- and backend-agnostic by reusing Fusio traits (`DynFs`, `Executor`, `Timer`) exactly as fusio-manifest expects.
@@ -72,7 +72,7 @@ Additional strategy-specific metadata can ride in an extensible `extra` map, but
 
 ### Sessions and Workflow
 
-- **Write path:** `TonboManifest::apply_version_edit` opens a fusio `WriteSession`, loads `TableHead`, assembles `VersionState` from the SST flush (including WAL segment refs), stages:
+- **Write path:** `TonboManifest::apply_version_edits` opens a fusio `WriteSession`, loads `TableHead`, assembles `VersionState` from the SST flush (including WAL segment refs), stages:
   - `put(TableVersion {...}, new_version)`
   - `put(TableHead {...}, updated_head_with_wal_floor)`
   and commits. CAS success defines global order.
@@ -89,7 +89,7 @@ pub struct TonboManifest { inner: fusio_manifest::Manifest<ManifestKey, Manifest
 
 impl TonboManifest {
     pub async fn open(stores: Stores, ctx: Arc<ManifestContext<..., ...>>) -> Result<Self>;
-    pub async fn apply_version_edit(&self, table: TableId, edit: VersionEdit) -> Result<ManifestTxn>;
+    pub async fn apply_version_edits(&self, table: TableId, edits: &[VersionEdit]) -> Result<ManifestTxn>;
     pub async fn snapshot_latest(&self, table: TableId) -> Result<CatalogSnapshot>;
     pub async fn list_versions(&self, table: TableId, limit: usize) -> Result<Vec<VersionState>>;
     pub async fn recover_orphans(&self) -> Result<usize>;
@@ -110,8 +110,8 @@ The first task for the development team is to wire Tonbo’s existing SST flush 
 1. **Capture WAL segment refs during flush.**
    - `DB::flush_immutables_with_descriptor` already gathers `wal_ids` via `SsTableDescriptor::with_wal_ids` (`src/ondisk/sstable.rs:216-242`). Convert those into `WalSegmentRef { seq, file_id, first_frame, last_frame }`.
    - Add a temporary helper (`wal::manifest_ext`) to fetch the active segment’s first/last frame numbers when sealing.
-2. **Call `TonboManifest::apply_version_edit`.**
-   - After successful Parquet write, construct a `VersionEdit` with the new `SstEntry` and WAL refs.
+2. **Call `TonboManifest::apply_version_edits`.**
+   - After successful Parquet write, construct the `VersionEdit` payload with the new `SstEntry` and WAL refs (pass as a single-element slice until batching is required).
    - Update `TableHead.wal_floor` to the minimum WAL sequence still referenced by retained versions.
 3. **Compute and persist `wal_floor`.**
    - For MVP, `wal_floor = last_retained_wal_ref.seq`. Later iterations will consider retention and multiple versions.

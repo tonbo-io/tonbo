@@ -9,6 +9,7 @@ use std::{borrow::Borrow, cmp::Ordering};
 
 use arrow_array::{BinaryArray, StringArray};
 use arrow_buffer::Buffer;
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone)]
 pub struct StrKey {
@@ -96,6 +97,25 @@ impl Borrow<str> for StrKey {
     }
 }
 
+impl Serialize for StrKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StrKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(StrKey::from_string_owned(s))
+    }
+}
+
 #[derive(Clone)]
 pub struct BinKey {
     data: Buffer,
@@ -173,5 +193,24 @@ impl Ord for BinKey {
 impl Borrow<[u8]> for BinKey {
     fn borrow(&self) -> &[u8] {
         self.as_bytes()
+    }
+}
+
+impl Serialize for BinKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(self.as_bytes())
+    }
+}
+
+impl<'de> Deserialize<'de> for BinKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let b = Vec::<u8>::deserialize(deserializer)?;
+        Ok(BinKey::from_vec_owned(b))
     }
 }

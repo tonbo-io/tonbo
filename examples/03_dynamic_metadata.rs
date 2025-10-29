@@ -44,7 +44,7 @@ fn main() {
     // Create DB from metadata
     let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
     let mut db: DB<DynMode, BlockingExecutor> =
-        DB::new(config, Arc::new(BlockingExecutor::default())).expect("metadata ok");
+        DB::new(config, Arc::new(BlockingExecutor)).expect("metadata ok");
     block_on(db.ingest(batch)).expect("insert");
 
     // Scan all rows

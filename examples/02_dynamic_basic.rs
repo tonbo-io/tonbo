@@ -54,7 +54,7 @@ fn main() {
     // Create a dynamic DB by specifying the key field name
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key col");
     let mut db: DB<DynMode, BlockingExecutor> =
-        DB::new(config, Arc::new(BlockingExecutor::default())).expect("schema ok");
+        DB::new(config, Arc::new(BlockingExecutor)).expect("schema ok");
     block_on(db.ingest(batch)).expect("insert dynamic batch");
 
     // Scan for a specific key (id == "carol") using KeyDyn

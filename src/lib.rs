@@ -31,6 +31,9 @@ pub mod query;
 /// Write-ahead log framework (async, fusio-backed).
 pub mod wal;
 
+/// Manifest integration atop `fusio-manifest`.
+pub mod manifest;
+
 /// MVCC primitives shared across modules.
 pub mod mvcc;
 

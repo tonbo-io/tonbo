@@ -35,6 +35,7 @@ use crate::{
 };
 
 pub mod frame;
+pub mod manifest_ext;
 pub mod metrics;
 pub mod replay;
 pub mod storage;

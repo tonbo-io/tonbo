@@ -22,14 +22,15 @@ use parquet::{
     errors::ParquetError,
     file::properties::WriterProperties,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    fs::FileId, inmem::immutable::Immutable, mode::Mode, mvcc::Timestamp, query::Predicate,
-    record::extract::KeyDyn, scan::RangeSet,
+    fs::FileId, inmem::immutable::Immutable, manifest::ManifestError, mode::Mode, mvcc::Timestamp,
+    query::Predicate, record::extract::KeyDyn, scan::RangeSet,
 };
 
 /// Identifier for an SSTable stored on disk.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SsTableId(u64);
 
 impl SsTableId {
@@ -148,11 +149,11 @@ impl<M: Mode> SsTable<M> {
 }
 
 /// Describes an SSTable's identity and layout hints.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SsTableDescriptor {
     id: SsTableId,
     level: usize,
-    approximate_stats: Option<SsTableStats>,
+    stats: Option<SsTableStats>,
     wal_ids: Option<Vec<FileId>>,
 }
 
@@ -162,14 +163,14 @@ impl SsTableDescriptor {
         Self {
             id,
             level,
-            approximate_stats: None,
+            stats: None,
             wal_ids: None,
         }
     }
 
     /// Attach rough statistics computed during flush.
     pub fn with_stats(mut self, stats: SsTableStats) -> Self {
-        self.approximate_stats = Some(stats);
+        self.stats = Some(stats);
         self
     }
 
@@ -191,7 +192,7 @@ impl SsTableDescriptor {
 
     /// Optional statistics bundle.
     pub fn stats(&self) -> Option<&SsTableStats> {
-        self.approximate_stats.as_ref()
+        self.stats.as_ref()
     }
 
     /// WAL file identifiers that contributed to this table.
@@ -201,7 +202,7 @@ impl SsTableDescriptor {
 }
 
 /// Lightweight table statistics captured at flush time.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SsTableStats {
     /// Estimated logical row count written to the table.
     pub rows: usize,
@@ -217,6 +218,12 @@ pub struct SsTableStats {
     pub min_commit_ts: Option<Timestamp>,
     /// Newest commit timestamp contained in the table.
     pub max_commit_ts: Option<Timestamp>,
+}
+
+impl PartialEq for SsTableStats {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 /// Error type shared across SSTable planning and IO.
@@ -240,6 +247,9 @@ pub enum SsTableError {
     /// Invalid path component produced while building an SSTable destination.
     #[error("invalid sstable path component: {0}")]
     InvalidPath(String),
+    /// Manifest backend error
+    #[error("failure when persist into manifest: {0}")]
+    Manifest(#[from] ManifestError),
 }
 
 /// Scratchpad used while minor compaction plans an SST. Keeps provisional stats
