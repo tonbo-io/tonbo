@@ -67,9 +67,11 @@ impl Default for WalSyncPolicy {
 /// point-in-time style semantics are implemented today; stricter or more lenient policies surface
 /// `WalError::Unimplemented`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum WalRecoveryMode {
     /// Stop replay at the first truncated or unreadable frame and surface the events committed up
     /// to that point.
+    #[default]
     PointInTime,
     /// Stop replay at the first truncated or unreadable frame, treating tail damage as the result
     /// of an interrupted write rather than hard corruption. Equivalent to
@@ -84,11 +86,6 @@ pub enum WalRecoveryMode {
     SkipCorrupted,
 }
 
-impl Default for WalRecoveryMode {
-    fn default() -> Self {
-        WalRecoveryMode::PointInTime
-    }
-}
 
 /// Configuration for enabling the WAL on a `DB` instance.
 #[derive(Clone)]
