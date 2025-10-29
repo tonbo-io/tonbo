@@ -1,15 +1,13 @@
 # RFC 0007: Manifest Integration on Top of `fusio-manifest`
 
-- Status: Draft
+- Status: In Progress
 - Authors: Tonbo team
 - Created: 2025-10-28
 - Area: Storage, Durability, GC
 
 ## Summary
 
-Tonbo’s current `dev` branch accepts Arrow `RecordBatch` ingest, persists batches through the async WAL (`src/wal/mod.rs`, `src/wal/writer.rs`), and can flush sealed immutables into Parquet-backed SSTables (`src/ondisk/sstable.rs`). However, there is no manifest/ version-set layer to define visibility, coordinate WAL reclamation, or accelerate recovery. The existing documentation (`docs/overview.md`) calls for CAS-published manifests, yet the implementation lacks any manifest modules.
-
-This RFC introduces a Tonbo-specific manifest module built on the `fusio-manifest` crate under the same workspace (`/Users/xing/Idea/fusio/fusio-manifest`). The module will capture Tonbo’s table metadata, SST versions, and WAL segment lifecycles using fusio-manifest’s serializable key–value transactions, snapshots, and GC APIs. By grounding the manifest on fusio-manifest we align Tonbo’s durability story with the Arrow-first engine and unlock downstream read-path, compaction, and MVCC work.
+Tonbo’s current `dev` branch now ships a first-cut manifest module (`tonbo/src/manifest`) backed by the in-tree `fusio-manifest` crate. The writer path can flush immutable runs into SSTs, publish them via `Manifest::apply_version_edits`, and observe the resulting state with `snapshot_latest`/`list_versions`. This replaces the earlier “no manifest layer” gap cited in the original draft. The implementation still uses in-memory stores and placeholder WAL metadata, so the RFC remains in-progress while durability, GC, and WAL coordination are completed.
 
 ## Goals
 
@@ -60,7 +58,7 @@ Values are serde-serializable structs stored as the manifest’s record payloads
 
 Each version commit stores a full `VersionState` under `TableVersion { table_id, version }`. The manifest’s append-only segments serve as the edit log; no separate delta key is required at MVP.
 
-`SstEntry` embeds an `SsTableDescriptor` capturing fields required by every compaction strategy. Levels are derived from the index within `VersionState.ssts`, where `ssts[level]` enumerates the SSTs published at a given level. Each entry records:
+`SstEntry` embeds an `SsTableDescriptor` capturing fields required by every compaction strategy. Levels are derived from the index within `VersionState.ssts`, where `ssts[level]` enumerates the SSTs published at a given level. Each entry records optional aggregates (`stats: Option<SsTableStats>`) and optional WAL references (`wal_segments: Option<Vec<FileId>>`) so callers can omit fields that are not yet computed. When present the statistics include:
 
 - `min_key` / `max_key`: lexicographic primary-key bounds.
 - `min_commit_ts` / `max_commit_ts`: earliest and latest MVCC timestamps present.
@@ -100,7 +98,26 @@ impl Manifest {
 
 ### Storage Layout
 
-Manifest data follows RFC 0004 (`docs/rfcs/0004-storage-layout.md`): `root/manifest/HEAD.json`, `root/manifest/segments/seg-<seq>.json`, checkpoints, and GC plan docs. fusio-manifest already provides stores compatible with Fusio `DynFs`.
+Manifest data follows RFC 0004 (`docs/rfcs/0004-storage-layout.md`): `root/manifest/HEAD.json`, `root/manifest/segments/seg-<seq>.json`, checkpoints, and GC plan docs. The prototype uses `fusio-manifest`’s in-memory stores so the code can evolve behind unit tests before wiring a real filesystem backend.
+
+## Implementation Status (2025-01-05)
+
+### Completed
+
+- Added `tonbo/src/manifest` with Tonbo-specific `Manifest`, `ManifestKey`, `ManifestValue`, and rich domain structs (`TableHead`, `VersionState`, etc.).
+- Implemented `VersionEdit` processing (`AddSsts`, `RemoveSsts`, `SetWalSegments`, `SetTombstoneWatermark`) and validation helpers.
+- Integrated the manifest with `DB::flush_immutables_with_descriptor`; flushes now publish a new manifest version and move the table head forward.
+- Added unit coverage for manifest edits (in `manifest::tests`) and a DB regression test that verifies `snapshot_latest` after a flush.
+- Provided temporary WAL plumbing (`wal::manifest_ext::mock_wal_segments`) so version commits include WAL references until the real metadata path lands.
+
+### Outstanding
+
+- Replace the in-memory manifest stores with durable `DynFs` implementations and thread them through `DB::new` configuration.
+- Record real WAL segment boundaries when sealing and remove the `mock_wal_segments` shim.
+- Advance and persist `wal_floor` based on retained versions, then teach WAL GC/recovery to honor the floor (currently only a TODO placeholder).
+- Expose catalog/table creation APIs and persist `CatalogState`/`TableMeta` edits beyond the default table bootstrap.
+- Add compaction/GC integration (`GcPlan` persistence, SST deletions, WAL truncation) and manifest checkpoints.
+- Harden recovery by replaying WAL above the manifest floor and adopting orphan segments prior to serving traffic.
 
 ## Initial Integration Step
 

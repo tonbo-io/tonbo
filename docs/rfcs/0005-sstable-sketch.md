@@ -1,13 +1,13 @@
 # RFD 0005: SSTable Skeleton (Dynamic Mode)
 
-- Status: Draft
+- Status: In Progress
 - Authors: Tonbo team
 - Created: 2025-10-24
 - Area: SsTable, Compaction
 
 ## Summary
 
-Tonbo’s dynamic mode now owns an on-disk module (`ondisk::sstable`) that sketches out the write/read surfaces for Parquet-backed sorted string tables. The goal of this RFD is to capture the current scaffolding, align it with the legacy Tonbo design on `main`, and enumerate the remaining pieces required to turn sealed immutables into durable SSTables. This draft also calls out the forthcoming MVCC sidecar plan from RFC 0006 so the writer/manifest work tracks that direction.
+Tonbo’s dynamic mode now owns an on-disk module (`ondisk::sstable`) that writes Parquet-backed sorted string tables via Fusio’s async IO. The goal of this RFD is to capture the current implementation, align it with the legacy Tonbo design on `main`, and enumerate the remaining pieces required to round out SST persistence (sidecars, readers, richer compaction). This draft also calls out the forthcoming MVCC sidecar plan from RFC 0006 so the writer/manifest work tracks that direction.
 
 ## Motivation
 
@@ -43,7 +43,7 @@ pub struct SsTableDescriptor {
 * Mirrors `main/src/ondisk/sstable.rs`, but parameterised for dynamic mode.
 * `SsTableCompression` currently exposes `None | Zstd`; default matches main.
 * `fs` + `root` inline the former `ParquetStore` wrapper.
-* `SsTableDescriptor` now captures optional WAL IDs alongside enriched stats for manifest consumers.
+* `SsTableDescriptor` now captures optional WAL IDs alongside optional `SsTableStats` for manifest consumers.
 
 ### Builder Skeleton
 
@@ -57,7 +57,7 @@ impl<M: Mode> SsTableBuilder<M> {
 ```
 
 * Tracks target descriptor/config and aggregates MVCC-aware stats through `StagedTableStats` (min/max key, commit horizon, tombstone count).
-* `finish` streams the user batch through `AsyncArrowWriter`, records byte size, and returns an `SsTable` handle populated with the enriched `SsTableStats`. A follow-up will add the MVCC sidecar writer described in RFC 0006.
+* `finish` streams the user batch through `AsyncArrowWriter`, closes the Parquet writer, records byte size, and returns an `SsTable` handle populated with optional `SsTableStats`. A follow-up will add the MVCC sidecar writer described in RFC 0006.
 * `SsTableError::NoImmutableSegments` still guards empty flush attempts.
 * Future: extend writer with page indexes/compression tuning.
 
@@ -74,7 +74,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 ```
 
 * Minor compaction entry point – owner of the sealed `immutables` deque.
-* Drains the in-memory runs into the builder, attaches collected WAL IDs, and clears them once the staged flush succeeds; immutables stay untouched on error.
+* Drains the in-memory runs into the builder, attaches collected WAL IDs, publishes manifest edits once the flush succeeds, and clears stage buffers; immutables stay untouched on error.
 
 ### Compaction Helper
 
@@ -104,17 +104,17 @@ impl MinorCompactor {
 
 | Area | Legacy Tonbo | Current Scaffold | Notes |
 | --- | --- | --- | --- |
-| Writer | Real Parquet writer with range filters and LRU caching | `SsTableBuilder::add_immutable` collects stats; `finish` returns stub `SsTable` | Need to port `AsyncWriter`, compute byte sizes, and persist MVCC metadata via the forthcoming sidecar. |
+| Writer | Real Parquet writer with range filters and LRU caching | `SsTableBuilder::add_immutable` collects stats; `finish` writes Parquet via Fusio async IO | Need to layer MVCC sidecars and page-index tuning. |
 | Store wrapper | `ParquetStore` newtype | Inlined `fs` + `root` on `SsTableConfig` | Simpler config; future manifest can still derive full paths. |
 | Reader | Async `SsTable::scan/get` returning `SsTableScan` stream | Placeholder `SsTableReader`/`SsTableStream` | Requires row filter + ordering support once IO lands. |
-| DB flush | Handled by compaction pipeline in `main` | `DB::flush_immutables_with_descriptor` drains immutables and returns staged descriptor | Real writer + WAL/plumbing will extend this; manifest work can observe descriptors today. |
+| DB flush | Handled by compaction pipeline in `main` | `DB::flush_immutables_with_descriptor` drains immutables, writes Parquet, and publishes manifest edits | Continue hardening WAL metadata + error handling, add sidecar support. |
 
 | Compaction helper | Policy-driven scheduler in legacy code | `MinorCompactor` with segment threshold | Acts as a placeholder orchestrator until version-set logic lands. |
 
 ## Execution Plan
 
 1. **Implement Writer IO**
-   * `ParquetTableWriter` performs real Parquet writes (via `AsyncArrowWriter`) and records enriched stats today; extend it to emit the aligned MVCC sidecar per RFC 0006, then iterate on page indexes & compression tuning.
+   * `ParquetTableWriter` already performs Parquet writes (via `AsyncArrowWriter`) and records enriched stats. Extend it to emit the aligned MVCC sidecar per RFC 0006, then iterate on page indexes & compression tuning.
 2. **Hook Minor Compaction**
    * `DB::flush_immutables_with_descriptor` drains immutables on success and propagates WAL IDs into the descriptor.
    * `MinorCompactor` provides a baseline orchestrator; richer policies can replace it.
