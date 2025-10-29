@@ -182,43 +182,104 @@ pub struct WalAck {
 pub struct WalPayload {
     /// Record batch supplied by the caller (without MVCC columns).
     pub batch: RecordBatch,
-    /// Tombstone bitmap associated with the batch.
-    pub tombstones: Vec<bool>,
+    /// Arrow column containing the `_commit_ts` values for the batch.
+    pub commit_ts_column: ArrayRef,
+    /// Arrow column containing the `_tombstone` bitmap for the batch.
+    pub tombstone_column: ArrayRef,
     /// Commit timestamp captured at enqueue.
     pub commit_ts: Timestamp,
 }
 
 impl WalPayload {
-    /// Construct a payload from a batch, tombstone bitmap, and commit timestamp.
-    pub fn new(batch: RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> Self {
-        Self {
-            batch,
-            tombstones,
-            commit_ts,
+    /// Construct a payload from a batch and MVCC columns.
+    pub fn new(
+        batch: RecordBatch,
+        commit_ts_column: ArrayRef,
+        tombstone_column: ArrayRef,
+        commit_ts: Timestamp,
+    ) -> WalResult<Self> {
+        let rows = batch.num_rows();
+
+        if commit_ts_column.len() != rows {
+            return Err(WalError::Codec(
+                "_commit_ts column length mismatch record batch".to_string(),
+            ));
         }
+        if tombstone_column.len() != rows {
+            return Err(WalError::Codec(
+                "_tombstone column length mismatch record batch".to_string(),
+            ));
+        }
+
+        let commit_array = commit_ts_column
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or_else(|| WalError::Codec("_commit_ts column not u64".to_string()))?;
+        if commit_array.null_count() > 0 {
+            return Err(WalError::Codec("null commit_ts value".to_string()));
+        }
+        if !commit_array.is_empty()
+            && commit_array
+                .iter()
+                .any(|value| value.map(|v| v != commit_ts.get()).unwrap_or(true))
+        {
+            return Err(WalError::Codec(
+                "_commit_ts column mismatch commit timestamp".to_string(),
+            ));
+        }
+
+        let tombstone_array = tombstone_column
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+        if tombstone_array.null_count() > 0 {
+            return Err(WalError::Codec("null tombstone value".to_string()));
+        }
+
+        Ok(Self {
+            batch,
+            commit_ts_column,
+            tombstone_column,
+            commit_ts,
+        })
     }
 }
 
 /// Append `_commit_ts` and `_tombstone` columns, returning a new batch for WAL storage.
 pub(crate) fn append_mvcc_columns(
     batch: &RecordBatch,
-    commit_ts: Timestamp,
-    tombstones: Option<&[bool]>,
+    commit_ts: &ArrayRef,
+    tombstones: &ArrayRef,
 ) -> WalResult<RecordBatch> {
     let rows = batch.num_rows();
-    let commit_values = vec![commit_ts.get(); rows];
 
-    let tombstone_values = match tombstones {
-        Some(bits) => {
-            if bits.len() != rows {
-                return Err(WalError::Codec(
-                    "tombstone bitmap length mismatch record batch".to_string(),
-                ));
-            }
-            bits.to_vec()
-        }
-        None => vec![false; rows],
-    };
+    if commit_ts.len() != rows {
+        return Err(WalError::Codec(
+            "commit_ts column length mismatch record batch".to_string(),
+        ));
+    }
+
+    let commit_array = commit_ts
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| WalError::Codec("_commit_ts column not u64".to_string()))?;
+    if commit_array.null_count() > 0 {
+        return Err(WalError::Codec("null commit_ts value".to_string()));
+    }
+
+    if tombstones.len() != rows {
+        return Err(WalError::Codec(
+            "tombstone bitmap length mismatch record batch".to_string(),
+        ));
+    }
+
+    let tombstone_array = tombstones
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+    if tombstone_array.null_count() > 0 {
+        return Err(WalError::Codec("null tombstone value".to_string()));
+    }
 
     if batch
         .schema()
@@ -247,8 +308,8 @@ pub(crate) fn append_mvcc_columns(
     fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
 
     let mut columns = batch.columns().to_vec();
-    columns.push(Arc::new(UInt64Array::from(commit_values)) as ArrayRef);
-    columns.push(Arc::new(BooleanArray::from(tombstone_values)) as ArrayRef);
+    columns.push(Arc::clone(commit_ts));
+    columns.push(Arc::clone(tombstones));
 
     let schema = Arc::new(arrow_schema::Schema::new(fields));
     RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
@@ -257,7 +318,7 @@ pub(crate) fn append_mvcc_columns(
 /// Remove MVCC columns, returning the stripped batch, commit timestamps, and bitmap.
 pub(crate) fn split_mvcc_columns(
     batch: RecordBatch,
-) -> WalResult<(RecordBatch, Option<Timestamp>, Vec<bool>)> {
+) -> WalResult<(RecordBatch, Option<Timestamp>, ArrayRef, ArrayRef)> {
     let schema = batch.schema();
     let commit_idx = schema
         .fields()
@@ -298,13 +359,13 @@ pub(crate) fn split_mvcc_columns(
     };
 
     let tombstone_array = batch.column(tombstone_idx);
-    let tombstones = tombstone_array
+    let tombstone_column = tombstone_array
         .as_any()
         .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?
-        .iter()
-        .map(|value| value.unwrap_or(false))
-        .collect::<Vec<_>>();
+        .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+    if tombstone_column.null_count() > 0 {
+        return Err(WalError::Codec("null tombstone value".to_string()));
+    }
 
     let stripped_fields = schema
         .fields()
@@ -327,21 +388,23 @@ pub(crate) fn split_mvcc_columns(
     )
     .map_err(|err| WalError::Codec(err.to_string()))?;
 
-    Ok((stripped, commit_ts, tombstones))
+    Ok((
+        stripped,
+        commit_ts,
+        Arc::clone(commit_array),
+        Arc::clone(tombstone_array),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int32Array, RecordBatch, UInt64Array};
+    use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
-    use crate::{
-        inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
-        mvcc::Timestamp,
-    };
+    use crate::inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL};
 
     fn int_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -349,11 +412,20 @@ mod tests {
         RecordBatch::try_new(schema, vec![data]).expect("batch")
     }
 
+    fn commit_array(ts: u64, len: usize) -> ArrayRef {
+        Arc::new(UInt64Array::from(vec![ts; len])) as ArrayRef
+    }
+
+    fn tombstone_array(values: &[bool]) -> ArrayRef {
+        Arc::new(BooleanArray::from(values.to_vec())) as ArrayRef
+    }
+
     #[test]
     fn append_mvcc_rejects_length_mismatch() {
         let batch = int_batch();
-        let err = append_mvcc_columns(&batch, Timestamp::new(1), Some(&[true]))
-            .expect_err("length mismatch");
+        let commit = commit_array(1, batch.num_rows());
+        let tombstones = tombstone_array(&[true]);
+        let err = append_mvcc_columns(&batch, &commit, &tombstones).expect_err("length mismatch");
         assert!(
             matches!(err, WalError::Codec(msg) if msg.contains("tombstone bitmap length mismatch"))
         );
@@ -368,8 +440,9 @@ mod tests {
         let data = Arc::new(Int32Array::from(vec![1])) as _;
         let commit = Arc::new(UInt64Array::from(vec![1_u64])) as _;
         let batch = RecordBatch::try_new(schema, vec![data, commit]).expect("batch");
-        let err = append_mvcc_columns(&batch, Timestamp::new(2), Some(&[false]))
-            .expect_err("existing column");
+        let commit = commit_array(2, batch.num_rows());
+        let tombstones = tombstone_array(&[false]);
+        let err = append_mvcc_columns(&batch, &commit, &tombstones).expect_err("existing column");
         assert!(matches!(err, WalError::Codec(msg) if msg.contains("already contains _commit_ts")));
 
         let schema = Arc::new(Schema::new(vec![
@@ -379,8 +452,9 @@ mod tests {
         let data = Arc::new(Int32Array::from(vec![1])) as _;
         let tombstones = Arc::new(BooleanArray::from(vec![false])) as _;
         let batch = RecordBatch::try_new(schema, vec![data, tombstones]).expect("batch");
-        let err =
-            append_mvcc_columns(&batch, Timestamp::new(3), None).expect_err("existing column");
+        let commit = commit_array(3, batch.num_rows());
+        let tombstones = tombstone_array(&[false]);
+        let err = append_mvcc_columns(&batch, &commit, &tombstones).expect_err("existing column");
         assert!(matches!(err, WalError::Codec(msg) if msg.contains("already contains _tombstone")));
     }
 
@@ -518,7 +592,14 @@ where
                 "tombstone bitmap length mismatch record batch".to_string(),
             ));
         }
-        let payload = WalPayload::new(batch.clone(), tombstones.to_vec(), commit_ts);
+        let commit_values = UInt64Array::from(vec![commit_ts.get(); batch.num_rows()]);
+        let tombstone_values = BooleanArray::from(tombstones.to_vec());
+        let payload = WalPayload::new(
+            batch.clone(),
+            Arc::new(commit_values) as ArrayRef,
+            Arc::new(tombstone_values) as ArrayRef,
+            commit_ts,
+        )?;
         self.submit(payload).await
     }
 

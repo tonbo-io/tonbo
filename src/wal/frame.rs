@@ -2,7 +2,7 @@
 
 use std::{convert::TryFrom, io::Cursor, mem::size_of};
 
-use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
@@ -271,10 +271,11 @@ impl FrameHeader {
 pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec<Frame>> {
     let WalPayload {
         batch,
-        tombstones,
+        commit_ts_column,
+        tombstone_column,
         commit_ts,
     } = payload;
-    let wal_batch = append_mvcc_columns(&batch, commit_ts, Some(&tombstones))?;
+    let wal_batch = append_mvcc_columns(&batch, &commit_ts_column, &tombstone_column)?;
     let append = encode_txn_append_batch(provisional_id, wal_batch)?;
     let commit = encode_txn_commit(provisional_id, commit_ts);
 
@@ -370,12 +371,13 @@ fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
         ));
     }
 
-    let (stripped, commit_ts, tombstones) = split_mvcc_columns(batch)?;
+    let (stripped, commit_ts, commit_ts_column, tombstones) = split_mvcc_columns(batch)?;
 
     Ok(WalEvent::DynAppend {
         provisional_id,
         batch: stripped,
-        commit_ts,
+        commit_ts_hint: commit_ts,
+        commit_ts_column,
         tombstones,
     })
 }
@@ -435,9 +437,11 @@ pub enum WalEvent {
         /// Record batch payload (without MVCC columns).
         batch: RecordBatch,
         /// Commit timestamp derived from the append payload (if available).
-        commit_ts: Option<Timestamp>,
+        commit_ts_hint: Option<Timestamp>,
+        /// Commit timestamp column recovered from the payload.
+        commit_ts_column: ArrayRef,
         /// Tombstone bitmap associated with the batch.
-        tombstones: Vec<bool>,
+        tombstones: ArrayRef,
     },
     /// Commit the transaction at the supplied timestamp.
     TxnCommit {
@@ -459,7 +463,7 @@ pub enum WalEvent {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
     use typed_arrow::arrow_schema::{DataType, Field, Schema};
 
     use super::*;
@@ -564,6 +568,30 @@ mod tests {
         RecordBatch::try_new(schema, vec![ids, names]).expect("valid batch")
     }
 
+    fn commit_column(len: usize, ts: Timestamp) -> ArrayRef {
+        Arc::new(UInt64Array::from(vec![ts.get(); len])) as ArrayRef
+    }
+
+    fn tombstone_column(values: Vec<bool>) -> ArrayRef {
+        Arc::new(BooleanArray::from(values)) as ArrayRef
+    }
+
+    fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
+        let commit = commit_column(batch.num_rows(), commit_ts);
+        let tombstone = tombstone_column(tombstones);
+        WalPayload::new(batch.clone(), commit, tombstone, commit_ts).expect("payload")
+    }
+
+    fn bools_from(array: &ArrayRef) -> Vec<bool> {
+        array
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .expect("boolean column")
+            .iter()
+            .map(|value| value.expect("non-null"))
+            .collect()
+    }
+
     #[test]
     fn encode_payload_dyn_batch_round_trip() {
         let base = sample_batch();
@@ -573,7 +601,7 @@ mod tests {
         let provisional_id = 7;
 
         let frames = encode_payload(
-            WalPayload::new(base.clone(), tombstones.clone(), commit_ts),
+            wal_payload(&base, tombstones.clone(), commit_ts),
             provisional_id,
         )
         .expect("encode succeeds");
@@ -586,12 +614,23 @@ mod tests {
             WalEvent::DynAppend {
                 provisional_id: decoded_id,
                 batch: decoded_batch,
-                commit_ts: append_ts,
+                commit_ts_hint: append_ts,
+                commit_ts_column,
                 tombstones,
             } => {
                 assert_eq!(decoded_id, provisional_id);
                 assert_eq!(append_ts, Some(commit_ts));
-                assert_eq!(tombstones, vec![true, false, true]);
+                assert_eq!(bools_from(&tombstones), vec![true, false, true]);
+                let commit_values = commit_ts_column
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("u64 column");
+                assert_eq!(commit_values.len(), base.num_rows());
+                assert!(
+                    commit_values
+                        .iter()
+                        .all(|value| value.expect("non-null") == commit_ts.get())
+                );
                 assert_eq!(
                     decoded_batch.schema().as_ref(),
                     user_expected.schema().as_ref()
@@ -616,8 +655,9 @@ mod tests {
 
     #[test]
     fn decode_append_rejects_truncated_payload() {
+        let batch = sample_batch();
         let frames = encode_payload(
-            WalPayload::new(sample_batch(), vec![false, false, false], Timestamp::new(1)),
+            wal_payload(&batch, vec![false, false, false], Timestamp::new(1)),
             9,
         )
         .expect("encode succeeds");

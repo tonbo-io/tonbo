@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{Int32Array, RecordBatch, StringArray};
+use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
@@ -20,6 +20,12 @@ use tonbo::{
     },
 };
 use typed_arrow_dyn::DynCell;
+
+fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
+    let commit: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()]));
+    let tombstone: ArrayRef = Arc::new(BooleanArray::from(tombstones));
+    WalPayload::new(batch.clone(), commit, tombstone, commit_ts).expect("payload")
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Error>> {
@@ -121,8 +127,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_payload =
-        WalPayload::new(committed_batch.clone(), vec![false], Timestamp::new(100));
+    let committed_payload = wal_payload(&committed_batch, vec![false], Timestamp::new(100));
     let committed_frames = encode_payload(committed_payload, 11)?;
 
     let partial_batch = RecordBatch::try_new(
@@ -132,7 +137,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_payload = WalPayload::new(partial_batch.clone(), vec![false], Timestamp::new(200));
+    let partial_payload = wal_payload(&partial_batch, vec![false], Timestamp::new(200));
     let partial_frames = encode_payload(partial_payload, 17)?;
 
     let mut seq = INITIAL_FRAME_SEQ;
@@ -218,8 +223,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_payload =
-        WalPayload::new(committed_batch.clone(), vec![false], Timestamp::new(100));
+    let committed_payload = wal_payload(&committed_batch, vec![false], Timestamp::new(100));
     let committed_frames = encode_payload(committed_payload, 11)?;
 
     let partial_batch = RecordBatch::try_new(
@@ -229,7 +233,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_payload = WalPayload::new(partial_batch.clone(), vec![false], Timestamp::new(200));
+    let partial_payload = wal_payload(&partial_batch, vec![false], Timestamp::new(200));
     let partial_frames = encode_payload(partial_payload, 17)?;
 
     let mut seq = INITIAL_FRAME_SEQ;
@@ -314,8 +318,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_payload =
-        WalPayload::new(committed_batch.clone(), vec![false], Timestamp::new(100));
+    let committed_payload = wal_payload(&committed_batch, vec![false], Timestamp::new(100));
     let committed_frames = encode_payload(committed_payload, 11)?;
 
     let partial_batch = RecordBatch::try_new(
@@ -325,7 +328,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_payload = WalPayload::new(partial_batch.clone(), vec![false], Timestamp::new(200));
+    let partial_payload = wal_payload(&partial_batch, vec![false], Timestamp::new(200));
     let partial_frames = encode_payload(partial_payload, 17)?;
 
     let mut seq = INITIAL_FRAME_SEQ;
