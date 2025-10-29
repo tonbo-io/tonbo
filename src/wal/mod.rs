@@ -97,6 +97,9 @@ pub struct WalConfig {
     pub dir: Path,
     /// Maximum size for a single WAL segment before rotation.
     pub segment_max_bytes: usize,
+    /// Maximum time a single WAL segment may remain active before rotation. `None` disables
+    /// age-based rotation.
+    pub segment_max_age: Option<Duration>,
     /// Flush interval for the writer's buffer.
     pub flush_interval: Duration,
     /// Durability policy applied after writes.
@@ -117,6 +120,7 @@ impl Default for WalConfig {
         Self {
             dir,
             segment_max_bytes: 64 * 1024 * 1024,
+            segment_max_age: None,
             flush_interval: Duration::from_millis(10),
             sync: WalSyncPolicy::default(),
             recovery: WalRecoveryMode::default(),
@@ -133,6 +137,7 @@ impl fmt::Debug for WalConfig {
         f.debug_struct("WalConfig")
             .field("dir", &self.dir)
             .field("segment_max_bytes", &self.segment_max_bytes)
+            .field("segment_max_age", &self.segment_max_age)
             .field("flush_interval", &self.flush_interval)
             .field("sync", &self.sync)
             .field("recovery", &self.recovery)
@@ -524,7 +529,17 @@ where
 
     /// Force manual rotation of the active WAL segment.
     pub async fn rotate(&self) -> WalResult<()> {
-        Err(WalError::Unimplemented("wal::WalHandle::rotate"))
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let mut sender = self.inner.clone_sender();
+        let msg = writer::WriterMsg::Rotate { ack_tx };
+
+        if let Err(_err) = sender.send(msg).await {
+            return Err(WalError::Storage("wal writer task closed".into()));
+        }
+
+        ack_rx
+            .await
+            .map_err(|_| WalError::Storage("wal writer task closed".into()))?
     }
 
     /// Shut down the writer task and wait for completion.
