@@ -12,6 +12,10 @@
 
 ## Design Docs & RFCs
 
+### IMPORTANT
+**YOU MUST CHECK RFC BEFORE STARTING RELATED COMPONENT DEVELOPMENT**
+**YOU MUST CHECK OVERVIEW AND RETHINK-SUMMARY IF YOU DO NOT READ IT BEFORE**
+
 - Start with `docs/overview.md` for architecture and component context.
   - Key sections for quick lookup:
     - [I/O](docs/overview.md#io) - Fusio runtime abstraction and durability contract.
