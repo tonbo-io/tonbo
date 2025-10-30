@@ -463,13 +463,10 @@ async fn insert_dyn_wal_batch<E>(
 where
     E: Executor + Timer,
 {
+    validate_record_batch_schema(db, &batch)?;
+    validate_vec_tombstone_bitmap(&batch, &tombstones)?;
+
     let commit_ts = db.next_commit_ts();
-    if batch.num_rows() != tombstones.len() {
-        return Err(KeyExtractError::TombstoneLengthMismatch {
-            expected: batch.num_rows(),
-            actual: tombstones.len(),
-        });
-    }
 
     let commit_array: ArrayRef =
         Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
@@ -583,6 +580,19 @@ fn validate_tombstone_bitmap(
         return Err(KeyExtractError::from(WalError::Codec(
             "tombstone column contained null".into(),
         )));
+    }
+    Ok(())
+}
+
+fn validate_vec_tombstone_bitmap(
+    batch: &RecordBatch,
+    tombstones: &[bool],
+) -> Result<(), KeyExtractError> {
+    if batch.num_rows() != tombstones.len() {
+        return Err(KeyExtractError::TombstoneLengthMismatch {
+            expected: batch.num_rows(),
+            actual: tombstones.len(),
+        });
     }
     Ok(())
 }
