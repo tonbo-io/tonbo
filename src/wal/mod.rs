@@ -155,6 +155,14 @@ pub enum WalError {
     /// Payload serialization or deserialization failure.
     #[error("wal frame codec error: {0}")]
     Codec(String),
+    /// Tombstone bitmap length does not match the batch row count.
+    #[error("tombstone bitmap length mismatch: expected {expected}, got {actual}")]
+    TombstoneLengthMismatch {
+        /// Expected number of rows in the batch.
+        expected: usize,
+        /// Actual bitmap entries provided.
+        actual: usize,
+    },
     /// The WAL data on disk is corrupt or truncated.
     #[error("wal frame is corrupt: {0}")]
     Corrupt(&'static str),
@@ -243,9 +251,10 @@ impl WalPayload {
     pub fn new(batch: RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalResult<Self> {
         let rows = batch.num_rows();
         if rows != tombstones.len() {
-            return Err(WalError::Codec(
-                "tombstone bitmap length mismatch record batch".to_string(),
-            ));
+            return Err(WalError::TombstoneLengthMismatch {
+                expected: rows,
+                actual: tombstones.len(),
+            });
         }
 
         let commit_values = UInt64Array::from(vec![commit_ts.get(); rows]);
@@ -709,7 +718,7 @@ mod tests {
             WalPayload::new(batch.clone(), vec![true], Timestamp::new(7)).expect_err("mismatch");
         assert!(matches!(
             err,
-            WalError::Codec(msg) if msg.contains("tombstone bitmap length mismatch")
+            WalError::TombstoneLengthMismatch { expected: 2, actual: 1 }
         ));
 
         let payload =

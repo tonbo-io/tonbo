@@ -463,10 +463,12 @@ where
     E: Executor + Timer,
 {
     let commit_ts = db.next_commit_ts();
-    validate_record_batch_schema(db, &batch)?;
-    validate_vec_tombstone_bitmap(&batch, &tombstones)?;
-    let payload = WalPayload::new(batch.clone(), tombstones.clone(), commit_ts)
-        .map_err(KeyExtractError::from)?;
+    let payload = WalPayload::new(batch, tombstones, commit_ts).map_err(|err| match err {
+        WalError::TombstoneLengthMismatch { expected, actual } => {
+            KeyExtractError::TombstoneLengthMismatch { expected, actual }
+        }
+        other => KeyExtractError::from(other),
+    })?;
     if let Some(handle) = db.wal_handle().cloned() {
         let ticket = handle
             .submit(payload.clone())
@@ -573,19 +575,6 @@ fn validate_tombstone_bitmap(
         return Err(KeyExtractError::from(WalError::Codec(
             "tombstone column contained null".into(),
         )));
-    }
-    Ok(())
-}
-
-fn validate_vec_tombstone_bitmap(
-    batch: &RecordBatch,
-    tombstones: &[bool],
-) -> Result<(), KeyExtractError> {
-    if batch.num_rows() != tombstones.len() {
-        return Err(KeyExtractError::TombstoneLengthMismatch {
-            expected: batch.num_rows(),
-            actual: tombstones.len(),
-        });
     }
     Ok(())
 }
