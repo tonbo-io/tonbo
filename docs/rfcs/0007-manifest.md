@@ -42,7 +42,7 @@ ManifestKey =
   CatalogRoot |
   TableMeta { table_id } |
   TableHead { table_id } |
-  TableVersion { table_id, version } |
+  TableVersion { table_id, manifest_ts } |
   WalFloor { table_id } |
   GcPlan { table_id }
 ```
@@ -55,10 +55,10 @@ Values are serde-serializable structs stored as the manifest’s record payloads
 
 - `CatalogState`: known tables and allocator state.
 - `TableMeta`: table name, schema fingerprint, PK layout, retention settings.
-- `TableHead`: current version id, schema version, next SST id, `wal_floor`, last manifest txn.
-- `VersionState`: version metadata—commit timestamp, lists of `SstEntry { id, level, descriptor }`, referenced `WalSegmentRef { seq, file_id, first_frame, last_frame }`, tombstone watermark, aggregated stats.
+- `TableHead`: schema version, latest `wal_floor`, `last_manifest_txn` (monotonic commit timestamp).
+- `VersionState`: version metadata keyed by commit timestamp—lists of `SstEntry { id, level, descriptor }`, referenced `WalSegmentRef { seq, file_id, first_frame, last_frame }`, tombstone watermark, aggregated stats.
 
-Each version commit stores a full `VersionState` under `TableVersion { table_id, version }`. The manifest’s append-only segments serve as the edit log; no separate delta key is required at MVP.
+Each version commit stores a full `VersionState` under `TableVersion { table_id, manifest_ts }`, where `manifest_ts` is the timestamp returned by `apply_version_edits`. The manifest’s append-only segments serve as the edit log; no separate delta key is required at MVP.
 
 `SstEntry` embeds an `SsTableDescriptor` capturing fields required by every compaction strategy:
 
@@ -76,7 +76,7 @@ Additional strategy-specific metadata can ride in an extensible `extra` map, but
   - `put(TableVersion {...}, new_version)`
   - `put(TableHead {...}, updated_head_with_wal_floor)`
   and commits. CAS success defines global order.
-- **Read path:** `snapshot_latest` opens a `ReadSession`, fetches `TableHead`, reads the referenced `VersionState`, and returns a snapshot struct containing both the fusio snapshot token and Tonbo version id.
+- **Read path:** `snapshot_latest` opens a `ReadSession`, fetches `TableHead`, reads the `VersionState` stored at `last_manifest_txn`, and returns a snapshot struct containing both the fusio snapshot token and the commit timestamp.
 - **Recovery:** On open, call `manifest.recover_orphans()` (fusio-manifest handles adopting contiguous segments). Load `CatalogState` and each `TableHead` to rebuild table descriptors; replay WAL only above the manifest’s `wal_floor`.
 - **GC:** `TonboManifest::compute_gc_plan` wraps fusio-manifest’s compactor GC APIs; plans delete SST objects once versions expire and advance `WalFloor` so WAL segments < floor can be truncated.
 
@@ -89,7 +89,7 @@ pub struct TonboManifest { inner: fusio_manifest::Manifest<ManifestKey, Manifest
 
 impl TonboManifest {
     pub async fn open(stores: Stores, ctx: Arc<ManifestContext<..., ...>>) -> Result<Self>;
-    pub async fn apply_version_edits(&self, table: TableId, edits: &[VersionEdit]) -> Result<ManifestTxn>;
+    pub async fn apply_version_edits(&self, table: TableId, edits: &[VersionEdit]) -> Result<Timestamp>;
     pub async fn snapshot_latest(&self, table: TableId) -> Result<CatalogSnapshot>;
     pub async fn list_versions(&self, table: TableId, limit: usize) -> Result<Vec<VersionState>>;
     pub async fn recover_orphans(&self) -> Result<usize>;

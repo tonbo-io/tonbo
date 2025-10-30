@@ -17,6 +17,7 @@ use fusio_manifest::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use ulid::Ulid;
 
 use crate::{
     fs::{FileId, generate_file_id},
@@ -44,24 +45,24 @@ pub type ManifestResult<T> = Result<T, ManifestError>;
 /// Identifier associated with a physical Tonbo table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TableId(FileId);
+pub struct TableId(Ulid);
 
 impl TableId {
-    /// Create a new identifier using a freshly generated file identifier.
+    /// Create a new identifier using a freshly generated ULID.
     #[must_use]
     pub fn new() -> Self {
         Self(generate_file_id())
     }
 
-    /// Wrap an existing file identifier.
+    /// Wrap an existing ULID value.
     #[must_use]
-    pub fn from_file_id(value: FileId) -> Self {
+    pub fn from_ulid(value: Ulid) -> Self {
         Self(value)
     }
 
-    /// Access the underlying file identifier.
+    /// Access the underlying ULID value.
     #[must_use]
-    pub fn as_file_id(self) -> FileId {
+    pub fn as_ulid(self) -> Ulid {
         self.0
     }
 }
@@ -72,31 +73,15 @@ impl Default for TableId {
     }
 }
 
-/// Identifier associated with a manifest version of a table.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
-)]
-pub struct VersionId(u64);
-
-impl VersionId {
-    /// Construct a version identifier from a raw integer.
-    #[must_use]
-    pub const fn from(value: u64) -> Self {
+impl From<Ulid> for TableId {
+    fn from(value: Ulid) -> Self {
         Self(value)
     }
+}
 
-    /// Access the raw version value.
-    #[must_use]
-    pub const fn inner(self) -> u64 {
-        self.0
-    }
-
-    /// Return the next `VersionId`, incremented by exactly one.
-    ///
-    /// # Panics
-    /// Panics if incrementing would overflow `u64`.
-    pub fn next(self) -> Self {
-        Self(self.0.checked_add(1).expect("VersionId overflow"))
+impl From<TableId> for Ulid {
+    fn from(value: TableId) -> Self {
+        value.0
     }
 }
 
@@ -115,12 +100,12 @@ pub enum ManifestKey {
         /// Identifier of the table whose head is being stored.
         table_id: TableId,
     },
-    /// Immutable state for a specific table version.
+    /// Immutable state for a specific table version keyed by manifest timestamp.
     TableVersion {
         /// Table identifier.
         table_id: TableId,
-        /// Version identifier associated with this entry.
-        version: VersionId,
+        /// Manifest transaction timestamp associated with this entry.
+        manifest_ts: Timestamp,
     },
     /// Lowest WAL sequence that must be retained.
     WalFloor {
@@ -279,8 +264,6 @@ impl Default for TableRetionConfig {
 pub struct TableHead {
     /// Identifier of the table.
     pub table_id: TableId,
-    /// Current committed version, if any.
-    pub current_version: Option<VersionId>,
     /// Current schema version.
     pub schema_version: u32,
     /// Lowest WAL sequence that must be retained.
@@ -294,8 +277,6 @@ pub struct TableHead {
 pub struct VersionState {
     /// Table identifier.
     pub table_id: TableId,
-    /// Version identifier.
-    pub version_id: VersionId,
     /// Commit timestamp in milliseconds since the Unix epoch.
     pub commit_timestamp: Timestamp,
     /// SST entries materialised for this version, grouped by compaction level.
@@ -311,7 +292,6 @@ impl VersionState {
     fn empty(table_id: TableId) -> Self {
         Self {
             table_id,
-            version_id: VersionId::from(0),
             commit_timestamp: Timestamp::new(0),
             ssts: Vec::new(),
             wal_floor: None,
@@ -520,10 +500,10 @@ where
             }
         };
 
-        let mut state = if let Some(current_version) = head.current_version {
+        let mut state = if let Some(last_txn) = head.last_manifest_txn {
             let version_key = ManifestKey::TableVersion {
                 table_id: table,
-                version: current_version,
+                manifest_ts: last_txn,
             };
             match session.get(&version_key).await? {
                 Some(value) => {
@@ -544,22 +524,19 @@ where
         version::apply_edits(&mut state, edits)?;
 
         // Update table version and commit timestamp
-        let new_version_id = state.version_id.next();
         let next_txn = state.commit_timestamp.next();
-        state.version_id = new_version_id;
         state.commit_timestamp = next_txn;
         let wal_floor = state.wal_floor.clone();
 
         session.put(
             ManifestKey::TableVersion {
                 table_id: table,
-                version: new_version_id,
+                manifest_ts: next_txn,
             },
             ManifestValue::TableVersion(state),
         );
 
         // Update table head with updated wal floor
-        head.current_version = Some(new_version_id);
         head.last_manifest_txn = Some(next_txn);
         head.wal_floor = wal_floor.clone();
 
@@ -595,16 +572,20 @@ where
             }
         };
 
-        let version_key = ManifestKey::TableVersion {
-            table_id: table,
-            version: head.current_version.unwrap_or_default(),
-        };
-        let latest_version = match session.get(&version_key).await? {
-            Some(value) => {
-                Self::validate_manifest_key_value(&version_key, &value)?;
-                Some(VersionState::try_from(value)?)
+        let latest_version = if let Some(last_txn) = head.last_manifest_txn {
+            let version_key = ManifestKey::TableVersion {
+                table_id: table,
+                manifest_ts: last_txn,
+            };
+            match session.get(&version_key).await? {
+                Some(value) => {
+                    Self::validate_manifest_key_value(&version_key, &value)?;
+                    Some(VersionState::try_from(value)?)
+                }
+                None => None,
             }
-            None => None,
+        } else {
+            None
         };
 
         session.end().await?;
@@ -629,11 +610,11 @@ where
             .scan_range(ScanRange {
                 start: Some(ManifestKey::TableVersion {
                     table_id: table,
-                    version: VersionId::from(0),
+                    manifest_ts: Timestamp::MIN,
                 }),
                 end: Some(ManifestKey::TableVersion {
                     table_id: table,
-                    version: VersionId(u64::MAX),
+                    manifest_ts: Timestamp::MAX,
                 }),
             })
             .await
@@ -653,7 +634,7 @@ where
         }
         session.end().await?;
 
-        versions.sort_by(|a, b| b.version_id.inner().cmp(&a.version_id.inner()));
+        versions.sort_by(|a, b| b.commit_timestamp.cmp(&a.commit_timestamp));
         if limit > 0 && versions.len() > limit {
             versions.truncate(limit);
         }
@@ -771,7 +752,6 @@ mod tests {
     async fn prime_table_head(manifest: &TestManifest, table_id: TableId) {
         let head = TableHead {
             table_id,
-            current_version: None,
             schema_version: 1,
             wal_floor: None,
             last_manifest_txn: None,
@@ -860,11 +840,6 @@ mod tests {
             .expect("latest version should exist after applying edits");
         assert_eq!(latest_version.table_id, table_id);
         assert_eq!(
-            latest_version.version_id,
-            VersionId::from(1),
-            "first published version should have id 1"
-        );
-        assert_eq!(
             latest_version.commit_timestamp,
             Timestamp::new(1),
             "commit timestamp should match returned value"
@@ -895,9 +870,9 @@ mod tests {
             "tombstone watermark should be captured"
         );
         assert_eq!(
-            snapshot.head.current_version,
-            Some(VersionId::from(1)),
-            "table head should point at the first committed version"
+            snapshot.head.last_manifest_txn,
+            Some(Timestamp::new(1)),
+            "table head should track the latest manifest txn"
         );
         assert_eq!(
             snapshot.head.wal_floor,
@@ -952,7 +927,6 @@ mod tests {
         let updated_version = snapshot_after
             .latest_version
             .expect("latest version should exist after removal edit");
-        assert_eq!(updated_version.version_id, VersionId::from(2));
         assert_eq!(updated_version.commit_timestamp, Timestamp::new(2));
         assert_eq!(updated_version.ssts.len(), 2);
         assert!(
@@ -992,9 +966,9 @@ mod tests {
             "table head should reflect the newest wal segment"
         );
         assert_eq!(
-            snapshot_after.head.current_version,
-            Some(VersionId::from(2)),
-            "head should point at the newest version after removal"
+            snapshot_after.head.last_manifest_txn,
+            Some(Timestamp::new(2)),
+            "head should point at the newest manifest txn after removal"
         );
 
         // Assert
@@ -1007,8 +981,16 @@ mod tests {
             2,
             "both committed versions should be discoverable"
         );
-        assert_eq!(listed_versions_after[0].version_id, VersionId::from(2));
-        assert_eq!(listed_versions_after[1].version_id, VersionId::from(1));
+        assert_eq!(
+            listed_versions_after[0].commit_timestamp,
+            Timestamp::new(2),
+            "newest version should appear first"
+        );
+        assert_eq!(
+            listed_versions_after[1].commit_timestamp,
+            Timestamp::new(1),
+            "oldest version should follow"
+        );
         assert_eq!(
             listed_versions_after[0].tombstone_watermark,
             Some(111),
@@ -1032,11 +1014,7 @@ mod tests {
             .await
             .expect("list_versions should allow limiting");
         assert_eq!(limited_versions.len(), 1);
-        assert_eq!(
-            limited_versions[0].version_id,
-            VersionId::from(2),
-            "limit should return only the newest version"
-        );
+        assert_eq!(limited_versions[0].commit_timestamp, Timestamp::new(2));
         assert_eq!(
             limited_versions[0].wal_floor,
             Some(new_wal_segment),

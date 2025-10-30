@@ -74,7 +74,6 @@ fn prime_manifest_head(manifest: &InMemoryManifest, table_id: TableId) {
             ManifestKey::TableHead { table_id },
             ManifestValue::TableHead(TableHead {
                 table_id,
-                current_version: None,
                 schema_version: 0,
                 wal_floor: None,
                 last_manifest_txn: None,
@@ -551,7 +550,7 @@ mod tests {
     use super::*;
     use crate::{
         inmem::policy::BatchesThreshold,
-        manifest::VersionId,
+        mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
@@ -862,13 +861,18 @@ mod tests {
             .block_on(async { db.manifest.snapshot_latest(db.manifest_table).await })
             .expect("manifest snapshot");
         assert_eq!(
-            snapshot.head.current_version,
-            Some(VersionId::from(1)),
-            "first flush should publish version 1"
+            snapshot.head.last_manifest_txn,
+            Some(Timestamp::new(1)),
+            "first flush should publish manifest txn 1"
         );
         let latest = snapshot
             .latest_version
             .expect("latest version must exist after flush");
+        assert_eq!(
+            latest.commit_timestamp,
+            Timestamp::new(1),
+            "latest version should reflect manifest txn 1"
+        );
         assert_eq!(latest.ssts.len(), 1);
         assert_eq!(latest.ssts[0].len(), 1);
         let recorded = &latest.ssts[0][0];
