@@ -5,10 +5,10 @@
 //! yet. Future patches will flesh out the concrete dynamic and typed builders,
 //! readers, and range scans using this scaffolding.
 
-use std::{convert::TryFrom, fmt, marker::PhantomData, sync::Arc};
+use std::{collections::HashMap, convert::TryFrom, fmt, marker::PhantomData, sync::Arc};
 
-use arrow_array::RecordBatch;
-use arrow_schema::SchemaRef;
+use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use fusio::{
     DynFs,
     error::Error as FsError,
@@ -16,6 +16,7 @@ use fusio::{
     path::{Path, PathPart},
 };
 use fusio_parquet::writer::AsyncWriter;
+use once_cell::sync::Lazy;
 use parquet::{
     arrow::async_writer::AsyncArrowWriter,
     basic::{Compression, ZstdLevel},
@@ -25,9 +26,61 @@ use parquet::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    fs::FileId, inmem::immutable::Immutable, manifest::ManifestError, mode::Mode, mvcc::Timestamp,
-    query::Predicate, record::extract::KeyDyn, scan::RangeSet,
+    fs::FileId,
+    inmem::immutable::{
+        Immutable,
+        memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
+    },
+    manifest::ManifestError,
+    mode::Mode,
+    mvcc::Timestamp,
+    query::Predicate,
+    record::extract::KeyDyn,
+    scan::RangeSet,
 };
+
+const MVCC_SCHEMA_VERSION_KEY: &str = "tonbo.mvcc.version";
+const MVCC_SCHEMA_VERSION_V1: &str = "1";
+
+static MVCC_SIDECAR_SCHEMA_V1: Lazy<SchemaRef> = Lazy::new(|| {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        MVCC_SCHEMA_VERSION_KEY.to_string(),
+        MVCC_SCHEMA_VERSION_V1.to_string(),
+    );
+    Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+            Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
+        ],
+        metadata,
+    ))
+});
+
+fn encode_mvcc_sidecar(mvcc: &MvccColumns) -> Result<RecordBatch, SsTableError> {
+    let commit_values = UInt64Array::from_iter_values(mvcc.commit_ts.iter().map(|ts| ts.get()));
+    let tombstone_values = BooleanArray::from(mvcc.tombstone.clone());
+    RecordBatch::try_new(
+        Arc::clone(&MVCC_SIDECAR_SCHEMA_V1),
+        vec![
+            Arc::new(commit_values) as ArrayRef,
+            Arc::new(tombstone_values) as ArrayRef,
+        ],
+    )
+    .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))
+}
+
+fn validate_mvcc_schema(schema: &Schema) -> Result<(), SsTableError> {
+    match schema.metadata().get(MVCC_SCHEMA_VERSION_KEY) {
+        Some(version) if version == MVCC_SCHEMA_VERSION_V1 => Ok(()),
+        Some(other) => Err(SsTableError::Parquet(ParquetError::ArrowError(format!(
+            "unsupported mvcc sidecar schema version {other}"
+        )))),
+        None => Err(SsTableError::Parquet(ParquetError::ArrowError(
+            "mvcc sidecar schema missing version metadata".to_string(),
+        ))),
+    }
+}
 
 /// Identifier for an SSTable stored on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -149,12 +202,14 @@ impl<M: Mode> SsTable<M> {
 }
 
 /// Describes an SSTable's identity and layout hints.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct SsTableDescriptor {
     id: SsTableId,
     level: usize,
     stats: Option<SsTableStats>,
     wal_ids: Option<Vec<FileId>>,
+    data_path: Option<Path>,
+    mvcc_path: Option<Path>,
 }
 
 impl SsTableDescriptor {
@@ -165,6 +220,8 @@ impl SsTableDescriptor {
             level,
             stats: None,
             wal_ids: None,
+            data_path: None,
+            mvcc_path: None,
         }
     }
 
@@ -177,6 +234,13 @@ impl SsTableDescriptor {
     /// Attach the WAL IDs associated with this table.
     pub fn with_wal_ids(mut self, wal_ids: Option<Vec<FileId>>) -> Self {
         self.wal_ids = wal_ids;
+        self
+    }
+
+    /// Attach the storage paths for the data and MVCC sidecar files.
+    pub fn with_storage_paths(mut self, data_path: Path, mvcc_path: Path) -> Self {
+        self.data_path = Some(data_path);
+        self.mvcc_path = Some(mvcc_path);
         self
     }
 
@@ -198,6 +262,16 @@ impl SsTableDescriptor {
     /// WAL file identifiers that contributed to this table.
     pub fn wal_ids(&self) -> Option<&[FileId]> {
         self.wal_ids.as_deref()
+    }
+
+    /// Relative path to the SSTable payload file.
+    pub fn data_path(&self) -> Option<&Path> {
+        self.data_path.as_ref()
+    }
+
+    /// Relative path to the MVCC sidecar file.
+    pub fn mvcc_path(&self) -> Option<&Path> {
+        self.mvcc_path.as_ref()
     }
 }
 
@@ -331,11 +405,17 @@ impl SsTableStats {
 }
 
 /// Parquet writer facade that streams staged immutables into an SST file.
+#[derive(Clone, Debug)]
+struct StagedSegment {
+    data: RecordBatch,
+    mvcc: MvccColumns,
+}
+
 pub(crate) struct ParquetTableWriter<M: Mode> {
     config: Arc<SsTableConfig>,
     descriptor: SsTableDescriptor,
     staged: StagedTableStats,
-    segments: Vec<RecordBatch>,
+    segments: Vec<StagedSegment>,
     wal_ids: Option<Vec<FileId>>,
     _mode: PhantomData<M>,
 }
@@ -397,7 +477,11 @@ where
         self.staged.segments += 1;
         self.staged.rows += rows;
         self.staged.tombstones += segment_tombstones;
-        self.segments.push(segment.storage().clone());
+        let staged_segment = StagedSegment {
+            data: segment.storage().clone(),
+            mvcc: segment.mvcc_columns().clone(),
+        };
+        self.segments.push(staged_segment);
         Ok(())
     }
 
@@ -407,16 +491,19 @@ where
         }
 
         let mut ctx = WriteContext::new(Arc::clone(&self.config), &self.descriptor).await?;
-        for batch in &self.segments {
-            ctx.write_batch(batch).await?;
+        for segment in &self.segments {
+            ctx.write_segment(segment).await?;
         }
-        let bytes_written = ctx.finish().await?;
+        let (data_path, mvcc_path, data_bytes) = ctx.finish().await?;
         let stats = SsTableStats::from_staged(
             self.staged,
-            usize::try_from(bytes_written).unwrap_or(usize::MAX),
+            usize::try_from(data_bytes).unwrap_or(usize::MAX),
         );
         Ok(SsTable::new(
-            self.descriptor.with_stats(stats).with_wal_ids(self.wal_ids),
+            self.descriptor
+                .with_stats(stats)
+                .with_storage_paths(data_path, mvcc_path)
+                .with_wal_ids(self.wal_ids),
         ))
     }
 
@@ -439,8 +526,10 @@ fn writer_properties(compression: SsTableCompression) -> WriterProperties {
 }
 struct WriteContext {
     fs: Arc<dyn DynFs>,
-    path: Path,
-    writer: Option<AsyncArrowWriter<AsyncWriter>>,
+    data_path: Path,
+    mvcc_path: Path,
+    data_writer: Option<AsyncArrowWriter<AsyncWriter>>,
+    mvcc_writer: Option<AsyncArrowWriter<AsyncWriter>>,
 }
 impl WriteContext {
     async fn new(
@@ -453,50 +542,92 @@ impl WriteContext {
             .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
         let dir_path = config.root().child(level_part);
         fs.create_dir_all(&dir_path).await?;
-        let file_name = format!("{:020}.parquet", descriptor.id().raw());
-        let file_part = PathPart::parse(&file_name)
+
+        let data_file_name = format!("{:020}.parquet", descriptor.id().raw());
+        let data_part = PathPart::parse(&data_file_name)
             .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
-        let file_path = dir_path.child(file_part);
-        let options = OpenOptions::default()
+        let data_path = dir_path.child(data_part);
+
+        let mvcc_file_name = format!("{:020}.mvcc.parquet", descriptor.id().raw());
+        let mvcc_part = PathPart::parse(&mvcc_file_name)
+            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
+        let mvcc_path = dir_path.child(mvcc_part);
+
+        let data_options = OpenOptions::default()
             .create(true)
             .write(true)
             .truncate(true);
-        let file = fs.open_options(&file_path, options).await?;
-        let writer = AsyncWriter::new(file);
-        let props = writer_properties(config.compression());
-        let arrow_writer = AsyncArrowWriter::try_new(writer, config.schema().clone(), Some(props))?;
+        let mvcc_options = OpenOptions::default()
+            .create(true)
+            .write(true)
+            .truncate(true);
+        let data_file = fs.open_options(&data_path, data_options).await?;
+        let mvcc_file = fs.open_options(&mvcc_path, mvcc_options).await?;
+
+        let data_writer = AsyncArrowWriter::try_new(
+            AsyncWriter::new(data_file),
+            config.schema().clone(),
+            Some(writer_properties(config.compression())),
+        )?;
+
+        let mvcc_writer = AsyncArrowWriter::try_new(
+            AsyncWriter::new(mvcc_file),
+            Arc::clone(&MVCC_SIDECAR_SCHEMA_V1),
+            Some(writer_properties(config.compression())),
+        )?;
+
         Ok(Self {
             fs,
-            path: file_path,
-            writer: Some(arrow_writer),
+            data_path,
+            mvcc_path,
+            data_writer: Some(data_writer),
+            mvcc_writer: Some(mvcc_writer),
         })
     }
-    async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), SsTableError> {
-        match self.writer.as_mut() {
-            Some(writer) => {
-                writer.write(batch).await?;
-                Ok(())
-            }
-            None => Err(SsTableError::WriterClosed),
+
+    async fn write_segment(&mut self, segment: &StagedSegment) -> Result<(), SsTableError> {
+        if let Some(writer) = self.data_writer.as_mut() {
+            writer.write(&segment.data).await?;
+        } else {
+            return Err(SsTableError::WriterClosed);
         }
+
+        let sidecar_batch = encode_mvcc_sidecar(&segment.mvcc)?;
+        validate_mvcc_schema(sidecar_batch.schema().as_ref())?;
+
+        if let Some(writer) = self.mvcc_writer.as_mut() {
+            writer.write(&sidecar_batch).await?;
+        } else {
+            return Err(SsTableError::WriterClosed);
+        }
+        Ok(())
     }
-    async fn finish(mut self) -> Result<u64, SsTableError> {
-        if let Some(writer) = self.writer.take() {
+
+    async fn finish(mut self) -> Result<(Path, Path, u64), SsTableError> {
+        if let Some(writer) = self.data_writer.take() {
             writer.close().await?;
         }
-        let file = self
+        if let Some(writer) = self.mvcc_writer.take() {
+            writer.close().await?;
+        }
+
+        let data_path = self.data_path.clone();
+        let mvcc_path = self.mvcc_path.clone();
+        let data_file = self
             .fs
-            .open_options(&self.path, OpenOptions::default().read(true))
+            .open_options(&data_path, OpenOptions::default().read(true))
             .await?;
-        let size = file.size().await?;
-        Ok(size)
+        let data_bytes = data_file.size().await?;
+
+        Ok((data_path, mvcc_path, data_bytes))
     }
 }
+
 impl Drop for WriteContext {
     fn drop(&mut self) {
         debug_assert!(
-            self.writer.is_none(),
-            "WriteContext dropped without closing writer"
+            self.data_writer.is_none() && self.mvcc_writer.is_none(),
+            "WriteContext dropped without closing writers"
         );
     }
 }
@@ -745,5 +876,29 @@ mod tests {
         let table = tokio_block_on(writer.finish()).expect("finish");
         let recorded = table.descriptor().wal_ids().expect("descriptor wal ids");
         assert_eq!(recorded, wal_ids.as_slice());
+    }
+
+    #[test]
+    fn finish_records_data_and_sidecar_paths() {
+        tokio_block_on(async {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, true),
+                Field::new("v", DataType::Int32, true),
+            ]));
+            let descriptor = SsTableDescriptor::new(SsTableId::new(21), 0);
+            let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+                ParquetTableWriter::new(test_config(schema.clone()), descriptor);
+
+            let segment = sample_segment(vec![("m".into(), 9)], vec![123], vec![false]);
+            writer.stage_immutable(&segment).expect("stage segment");
+
+            let table = writer.finish().await.expect("finish table");
+            let descriptor = table.descriptor();
+            let data_path = descriptor.data_path().expect("data path present");
+            let mvcc_path = descriptor.mvcc_path().expect("mvcc path present");
+            assert!(data_path.as_ref().ends_with(".parquet"));
+            assert!(mvcc_path.as_ref().ends_with(".mvcc.parquet"));
+            assert_ne!(data_path.as_ref(), mvcc_path.as_ref());
+        });
     }
 }

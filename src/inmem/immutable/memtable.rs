@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(seg.len(), 3);
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MvccColumns {
     pub commit_ts: Vec<Timestamp>,
     pub tombstone: Vec<bool>,

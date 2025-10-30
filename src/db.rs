@@ -27,8 +27,8 @@ use crate::{
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
     manifest::{
-        Manifest as TonboManifest, ManifestKey, ManifestValue, SstEntry, Stores, TableHead,
-        TableId, VersionEdit, WalSegmentRef,
+        Manifest as TonboManifest, ManifestError, ManifestKey, ManifestValue, SstEntry, Stores,
+        TableHead, TableId, VersionEdit, WalSegmentRef,
     },
     mvcc::{CommitClock, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
@@ -376,6 +376,16 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
             Ok(table) => {
                 // Persist Sst change into manifest
                 let descriptor_ref = table.descriptor();
+                let data_path = descriptor_ref.data_path().cloned().ok_or_else(|| {
+                    SsTableError::Manifest(ManifestError::Invariant(
+                        "sst descriptor missing data path",
+                    ))
+                })?;
+                let mvcc_path = descriptor_ref.mvcc_path().cloned().ok_or_else(|| {
+                    SsTableError::Manifest(ManifestError::Invariant(
+                        "sst descriptor missing mvcc path",
+                    ))
+                })?;
                 let wal_ids: Vec<FileId> = descriptor_ref
                     .wal_ids()
                     .map(|ids| ids.to_vec())
@@ -385,6 +395,8 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
                     sst_id: descriptor_ref.id().clone(),
                     stats,
                     wal_segments: (!wal_ids.is_empty()).then_some(wal_ids.clone()),
+                    data_path,
+                    mvcc_path,
                 };
                 let mut edits = vec![VersionEdit::AddSsts {
                     level: descriptor_ref.level() as u32,

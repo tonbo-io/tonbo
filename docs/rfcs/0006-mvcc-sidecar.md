@@ -69,8 +69,9 @@
 - Extend `SsTableDescriptor` and manifest entries with:
   - `data_uri`,
   - `mvcc_uri`,
-  - MVCC stats (rows, tombstone count, min/max commit_ts).
+  - ~~MVCC stats (rows, tombstone count, min/max commit_ts).~~ no longer required as recorded in SstableStats already.
 - Fusio uploads both objects before committing the manifest edit.
+- Persist data and mvcc path in manifest using SstEntry.
 
 ### 5. Read path & compaction
 
