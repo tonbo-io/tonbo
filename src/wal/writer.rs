@@ -864,6 +864,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use arrow_array::{ArrayRef, BooleanArray, UInt64Array};
     use fusio::{DynFs, executor::BlockingExecutor, impls::mem::fs::InMemoryFs, path::Path};
     use futures::{channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
     use typed_arrow::{
@@ -872,10 +873,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{
-        mvcc::Timestamp,
-        wal::{WalPayload, WalResult},
-    };
+    use crate::{mvcc::Timestamp, wal::WalResult};
 
     fn sample_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -883,28 +881,17 @@ mod tests {
         RecordBatch::try_new(schema, vec![data]).expect("valid batch")
     }
 
-    fn sample_payload(batch: &RecordBatch, commit_ts: u64) -> WalPayload {
-        WalPayload::new(
-            batch.clone(),
-            vec![false; batch.num_rows()],
-            Timestamp::new(commit_ts),
-        )
-        .expect("payload")
-    }
-
-    fn command_from_payload(provisional_id: u64, payload: WalPayload) -> WalCommand {
-        let WalPayload {
-            batch,
-            commit_ts_column,
-            tombstone_column,
-            commit_ts,
-        } = payload;
+    fn sample_command(batch: &RecordBatch, commit_ts: u64, provisional_id: u64) -> WalCommand {
+        let commit_array: ArrayRef =
+            Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()])) as ArrayRef;
+        let tombstone_array: ArrayRef =
+            Arc::new(BooleanArray::from(vec![false; batch.num_rows()])) as ArrayRef;
         WalCommand::Autocommit {
             provisional_id,
-            batch,
-            commit_ts_column,
-            tombstone_column,
-            commit_ts,
+            batch: batch.clone(),
+            commit_ts_column: commit_array,
+            tombstone_column: tombstone_array,
+            commit_ts: Timestamp::new(commit_ts),
         }
     }
 
@@ -950,10 +937,8 @@ mod tests {
             .expect("spawn");
 
         let base = sample_batch();
-        let payload = sample_payload(&base, 42);
-
         let payload_seq = 777;
-        let command = command_from_payload(payload_seq, payload);
+        let command = sample_command(&base, 42, payload_seq);
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
         sender
@@ -1035,8 +1020,7 @@ mod tests {
         let seq1 = 42;
         let (ack1_tx, ack1_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
-        let payload1 = sample_payload(&sample_batch(), 1);
-        let command1 = command_from_payload(seq1, payload1);
+        let command1 = sample_command(&sample_batch(), 1, seq1);
         sender
             .try_send(WriterMsg::queued(seq1, command1, Instant::now(), ack1_tx))
             .expect("first send");
@@ -1062,8 +1046,7 @@ mod tests {
 
         queue_depth.fetch_add(1, Ordering::SeqCst);
         let (ack2_tx, ack2_rx) = oneshot::channel();
-        let payload2 = sample_payload(&sample_batch(), 2);
-        let command2 = command_from_payload(seq1 + 1, payload2);
+        let command2 = sample_command(&sample_batch(), 2, seq1 + 1);
         sender
             .try_send(WriterMsg::queued(
                 seq1 + 1,
@@ -1144,8 +1127,7 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
-        let payload = sample_payload(&sample_batch(), 11);
-        let command = command_from_payload(99, payload);
+        let command = sample_command(&sample_batch(), 11, 99);
         sender
             .try_send(WriterMsg::queued(99, command, Instant::now(), ack_tx))
             .expect("send");
@@ -1220,8 +1202,7 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
-        let payload = sample_payload(&sample_batch(), 21);
-        let command = command_from_payload(7, payload);
+        let command = sample_command(&sample_batch(), 21, 7);
         sender
             .try_send(WriterMsg::queued(7, command, Instant::now(), ack_tx))
             .expect("send");
@@ -1298,8 +1279,7 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
-        let payload = sample_payload(&sample_batch(), 55);
-        let command = command_from_payload(17, payload);
+        let command = sample_command(&sample_batch(), 55, 17);
         sender
             .try_send(WriterMsg::queued(17, command, Instant::now(), ack_tx))
             .expect("send payload");
@@ -1409,8 +1389,7 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
-        let payload = sample_payload(&sample_batch(), 90);
-        let command = command_from_payload(31, payload);
+        let command = sample_command(&sample_batch(), 90, 31);
         sender
             .try_send(WriterMsg::queued(31, command, Instant::now(), ack_tx))
             .expect("send payload");
@@ -1498,8 +1477,7 @@ mod tests {
         let mut enqueue_payload = |seq: u64, commit_ts: u64| {
             let (ack_tx, ack_rx) = oneshot::channel();
             queue_depth.fetch_add(1, Ordering::SeqCst);
-            let payload = sample_payload(&sample_batch(), commit_ts);
-            let command = command_from_payload(seq, payload);
+            let command = sample_command(&sample_batch(), commit_ts, seq);
             sender
                 .try_send(WriterMsg::queued(seq, command, Instant::now(), ack_tx))
                 .expect("send payload");

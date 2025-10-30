@@ -1,14 +1,14 @@
 //! Frame encoding and decoding primitives for the WAL.
 
-use std::{convert::TryFrom, io::Cursor, mem::size_of};
+use std::{convert::TryFrom, io::Cursor, mem::size_of, sync::Arc};
 
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
 use crate::{
     mvcc::Timestamp,
-    wal::{WalCommand, WalError, WalPayload, WalResult, append_mvcc_columns, split_mvcc_columns},
+    wal::{WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns},
 };
 
 /// Maximum supported frame version.
@@ -292,23 +292,6 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
     }
 }
 
-/// Encode a WAL payload into one or more frames using the provided provisional id.
-pub fn encode_payload(payload: WalPayload, provisional_id: u64) -> WalResult<Vec<Frame>> {
-    let WalPayload {
-        batch,
-        commit_ts_column,
-        tombstone_column,
-        commit_ts,
-    } = payload;
-    encode_autocommit(
-        provisional_id,
-        &batch,
-        &commit_ts_column,
-        &tombstone_column,
-        commit_ts,
-    )
-}
-
 fn encode_autocommit(
     provisional_id: u64,
     batch: &RecordBatch,
@@ -324,6 +307,32 @@ fn encode_autocommit(
         Frame::new(FrameType::TxnAppend, append),
         Frame::new(FrameType::TxnCommit, commit),
     ])
+}
+
+/// Convenience helper used mainly by tests to encode an autocommit command from raw inputs.
+pub fn encode_autocommit_frames(
+    batch: RecordBatch,
+    tombstones: Vec<bool>,
+    provisional_id: u64,
+    commit_ts: Timestamp,
+) -> WalResult<Vec<Frame>> {
+    if batch.num_rows() != tombstones.len() {
+        return Err(WalError::TombstoneLengthMismatch {
+            expected: batch.num_rows(),
+            actual: tombstones.len(),
+        });
+    }
+    let commit_array: ArrayRef =
+        Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
+    let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones)) as ArrayRef;
+    let command = WalCommand::Autocommit {
+        provisional_id,
+        batch,
+        commit_ts_column: commit_array,
+        tombstone_column: tombstone_array,
+        commit_ts,
+    };
+    encode_command(command)
 }
 
 fn encode_txn_append_batch(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
@@ -609,10 +618,6 @@ mod tests {
         RecordBatch::try_new(schema, vec![ids, names]).expect("valid batch")
     }
 
-    fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
-        WalPayload::new(batch.clone(), tombstones, commit_ts).expect("payload")
-    }
-
     #[test]
     fn encode_payload_dyn_batch_round_trip() {
         let base = sample_batch();
@@ -621,11 +626,9 @@ mod tests {
         let commit_ts = Timestamp::new(42);
         let provisional_id = 7;
 
-        let frames = encode_payload(
-            wal_payload(&base, tombstones.clone(), commit_ts),
-            provisional_id,
-        )
-        .expect("encode succeeds");
+        let frames =
+            encode_autocommit_frames(base.clone(), tombstones.clone(), provisional_id, commit_ts)
+                .expect("encode succeeds");
 
         assert_eq!(frames.len(), 2);
 
@@ -690,8 +693,9 @@ mod tests {
         let tombstones: Vec<bool> = (0..12).map(|idx| idx % 3 == 0).collect();
         let commit_ts = Timestamp::new(77);
 
-        let frames = encode_payload(wal_payload(&large_batch, tombstones.clone(), commit_ts), 11)
-            .expect("encode");
+        let frames =
+            encode_autocommit_frames(large_batch.clone(), tombstones.clone(), 11, commit_ts)
+                .expect("encode");
 
         match decode_frame(frames[0].frame_type(), frames[0].payload())
             .expect("decode append frame")
@@ -754,9 +758,11 @@ mod tests {
     #[test]
     fn decode_append_rejects_truncated_payload() {
         let batch = sample_batch();
-        let frames = encode_payload(
-            wal_payload(&batch, vec![false, false, false], Timestamp::new(1)),
+        let frames = encode_autocommit_frames(
+            batch.clone(),
+            vec![false, false, false],
             9,
+            Timestamp::new(1),
         )
         .expect("encode succeeds");
 

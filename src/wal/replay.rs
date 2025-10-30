@@ -135,15 +135,11 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
-            WalPayload, WalRecoveryMode,
-            frame::{INITIAL_FRAME_SEQ, encode_payload},
+            WalRecoveryMode,
+            frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
             storage::WalStorage,
         },
     };
-
-    fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
-        WalPayload::new(batch.clone(), tombstones, commit_ts).expect("payload")
-    }
 
     #[test]
     fn replayer_returns_logged_events() {
@@ -164,8 +160,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload = wal_payload(&batch, vec![false], Timestamp::new(42));
-        let frames = encode_payload(payload, 7).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![false], 7, Timestamp::new(42))
+            .expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
         for frame in frames {
@@ -259,8 +255,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload = wal_payload(&batch, vec![false], Timestamp::new(42));
-        let frames = encode_payload(payload, 9).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![false], 9, Timestamp::new(42))
+            .expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
         let append_bytes = frames[0].clone().into_bytes(seq);
@@ -340,8 +336,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload = wal_payload(&batch, vec![false], Timestamp::new(7));
-        let frames = encode_payload(payload, 11).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![false], 11, Timestamp::new(7))
+            .expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();

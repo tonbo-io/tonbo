@@ -7,7 +7,6 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
-use crate::wal::WalPayload;
 use arrow_schema::SchemaRef;
 use fusio::{
     executor::{Executor, Timer},
@@ -35,7 +34,9 @@ use crate::{
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
-    wal::{WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer},
+    wal::{
+        WalCommand, WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer,
+    },
 };
 
 type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, ArrayRef, Option<Timestamp>)>>;
@@ -463,27 +464,34 @@ where
     E: Executor + Timer,
 {
     let commit_ts = db.next_commit_ts();
-    let payload = WalPayload::new(batch, tombstones, commit_ts).map_err(|err| match err {
-        WalError::TombstoneLengthMismatch { expected, actual } => {
-            KeyExtractError::TombstoneLengthMismatch { expected, actual }
-        }
-        other => KeyExtractError::from(other),
-    })?;
+    if batch.num_rows() != tombstones.len() {
+        return Err(KeyExtractError::TombstoneLengthMismatch {
+            expected: batch.num_rows(),
+            actual: tombstones.len(),
+        });
+    }
+
+    let commit_array: ArrayRef =
+        Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
+    let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones.clone())) as ArrayRef;
+
     if let Some(handle) = db.wal_handle().cloned() {
+        let provisional_id = handle.next_provisional_id();
+        let command = WalCommand::Autocommit {
+            provisional_id,
+            batch: batch.clone(),
+            commit_ts_column: Arc::clone(&commit_array),
+            tombstone_column: Arc::clone(&tombstone_array),
+            commit_ts,
+        };
         let ticket = handle
-            .submit(payload.clone())
+            .submit_command(command)
             .await
             .map_err(KeyExtractError::from)?;
         ticket.durable().await.map_err(KeyExtractError::from)?;
     }
-    let WalPayload {
-        batch,
-        commit_ts_column,
-        tombstone_column,
-        commit_ts: payload_commit_ts,
-    } = payload;
-    debug_assert_eq!(payload_commit_ts, commit_ts);
-    apply_dyn_wal_batch(db, batch, commit_ts_column, tombstone_column, commit_ts)
+
+    apply_dyn_wal_batch(db, batch, commit_array, tombstone_array, commit_ts)
 }
 
 async fn insert_dyn_wal_batches<E>(
@@ -600,10 +608,7 @@ mod tests {
         manifest::VersionId,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
-        wal::{
-            WalPayload,
-            frame::{INITIAL_FRAME_SEQ, encode_payload},
-        },
+        wal::frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
     };
 
     #[test]
@@ -1069,9 +1074,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload =
-            WalPayload::new(batch.clone(), vec![true], Timestamp::new(42)).expect("payload");
-        let frames = encode_payload(payload, 7).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![true], 7, Timestamp::new(42))
+            .expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
         for frame in frames {

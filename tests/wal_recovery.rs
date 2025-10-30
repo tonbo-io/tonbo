@@ -14,16 +14,12 @@ use tonbo::{
     record::extract::{KeyDyn, dyn_extractor_for_field},
     scan::RangeSet,
     wal::{
-        WalConfig, WalExt, WalPayload, WalRecoveryMode, WalSyncPolicy,
-        frame::{INITIAL_FRAME_SEQ, encode_payload},
+        WalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
+        frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
         storage::WalStorage,
     },
 };
 use typed_arrow_dyn::DynCell;
-
-fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
-    WalPayload::new(batch.clone(), tombstones, commit_ts).expect("payload")
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Error>> {
@@ -125,8 +121,12 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_payload = wal_payload(&committed_batch, vec![false], Timestamp::new(100));
-    let committed_frames = encode_payload(committed_payload, 11)?;
+    let committed_frames = encode_autocommit_frames(
+        committed_batch.clone(),
+        vec![false],
+        11,
+        Timestamp::new(100),
+    )?;
 
     let partial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -135,8 +135,8 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_payload = wal_payload(&partial_batch, vec![false], Timestamp::new(200));
-    let partial_frames = encode_payload(partial_payload, 17)?;
+    let partial_frames =
+        encode_autocommit_frames(partial_batch.clone(), vec![false], 17, Timestamp::new(200))?;
 
     let mut seq = INITIAL_FRAME_SEQ;
     for frame in committed_frames {
@@ -221,8 +221,12 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_payload = wal_payload(&committed_batch, vec![false], Timestamp::new(100));
-    let committed_frames = encode_payload(committed_payload, 11)?;
+    let committed_frames = encode_autocommit_frames(
+        committed_batch.clone(),
+        vec![false],
+        11,
+        Timestamp::new(100),
+    )?;
 
     let partial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -231,8 +235,8 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_payload = wal_payload(&partial_batch, vec![false], Timestamp::new(200));
-    let partial_frames = encode_payload(partial_payload, 17)?;
+    let partial_frames =
+        encode_autocommit_frames(partial_batch.clone(), vec![false], 17, Timestamp::new(200))?;
 
     let mut seq = INITIAL_FRAME_SEQ;
     for frame in committed_frames {
@@ -316,8 +320,12 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_payload = wal_payload(&committed_batch, vec![false], Timestamp::new(100));
-    let committed_frames = encode_payload(committed_payload, 11)?;
+    let committed_frames = encode_autocommit_frames(
+        committed_batch.clone(),
+        vec![false],
+        11,
+        Timestamp::new(100),
+    )?;
 
     let partial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -326,8 +334,8 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_payload = wal_payload(&partial_batch, vec![false], Timestamp::new(200));
-    let partial_frames = encode_payload(partial_payload, 17)?;
+    let partial_frames =
+        encode_autocommit_frames(partial_batch.clone(), vec![false], 17, Timestamp::new(200))?;
 
     let mut seq = INITIAL_FRAME_SEQ;
     for frame in committed_frames {

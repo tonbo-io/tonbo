@@ -566,13 +566,13 @@ mod tests {
             )
             .expect("batch");
 
-            let payload = crate::wal::WalPayload::new(
+            let frames = crate::wal::frame::encode_autocommit_frames(
                 batch.clone(),
                 vec![false],
+                7,
                 crate::mvcc::Timestamp::new(42),
             )
-            .expect("payload");
-            let frames = crate::wal::frame::encode_payload(payload, 7).expect("encode");
+            .expect("encode");
 
             let mut seq = crate::wal::frame::INITIAL_FRAME_SEQ;
             let mut bytes = Vec::new();

@@ -233,92 +233,6 @@ pub enum WalCommand {
     },
 }
 
-/// Logical payload accepted by the WAL submission helpers.
-#[derive(Debug, Clone)]
-pub struct WalPayload {
-    /// Record batch supplied by the caller (user schema only).
-    pub batch: RecordBatch,
-    /// Arrow column containing the `_commit_ts` values for the batch.
-    pub commit_ts_column: ArrayRef,
-    /// Arrow column containing the `_tombstone` bitmap for the batch.
-    pub tombstone_column: ArrayRef,
-    /// Commit timestamp captured at enqueue.
-    pub commit_ts: Timestamp,
-}
-
-impl WalPayload {
-    /// Construct a payload from a batch and tombstone bitmap.
-    pub fn new(batch: RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalResult<Self> {
-        let rows = batch.num_rows();
-        if rows != tombstones.len() {
-            return Err(WalError::TombstoneLengthMismatch {
-                expected: rows,
-                actual: tombstones.len(),
-            });
-        }
-
-        let commit_values = UInt64Array::from(vec![commit_ts.get(); rows]);
-        let tombstone_values = BooleanArray::from(tombstones);
-
-        Self::from_columns(
-            batch,
-            Arc::new(commit_values) as ArrayRef,
-            Arc::new(tombstone_values) as ArrayRef,
-            commit_ts,
-        )
-    }
-
-    /// Construct a payload from Arrow columns containing MVCC metadata.
-    pub fn from_columns(
-        batch: RecordBatch,
-        commit_ts_column: ArrayRef,
-        tombstone_column: ArrayRef,
-        commit_ts: Timestamp,
-    ) -> WalResult<Self> {
-        if commit_ts_column.len() != batch.num_rows() {
-            return Err(WalError::Codec(
-                "commit_ts column length mismatch record batch".to_string(),
-            ));
-        }
-        if tombstone_column.len() != batch.num_rows() {
-            return Err(WalError::Codec(
-                "tombstone bitmap length mismatch record batch".to_string(),
-            ));
-        }
-
-        let commit_array = commit_ts_column
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| WalError::Codec("_commit_ts column not u64".to_string()))?;
-        if commit_array.null_count() > 0 {
-            return Err(WalError::Codec("null commit_ts value".to_string()));
-        }
-        if commit_array
-            .iter()
-            .any(|value| value.map(|v| v != commit_ts.get()).unwrap_or(true))
-        {
-            return Err(WalError::Codec(
-                "commit_ts column mismatch commit timestamp".to_string(),
-            ));
-        }
-
-        let tombstone_array = tombstone_column
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
-        if tombstone_array.null_count() > 0 {
-            return Err(WalError::Codec("null tombstone value".to_string()));
-        }
-
-        Ok(Self {
-            batch,
-            commit_ts_column,
-            tombstone_column,
-            commit_ts,
-        })
-    }
-}
-
 /// Append `_commit_ts` and `_tombstone` columns, returning a new batch for WAL storage.
 pub(crate) fn append_mvcc_columns(
     batch: &RecordBatch,
@@ -561,26 +475,18 @@ where
         }
     }
 
-    /// Enqueue a payload to the WAL writer.
-    pub async fn submit(&self, payload: WalPayload) -> WalResult<WalTicket<E>> {
-        let provisional_id = self.inner.next_payload_seq.fetch_add(1, Ordering::SeqCst);
-        let WalPayload {
-            batch,
-            commit_ts_column,
-            tombstone_column,
-            commit_ts,
-        } = payload;
-        let command = WalCommand::Autocommit {
-            provisional_id,
-            batch,
-            commit_ts_column,
-            tombstone_column,
-            commit_ts,
-        };
-        self.submit_command(command, provisional_id).await
+    /// Allocate the next provisional identifier suitable for WAL commands.
+    pub fn next_provisional_id(&self) -> u64 {
+        self.inner.next_payload_seq.fetch_add(1, Ordering::SeqCst)
     }
 
-    async fn submit_command(
+    /// Enqueue a command to the WAL writer.
+    pub async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
+        let submission_seq = self.next_provisional_id();
+        self.enqueue_command(command, submission_seq).await
+    }
+
+    async fn enqueue_command(
         &self,
         command: WalCommand,
         submission_seq: u64,
@@ -617,8 +523,25 @@ where
         tombstones: &[bool],
         commit_ts: Timestamp,
     ) -> WalResult<WalTicket<E>> {
-        let payload = WalPayload::new(batch.clone(), tombstones.to_vec(), commit_ts)?;
-        self.submit(payload).await
+        if batch.num_rows() != tombstones.len() {
+            return Err(WalError::TombstoneLengthMismatch {
+                expected: batch.num_rows(),
+                actual: tombstones.len(),
+            });
+        }
+
+        let provisional_id = self.next_provisional_id();
+        let commit_values =
+            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
+        let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
+        let command = WalCommand::Autocommit {
+            provisional_id,
+            batch: batch.clone(),
+            commit_ts_column: Arc::clone(&commit_values),
+            tombstone_column: Arc::clone(&tombstone_values),
+            commit_ts,
+        };
+        self.enqueue_command(command, provisional_id).await
     }
 
     /// Force manual rotation of the active WAL segment.
@@ -709,40 +632,6 @@ mod tests {
 
     fn tombstone_array(values: &[bool]) -> ArrayRef {
         Arc::new(BooleanArray::from(values.to_vec())) as ArrayRef
-    }
-
-    #[test]
-    fn wal_payload_rejects_length_mismatch() {
-        let batch = sample_batch();
-        let err =
-            WalPayload::new(batch.clone(), vec![true], Timestamp::new(7)).expect_err("mismatch");
-        assert!(matches!(
-            err,
-            WalError::TombstoneLengthMismatch { expected: 2, actual: 1 }
-        ));
-
-        let payload =
-            WalPayload::new(batch, vec![true, false], Timestamp::new(9)).expect("valid payload");
-        let commit_array = payload
-            .commit_ts_column
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("u64 column");
-        assert_eq!(commit_array.len(), 2);
-        assert!(
-            commit_array
-                .iter()
-                .all(|value| value.expect("non-null") == 9)
-        );
-        let tombstone_array = payload
-            .tombstone_column
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .expect("boolean column");
-        assert_eq!(tombstone_array.len(), 2);
-        assert_eq!(tombstone_array.value(0), true);
-        assert_eq!(tombstone_array.value(1), false);
-        assert_eq!(payload.commit_ts, Timestamp::new(9));
     }
 
     #[test]
