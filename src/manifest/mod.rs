@@ -7,6 +7,7 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use fusio::path::Path;
 use fusio_manifest::{
     BlockingExecutor, CheckpointStore, HeadStore, LeaseStore, SegmentIo,
     manifest::Manifest as FusioManifest,
@@ -328,6 +329,12 @@ pub struct SstEntry {
     pub stats: Option<SsTableStats>,
     /// Mandatory WAL segments composed to build the SST.
     pub wal_segments: Option<Vec<FileId>>,
+    /// Path to the SST data object.
+    #[serde(with = "path_serde")]
+    pub data_path: Path,
+    /// Path to the MVCC sidecar associated with the SST.
+    #[serde(with = "path_serde")]
+    pub mvcc_path: Path,
 }
 
 impl PartialEq for SstEntry {
@@ -367,6 +374,27 @@ pub struct TableSnapshot {
     pub head: TableHead,
     /// Most recent committed version for the table, if any.
     pub latest_version: Option<VersionState>,
+}
+
+mod path_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::*;
+
+    pub fn serialize<S>(value: &Path, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(value.as_ref())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Path, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Path::parse(raw).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Bundle of storage backends required by the manifest.
@@ -733,6 +761,13 @@ mod tests {
         Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
     }
 
+    fn test_paths(id: u64) -> (Path, Path) {
+        let base = format!("sst/L0/{id:020}");
+        let data = Path::parse(format!("{base}.parquet")).expect("parse data path");
+        let mvcc = Path::parse(format!("{base}.mvcc.parquet")).expect("parse mvcc path");
+        (data, mvcc)
+    }
+
     async fn prime_table_head(manifest: &TestManifest, table_id: TableId) {
         let head = TableHead {
             table_id,
@@ -769,20 +804,29 @@ mod tests {
             first_frame: 0,
             last_frame: 10,
         };
+        let (data0a, mvcc0a) = test_paths(7);
         let sst_level0_a = SstEntry {
             sst_id: SsTableId::new(7),
             stats: Some(SsTableStats::default()),
             wal_segments: Some(vec![wal_segment.file_id.clone()]),
+            data_path: data0a.clone(),
+            mvcc_path: mvcc0a.clone(),
         };
+        let (data0b, mvcc0b) = test_paths(8);
         let sst_level0_b = SstEntry {
             sst_id: SsTableId::new(8),
             stats: Some(SsTableStats::default()),
             wal_segments: Some(vec![generate_file_id()]),
+            data_path: data0b.clone(),
+            mvcc_path: mvcc0b.clone(),
         };
+        let (data1, mvcc1) = test_paths(21);
         let sst_level1 = SstEntry {
             sst_id: SsTableId::new(21),
             stats: Some(SsTableStats::default()),
             wal_segments: Some(vec![generate_file_id()]),
+            data_path: data1.clone(),
+            mvcc_path: mvcc1.clone(),
         };
 
         // Simulate flush of immutables
@@ -832,6 +876,19 @@ mod tests {
                 && latest_version.ssts[0].contains(&sst_level0_b)
         );
         assert_eq!(latest_version.wal_floor, Some(wal_segment.clone()));
+        let persisted_level0 = &latest_version.ssts[0];
+        let persisted_a = persisted_level0
+            .iter()
+            .find(|entry| entry.sst_id == sst_level0_a.sst_id)
+            .expect("level 0 should contain first sst");
+        assert_eq!(persisted_a.data_path, data0a);
+        assert_eq!(persisted_a.mvcc_path, mvcc0a);
+        let persisted_b = persisted_level0
+            .iter()
+            .find(|entry| entry.sst_id == sst_level0_b.sst_id)
+            .expect("level 0 should contain second sst");
+        assert_eq!(persisted_b.data_path, data0b);
+        assert_eq!(persisted_b.mvcc_path, mvcc0b);
         assert_eq!(
             latest_version.tombstone_watermark,
             Some(99),
@@ -910,6 +967,15 @@ mod tests {
             Some(&vec![sst_level1.clone()]),
             "level 1 should contain the newly added SST"
         );
+        let persisted_level1 = updated_version
+            .ssts
+            .get(1)
+            .expect("level 1 present")
+            .iter()
+            .find(|entry| entry.sst_id == sst_level1.sst_id)
+            .expect("level 1 entry present");
+        assert_eq!(persisted_level1.data_path, data1);
+        assert_eq!(persisted_level1.mvcc_path, mvcc1);
         assert_eq!(
             updated_version.wal_floor,
             Some(new_wal_segment.clone()),
@@ -982,6 +1048,7 @@ mod tests {
     async fn apply_version_edits_failure() {
         let manifest = in_memory_manifest();
         let table_id = TableId::new();
+        let (failure_data_path, failure_mvcc_path) = test_paths(11);
         let err = manifest
             .apply_version_edits(
                 table_id,
@@ -991,6 +1058,8 @@ mod tests {
                         sst_id: SsTableId::new(11),
                         stats: Some(SsTableStats::default()),
                         wal_segments: Some(vec![generate_file_id()]),
+                        data_path: failure_data_path,
+                        mvcc_path: failure_mvcc_path,
                     }],
                 }],
             )

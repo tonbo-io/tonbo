@@ -42,7 +42,7 @@
 
 ### 1. Immutable representation
 
-- Replace `attach_mvcc_columns` with `split_mvcc_sidecar(batch, commit_ts, tombstone)` returning the original `RecordBatch` plus `MvccColumns`.
+- Replace `attach_mvcc_columns` with `bundle_mvcc_sidecar(batch, commit_ts, tombstone)` returning the original `RecordBatch` plus `MvccColumns`.
 - Ensure `ImmutableMemTable` stores the original batch and MVCC vectors without modifying the schema; maintain index and iterators as today.
 
 ### 2. MVCC sidecar format
@@ -69,8 +69,9 @@
 - Extend `SsTableDescriptor` and manifest entries with:
   - `data_uri`,
   - `mvcc_uri`,
-  - MVCC stats (rows, tombstone count, min/max commit_ts).
+  - ~~MVCC stats (rows, tombstone count, min/max commit_ts).~~ no longer required as recorded in SstableStats already.
 - Fusio uploads both objects before committing the manifest edit.
+- Persist data and mvcc path in manifest using SstEntry.
 
 ### 5. Read path & compaction
 

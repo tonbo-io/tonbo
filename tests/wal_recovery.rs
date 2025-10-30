@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
+use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
@@ -22,9 +22,7 @@ use tonbo::{
 use typed_arrow_dyn::DynCell;
 
 fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
-    let commit: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()]));
-    let tombstone: ArrayRef = Arc::new(BooleanArray::from(tombstones));
-    WalPayload::new(batch.clone(), commit, tombstone, commit_ts).expect("payload")
+    WalPayload::new(batch.clone(), tombstones, commit_ts).expect("payload")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

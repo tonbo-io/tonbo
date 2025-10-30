@@ -12,7 +12,7 @@ use arrow_schema::SchemaRef;
 use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
 use crate::{
     inmem::{
-        immutable::memtable::{ImmutableMemTable, VersionSlice, attach_mvcc_columns},
+        immutable::memtable::{ImmutableMemTable, VersionSlice, bundle_mvcc_sidecar},
         policy::{MemStats, StatsProvider},
     },
     mvcc::Timestamp,
@@ -206,7 +206,7 @@ impl DynMem {
         };
 
         let batch = concat_batches(schema, &slices)?;
-        let (batch, mvcc) = attach_mvcc_columns(batch, commit_ts, tombstone)?;
+        let (batch, mvcc) = bundle_mvcc_sidecar(batch, commit_ts, tombstone)?;
         Ok(Some(ImmutableMemTable::new(batch, index, mvcc)))
     }
 }
