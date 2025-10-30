@@ -3,15 +3,9 @@
 use crate::{fs::FileId, manifest::WalSegmentRef};
 
 /// Temporary helper that fabricates WAL segment references until real manifest plumbing lands.
-pub fn mock_wal_segments(ids: &[FileId]) -> Vec<WalSegmentRef> {
+pub(crate) fn mock_wal_segments(ids: &[FileId]) -> Vec<WalSegmentRef> {
     ids.iter()
         .enumerate()
-        .map(|(idx, &id)| WalSegmentRef {
-            // TODO: Fetch the actual value from WAL frame
-            seq: idx as u64,
-            file_id: id,
-            first_frame: 0,
-            last_frame: 0,
-        })
+        .map(|(idx, &id)| WalSegmentRef::new(idx as u64, id, 0, 0))
         .collect()
 }

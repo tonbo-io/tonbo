@@ -8,14 +8,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use fusio::{
-    executor::{Executor, Timer},
-    mem::fs::InMemoryFs,
-};
-use fusio_manifest::{
-    BackoffPolicy, BlockingExecutor as ManifestBlockingExecutor, CheckpointStoreImpl,
-    HeadStoreImpl, LeaseStoreImpl, ManifestContext, SegmentStoreImpl,
-};
+use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
@@ -27,8 +20,8 @@ use crate::{
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
     manifest::{
-        Manifest as TonboManifest, ManifestError, ManifestKey, ManifestValue, SstEntry, Stores,
-        TableHead, TableId, VersionEdit, WalSegmentRef,
+        InMemoryManifest, ManifestError, SstEntry, TableId, VersionEdit, WalSegmentRef,
+        init_in_memory_manifest,
     },
     mvcc::{CommitClock, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
@@ -38,53 +31,6 @@ use crate::{
 };
 
 type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, Vec<bool>, Option<Timestamp>)>>;
-
-type InMemoryManifest = TonboManifest<
-    HeadStoreImpl<InMemoryFs>,
-    SegmentStoreImpl<InMemoryFs>,
-    CheckpointStoreImpl<InMemoryFs>,
-    LeaseStoreImpl<InMemoryFs, ManifestBlockingExecutor>,
->;
-
-const DEFAULT_TABLE_NAME: &str = "default";
-
-fn init_manifest() -> (InMemoryManifest, TableId) {
-    let _table_name: &str = DEFAULT_TABLE_NAME;
-    let fs = InMemoryFs::new();
-    let head = HeadStoreImpl::new(fs.clone(), "head.json");
-    let segment = SegmentStoreImpl::new(fs.clone(), "segments");
-    let checkpoint = CheckpointStoreImpl::new(fs.clone(), "");
-    let timer = ManifestBlockingExecutor;
-    let lease = LeaseStoreImpl::new(fs, "", BackoffPolicy::default(), timer);
-    let ctx = Arc::new(ManifestContext::new(ManifestBlockingExecutor));
-    let manifest = TonboManifest::open(Stores::new(head, segment, checkpoint, lease), ctx);
-    let table_id = TableId::new();
-    prime_manifest_head(&manifest, table_id);
-    (manifest, table_id)
-}
-
-fn prime_manifest_head(manifest: &InMemoryManifest, table_id: TableId) {
-    block_on(async {
-        let mut session = manifest
-            .inner()
-            .session_write()
-            .await
-            .expect("manifest write session");
-        session.put(
-            ManifestKey::TableHead { table_id },
-            ManifestValue::TableHead(TableHead {
-                table_id,
-                schema_version: 0,
-                wal_floor: None,
-                last_manifest_txn: None,
-            }),
-        );
-        session
-            .commit()
-            .await
-            .expect("commit default table head into manifest");
-    });
-}
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
@@ -230,7 +176,8 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         M: Sized,
     {
         let (mode, mem) = M::build(config)?;
-        let (manifest, manifest_table) = init_manifest();
+        let (manifest, manifest_table) =
+            init_in_memory_manifest(0).expect("manifest initialization");
         Ok(Self {
             mode,
             mem,
@@ -390,13 +337,13 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
                     .map(|ids| ids.to_vec())
                     .unwrap_or_default();
                 let stats = descriptor_ref.stats().cloned();
-                let sst_entry = SstEntry {
-                    sst_id: descriptor_ref.id().clone(),
+                let sst_entry = SstEntry::new(
+                    descriptor_ref.id().clone(),
                     stats,
-                    wal_segments: (!wal_ids.is_empty()).then_some(wal_ids.clone()),
+                    (!wal_ids.is_empty()).then_some(wal_ids.clone()),
                     data_path,
                     mvcc_path,
-                };
+                );
                 let mut edits = vec![VersionEdit::AddSsts {
                     level: descriptor_ref.level() as u32,
                     entries: vec![sst_entry],
@@ -408,7 +355,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
                     // successfully persist them in parquet table writer
                     let wal_floor = wal_refs
                         .iter()
-                        .max_by_key(|segment| segment.seq)
+                        .max_by_key(|segment| segment.seq())
                         .cloned()
                         .unwrap();
                     edits.push(VersionEdit::SetWalSegment { segment: wal_floor });
@@ -869,20 +816,20 @@ mod tests {
             .latest_version
             .expect("latest version must exist after flush");
         assert_eq!(
-            latest.commit_timestamp,
+            latest.commit_timestamp(),
             Timestamp::new(1),
             "latest version should reflect manifest txn 1"
         );
-        assert_eq!(latest.ssts.len(), 1);
-        assert_eq!(latest.ssts[0].len(), 1);
-        let recorded = &latest.ssts[0][0];
-        assert_eq!(recorded.sst_id, *descriptor.id());
+        assert_eq!(latest.ssts().len(), 1);
+        assert_eq!(latest.ssts()[0].len(), 1);
+        let recorded = &latest.ssts()[0][0];
+        assert_eq!(recorded.sst_id(), descriptor.id());
         assert!(
-            recorded.stats.is_some() || table.descriptor().stats().is_none(),
+            recorded.stats().is_some() || table.descriptor().stats().is_none(),
             "stats should propagate when available"
         );
         assert!(
-            recorded.wal_segments.is_none(),
+            recorded.wal_segments().is_none(),
             "no WAL segments recorded since none were attached"
         );
     }

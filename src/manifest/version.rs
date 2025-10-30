@@ -1,11 +1,15 @@
 use std::collections::HashSet;
 
-use super::{ManifestError, ManifestResult, SstEntry, VersionState, WalSegmentRef};
+use super::{
+    ManifestError, ManifestResult,
+    domain::{SstEntry, VersionState, WalSegmentRef},
+};
 use crate::ondisk::sstable::SsTableId;
 
 /// Manifest edits applied sequentially to produce a new version.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub enum VersionEdit {
+pub(crate) enum VersionEdit {
     /// Add SST entries to the specified level.
     AddSsts {
         /// Compaction level receiving the new SSTs.
@@ -32,33 +36,7 @@ pub enum VersionEdit {
     },
 }
 
-pub(super) fn apply_edits(state: &mut VersionState, edits: &[VersionEdit]) -> ManifestResult<()> {
-    for edit in edits {
-        match edit {
-            VersionEdit::AddSsts { level, entries } => {
-                apply_add_ssts(&mut state.ssts, *level, entries)?
-            }
-            VersionEdit::RemoveSsts { level, sst_ids } => {
-                apply_remove_ssts(&mut state.ssts, *level, sst_ids)?
-            }
-            VersionEdit::SetWalSegment { segment } => {
-                state.wal_floor = Some(segment.clone());
-            }
-            VersionEdit::SetTombstoneWatermark { watermark } => {
-                state.tombstone_watermark = Some(*watermark);
-            }
-        }
-    }
-
-    for bucket in &mut state.ssts {
-        bucket.sort_by_key(|entry| entry.sst_id.raw());
-    }
-    trim_trailing_empty_levels(&mut state.ssts);
-
-    Ok(())
-}
-
-fn apply_add_ssts(
+pub(super) fn apply_add_ssts(
     levels: &mut Vec<Vec<SstEntry>>,
     level: u32,
     entries: &[SstEntry],
@@ -68,14 +46,14 @@ fn apply_add_ssts(
     }
     let bucket = ensure_level(levels, level);
     for entry in entries {
-        bucket.retain(|existing| existing.sst_id != entry.sst_id);
+        bucket.retain(|existing| existing.sst_id() != entry.sst_id());
         bucket.push(entry.clone());
     }
     Ok(())
 }
 
-fn apply_remove_ssts(
-    levels: &mut [Vec<SstEntry>],
+pub(super) fn apply_remove_ssts(
+    levels: &mut Vec<Vec<SstEntry>>,
     level: u32,
     sst_ids: &[SsTableId],
 ) -> ManifestResult<()> {
@@ -90,7 +68,7 @@ fn apply_remove_ssts(
     }
     let bucket = &mut levels[index];
     let targets: HashSet<SsTableId> = sst_ids.iter().cloned().collect();
-    bucket.retain(|entry| !targets.contains(&entry.sst_id));
+    bucket.retain(|entry| !targets.contains(entry.sst_id()));
     Ok(())
 }
 
@@ -102,7 +80,7 @@ fn ensure_level(levels: &mut Vec<Vec<SstEntry>>, level: u32) -> &mut Vec<SstEntr
     &mut levels[index]
 }
 
-fn trim_trailing_empty_levels(levels: &mut Vec<Vec<SstEntry>>) {
+pub(super) fn trim_trailing_empty_levels(levels: &mut Vec<Vec<SstEntry>>) {
     while levels.last().is_some_and(|entries| entries.is_empty()) {
         levels.pop();
     }
