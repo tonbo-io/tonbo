@@ -123,7 +123,7 @@ impl Replayer {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_array::{BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         Write,
@@ -198,11 +198,23 @@ mod tests {
                 provisional_id,
                 batch: decoded,
                 commit_ts_hint,
+                commit_ts_column,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
                 assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                assert_eq!(tombstones, &vec![false]);
+                let commit_array = commit_ts_column
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("u64 column");
+                assert_eq!(commit_array.len(), 1);
+                assert_eq!(commit_array.value(0), 42);
+                let tombstone_array = tombstones
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .expect("boolean column");
+                assert_eq!(tombstone_array.len(), 1);
+                assert!(!tombstone_array.value(0));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -278,11 +290,23 @@ mod tests {
                 provisional_id,
                 batch: decoded,
                 commit_ts_hint,
+                commit_ts_column,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 9);
                 assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                assert_eq!(tombstones, &vec![false]);
+                let commit_array = commit_ts_column
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("u64 column");
+                assert_eq!(commit_array.len(), 1);
+                assert_eq!(commit_array.value(0), 42);
+                let tombstone_array = tombstones
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .expect("boolean column");
+                assert_eq!(tombstone_array.len(), 1);
+                assert!(!tombstone_array.value(0));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),

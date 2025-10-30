@@ -25,8 +25,8 @@ use futures::{
 };
 
 use crate::wal::{
-    WalAck, WalConfig, WalError, WalPayload, WalResult, WalSyncPolicy,
-    frame::{self, Frame, encode_payload},
+    WalAck, WalCommand, WalConfig, WalError, WalResult, WalSyncPolicy,
+    frame::{self, Frame, encode_command},
     metrics::WalMetrics,
     storage::{SegmentDescriptor, WalSegment, WalStorage},
 };
@@ -38,16 +38,16 @@ type SleepSlot = Option<Fuse<SleepFuture>>;
 
 /// Message dispatched to the writer loop.
 pub(crate) enum WriterMsg {
-    /// Append a payload to the WAL.
+    /// Append a command to the WAL.
     ///
     /// We model messages as an enum even though only `Enqueue` exists today so
     /// future command variants (e.g. rotation, flush) can ride the same queue
     /// without changing its type.
     Enqueue {
         /// Logical sequence assigned by the submitter (embedded in frame payloads).
-        payload_seq: u64,
-        /// Logical payload to encode.
-        payload: WalPayload,
+        submission_seq: u64,
+        /// Logical command to encode.
+        command: WalCommand,
         /// Instant at which the payload was enqueued (used for latency metrics).
         enqueued_at: Instant,
         /// Sender to resolve once durability is satisfied.
@@ -63,14 +63,14 @@ pub(crate) enum WriterMsg {
 impl WriterMsg {
     #[cfg(test)]
     fn queued(
-        payload_seq: u64,
-        payload: WalPayload,
+        submission_seq: u64,
+        command: WalCommand,
         enqueued_at: Instant,
         ack_tx: oneshot::Sender<WalResult<WalAck>>,
     ) -> Self {
         Self::Enqueue {
-            payload_seq,
-            payload,
+            submission_seq,
+            command,
             enqueued_at,
             ack_tx,
         }
@@ -195,10 +195,10 @@ where
                 }
                 msg = receiver.next() => {
                     match msg {
-                        Some(WriterMsg::Enqueue { payload_seq, payload, enqueued_at, ack_tx }) => {
+                        Some(WriterMsg::Enqueue { submission_seq, command, enqueued_at, ack_tx }) => {
                             ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                             ctx.update_queue_depth_metric().await;
-                            match ctx.handle_enqueue(payload_seq, payload, enqueued_at).await {
+                            match ctx.handle_enqueue(submission_seq, command, enqueued_at).await {
                                 Ok(HandleOutcome { ack, sync_performed, timer_directive }) => {
                                     if sync_performed {
                                         ctx.record_sync().await;
@@ -242,14 +242,17 @@ where
         } else {
             match receiver.next().await {
                 Some(WriterMsg::Enqueue {
-                    payload_seq,
-                    payload,
+                    submission_seq,
+                    command,
                     enqueued_at,
                     ack_tx,
                 }) => {
                     ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                     ctx.update_queue_depth_metric().await;
-                    match ctx.handle_enqueue(payload_seq, payload, enqueued_at).await {
+                    match ctx
+                        .handle_enqueue(submission_seq, command, enqueued_at)
+                        .await
+                    {
                         Ok(HandleOutcome {
                             ack,
                             sync_performed,
@@ -404,12 +407,12 @@ where
 
     async fn handle_enqueue(
         &mut self,
-        payload_seq: u64,
-        payload: WalPayload,
+        _submission_seq: u64,
+        command: WalCommand,
         enqueued_at: Instant,
     ) -> WalResult<HandleOutcome> {
         let was_empty = self.segment_bytes == 0;
-        let mut frames = encode_payload(payload, payload_seq)?;
+        let mut frames = encode_command(command)?;
         if frames.is_empty() {
             return Err(WalError::Corrupt("wal payload produced no frames"));
         }
@@ -889,6 +892,22 @@ mod tests {
         .expect("payload")
     }
 
+    fn command_from_payload(provisional_id: u64, payload: WalPayload) -> WalCommand {
+        let WalPayload {
+            batch,
+            commit_ts_column,
+            tombstone_column,
+            commit_ts,
+        } = payload;
+        WalCommand::Autocommit {
+            provisional_id,
+            batch,
+            commit_ts_column,
+            tombstone_column,
+            commit_ts,
+        }
+    }
+
     #[test]
     fn submit_and_drain_on_shutdown() {
         let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
@@ -934,12 +953,13 @@ mod tests {
         let payload = sample_payload(&base, 42);
 
         let payload_seq = 777;
+        let command = command_from_payload(payload_seq, payload);
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
         sender
             .try_send(WriterMsg::queued(
                 payload_seq,
-                payload,
+                command,
                 Instant::now(),
                 ack_tx,
             ))
@@ -1015,13 +1035,10 @@ mod tests {
         let seq1 = 42;
         let (ack1_tx, ack1_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
+        let payload1 = sample_payload(&sample_batch(), 1);
+        let command1 = command_from_payload(seq1, payload1);
         sender
-            .try_send(WriterMsg::queued(
-                seq1,
-                sample_payload(&sample_batch(), 1),
-                Instant::now(),
-                ack1_tx,
-            ))
+            .try_send(WriterMsg::queued(seq1, command1, Instant::now(), ack1_tx))
             .expect("first send");
 
         let ack1_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
@@ -1045,10 +1062,12 @@ mod tests {
 
         queue_depth.fetch_add(1, Ordering::SeqCst);
         let (ack2_tx, ack2_rx) = oneshot::channel();
+        let payload2 = sample_payload(&sample_batch(), 2);
+        let command2 = command_from_payload(seq1 + 1, payload2);
         sender
             .try_send(WriterMsg::queued(
                 seq1 + 1,
-                sample_payload(&sample_batch(), 2),
+                command2,
                 Instant::now(),
                 ack2_tx,
             ))
@@ -1125,13 +1144,10 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
+        let payload = sample_payload(&sample_batch(), 11);
+        let command = command_from_payload(99, payload);
         sender
-            .try_send(WriterMsg::queued(
-                99,
-                sample_payload(&sample_batch(), 11),
-                Instant::now(),
-                ack_tx,
-            ))
+            .try_send(WriterMsg::queued(99, command, Instant::now(), ack_tx))
             .expect("send");
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
@@ -1204,13 +1220,10 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
+        let payload = sample_payload(&sample_batch(), 21);
+        let command = command_from_payload(7, payload);
         sender
-            .try_send(WriterMsg::queued(
-                7,
-                sample_payload(&sample_batch(), 21),
-                Instant::now(),
-                ack_tx,
-            ))
+            .try_send(WriterMsg::queued(7, command, Instant::now(), ack_tx))
             .expect("send");
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
@@ -1285,13 +1298,10 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
+        let payload = sample_payload(&sample_batch(), 55);
+        let command = command_from_payload(17, payload);
         sender
-            .try_send(WriterMsg::queued(
-                17,
-                sample_payload(&sample_batch(), 55),
-                Instant::now(),
-                ack_tx,
-            ))
+            .try_send(WriterMsg::queued(17, command, Instant::now(), ack_tx))
             .expect("send payload");
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
@@ -1399,13 +1409,10 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel();
         queue_depth.fetch_add(1, Ordering::SeqCst);
+        let payload = sample_payload(&sample_batch(), 90);
+        let command = command_from_payload(31, payload);
         sender
-            .try_send(WriterMsg::queued(
-                31,
-                sample_payload(&sample_batch(), 90),
-                Instant::now(),
-                ack_tx,
-            ))
+            .try_send(WriterMsg::queued(31, command, Instant::now(), ack_tx))
             .expect("send payload");
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
@@ -1491,13 +1498,10 @@ mod tests {
         let mut enqueue_payload = |seq: u64, commit_ts: u64| {
             let (ack_tx, ack_rx) = oneshot::channel();
             queue_depth.fetch_add(1, Ordering::SeqCst);
+            let payload = sample_payload(&sample_batch(), commit_ts);
+            let command = command_from_payload(seq, payload);
             sender
-                .try_send(WriterMsg::queued(
-                    seq,
-                    sample_payload(&sample_batch(), commit_ts),
-                    Instant::now(),
-                    ack_tx,
-                ))
+                .try_send(WriterMsg::queued(seq, command, Instant::now(), ack_tx))
                 .expect("send payload");
 
             let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
