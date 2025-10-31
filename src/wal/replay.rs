@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fusio::Read;
 #[cfg(test)]
-use fusio::{DynFs, path::Path as FusioPath};
+use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
 
 use crate::wal::{
     WalConfig, WalError, WalResult,
@@ -135,6 +135,7 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
+            state::FsWalStateStore,
             WalRecoveryMode,
             frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
             storage::WalStorage,
@@ -143,9 +144,11 @@ mod tests {
 
     #[test]
     fn replayer_returns_logged_events() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::parse("wal-test").expect("wal path");
-        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -184,7 +187,8 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.filesystem = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
         let events = futures::executor::block_on(replayer.scan()).expect("scan");
         assert_eq!(events.len(), 2);
@@ -230,9 +234,11 @@ mod tests {
 
     #[test]
     fn replayer_stops_after_truncated_tail() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::parse("wal-truncated").expect("wal path");
-        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
         let storage_clone = storage.clone();
         let wal_root_for_dir = wal_root.clone();
         futures::executor::block_on(async move {
@@ -276,7 +282,8 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.filesystem = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
         let events = futures::executor::block_on(replayer.scan()).expect("scan succeeds");
 
@@ -314,9 +321,11 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let wal_dir = dir.path().join("wal");
 
-        let fs: Arc<dyn DynFs> = Arc::new(TokioFs);
+        let backend = Arc::new(TokioFs);
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::from_filesystem_path(&wal_dir).expect("wal path");
-        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
 
         storage
             .ensure_dir(storage.root())
@@ -353,7 +362,8 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.filesystem = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
         let replayer = Replayer::new(cfg);
         let events = replayer.scan().await.expect("scan");
@@ -373,12 +383,15 @@ mod tests {
 
     #[test]
     fn replayer_rejects_unimplemented_recovery_mode() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::parse("wal-unimplemented").expect("wal path");
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.filesystem = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         cfg.recovery = WalRecoveryMode::AbsoluteConsistency;
 
         let replayer = Replayer::new(cfg);

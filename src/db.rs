@@ -28,7 +28,8 @@ use crate::{
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
     wal::{
-        WalCommand, WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer,
+        WalCommand, WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext,
+        replay::Replayer, state::WalStateHandle,
     },
 };
 
@@ -207,6 +208,14 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     where
         M: Sized,
     {
+        let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
+            WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
+                .await?
+                .state()
+                .commit_ts()
+        } else {
+            None
+        };
         let mut db = Self::new(config, executor)?;
         db.set_wal_config(Some(wal_cfg.clone()));
 
@@ -218,7 +227,8 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
         // references.
 
         let last_commit_ts = M::replay_wal(&mut db, events)?;
-        if let Some(ts) = last_commit_ts {
+        let effective_commit = last_commit_ts.or(state_commit_hint);
+        if let Some(ts) = effective_commit {
             db.commit_clock.advance_to_at_least(ts.saturating_add(1));
         }
 

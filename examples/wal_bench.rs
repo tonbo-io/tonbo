@@ -9,13 +9,13 @@ use std::{
 use arrow_array::{Array, ArrayRef, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use clap::{Parser, ValueEnum};
-use fusio::{executor::tokio::TokioExecutor, impls::mem::fs::InMemoryFs, path::Path};
+use fusio::{executor::tokio::TokioExecutor, fs::FsCas, impls::mem::fs::InMemoryFs, path::Path};
 use tokio::runtime::Runtime;
 use tonbo::{
     db::DB,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
-    wal::{WalConfig, WalExt, WalSyncPolicy},
+    wal::{WalConfig, WalExt, WalSyncPolicy, state::FsWalStateStore},
 };
 use ulid::Ulid;
 
@@ -130,7 +130,11 @@ async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, Tokio
 
 fn wal_config(sync: WalSyncPolicy) -> WalConfig {
     let mut cfg = WalConfig::default();
-    cfg.filesystem = Arc::new(InMemoryFs::new());
+    let backend = Arc::new(InMemoryFs::new());
+    let fs_dyn: Arc<dyn fusio::DynFs> = backend.clone();
+    let fs_cas: Arc<dyn FsCas> = backend.clone();
+    cfg.filesystem = fs_dyn;
+    cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
     cfg.dir = Path::parse(format!("wal-bench-{}", Ulid::new())).expect("path");
     cfg.sync = sync;
     cfg

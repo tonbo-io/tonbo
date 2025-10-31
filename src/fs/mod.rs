@@ -6,7 +6,12 @@ use std::{
     sync::Arc,
 };
 
-use fusio::{DynFs, disk::LocalFs, fs::OpenOptions, path::Path};
+use fusio::{
+    DynFs,
+    disk::LocalFs,
+    fs::{FsCas, OpenOptions},
+    path::Path,
+};
 use once_cell::sync::OnceCell;
 use ulid::{DecodeError, Ulid};
 
@@ -35,6 +40,15 @@ pub fn generate_file_id() -> FileId {
 #[inline]
 pub fn local_fs() -> Arc<dyn DynFs> {
     Arc::new(LocalFs {})
+}
+
+/// Construct paired filesystem handles that support both generic FS ops and CAS semantics.
+#[inline]
+pub fn local_fs_with_cas() -> (Arc<dyn DynFs>, Arc<dyn FsCas>) {
+    let fs = Arc::new(LocalFs {});
+    let dyn_fs: Arc<dyn DynFs> = fs.clone();
+    let cas_fs: Arc<dyn FsCas> = fs;
+    (dyn_fs, cas_fs)
 }
 
 /// Logical file categories with known on-disk conventions.

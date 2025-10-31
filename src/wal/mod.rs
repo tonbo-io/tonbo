@@ -38,6 +38,7 @@ pub mod frame;
 pub mod manifest_ext;
 pub mod metrics;
 pub mod replay;
+pub mod state;
 pub mod storage;
 pub mod writer;
 // Writer logic will live here once the async queue is implemented.
@@ -107,11 +108,15 @@ pub struct WalConfig {
     pub queue_size: usize,
     /// Filesystem implementation backing the WAL directory.
     pub filesystem: Arc<dyn DynFs>,
+    /// Optional store used for `state.json` persistence.
+    pub state_store: Option<Arc<dyn state::WalStateStore>>,
 }
 
 impl Default for WalConfig {
     fn default() -> Self {
         let dir = Path::parse("wal").expect("static wal path");
+        let (filesystem, state_cas) = crate::fs::local_fs_with_cas();
+        let state_store = state::FsWalStateStore::new(state_cas);
         Self {
             dir,
             segment_max_bytes: 64 * 1024 * 1024,
@@ -121,7 +126,8 @@ impl Default for WalConfig {
             recovery: WalRecoveryMode::default(),
             retention_bytes: None,
             queue_size: 65_536,
-            filesystem: crate::fs::local_fs(),
+            filesystem,
+            state_store: Some(Arc::new(state_store)),
         }
     }
 }
@@ -139,7 +145,24 @@ impl fmt::Debug for WalConfig {
             .field("retention_bytes", &self.retention_bytes)
             .field("queue_size", &self.queue_size)
             .field("filesystem", &fs_tag)
+            .field("state_store_present", &self.state_store.is_some())
             .finish()
+    }
+}
+
+impl WalConfig {
+    /// Replace the store used for `state.json` bookkeeping.
+    #[must_use]
+    pub fn with_state_store(mut self, store: Arc<dyn state::WalStateStore>) -> Self {
+        self.state_store = Some(store);
+        self
+    }
+
+    /// Disable `state.json` persistence (primarily for tests).
+    #[must_use]
+    pub fn without_state_store(mut self) -> Self {
+        self.state_store = None;
+        self
     }
 }
 
@@ -169,6 +192,9 @@ pub enum WalError {
     /// The WAL is not currently enabled.
     #[error("wal not enabled")]
     Disabled,
+    /// State file persistence failed.
+    #[error("wal state error: {0}")]
+    State(String),
     /// Module has not been fully implemented yet.
     #[error("wal feature is not implemented: {0}")]
     Unimplemented(&'static str),
