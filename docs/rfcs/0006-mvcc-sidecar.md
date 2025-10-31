@@ -53,13 +53,10 @@
 
 ### 3. WAL changes
 
-- Deprecate `append_tombstone_column` and `split_tombstone_column`.
-- `WalPayload::DynBatch` carries:
-  - `batch: RecordBatch` (user schema),
-  - `tombstones: Vec<bool>` (or `BooleanArray`),
-  - `commit_ts: Timestamp`.
-- Frame encoder writes two IPC buffers: user batch and tombstone bitmap (little-endian packed). Decoder rebuilds `(RecordBatch, Vec<bool>)` without touching schema.
-- Update WAL tests and replay logic to expect the new payload shape.
+- Keep the helpers as WAL-local utilities: `append_mvcc_columns` widens batches for encoding; `split_mvcc_columns` strips MVCC columns immediately after decoding.
+- `Wal::append` accepts the user `RecordBatch`, a tombstone slice, and the commit timestamp; it materializes Arrow arrays internally so MVCC metadata stays hidden from callers.
+- Frame encoding continues to emit a single Arrow IPC stream with `_commit_ts` and `_tombstone` appended; decode recovers `(RecordBatch, Option<Timestamp>, ArrayRef, ArrayRef)` and drops the widened schema before handing the payload to replay.
+- WAL tests and recovery specs assert bitmap-length validation occurs prior to encoding and that MVCC columns never escape the WAL boundary.
 
 ### 4. Flush & manifest
 

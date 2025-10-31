@@ -14,7 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_schema::{DataType, Field, Schema};
 use fusio::{
     DynFs,
     executor::{Executor, JoinHandle, Timer},
@@ -26,7 +27,12 @@ use futures::{
     executor::block_on,
 };
 
-use crate::{db::Mode, mvcc::Timestamp, wal::metrics::WalMetrics};
+use crate::{
+    db::Mode,
+    inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
+    mvcc::Timestamp,
+    wal::metrics::WalMetrics,
+};
 
 pub mod frame;
 pub mod manifest_ext;
@@ -149,6 +155,14 @@ pub enum WalError {
     /// Payload serialization or deserialization failure.
     #[error("wal frame codec error: {0}")]
     Codec(String),
+    /// Tombstone bitmap length does not match the batch row count.
+    #[error("tombstone bitmap length mismatch: expected {expected}, got {actual}")]
+    TombstoneLengthMismatch {
+        /// Expected number of rows in the batch.
+        expected: usize,
+        /// Actual bitmap entries provided.
+        actual: usize,
+    },
     /// The WAL data on disk is corrupt or truncated.
     #[error("wal frame is corrupt: {0}")]
     Corrupt(&'static str),
@@ -171,31 +185,208 @@ pub struct WalAck {
     pub elapsed: Duration,
 }
 
-/// Logical payload accepted by the WAL writer queue.
+/// Logical command accepted by the WAL writer queue.
 #[derive(Debug, Clone)]
-pub struct WalPayload {
-    /// Record batch supplied by the caller (user schema only).
-    pub batch: RecordBatch,
-    /// Tombstone bitmap aligned with `batch`.
-    pub tombstones: Vec<bool>,
-    /// Commit timestamp captured at enqueue.
-    pub commit_ts: Timestamp,
+pub enum WalCommand {
+    /// Autocommit ingest (legacy path): append + commit in a single submission.
+    Autocommit {
+        /// Provisional identifier used for WAL frames.
+        provisional_id: u64,
+        /// Record batch supplied by the caller (without MVCC columns).
+        batch: RecordBatch,
+        /// Arrow column containing the `_commit_ts` values for the batch.
+        commit_ts_column: ArrayRef,
+        /// Arrow column containing the `_tombstone` bitmap for the batch.
+        tombstone_column: ArrayRef,
+        /// Commit timestamp captured at enqueue.
+        commit_ts: Timestamp,
+    },
+    /// Open an explicit transaction.
+    TxnBegin {
+        /// Provisional identifier reserved for this transaction.
+        provisional_id: u64,
+    },
+    /// Append rows to an explicit transaction.
+    TxnAppend {
+        /// Provisional identifier associated with the transaction.
+        provisional_id: u64,
+        /// Record batch payload (without MVCC columns).
+        batch: RecordBatch,
+        /// Arrow column containing the `_commit_ts` values for the batch.
+        commit_ts_column: ArrayRef,
+        /// Arrow column containing the `_tombstone` bitmap for the batch.
+        tombstone_column: ArrayRef,
+        /// Commit timestamp assigned to these rows (should match the eventual commit).
+        commit_ts: Timestamp,
+    },
+    /// Commit an explicit transaction.
+    TxnCommit {
+        /// Provisional identifier associated with the transaction.
+        provisional_id: u64,
+        /// Commit timestamp.
+        commit_ts: Timestamp,
+    },
+    /// Abort an explicit transaction.
+    TxnAbort {
+        /// Provisional identifier associated with the transaction.
+        provisional_id: u64,
+    },
 }
 
-impl WalPayload {
-    /// Construct a payload from a batch and tombstone bitmap.
-    pub fn new(batch: RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalResult<Self> {
-        if batch.num_rows() != tombstones.len() {
+/// Append `_commit_ts` and `_tombstone` columns, returning a new batch for WAL storage.
+pub(crate) fn append_mvcc_columns(
+    batch: &RecordBatch,
+    commit_ts: &ArrayRef,
+    tombstones: &ArrayRef,
+) -> WalResult<RecordBatch> {
+    let rows = batch.num_rows();
+
+    if commit_ts.len() != rows {
+        return Err(WalError::Codec(
+            "commit_ts column length mismatch record batch".to_string(),
+        ));
+    }
+
+    let commit_array = commit_ts
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| WalError::Codec("_commit_ts column not u64".to_string()))?;
+    if commit_array.null_count() > 0 {
+        return Err(WalError::Codec("null commit_ts value".to_string()));
+    }
+
+    if commit_array.is_empty()
+        || commit_array
+            .iter()
+            .all(|value| value.map(|v| v == commit_array.value(0)).unwrap_or(false))
+    {
+        // ok
+    } else {
+        return Err(WalError::Codec(
+            "commit_ts column contained varying values".to_string(),
+        ));
+    }
+
+    if tombstones.len() != rows {
+        return Err(WalError::Codec(
+            "tombstone bitmap length mismatch record batch".to_string(),
+        ));
+    }
+
+    let tombstone_array = tombstones
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+    if tombstone_array.null_count() > 0 {
+        return Err(WalError::Codec("null tombstone value".to_string()));
+    }
+
+    if batch
+        .schema()
+        .fields()
+        .iter()
+        .any(|f| f.name() == MVCC_TOMBSTONE_COL)
+    {
+        return Err(WalError::Codec(
+            "record batch already contains _tombstone column".to_string(),
+        ));
+    }
+
+    if batch
+        .schema()
+        .fields()
+        .iter()
+        .any(|f| f.name() == MVCC_COMMIT_COL)
+    {
+        return Err(WalError::Codec(
+            "record batch already contains _commit_ts column".to_string(),
+        ));
+    }
+
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
+    fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
+
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::clone(commit_ts));
+    columns.push(Arc::clone(tombstones));
+
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
+}
+
+/// Remove MVCC columns, returning the stripped batch, commit timestamps, and bitmap.
+pub(crate) fn split_mvcc_columns(
+    batch: RecordBatch,
+) -> WalResult<(RecordBatch, Option<Timestamp>, ArrayRef, ArrayRef)> {
+    let schema = batch.schema();
+    let commit_idx = schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == MVCC_COMMIT_COL)
+        .ok_or_else(|| WalError::Codec("_commit_ts column missing".to_string()))?;
+    let tombstone_idx = schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == MVCC_TOMBSTONE_COL)
+        .ok_or_else(|| WalError::Codec("_tombstone column missing".to_string()))?;
+
+    let commit_array = batch.column(commit_idx);
+    let commit_column = commit_array
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| WalError::Codec("_commit_ts column not u64".to_string()))?;
+    if commit_column.null_count() > 0 {
+        return Err(WalError::Codec("null commit_ts value".to_string()));
+    }
+    let commit_ts = if commit_column.is_empty() {
+        None
+    } else {
+        let first = commit_column.value(0);
+        if commit_column
+            .iter()
+            .any(|value| value.map(|v| v != first).unwrap_or(true))
+        {
             return Err(WalError::Codec(
-                "tombstone bitmap length mismatch record batch".to_string(),
+                "commit_ts column contained varying values".to_string(),
             ));
         }
-        Ok(Self {
-            batch,
-            tombstones,
-            commit_ts,
-        })
+        Some(Timestamp::from(first))
+    };
+
+    let tombstone_array = batch.column(tombstone_idx);
+    let tombstone_column = tombstone_array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| WalError::Codec("_tombstone column not boolean".to_string()))?;
+    if tombstone_column.null_count() > 0 {
+        return Err(WalError::Codec("null tombstone value".to_string()));
     }
+
+    let stripped_fields = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != commit_idx && *idx != tombstone_idx)
+        .map(|(_, field)| field.clone())
+        .collect::<Vec<_>>();
+    let stripped_columns = batch
+        .columns()
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != commit_idx && *idx != tombstone_idx)
+        .map(|(_, column)| column.clone())
+        .collect::<Vec<_>>();
+
+    let stripped = RecordBatch::try_new(Arc::new(Schema::new(stripped_fields)), stripped_columns)
+        .map_err(|err| WalError::Codec(err.to_string()))?;
+
+    Ok((
+        stripped,
+        commit_ts,
+        Arc::clone(commit_array),
+        Arc::clone(tombstone_array),
+    ))
 }
 
 struct WalHandleInner<E>
@@ -284,17 +475,30 @@ where
         }
     }
 
-    /// Enqueue a payload to the WAL writer.
-    pub async fn submit(&self, payload: WalPayload) -> WalResult<WalTicket<E>> {
-        let payload_seq = self.inner.next_payload_seq.fetch_add(1, Ordering::SeqCst);
+    /// Allocate the next provisional identifier suitable for WAL commands.
+    pub fn next_provisional_id(&self) -> u64 {
+        self.inner.next_payload_seq.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Enqueue a command to the WAL writer.
+    pub async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
+        let submission_seq = self.next_provisional_id();
+        self.enqueue_command(command, submission_seq).await
+    }
+
+    async fn enqueue_command(
+        &self,
+        command: WalCommand,
+        submission_seq: u64,
+    ) -> WalResult<WalTicket<E>> {
         let (ack_tx, ack_rx) = oneshot::channel();
         let enqueued_at = Instant::now();
 
         self.inner.queue_depth.fetch_add(1, Ordering::SeqCst);
 
         let msg = writer::WriterMsg::Enqueue {
-            payload_seq,
-            payload,
+            submission_seq,
+            command,
             enqueued_at,
             ack_tx,
         };
@@ -306,7 +510,7 @@ where
         }
 
         Ok(WalTicket {
-            seq: payload_seq,
+            seq: submission_seq,
             receiver: ack_rx,
             _exec: PhantomData,
         })
@@ -319,8 +523,25 @@ where
         tombstones: &[bool],
         commit_ts: Timestamp,
     ) -> WalResult<WalTicket<E>> {
-        let payload = WalPayload::new(batch.clone(), tombstones.to_vec(), commit_ts)?;
-        self.submit(payload).await
+        if batch.num_rows() != tombstones.len() {
+            return Err(WalError::TombstoneLengthMismatch {
+                expected: batch.num_rows(),
+                actual: tombstones.len(),
+            });
+        }
+
+        let provisional_id = self.next_provisional_id();
+        let commit_values =
+            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
+        let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
+        let command = WalCommand::Autocommit {
+            provisional_id,
+            batch: batch.clone(),
+            commit_ts_column: Arc::clone(&commit_values),
+            tombstone_column: Arc::clone(&tombstone_values),
+            commit_ts,
+        };
+        self.enqueue_command(command, provisional_id).await
     }
 
     /// Force manual rotation of the active WAL segment.
@@ -394,7 +615,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Int32Array, RecordBatch};
+    use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
@@ -405,20 +626,57 @@ mod tests {
         RecordBatch::try_new(schema, vec![data]).expect("batch")
     }
 
-    #[test]
-    fn wal_payload_rejects_length_mismatch() {
-        let batch = sample_batch();
-        let err =
-            WalPayload::new(batch.clone(), vec![true], Timestamp::new(7)).expect_err("mismatch");
-        assert!(matches!(
-            err,
-            WalError::Codec(msg) if msg.contains("tombstone bitmap length mismatch")
-        ));
+    fn commit_array(ts: u64, len: usize) -> ArrayRef {
+        Arc::new(UInt64Array::from(vec![ts; len])) as ArrayRef
+    }
 
-        let payload =
-            WalPayload::new(batch, vec![true, false], Timestamp::new(9)).expect("valid payload");
-        assert_eq!(payload.tombstones, vec![true, false]);
-        assert_eq!(payload.commit_ts, Timestamp::new(9));
+    fn tombstone_array(values: &[bool]) -> ArrayRef {
+        Arc::new(BooleanArray::from(values.to_vec())) as ArrayRef
+    }
+
+    #[test]
+    fn append_mvcc_rejects_length_mismatch() {
+        let batch = sample_batch();
+        let commit = commit_array(1, batch.num_rows());
+        let tombstones = tombstone_array(&[true]);
+        let err = append_mvcc_columns(&batch, &commit, &tombstones).expect_err("length mismatch");
+        assert!(
+            matches!(err, WalError::Codec(msg) if msg.contains("tombstone bitmap length mismatch"))
+        );
+    }
+
+    #[test]
+    fn append_mvcc_rejects_existing_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let data = Arc::new(Int32Array::from(vec![1])) as _;
+        let commit = Arc::new(UInt64Array::from(vec![1_u64])) as _;
+        let batch = RecordBatch::try_new(schema, vec![data, commit]).expect("batch");
+        let commit = commit_array(2, batch.num_rows());
+        let tombstones = tombstone_array(&[false]);
+        let err = append_mvcc_columns(&batch, &commit, &tombstones).expect_err("existing column");
+        assert!(matches!(err, WalError::Codec(msg) if msg.contains("already contains _commit_ts")));
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
+        ]));
+        let data = Arc::new(Int32Array::from(vec![1])) as _;
+        let tombstones = Arc::new(BooleanArray::from(vec![false])) as _;
+        let batch = RecordBatch::try_new(schema, vec![data, tombstones]).expect("batch");
+        let commit = commit_array(3, batch.num_rows());
+        let tombstones = tombstone_array(&[false]);
+        let err = append_mvcc_columns(&batch, &commit, &tombstones).expect_err("existing column");
+        assert!(matches!(err, WalError::Codec(msg) if msg.contains("already contains _tombstone")));
+    }
+
+    #[test]
+    fn split_tombstone_requires_column() {
+        let batch = sample_batch();
+        let err = split_mvcc_columns(batch).expect_err("missing column");
+        assert!(matches!(err, WalError::Codec(msg) if msg.contains("_commit_ts column missing")));
     }
 }
 

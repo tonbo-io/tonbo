@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
@@ -27,10 +27,12 @@ use crate::{
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
-    wal::{WalConfig, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer},
+    wal::{
+        WalCommand, WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer,
+    },
 };
 
-type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, Vec<bool>, Option<Timestamp>)>>;
+type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, ArrayRef, Option<Timestamp>)>>;
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
@@ -83,11 +85,13 @@ where
                     provisional_id,
                     batch,
                     commit_ts_hint,
+                    commit_ts_column,
                     tombstones,
                     ..
                 } => {
                     pending.entry(provisional_id).or_default().push((
                         batch,
+                        commit_ts_column,
                         tombstones,
                         commit_ts_hint,
                     ));
@@ -97,14 +101,14 @@ where
                     commit_ts,
                 } => {
                     if let Some(batches) = pending.remove(&provisional_id) {
-                        for (batch, tombstones, hinted_ts) in batches {
+                        for (batch, commit_column, tombstones, hinted_ts) in batches {
                             if let Some(hint) = hinted_ts {
                                 debug_assert_eq!(
                                     hint, commit_ts,
                                     "commit timestamp derived from append payload diverged"
                                 );
                             }
-                            apply_dyn_wal_batch(self, batch, tombstones, commit_ts)?;
+                            apply_dyn_wal_batch(self, batch, commit_column, tombstones, commit_ts)?;
                         }
                         last_commit_ts = Some(match last_commit_ts {
                             Some(prev) => prev.max(commit_ts),
@@ -406,16 +410,31 @@ where
     E: Executor + Timer,
 {
     validate_record_batch_schema(db, &batch)?;
-    validate_tombstone_bitmap(&batch, &tombstones)?;
+    validate_vec_tombstone_bitmap(&batch, &tombstones)?;
+
     let commit_ts = db.next_commit_ts();
+
+    let commit_array: ArrayRef =
+        Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
+    let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones.clone())) as ArrayRef;
+
     if let Some(handle) = db.wal_handle().cloned() {
+        let provisional_id = handle.next_provisional_id();
+        let command = WalCommand::Autocommit {
+            provisional_id,
+            batch: batch.clone(),
+            commit_ts_column: Arc::clone(&commit_array),
+            tombstone_column: Arc::clone(&tombstone_array),
+            commit_ts,
+        };
         let ticket = handle
-            .append(&batch, &tombstones, commit_ts)
+            .submit_command(command)
             .await
             .map_err(KeyExtractError::from)?;
         ticket.durable().await.map_err(KeyExtractError::from)?;
     }
-    apply_dyn_wal_batch(db, batch, tombstones, commit_ts)
+
+    apply_dyn_wal_batch(db, batch, commit_array, tombstone_array, commit_ts)
 }
 
 async fn insert_dyn_wal_batches<E>(
@@ -434,17 +453,44 @@ where
 fn apply_dyn_wal_batch<E>(
     db: &mut DB<DynMode, E>,
     batch: RecordBatch,
-    tombstones: Vec<bool>,
+    commit_ts_column: ArrayRef,
+    tombstones: ArrayRef,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
 where
     E: Executor + Timer,
 {
     validate_record_batch_schema(db, &batch)?;
-    validate_tombstone_bitmap(&batch, &tombstones)?;
+    let commit_array = commit_ts_column
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| KeyExtractError::from(WalError::Codec("_commit_ts column not u64".into())))?
+        .clone();
+    if commit_array.null_count() > 0 {
+        return Err(KeyExtractError::from(WalError::Codec(
+            "commit_ts column contained null".into(),
+        )));
+    }
+    if commit_array
+        .iter()
+        .any(|value| value.map(|v| v != commit_ts.get()).unwrap_or(true))
+    {
+        return Err(KeyExtractError::from(WalError::Codec(
+            "commit_ts column mismatch commit timestamp".into(),
+        )));
+    }
+
+    let tombstone_array = tombstones
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| {
+            KeyExtractError::from(WalError::Codec("_tombstone column not boolean".into()))
+        })?
+        .clone();
+    validate_tombstone_bitmap(&batch, &tombstone_array)?;
     db.mem
         .insert_batch_with_ts(db.mode.extractor.as_ref(), batch, commit_ts, move |row| {
-            tombstones[row]
+            tombstone_array.value(row)
         })?;
     db.maybe_seal_after_insert()?;
     Ok(())
@@ -467,6 +513,24 @@ where
 }
 
 fn validate_tombstone_bitmap(
+    batch: &RecordBatch,
+    tombstones: &BooleanArray,
+) -> Result<(), KeyExtractError> {
+    if batch.num_rows() != tombstones.len() {
+        return Err(KeyExtractError::TombstoneLengthMismatch {
+            expected: batch.num_rows(),
+            actual: tombstones.len(),
+        });
+    }
+    if tombstones.null_count() > 0 {
+        return Err(KeyExtractError::from(WalError::Codec(
+            "tombstone column contained null".into(),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_vec_tombstone_bitmap(
     batch: &RecordBatch,
     tombstones: &[bool],
 ) -> Result<(), KeyExtractError> {
@@ -500,10 +564,7 @@ mod tests {
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
-        wal::{
-            WalPayload,
-            frame::{INITIAL_FRAME_SEQ, encode_payload},
-        },
+        wal::frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
     };
 
     #[test]
@@ -974,9 +1035,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload =
-            WalPayload::new(batch.clone(), vec![true], Timestamp::new(42)).expect("payload");
-        let frames = encode_payload(payload, 7).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![true], 7, Timestamp::new(42))
+            .expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
         for frame in frames {

@@ -123,7 +123,7 @@ impl Replayer {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_array::{BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         Write,
@@ -135,15 +135,11 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
-            WalPayload, WalRecoveryMode,
-            frame::{INITIAL_FRAME_SEQ, encode_payload},
+            WalRecoveryMode,
+            frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
             storage::WalStorage,
         },
     };
-
-    fn wal_payload(batch: &RecordBatch, tombstones: Vec<bool>, commit_ts: Timestamp) -> WalPayload {
-        WalPayload::new(batch.clone(), tombstones, commit_ts).expect("payload")
-    }
 
     #[test]
     fn replayer_returns_logged_events() {
@@ -164,8 +160,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload = wal_payload(&batch, vec![false], Timestamp::new(42));
-        let frames = encode_payload(payload, 7).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![false], 7, Timestamp::new(42))
+            .expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
         for frame in frames {
@@ -198,11 +194,23 @@ mod tests {
                 provisional_id,
                 batch: decoded,
                 commit_ts_hint,
+                commit_ts_column,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 7);
                 assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                assert_eq!(tombstones, &vec![false]);
+                let commit_array = commit_ts_column
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("u64 column");
+                assert_eq!(commit_array.len(), 1);
+                assert_eq!(commit_array.value(0), 42);
+                let tombstone_array = tombstones
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .expect("boolean column");
+                assert_eq!(tombstone_array.len(), 1);
+                assert!(!tombstone_array.value(0));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -247,8 +255,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload = wal_payload(&batch, vec![false], Timestamp::new(42));
-        let frames = encode_payload(payload, 9).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![false], 9, Timestamp::new(42))
+            .expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
         let append_bytes = frames[0].clone().into_bytes(seq);
@@ -278,11 +286,23 @@ mod tests {
                 provisional_id,
                 batch: decoded,
                 commit_ts_hint,
+                commit_ts_column,
                 tombstones,
             } => {
                 assert_eq!(*provisional_id, 9);
                 assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                assert_eq!(tombstones, &vec![false]);
+                let commit_array = commit_ts_column
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("u64 column");
+                assert_eq!(commit_array.len(), 1);
+                assert_eq!(commit_array.value(0), 42);
+                let tombstone_array = tombstones
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .expect("boolean column");
+                assert_eq!(tombstone_array.len(), 1);
+                assert!(!tombstone_array.value(0));
                 assert_eq!(decoded.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -316,8 +336,8 @@ mod tests {
         )
         .expect("batch");
 
-        let payload = wal_payload(&batch, vec![false], Timestamp::new(7));
-        let frames = encode_payload(payload, 11).expect("encode");
+        let frames = encode_autocommit_frames(batch.clone(), vec![false], 11, Timestamp::new(7))
+            .expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
