@@ -58,6 +58,7 @@ Pre-submit routine (every source adjustment):
 - Rust 2024 edition; format with `rustfmt` via `cargo +nightly fmt`.
 - Names: types/traits CamelCase, functions/variables snake_case, modules snake_case.
 - Visibility: prefer crate-private; document public APIs. The crate denies `missing_docs`.
+- Default to the as most conservative as possible visibility (`pub(super)`, `pub(crate)`, etc.); only use `pub` when cross-crate access is required.
 - Keep modules small and cohesive; avoid single-letter identifiers except indices.
 - No backward-compatibility constraints; prioritize clean code.
 
