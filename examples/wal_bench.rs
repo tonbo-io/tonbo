@@ -133,7 +133,7 @@ fn wal_config(sync: WalSyncPolicy) -> WalConfig {
     let backend = Arc::new(InMemoryFs::new());
     let fs_dyn: Arc<dyn fusio::DynFs> = backend.clone();
     let fs_cas: Arc<dyn FsCas> = backend.clone();
-    cfg.filesystem = fs_dyn;
+    cfg.segment_backend = fs_dyn;
     cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
     cfg.dir = Path::parse(format!("wal-bench-{}", Ulid::new())).expect("path");
     cfg.sync = sync;

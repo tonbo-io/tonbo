@@ -16,14 +16,14 @@ use crate::wal::{
 pub struct Replayer {
     /// Configuration snapshot guiding where segments reside.
     cfg: WalConfig,
-    /// Storage facade shared with the WAL writer for filesystem access.
+    /// Storage facade shared with the WAL writer for segment access.
     storage: WalStorage,
 }
 
 impl Replayer {
     /// Create a new replayer using the provided configuration.
     pub fn new(cfg: WalConfig) -> Self {
-        let storage = WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
+        let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
         Self { cfg, storage }
     }
 
@@ -135,9 +135,9 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
-            state::FsWalStateStore,
             WalRecoveryMode,
             frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+            state::FsWalStateStore,
             storage::WalStorage,
         },
     };
@@ -187,7 +187,7 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs_dyn;
+        cfg.segment_backend = fs_dyn;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
         let events = futures::executor::block_on(replayer.scan()).expect("scan");
@@ -282,7 +282,7 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs_dyn;
+        cfg.segment_backend = fs_dyn;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
         let events = futures::executor::block_on(replayer.scan()).expect("scan succeeds");
@@ -362,7 +362,7 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs_dyn;
+        cfg.segment_backend = fs_dyn;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
         let replayer = Replayer::new(cfg);
@@ -390,7 +390,7 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs_dyn;
+        cfg.segment_backend = fs_dyn;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         cfg.recovery = WalRecoveryMode::AbsoluteConsistency;
 

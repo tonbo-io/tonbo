@@ -106,8 +106,8 @@ pub struct WalConfig {
     pub retention_bytes: Option<usize>,
     /// Capacity of the writer's bounded queue.
     pub queue_size: usize,
-    /// Filesystem implementation backing the WAL directory.
-    pub filesystem: Arc<dyn DynFs>,
+    /// Backend used to create and append WAL segments.
+    pub segment_backend: Arc<dyn DynFs>,
     /// Optional store used for `state.json` persistence.
     pub state_store: Option<Arc<dyn state::WalStateStore>>,
 }
@@ -126,7 +126,7 @@ impl Default for WalConfig {
             recovery: WalRecoveryMode::default(),
             retention_bytes: None,
             queue_size: 65_536,
-            filesystem,
+            segment_backend: filesystem,
             state_store: Some(Arc::new(state_store)),
         }
     }
@@ -134,7 +134,7 @@ impl Default for WalConfig {
 
 impl fmt::Debug for WalConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let fs_tag = self.filesystem.file_system();
+        let fs_tag = self.segment_backend.file_system();
         f.debug_struct("WalConfig")
             .field("dir", &self.dir)
             .field("segment_max_bytes", &self.segment_max_bytes)
@@ -144,7 +144,7 @@ impl fmt::Debug for WalConfig {
             .field("recovery", &self.recovery)
             .field("retention_bytes", &self.retention_bytes)
             .field("queue_size", &self.queue_size)
-            .field("filesystem", &fs_tag)
+            .field("segment_backend", &fs_tag)
             .field("state_store_present", &self.state_store.is_some())
             .finish()
     }
@@ -724,7 +724,7 @@ where
     E: Executor + Timer,
 {
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
-        let storage = storage::WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
+        let storage = storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
 
         let tail_metadata = block_on(storage.tail_metadata())?;
         let next_payload_seq = tail_metadata

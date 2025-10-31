@@ -940,7 +940,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::{mvcc::Timestamp, wal::state::{FsWalStateStore, WalStateStore}, wal::WalResult};
+    use crate::{
+        mvcc::Timestamp,
+        wal::WalResult,
+        wal::state::{FsWalStateStore, WalStateStore},
+    };
 
     fn sample_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -974,7 +978,7 @@ mod tests {
         let mut cfg = WalConfig::default();
         cfg.queue_size = queue_size;
         cfg.sync = sync;
-        cfg.filesystem = fs_dyn;
+        cfg.segment_backend = fs_dyn;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         (storage, cfg)
     }
@@ -990,7 +994,7 @@ mod tests {
         let mut cfg = WalConfig::default();
         cfg.queue_size = 2;
         cfg.sync = WalSyncPolicy::Always;
-        cfg.filesystem = fs_writer;
+        cfg.segment_backend = fs_writer;
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
         cfg.state_store = Some(Arc::clone(&state_store));
 
@@ -1386,7 +1390,7 @@ mod tests {
         cfg.queue_size = 4;
         cfg.segment_max_bytes = 1024;
         cfg.sync = WalSyncPolicy::Always;
-        cfg.filesystem = fs_writer;
+        cfg.segment_backend = fs_writer;
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
         cfg.state_store = Some(Arc::clone(&state_store));
 
@@ -1485,11 +1489,9 @@ mod tests {
         );
         assert_eq!(segments[1].seq, 1);
 
-        let state_handle = futures::executor::block_on(WalStateHandle::load(
-            state_store,
-            storage_reader.root(),
-        ))
-        .expect("load state after rotation");
+        let state_handle =
+            futures::executor::block_on(WalStateHandle::load(state_store, storage_reader.root()))
+                .expect("load state after rotation");
         let state = state_handle.state();
         assert_eq!(state.last_segment_seq, Some(0));
         assert_eq!(state.last_frame_seq, Some(frame::INITIAL_FRAME_SEQ + 1));
@@ -1510,7 +1512,7 @@ mod tests {
         cfg.queue_size = 4;
         cfg.segment_max_age = Some(Duration::from_millis(0));
         cfg.sync = WalSyncPolicy::Always;
-        cfg.filesystem = fs_writer;
+        cfg.segment_backend = fs_writer;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
@@ -1600,7 +1602,7 @@ mod tests {
         cfg.segment_max_bytes = 1;
         cfg.retention_bytes = Some(1);
         cfg.sync = WalSyncPolicy::Disabled;
-        cfg.filesystem = fs_writer;
+        cfg.segment_backend = fs_writer;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
