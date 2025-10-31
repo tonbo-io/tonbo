@@ -1,8 +1,6 @@
 #![allow(clippy::missing_panics_doc)]
 
 use std::{
-    collections::HashMap,
-    env,
     fmt,
     sync::Arc,
     time::{Duration, Instant},
@@ -10,20 +8,19 @@ use std::{
 
 use arrow_array::{Array, ArrayRef, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use fusio::{impls::mem::fs::InMemoryFs, path::Path};
+use clap::{Parser, ValueEnum};
+use fusio::{executor::tokio::TokioExecutor, impls::mem::fs::InMemoryFs, path::Path};
 use tokio::runtime::Runtime;
-use ulid::Ulid;
-
 use tonbo::{
     db::DB,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
-    wal::{WalConfig, WalSyncPolicy, WalExt},
+    wal::{WalConfig, WalExt, WalSyncPolicy},
 };
-use fusio::executor::tokio::TokioExecutor;
+use ulid::Ulid;
 
 fn main() {
-    let cfg = Config::from_args(env::args());
+    let cfg = Config::parse();
     let runtime = Runtime::new().expect("tokio runtime");
     let schema = Arc::new(build_schema(cfg.value_columns));
 
@@ -35,73 +32,38 @@ fn main() {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Mode {
     Wal,
 }
 
-#[derive(Clone)]
+#[derive(Parser, Clone)]
+#[command(
+    name = "wal-bench",
+    about = "Benchmark WAL append throughput into the WAL."
+)]
 struct Config {
+    #[arg(long, value_enum, default_value_t = Mode::Wal)]
     mode: Mode,
+    #[arg(long, default_value_t = 4096)]
     rows: usize,
+    #[arg(long, default_value_t = 64)]
     batches: usize,
+    #[arg(long = "density", default_value_t = 0.2)]
     tombstone_density: f64,
+    #[arg(long, value_enum, default_value_t = SyncMode::Disabled)]
     sync: SyncMode,
+    #[arg(long = "columns", default_value_t = 2)]
     value_columns: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum SyncMode {
     Disabled,
     Always,
 }
 
 impl Config {
-    fn from_args<I>(iter: I) -> Self
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        let mut map: HashMap<String, String> = HashMap::new();
-        for arg in iter.into_iter().map(Into::into).skip(1) {
-            if let Some((k, v)) = arg.split_once('=') {
-                map.insert(k.trim_start_matches("--").to_string(), v.to_string());
-            }
-        }
-
-        let mode = Mode::Wal;
-
-        let rows = map
-            .get("rows")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4096);
-        let batches = map
-            .get("batches")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(64);
-        let density = map
-            .get("density")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.2);
-        let sync = match map.get("sync").map(|s| s.as_str()) {
-            Some("always") => SyncMode::Always,
-            _ => SyncMode::Disabled,
-        };
-        let value_columns = map
-            .get("columns")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2);
-
-        Self {
-            mode,
-            rows,
-            batches,
-            tombstone_density: density,
-            sync,
-            value_columns,
-        }
-    }
-
     fn sync_policy(&self) -> WalSyncPolicy {
         match self.sync {
             SyncMode::Disabled => WalSyncPolicy::Disabled,
@@ -124,7 +86,8 @@ fn report(mode: &str, cfg: &Config, duration: Duration, bytes: usize) {
     };
 
     println!(
-        "mode={mode} rows={} batches={} density={:.2} sync={:?} duration_ms={:.2} bytes={} mb_per_s={:.2} ops_per_s={:.2}",
+        "mode={mode} rows={} batches={} density={:.2} sync={:?} duration_ms={:.2} bytes={} \
+         mb_per_s={:.2} ops_per_s={:.2}",
         cfg.rows,
         cfg.batches,
         cfg.tombstone_density,
@@ -136,10 +99,7 @@ fn report(mode: &str, cfg: &Config, duration: Duration, bytes: usize) {
     );
 }
 
-async fn bench_wal_append(
-    cfg: &Config,
-    schema: Arc<Schema>,
-) -> (Duration, usize) {
+async fn bench_wal_append(cfg: &Config, schema: Arc<Schema>) -> (Duration, usize) {
     let db = setup_db(Arc::clone(&schema), cfg.sync_policy()).await;
     let batch = build_batch(Arc::clone(&schema), cfg.rows);
     let tombstones = build_tombstones(cfg.rows, cfg.tombstone_density);
