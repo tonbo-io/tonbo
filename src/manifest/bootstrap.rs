@@ -8,12 +8,14 @@ use fusio_manifest::{
 use futures::executor::block_on;
 
 use super::{
+    codec::VersionCodec,
     domain::{TableHead, TableId},
     driver::{Manifest, ManifestResult, Stores},
 };
 
 /// In-memory manifest type wired against `fusio`'s memory FS for dev/test flows.
 pub(crate) type InMemoryManifest = Manifest<
+    VersionCodec,
     HeadStoreImpl<InMemoryFs>,
     SegmentStoreImpl<InMemoryFs>,
     CheckpointStoreImpl<InMemoryFs>,

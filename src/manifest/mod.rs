@@ -1,6 +1,7 @@
 //! Manifest domain types and Tonbo-specific wrapper around `fusio-manifest`.
 
 pub(crate) mod bootstrap;
+pub(crate) mod codec;
 mod domain;
 mod driver;
 mod version;

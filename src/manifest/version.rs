@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::{
     ManifestError, ManifestResult,
-    domain::{SstEntry, VersionState, WalSegmentRef},
+    domain::{SstEntry, WalSegmentRef},
 };
 use crate::ondisk::sstable::SsTableId;
 

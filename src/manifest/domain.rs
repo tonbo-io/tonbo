@@ -7,7 +7,7 @@ use ulid::Ulid;
 use crate::{
     fs::{FileId, generate_file_id},
     manifest::{
-        ManifestResult, VersionEdit,
+        ManifestError, ManifestResult, VersionEdit,
         version::{apply_add_ssts, apply_remove_ssts, trim_trailing_empty_levels},
     },
     mvcc::Timestamp,
@@ -44,16 +44,33 @@ impl From<TableId> for Ulid {
     }
 }
 
-/// Logical manifest keys tracked inside `fusio-manifest`.
+/// Keys stored by the catalog manifest instance.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub(crate) enum ManifestKey {
+pub(crate) enum CatalogKey {
     /// Global catalog state, including allocator metadata.
-    CatalogRoot,
+    Root,
     /// Static metadata describing a table.
     TableMeta {
         /// Identifier of the table described by this entry.
         table_id: TableId,
     },
+}
+
+/// Values stored by the catalog manifest instance.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub(crate) enum CatalogValue {
+    /// Catalog state payload.
+    Catalog(CatalogState),
+    /// Table metadata payload.
+    TableMeta(TableMeta),
+}
+
+/// Keys tracked by the version manifest instance.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) enum VersionKey {
     /// Mutable head pointer for a table containing the latest version info.
     TableHead {
         /// Identifier of the table whose head is being stored.
@@ -71,32 +88,107 @@ pub(crate) enum ManifestKey {
         /// Table identifier.
         table_id: TableId,
     },
-    /// Stored garbage-collection plan for a table.
-    GcPlan {
-        /// Table identifier.
-        table_id: TableId,
-    },
 }
 
-/// Serde-serializable manifest value.
+/// Values tracked by the version manifest instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
-pub(crate) enum ManifestValue {
-    /// Catalog state payload.
-    Catalog(CatalogState),
-    /// Table metadata payload.
-    TableMeta(TableMeta),
+pub(crate) enum VersionValue {
     /// Table head payload.
     TableHead(TableHead),
     /// Immutable version payload.
     TableVersion(VersionState),
     /// WAL retention floor payload.
     WalFloor(WalSegmentRef),
+}
+
+/// Keys tracked by the GC-plan manifest instance.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) enum GcPlanKey {
+    /// Stored garbage-collection plan for a table.
+    Table {
+        /// Table identifier.
+        table_id: TableId,
+    },
+}
+
+/// Values tracked by the GC-plan manifest instance.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub(crate) enum GcPlanValue {
     /// Table garbage-collection plan payload.
-    GcPlan(GcPlanState),
+    Plan(GcPlanState),
+}
+
+impl TryFrom<CatalogValue> for CatalogState {
+    type Error = ManifestError;
+
+    fn try_from(value: CatalogValue) -> Result<Self, Self::Error> {
+        match value {
+            CatalogValue::Catalog(payload) => Ok(payload),
+            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
+        }
+    }
+}
+
+impl TryFrom<CatalogValue> for TableMeta {
+    type Error = ManifestError;
+
+    fn try_from(value: CatalogValue) -> Result<Self, Self::Error> {
+        match value {
+            CatalogValue::TableMeta(payload) => Ok(payload),
+            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
+        }
+    }
+}
+
+impl TryFrom<VersionValue> for TableHead {
+    type Error = ManifestError;
+
+    fn try_from(value: VersionValue) -> Result<Self, Self::Error> {
+        match value {
+            VersionValue::TableHead(payload) => Ok(payload),
+            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
+        }
+    }
+}
+
+impl TryFrom<VersionValue> for VersionState {
+    type Error = ManifestError;
+
+    fn try_from(value: VersionValue) -> Result<Self, Self::Error> {
+        match value {
+            VersionValue::TableVersion(payload) => Ok(payload),
+            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
+        }
+    }
+}
+
+impl TryFrom<VersionValue> for WalSegmentRef {
+    type Error = ManifestError;
+
+    fn try_from(value: VersionValue) -> Result<Self, Self::Error> {
+        match value {
+            VersionValue::WalFloor(payload) => Ok(payload),
+            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
+        }
+    }
+}
+
+impl TryFrom<GcPlanValue> for GcPlanState {
+    type Error = ManifestError;
+
+    fn try_from(value: GcPlanValue) -> Result<Self, Self::Error> {
+        match value {
+            GcPlanValue::Plan(payload) => Ok(payload),
+        }
+    }
 }
 
 /// Snapshot of catalog-level metadata stored in the manifest.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct CatalogState {
     /// Mapping of table identifiers to their catalog entries.
@@ -106,6 +198,7 @@ pub(crate) struct CatalogState {
 }
 
 /// Entry describing a table inside the catalog root.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TableCatalogEntry {
     /// Logical representation of the table.
@@ -113,6 +206,7 @@ pub(crate) struct TableCatalogEntry {
 }
 
 /// Static metadata for a Tonbo table.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TableMeta {
     /// Identifier of the table.
@@ -130,6 +224,7 @@ pub(crate) struct TableMeta {
 }
 
 /// Retention policy knobs for a table.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TableRetionConfig {
     /// Maximum number of committed versions to retain.
@@ -215,18 +310,17 @@ impl VersionState {
         self.commit_timestamp
     }
 
+    #[cfg(test)]
     pub(crate) fn table_id(&self) -> &TableId {
         &self.table_id
     }
 
+    #[cfg(test)]
     pub(crate) fn ssts(&self) -> &[Vec<SstEntry>] {
         &self.ssts
     }
 
-    pub(crate) fn ssts_mut(&mut self) -> &mut Vec<Vec<SstEntry>> {
-        &mut self.ssts
-    }
-
+    #[cfg(test)]
     pub(crate) fn wal_floor(&self) -> Option<&WalSegmentRef> {
         self.wal_floor.as_ref()
     }
@@ -235,20 +329,13 @@ impl VersionState {
         self.wal_floor.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn tombstone_watermark(&self) -> Option<u64> {
         self.tombstone_watermark
     }
 
     pub(crate) fn set_commit_timestamp(&mut self, ts: Timestamp) {
         self.commit_timestamp = ts;
-    }
-
-    pub(crate) fn set_wal_floor(&mut self, floor: Option<WalSegmentRef>) {
-        self.wal_floor = floor;
-    }
-
-    pub(crate) fn set_tombstone_watermark(&mut self, watermark: Option<u64>) {
-        self.tombstone_watermark = watermark;
     }
 }
 
@@ -291,18 +378,22 @@ impl SstEntry {
         &self.sst_id
     }
 
+    #[cfg(test)]
     pub(crate) fn stats(&self) -> Option<&SsTableStats> {
         self.stats.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn wal_segments(&self) -> Option<&[FileId]> {
         self.wal_segments.as_deref()
     }
 
+    #[cfg(test)]
     pub(crate) fn data_path(&self) -> &Path {
         &self.data_path
     }
 
+    #[cfg(test)]
     pub(crate) fn mvcc_path(&self) -> &Path {
         &self.mvcc_path
     }
@@ -342,6 +433,7 @@ impl WalSegmentRef {
 }
 
 /// Garbage-collection plan for a table.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct GcPlanState {
     /// SST identifiers that can be removed.
