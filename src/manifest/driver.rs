@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use fusio_manifest::{
     BlockingExecutor, CheckpointStore, HeadStore, LeaseStore, SegmentIo,
+    compactor::Compactor,
     context::ManifestContext,
     manifest::Manifest as FusioManifest,
     retention::DefaultRetention,
@@ -12,10 +13,8 @@ use thiserror::Error;
 
 use super::{
     VersionEdit,
-    domain::{
-        CatalogState, GcPlanState, ManifestKey, ManifestValue, TableHead, TableId, TableMeta,
-        VersionState, WalSegmentRef,
-    },
+    codec::{ManifestCodec, VersionCodec},
+    domain::{TableHead, TableId, VersionKey, VersionState, VersionValue, WalSegmentRef},
 };
 use crate::mvcc::Timestamp;
 
@@ -33,66 +32,6 @@ pub enum ManifestError {
 /// Convenience result alias for manifest operations.
 pub(crate) type ManifestResult<T> = Result<T, ManifestError>;
 
-impl TryFrom<ManifestValue> for CatalogState {
-    type Error = ManifestError;
-    fn try_from(value: ManifestValue) -> Result<Self, Self::Error> {
-        match value {
-            ManifestValue::Catalog(payload) => Ok(payload),
-            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
-        }
-    }
-}
-
-impl TryFrom<ManifestValue> for TableMeta {
-    type Error = ManifestError;
-    fn try_from(value: ManifestValue) -> Result<Self, Self::Error> {
-        match value {
-            ManifestValue::TableMeta(payload) => Ok(payload),
-            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
-        }
-    }
-}
-
-impl TryFrom<ManifestValue> for TableHead {
-    type Error = ManifestError;
-    fn try_from(value: ManifestValue) -> Result<Self, Self::Error> {
-        match value {
-            ManifestValue::TableHead(payload) => Ok(payload),
-            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
-        }
-    }
-}
-
-impl TryFrom<ManifestValue> for VersionState {
-    type Error = ManifestError;
-    fn try_from(value: ManifestValue) -> Result<Self, Self::Error> {
-        match value {
-            ManifestValue::TableVersion(payload) => Ok(payload),
-            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
-        }
-    }
-}
-
-impl TryFrom<ManifestValue> for WalSegmentRef {
-    type Error = ManifestError;
-    fn try_from(value: ManifestValue) -> Result<Self, Self::Error> {
-        match value {
-            ManifestValue::WalFloor(payload) => Ok(payload),
-            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
-        }
-    }
-}
-
-impl TryFrom<ManifestValue> for GcPlanState {
-    type Error = ManifestError;
-    fn try_from(value: ManifestValue) -> Result<Self, Self::Error> {
-        match value {
-            ManifestValue::GcPlan(payload) => Ok(payload),
-            _ => Err(ManifestError::Invariant("manifest value type mismatch")),
-        }
-    }
-}
-
 /// Result of loading the latest state for a table.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -106,6 +45,11 @@ pub(crate) struct TableSnapshot {
 }
 
 /// Bundle of storage backends required by the manifest.
+///
+/// Each manifest instance should receive store handles that already point at the physical
+/// directory or bucket allocated for that instance. Supplying distinct stores allows callers to
+/// isolate manifest families on disk or in object storage; sharing the same stores will co-locate
+/// them while still keeping key spaces separated at the type level.
 #[derive(Debug)]
 pub(crate) struct Stores<HS, SS, CS, LS> {
     /// Store used for the manifest head CAS object.
@@ -131,28 +75,21 @@ impl<HS, SS, CS, LS> Stores<HS, SS, CS, LS> {
     }
 }
 
-/// Manifest wrapper that stores Tonbo-specific key/value pairs and exposes higher-level APIs.
-pub(crate) struct Manifest<HS, SS, CS, LS>
+/// Manifest wrapper parameterized by the codec describing its key/value types.
+pub(crate) struct Manifest<C, HS, SS, CS, LS>
 where
+    C: ManifestCodec,
     HS: HeadStore + Send + Sync + 'static,
     SS: SegmentIo + Send + Sync + 'static,
     CS: CheckpointStore + Send + Sync + 'static,
     LS: LeaseStore + Send + Sync + 'static,
 {
-    inner: FusioManifest<
-        ManifestKey,
-        ManifestValue,
-        HS,
-        SS,
-        CS,
-        LS,
-        BlockingExecutor,
-        DefaultRetention,
-    >,
+    inner: FusioManifest<C::Key, C::Value, HS, SS, CS, LS, BlockingExecutor, DefaultRetention>,
 }
 
-impl<HS, SS, CS, LS> Manifest<HS, SS, CS, LS>
+impl<C, HS, SS, CS, LS> Manifest<C, HS, SS, CS, LS>
 where
+    C: ManifestCodec,
     HS: HeadStore + Send + Sync + 'static,
     SS: SegmentIo + Send + Sync + 'static,
     CS: CheckpointStore + Send + Sync + 'static,
@@ -160,7 +97,7 @@ where
 {
     /// Construct a new manifest wrapper from the provided stores and context.
     #[must_use]
-    pub(crate) fn open(
+    pub(super) fn open(
         stores: Stores<HS, SS, CS, LS>,
         ctx: Arc<ManifestContext<DefaultRetention, BlockingExecutor>>,
     ) -> Self {
@@ -175,6 +112,22 @@ where
         }
     }
 
+    /// Access the underlying compactor for advanced merging workflows.
+    #[allow(dead_code)]
+    pub(crate) fn compactor(
+        &self,
+    ) -> Compactor<C::Key, C::Value, HS, SS, CS, LS, BlockingExecutor, DefaultRetention> {
+        self.inner.compactor()
+    }
+}
+
+impl<HS, SS, CS, LS> Manifest<VersionCodec, HS, SS, CS, LS>
+where
+    HS: HeadStore + Send + Sync + 'static,
+    SS: SegmentIo + Send + Sync + 'static,
+    CS: CheckpointStore + Send + Sync + 'static,
+    LS: LeaseStore + Send + Sync + 'static,
+{
     /// Apply a sequence of edits, atomically publishing a new table version together with head
     /// metadata.
     pub(crate) async fn apply_version_edits(
@@ -188,10 +141,10 @@ where
 
         let mut session = self.inner.session_write().await?;
 
-        let head_key = ManifestKey::TableHead { table_id: table };
+        let head_key = VersionKey::TableHead { table_id: table };
         let mut head = match session.get(&head_key).await? {
             Some(value) => {
-                Self::validate_manifest_key_value(&head_key, &value)?;
+                <VersionCodec as ManifestCodec>::validate_key_value(&head_key, &value)?;
                 TableHead::try_from(value)?
             }
             None => {
@@ -203,13 +156,13 @@ where
         };
 
         let mut state = if let Some(last_txn) = head.last_manifest_txn {
-            let version_key = ManifestKey::TableVersion {
+            let version_key = VersionKey::TableVersion {
                 table_id: table,
                 manifest_ts: last_txn,
             };
             match session.get(&version_key).await? {
                 Some(value) => {
-                    Self::validate_manifest_key_value(&version_key, &value)?;
+                    <VersionCodec as ManifestCodec>::validate_key_value(&version_key, &value)?;
                     VersionState::try_from(value)?
                 }
                 None => {
@@ -231,24 +184,24 @@ where
         let wal_floor = state.cloned_wal_floor();
 
         session.put(
-            ManifestKey::TableVersion {
+            VersionKey::TableVersion {
                 table_id: table,
                 manifest_ts: next_txn,
             },
-            ManifestValue::TableVersion(state),
+            VersionValue::TableVersion(state),
         );
 
         // Update table head with updated wal floor
         head.last_manifest_txn = Some(next_txn);
         head.wal_floor = wal_floor.clone();
 
-        session.put(head_key, ManifestValue::TableHead(head));
+        session.put(head_key, VersionValue::TableHead(head));
 
         // Update WAL floor
         if let Some(floor) = wal_floor {
             session.put(
-                ManifestKey::WalFloor { table_id: table },
-                ManifestValue::WalFloor(floor),
+                VersionKey::WalFloor { table_id: table },
+                VersionValue::WalFloor(floor),
             )
         }
 
@@ -261,10 +214,10 @@ where
         let session = self.inner.session_read().await?;
         let manifest_snapshot = session.snapshot().clone();
 
-        let head_key = ManifestKey::TableHead { table_id: table };
+        let head_key = VersionKey::TableHead { table_id: table };
         let head = match session.get(&head_key).await? {
             Some(value) => {
-                Self::validate_manifest_key_value(&head_key, &value)?;
+                <VersionCodec as ManifestCodec>::validate_key_value(&head_key, &value)?;
                 TableHead::try_from(value)?
             }
             None => {
@@ -275,13 +228,13 @@ where
         };
 
         let latest_version = if let Some(last_txn) = head.last_manifest_txn {
-            let version_key = ManifestKey::TableVersion {
+            let version_key = VersionKey::TableVersion {
                 table_id: table,
                 manifest_ts: last_txn,
             };
             match session.get(&version_key).await? {
                 Some(value) => {
-                    Self::validate_manifest_key_value(&version_key, &value)?;
+                    <VersionCodec as ManifestCodec>::validate_key_value(&version_key, &value)?;
                     Some(VersionState::try_from(value)?)
                 }
                 None => None,
@@ -305,8 +258,8 @@ where
     ) -> ManifestResult<()> {
         let mut session = self.inner.session_write().await?;
         session.put(
-            ManifestKey::TableHead { table_id },
-            ManifestValue::TableHead(head),
+            VersionKey::TableHead { table_id },
+            VersionValue::TableHead(head),
         );
         session.commit().await?;
         Ok(())
@@ -324,11 +277,11 @@ where
         // TODO: This is inefficient; fusio-manifest should support limit for range scan.
         let entries = match session
             .scan_range(ScanRange {
-                start: Some(ManifestKey::TableVersion {
+                start: Some(VersionKey::TableVersion {
                     table_id: table,
                     manifest_ts: Timestamp::MIN,
                 }),
-                end: Some(ManifestKey::TableVersion {
+                end: Some(VersionKey::TableVersion {
                     table_id: table,
                     manifest_ts: Timestamp::MAX,
                 }),
@@ -343,8 +296,8 @@ where
         };
 
         for (key, value) in entries {
-            Self::validate_manifest_key_value(&key, &value)?;
-            if let ManifestValue::TableVersion(state) = value {
+            <VersionCodec as ManifestCodec>::validate_key_value(&key, &value)?;
+            if let VersionValue::TableVersion(state) = value {
                 versions.push(state);
             }
         }
@@ -366,29 +319,13 @@ where
             .map_err(ManifestError::from)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn compactor(
-        &self,
-    ) -> fusio_manifest::compactor::Compactor<
-        ManifestKey,
-        ManifestValue,
-        HS,
-        SS,
-        CS,
-        LS,
-        BlockingExecutor,
-        DefaultRetention,
-    > {
-        self.inner.compactor()
-    }
-
     /// Fetch the persisted WAL floor for a table.
     pub(crate) async fn wal_floor(&self, table: TableId) -> ManifestResult<Option<WalSegmentRef>> {
         let session = self.inner.session_read().await?;
-        let key = ManifestKey::WalFloor { table_id: table };
+        let key = VersionKey::WalFloor { table_id: table };
         let floor = match session.get(&key).await? {
             Some(value) => {
-                Self::validate_manifest_key_value(&key, &value)?;
+                <VersionCodec as ManifestCodec>::validate_key_value(&key, &value)?;
                 Some(WalSegmentRef::try_from(value)?)
             }
             None => None,
@@ -396,25 +333,11 @@ where
         session.end().await?;
         Ok(floor)
     }
-
-    fn validate_manifest_key_value(
-        key: &ManifestKey,
-        value: &ManifestValue,
-    ) -> Result<(), ManifestError> {
-        match (key, value) {
-            (ManifestKey::CatalogRoot, ManifestValue::Catalog(_)) => Ok(()),
-            (ManifestKey::TableMeta { .. }, ManifestValue::TableMeta(_)) => Ok(()),
-            (ManifestKey::TableHead { .. }, ManifestValue::TableHead(_)) => Ok(()),
-            (ManifestKey::TableVersion { .. }, ManifestValue::TableVersion(_)) => Ok(()),
-            (ManifestKey::WalFloor { .. }, ManifestValue::WalFloor(_)) => Ok(()),
-            (ManifestKey::GcPlan { .. }, ManifestValue::GcPlan(_)) => Ok(()),
-            _ => Err(ManifestError::Invariant("manifest key/value type mismatch")),
-        }
-    }
 }
 
-impl<HS, SS, CS, LS> Clone for Manifest<HS, SS, CS, LS>
+impl<C, HS, SS, CS, LS> Clone for Manifest<C, HS, SS, CS, LS>
 where
+    C: ManifestCodec,
     HS: HeadStore + Send + Sync + Clone + 'static,
     SS: SegmentIo + Send + Sync + Clone + 'static,
     CS: CheckpointStore + Send + Sync + Clone + 'static,
