@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
 use crate::inmem::immutable::keys::{BinKey, StrKey};
@@ -115,6 +117,65 @@ impl std::cmp::PartialEq for KeyDyn {
 }
 
 impl std::cmp::Eq for KeyDyn {}
+
+impl Hash for KeyDyn {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        use KeyDyn::*;
+        match self {
+            Str(v) => {
+                0u8.hash(state);
+                v.hash(state);
+            }
+            Bin(v) => {
+                1u8.hash(state);
+                v.hash(state);
+            }
+            U64(vv) => {
+                2u8.hash(state);
+                vv.hash(state);
+            }
+            U32(vv) => {
+                3u8.hash(state);
+                vv.hash(state);
+            }
+            I64(vv) => {
+                4u8.hash(state);
+                vv.hash(state);
+            }
+            I32(vv) => {
+                5u8.hash(state);
+                vv.hash(state);
+            }
+            F64(vv) => {
+                6u8.hash(state);
+                if vv.is_nan() {
+                    0xFFu8.hash(state);
+                } else {
+                    vv.to_bits().hash(state);
+                }
+            }
+            F32(vv) => {
+                7u8.hash(state);
+                if vv.is_nan() {
+                    0xFFu8.hash(state);
+                } else {
+                    vv.to_bits().hash(state);
+                }
+            }
+            Bool(vv) => {
+                8u8.hash(state);
+                vv.hash(state);
+            }
+            Tuple(items) => {
+                9u8.hash(state);
+                items.len().hash(state);
+                for item in items {
+                    item.hash(state);
+                }
+            }
+        }
+    }
+}
 
 impl From<StrKey> for KeyDyn {
     fn from(v: StrKey) -> Self {

@@ -37,6 +37,9 @@ pub mod manifest;
 /// MVCC primitives shared across modules.
 pub mod mvcc;
 
+/// Optimistic transaction scaffolding (write path focus for now).
+pub mod transaction;
+
 /// On-disk persistence scaffolding (SSTable skeletons).
 pub mod ondisk;
 

@@ -45,7 +45,7 @@ pub(crate) enum WriterMsg {
     /// without changing its type.
     Enqueue {
         /// Logical sequence assigned by the submitter (embedded in frame payloads).
-        submission_seq: u64,
+        _submission_seq: u64,
         /// Logical command to encode.
         command: WalCommand,
         /// Instant at which the payload was enqueued (used for latency metrics).
@@ -63,13 +63,13 @@ pub(crate) enum WriterMsg {
 impl WriterMsg {
     #[cfg(test)]
     fn queued(
-        submission_seq: u64,
+        _submission_seq: u64,
         command: WalCommand,
         enqueued_at: Instant,
         ack_tx: oneshot::Sender<WalResult<WalAck>>,
     ) -> Self {
         Self::Enqueue {
-            submission_seq,
+            _submission_seq,
             command,
             enqueued_at,
             ack_tx,
@@ -195,10 +195,10 @@ where
                 }
                 msg = receiver.next() => {
                     match msg {
-                        Some(WriterMsg::Enqueue { submission_seq, command, enqueued_at, ack_tx }) => {
+                        Some(WriterMsg::Enqueue { _submission_seq: _, command, enqueued_at, ack_tx }) => {
                             ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                             ctx.update_queue_depth_metric().await;
-                            match ctx.handle_enqueue(submission_seq, command, enqueued_at).await {
+                            match ctx.handle_enqueue(command, enqueued_at).await {
                                 Ok(HandleOutcome { ack, sync_performed, timer_directive }) => {
                                     if sync_performed {
                                         ctx.record_sync().await;
@@ -242,17 +242,14 @@ where
         } else {
             match receiver.next().await {
                 Some(WriterMsg::Enqueue {
-                    submission_seq,
+                    _submission_seq: _,
                     command,
                     enqueued_at,
                     ack_tx,
                 }) => {
                     ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                     ctx.update_queue_depth_metric().await;
-                    match ctx
-                        .handle_enqueue(submission_seq, command, enqueued_at)
-                        .await
-                    {
+                    match ctx.handle_enqueue(command, enqueued_at).await {
                         Ok(HandleOutcome {
                             ack,
                             sync_performed,
@@ -407,7 +404,6 @@ where
 
     async fn handle_enqueue(
         &mut self,
-        _submission_seq: u64,
         command: WalCommand,
         enqueued_at: Instant,
     ) -> WalResult<HandleOutcome> {
@@ -873,7 +869,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::{mvcc::Timestamp, wal::WalResult};
+    use crate::{
+        mvcc::Timestamp,
+        wal::{WalCommand, WalResult},
+    };
 
     fn sample_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));

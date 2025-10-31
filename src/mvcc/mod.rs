@@ -37,6 +37,12 @@ impl Timestamp {
     pub const fn saturating_add(self, delta: u64) -> Self {
         Self(self.0.saturating_add(delta))
     }
+
+    /// Subtract `delta` while saturating at [`Timestamp::MIN`].
+    #[inline]
+    pub const fn saturating_sub(self, delta: u64) -> Self {
+        Self(self.0.saturating_sub(delta))
+    }
 }
 
 impl From<u64> for Timestamp {

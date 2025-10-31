@@ -5,7 +5,11 @@
 //! so they can be used as `BTreeMap` keys and queried with borrowed
 //! forms like `&str` or `&[u8]`.
 
-use std::{borrow::Borrow, cmp::Ordering};
+use std::{
+    borrow::Borrow,
+    cmp::Ordering,
+    hash::{Hash, Hasher},
+};
 
 use arrow_array::{BinaryArray, StringArray};
 use arrow_buffer::Buffer;
@@ -94,6 +98,12 @@ impl Ord for StrKey {
 impl Borrow<str> for StrKey {
     fn borrow(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl Hash for StrKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_bytes().hash(state);
     }
 }
 
@@ -193,6 +203,12 @@ impl Ord for BinKey {
 impl Borrow<[u8]> for BinKey {
     fn borrow(&self) -> &[u8] {
         self.as_bytes()
+    }
+}
+
+impl Hash for BinKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_bytes().hash(state);
     }
 }
 

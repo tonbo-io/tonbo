@@ -283,15 +283,36 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
             &tombstone_column,
             commit_ts,
         ),
-        WalCommand::TxnBegin { .. }
-        | WalCommand::TxnAppend { .. }
-        | WalCommand::TxnCommit { .. }
-        | WalCommand::TxnAbort { .. } => Err(WalError::Unimplemented(
-            "transactional wal commands are not enabled on this branch",
-        )),
+        WalCommand::TxnBegin { provisional_id } => {
+            let begin = encode_txn_begin(provisional_id);
+            Ok(vec![Frame::new(FrameType::TxnBegin, begin)])
+        }
+        WalCommand::TxnAppend {
+            provisional_id,
+            batch,
+            commit_ts_column,
+            tombstone_column,
+            commit_ts,
+        } => encode_txn_append(
+            provisional_id,
+            &batch,
+            &commit_ts_column,
+            &tombstone_column,
+            commit_ts,
+        ),
+        WalCommand::TxnCommit {
+            provisional_id,
+            commit_ts,
+        } => {
+            let commit = encode_txn_commit(provisional_id, commit_ts);
+            Ok(vec![Frame::new(FrameType::TxnCommit, commit)])
+        }
+        WalCommand::TxnAbort { provisional_id } => {
+            let abort = encode_txn_abort(provisional_id);
+            Ok(vec![Frame::new(FrameType::TxnAbort, abort)])
+        }
     }
 }
-
 fn encode_autocommit(
     provisional_id: u64,
     batch: &RecordBatch,
@@ -307,6 +328,18 @@ fn encode_autocommit(
         Frame::new(FrameType::TxnAppend, append),
         Frame::new(FrameType::TxnCommit, commit),
     ])
+}
+
+fn encode_txn_append(
+    provisional_id: u64,
+    batch: &RecordBatch,
+    commit_ts_column: &ArrayRef,
+    tombstones: &ArrayRef,
+    _commit_ts: Timestamp,
+) -> WalResult<Vec<Frame>> {
+    let wal_batch = append_mvcc_columns(batch, commit_ts_column, tombstones)?;
+    let append = encode_txn_append_batch(provisional_id, wal_batch)?;
+    Ok(vec![Frame::new(FrameType::TxnAppend, append)])
 }
 
 /// Convenience helper used mainly by tests to encode an autocommit command from raw inputs.
@@ -360,6 +393,14 @@ fn encode_txn_commit(provisional_id: u64, commit_ts: Timestamp) -> Vec<u8> {
     payload.extend_from_slice(&provisional_id.to_le_bytes());
     payload.extend_from_slice(&commit_ts.get().to_le_bytes());
     payload
+}
+
+fn encode_txn_begin(provisional_id: u64) -> Vec<u8> {
+    provisional_id.to_le_bytes().to_vec()
+}
+
+fn encode_txn_abort(provisional_id: u64) -> Vec<u8> {
+    provisional_id.to_le_bytes().to_vec()
 }
 
 /// Decode a single frame payload into a [`WalEvent`].
@@ -619,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_payload_dyn_batch_round_trip() {
+    fn encode_command_dyn_batch_round_trip() {
         let base = sample_batch();
         let tombstones = vec![true, false, true];
         let user_expected = base.clone();
