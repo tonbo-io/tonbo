@@ -280,6 +280,7 @@ pub(crate) fn append_mvcc_columns(
     tombstones: &ArrayRef,
 ) -> WalResult<RecordBatch> {
     let rows = batch.num_rows();
+    let schema = batch.schema();
 
     if commit_ts.len() != rows {
         return Err(WalError::Codec(
@@ -321,8 +322,7 @@ pub(crate) fn append_mvcc_columns(
         return Err(WalError::Codec("null tombstone value".to_string()));
     }
 
-    if batch
-        .schema()
+    if schema
         .fields()
         .iter()
         .any(|f| f.name() == MVCC_TOMBSTONE_COL)
@@ -332,18 +332,13 @@ pub(crate) fn append_mvcc_columns(
         ));
     }
 
-    if batch
-        .schema()
-        .fields()
-        .iter()
-        .any(|f| f.name() == MVCC_COMMIT_COL)
-    {
+    if schema.fields().iter().any(|f| f.name() == MVCC_COMMIT_COL) {
         return Err(WalError::Codec(
             "record batch already contains _commit_ts column".to_string(),
         ));
     }
 
-    let mut fields = batch.schema().fields().to_vec();
+    let mut fields = schema.fields().to_vec();
     fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
     fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
 
@@ -351,8 +346,9 @@ pub(crate) fn append_mvcc_columns(
     columns.push(Arc::clone(commit_ts));
     columns.push(Arc::clone(tombstones));
 
-    let schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
+    let metadata = schema.metadata().clone();
+    let updated_schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    RecordBatch::try_new(updated_schema, columns).map_err(|err| WalError::Codec(err.to_string()))
 }
 
 /// Remove MVCC columns, returning the stripped batch, commit timestamps, and bitmap.
@@ -418,7 +414,9 @@ pub(crate) fn split_mvcc_columns(
         .map(|(_, column)| column.clone())
         .collect::<Vec<_>>();
 
-    let stripped = RecordBatch::try_new(Arc::new(Schema::new(stripped_fields)), stripped_columns)
+    let metadata = schema.metadata().clone();
+    let stripped_schema = Arc::new(Schema::new_with_metadata(stripped_fields, metadata));
+    let stripped = RecordBatch::try_new(stripped_schema, stripped_columns)
         .map_err(|err| WalError::Codec(err.to_string()))?;
 
     Ok((
