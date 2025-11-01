@@ -939,9 +939,8 @@ mod tests {
     use crate::{
         mvcc::Timestamp,
         wal::{
+            WalCommand, WalResult,
             state::{FsWalStateStore, WalStateStore},
-            WalCommand,
-            WalResult,
         },
     };
 
