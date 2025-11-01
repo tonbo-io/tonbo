@@ -260,6 +260,19 @@ pub enum WalCommand {
     },
 }
 
+impl WalCommand {
+    /// Return the provisional identifier carried by this command.
+    fn provisional_id(&self) -> u64 {
+        match self {
+            WalCommand::Autocommit { provisional_id, .. }
+            | WalCommand::TxnBegin { provisional_id }
+            | WalCommand::TxnAppend { provisional_id, .. }
+            | WalCommand::TxnCommit { provisional_id, .. }
+            | WalCommand::TxnAbort { provisional_id } => *provisional_id,
+        }
+    }
+}
+
 /// Append `_commit_ts` and `_tombstone` columns, returning a new batch for WAL storage.
 pub(crate) fn append_mvcc_columns(
     batch: &RecordBatch,
@@ -512,7 +525,7 @@ where
 
     /// Enqueue a command to the WAL writer.
     pub async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
-        let submission_seq = self.inner.next_payload_seq();
+        let submission_seq = command.provisional_id();
         self.enqueue_command(command, submission_seq).await
     }
 
