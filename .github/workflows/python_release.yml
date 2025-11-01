@@ -38,7 +38,7 @@ jobs:
           sccache: "true"
           working-directory: "bindings/python"
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wheels-windows-${{ matrix.platform.target }}
           path: bindings/python/dist
@@ -65,7 +65,7 @@ jobs:
           sccache: "true"
           working-directory: "bindings/python"
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wheels-macos-${{ matrix.platform.target }}
           path: bindings/python/dist
