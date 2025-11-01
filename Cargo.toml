@@ -81,7 +81,7 @@ path = "benches/criterion/writes.rs"
 required-features = ["sled"]
 
 [dependencies]
-arrow = "56.0.0"
+arrow = "57.0.0"
 async-lock = "3"
 async-stream = "0.3"
 async-trait = { version = "0.1", optional = true }
