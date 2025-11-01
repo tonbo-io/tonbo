@@ -7,6 +7,8 @@
 //! re-introducing compile-time typed dispatch in the future.
 
 mod inmem;
+/// Zero-copy key projection scaffolding and owned key wrapper.
+pub mod key;
 pub mod mode;
 pub mod record;
 

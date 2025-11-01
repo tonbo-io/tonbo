@@ -871,7 +871,7 @@ mod tests {
     use super::*;
     use crate::{
         mvcc::Timestamp,
-        wal::{WalCommand, WalResult},
+        wal::{DynBatchPayload, WalCommand, WalResult},
     };
 
     fn sample_batch() -> RecordBatch {
@@ -885,11 +885,14 @@ mod tests {
             Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()])) as ArrayRef;
         let tombstone_array: ArrayRef =
             Arc::new(BooleanArray::from(vec![false; batch.num_rows()])) as ArrayRef;
-        WalCommand::Autocommit {
-            provisional_id,
+        let payload = DynBatchPayload {
             batch: batch.clone(),
             commit_ts_column: commit_array,
             tombstone_column: tombstone_array,
+        };
+        WalCommand::Autocommit {
+            provisional_id,
+            payload,
             commit_ts: Timestamp::new(commit_ts),
         }
     }

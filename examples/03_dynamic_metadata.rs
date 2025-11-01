@@ -6,8 +6,8 @@ use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
+    key::KeyOwned,
     mode::DynModeConfig,
-    record::extract::KeyDyn,
     scan::RangeSet,
 };
 use typed_arrow::{
@@ -63,7 +63,7 @@ fn main() {
     block_on(db.ingest(batch)).expect("insert");
 
     // Scan all rows
-    let all = RangeSet::<KeyDyn>::all();
+    let all = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = db
         .scan_mutable_rows(&all)
         .map(|r| match (&r[0], &r[1]) {

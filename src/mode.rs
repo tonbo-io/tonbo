@@ -12,8 +12,9 @@ use fusio::executor::{Executor, Timer};
 use crate::{
     db::DB,
     inmem::mutable::{DynMem, MutableLayout},
+    key::KeyOwned,
     mvcc::Timestamp,
-    record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError},
+    record::extract::{DynKeyExtractor, KeyExtractError},
     wal::frame::WalEvent,
 };
 
@@ -87,7 +88,7 @@ impl DynModeConfig {
 }
 
 impl Mode for DynMode {
-    type Key = KeyDyn;
+    type Key = KeyOwned;
     type ImmLayout = RecordBatch;
     type Mutable = DynMem;
     type Config = DynModeConfig;

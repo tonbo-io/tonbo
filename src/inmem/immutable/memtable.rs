@@ -6,8 +6,9 @@ use std::collections::{
 use arrow_array::RecordBatch;
 
 use crate::{
+    key::KeyOwned,
     mvcc::Timestamp,
-    record::extract::{DynKeyExtractor, KeyDyn, KeyExtractError, dyn_extractor_for_field},
+    record::extract::{DynKeyExtractor, KeyExtractError, dyn_extractor_for_field},
     scan::{KeyRange, RangeSet},
 };
 
@@ -100,10 +101,10 @@ impl VersionSlice {
 pub(crate) fn segment_from_batch_with_extractor(
     batch: RecordBatch,
     extractor: &dyn DynKeyExtractor,
-) -> Result<ImmutableMemTable<KeyDyn, RecordBatch>, KeyExtractError> {
+) -> Result<ImmutableMemTable<KeyOwned, RecordBatch>, KeyExtractError> {
     extractor.validate_schema(&batch.schema())?;
     let len = batch.num_rows();
-    let mut index: BTreeMap<KeyDyn, VersionSlice> = BTreeMap::new();
+    let mut index: BTreeMap<KeyOwned, VersionSlice> = BTreeMap::new();
     for row in 0..len {
         let k = extractor.key_at(&batch, row)?;
         index.insert(k, VersionSlice::new(row as u32, 1));
@@ -120,7 +121,7 @@ pub(crate) fn segment_from_batch_with_extractor(
 pub(crate) fn segment_from_batch_with_key_col(
     batch: RecordBatch,
     key_col: usize,
-) -> Result<ImmutableMemTable<KeyDyn, RecordBatch>, KeyExtractError> {
+) -> Result<ImmutableMemTable<KeyOwned, RecordBatch>, KeyExtractError> {
     let schema = batch.schema();
     let fields = schema.fields();
     if key_col >= fields.len() {
@@ -136,7 +137,7 @@ pub(crate) fn segment_from_batch_with_key_col(
 pub(crate) fn segment_from_batch_with_key_name(
     batch: RecordBatch,
     key_field: &str,
-) -> Result<ImmutableMemTable<KeyDyn, RecordBatch>, KeyExtractError> {
+) -> Result<ImmutableMemTable<KeyOwned, RecordBatch>, KeyExtractError> {
     let schema = batch.schema();
     let fields = schema.fields();
     let Some((idx, _)) = fields
@@ -205,8 +206,8 @@ impl<'t, 's, K: Ord> Iterator for ImmutableScan<'t, 's, K> {
                 self.range_idx += 1;
             }
             if let Some(cur) = &mut self.cursor {
-                if let Some((k, slice)) = cur.next() {
-                    return Some((k, *slice));
+                if let Some(item) = cur.next() {
+                    return Some((item.0, *item.1));
                 }
                 self.cursor = None;
                 continue;
@@ -215,6 +216,7 @@ impl<'t, 's, K: Ord> Iterator for ImmutableScan<'t, 's, K> {
     }
 }
 
+/// Iterator over immutable rows, yielding only rows visible at `read_ts`.
 pub(crate) struct ImmutableVisibleScan<'t, 's, K: Ord, S> {
     table: &'t ImmutableMemTable<K, S>,
     ranges: &'s [KeyRange<K>],
@@ -241,7 +243,6 @@ impl<'t, 's, K: Ord, S> ImmutableVisibleScan<'t, 's, K, S> {
 
 impl<'t, 's, K: Ord, S> Iterator for ImmutableVisibleScan<'t, 's, K, S> {
     type Item = (&'t K, u32);
-
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
@@ -252,7 +253,6 @@ impl<'t, 's, K: Ord, S> Iterator for ImmutableVisibleScan<'t, 's, K, S> {
                 self.cursor = Some(self.table.index.range((start, end)));
                 self.range_idx += 1;
             }
-
             if let Some(cur) = &mut self.cursor {
                 for (key, slice) in cur.by_ref() {
                     let start = slice.start as usize;
@@ -336,13 +336,32 @@ impl<'t, K: Ord, S> Iterator for ImmutableRowIter<'t, K, S> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct MvccColumns {
+    pub commit_ts: Vec<Timestamp>,
+    pub tombstone: Vec<bool>,
+}
+
+impl MvccColumns {
+    pub fn new(commit_ts: Vec<Timestamp>, tombstone: Vec<bool>) -> Self {
+        debug_assert_eq!(commit_ts.len(), tombstone.len());
+        Self {
+            commit_ts,
+            tombstone,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use typed_arrow_dyn::DynCell;
 
     use super::*;
-    use crate::test_util::build_batch;
+    use crate::{
+        key::{KeyComponentOwned, KeyOwned},
+        test_util::build_batch,
+    };
 
     #[test]
     fn scan_ranges_dynamic_key_name() {
@@ -360,14 +379,16 @@ mod tests {
         let seg = segment_from_batch_with_key_name(batch, "id").expect("seg");
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyDyn::from("b")),
+            B::Included(KeyOwned::from("b")),
             B::Unbounded,
         )]);
         let got: Vec<String> = seg
             .scan_ranges(&ranges)
-            .map(|(k, _)| match k {
-                KeyDyn::Str(s) => s.as_str().to_string(),
-                _ => unreachable!(),
+            .map(|(k, _)| match k.component() {
+                KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => {
+                    s.as_ref().to_string()
+                }
+                other => panic!("unexpected key variant: {other:?}"),
             })
             .collect();
         assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
@@ -387,7 +408,7 @@ mod tests {
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
-        index.insert(KeyDyn::from("k"), VersionSlice::new(0, 4));
+        index.insert(KeyOwned::from("k"), VersionSlice::new(0, 4));
         let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![
@@ -403,8 +424,8 @@ mod tests {
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyDyn::from("k")),
-            B::Included(KeyDyn::from("k")),
+            B::Included(KeyOwned::from("k")),
+            B::Included(KeyOwned::from("k")),
         )]);
 
         let first_visible: Vec<u32> = seg
@@ -446,7 +467,7 @@ mod tests {
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
-        index.insert(KeyDyn::from("k"), VersionSlice::new(0, 3));
+        index.insert(KeyOwned::from("k"), VersionSlice::new(0, 3));
         let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
@@ -465,8 +486,8 @@ mod tests {
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyDyn::from("k")),
-            B::Included(KeyDyn::from("k")),
+            B::Included(KeyOwned::from("k")),
+            B::Included(KeyOwned::from("k")),
         )]);
 
         // Timestamp past the tombstoned version should return the next older live row.
@@ -500,8 +521,8 @@ mod tests {
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
-        index.insert(KeyDyn::from("a"), VersionSlice::new(0, 2));
-        index.insert(KeyDyn::from("b"), VersionSlice::new(2, 1));
+        index.insert(KeyOwned::from("a"), VersionSlice::new(0, 2));
+        index.insert(KeyOwned::from("b"), VersionSlice::new(2, 1));
         let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
@@ -513,9 +534,11 @@ mod tests {
         let got: Vec<(String, u32, u64, bool)> = seg
             .row_iter()
             .map(|entry| {
-                let key = match entry._key {
-                    KeyDyn::Str(s) => s.as_str().to_string(),
-                    _ => unreachable!("unexpected key type"),
+                let key = match entry._key.component() {
+                    KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => {
+                        s.as_ref().to_string()
+                    }
+                    other => panic!("unexpected key type: {other:?}"),
                 };
                 (key, entry._row, entry.commit_ts.get(), entry.tombstone)
             })
@@ -529,31 +552,16 @@ mod tests {
             ]
         );
 
-        let min_key = seg.min_key().and_then(|k| match k {
-            KeyDyn::Str(s) => Some(s.as_str()),
+        let min_key = seg.min_key().and_then(|k| match k.component() {
+            KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => Some(s.as_ref()),
             _ => None,
         });
-        let max_key = seg.max_key().and_then(|k| match k {
-            KeyDyn::Str(s) => Some(s.as_str()),
+        let max_key = seg.max_key().and_then(|k| match k.component() {
+            KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => Some(s.as_ref()),
             _ => None,
         });
-        assert_eq!(min_key, Some("a"));
-        assert_eq!(max_key, Some("b"));
+        assert_eq!(min_key.map(|s| s.as_str()), Some("a"));
+        assert_eq!(max_key.map(|s| s.as_str()), Some("b"));
         assert_eq!(seg.len(), 3);
-    }
-}
-#[derive(Debug, Clone)]
-pub(crate) struct MvccColumns {
-    pub commit_ts: Vec<Timestamp>,
-    pub tombstone: Vec<bool>,
-}
-
-impl MvccColumns {
-    pub fn new(commit_ts: Vec<Timestamp>, tombstone: Vec<bool>) -> Self {
-        debug_assert_eq!(commit_ts.len(), tombstone.len());
-        Self {
-            commit_ts,
-            tombstone,
-        }
     }
 }

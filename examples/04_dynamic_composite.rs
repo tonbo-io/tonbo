@@ -6,8 +6,8 @@ use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
+    key::KeyOwned,
     mode::DynModeConfig,
-    record::extract::KeyDyn,
     scan::{KeyRange, RangeSet},
 };
 use typed_arrow::{
@@ -78,8 +78,8 @@ fn main() {
     block_on(db.ingest(batch)).expect("insert");
 
     // Range over composite key: ("a", 5) ..= ("a", 10)
-    let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(5i64)]);
-    let hi = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(10i64)]);
+    let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(5i64)]);
+    let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
     let rs = RangeSet::from_ranges(vec![KeyRange::new(
         Bound::Included(lo),
         Bound::Included(hi),

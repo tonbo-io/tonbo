@@ -25,7 +25,7 @@ thiserror = "2.0.17"
 ulid = { version = "1", features = ["serde"] }
 parquet = "56.2.0"
 lockable = "0.2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 fusio_manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest" }
 
 [dev-dependencies]

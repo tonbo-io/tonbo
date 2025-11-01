@@ -9,9 +9,10 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
     DB,
+    key::KeyOwned,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
-    record::extract::{KeyDyn, dyn_extractor_for_field},
+    record::extract::dyn_extractor_for_field,
     scan::RangeSet,
     wal::{
         WalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
@@ -62,7 +63,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
@@ -161,7 +162,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
@@ -261,7 +262,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
@@ -360,7 +361,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg.clone()).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
@@ -476,7 +477,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), wal_cfg.clone()).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {

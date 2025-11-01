@@ -20,17 +20,20 @@ use crate::{
         mutable::MutableLayout,
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
+    key::KeyOwned,
     manifest::{
         InMemoryManifest, ManifestError, SstEntry, TableId, VersionEdit, WalSegmentRef,
         init_in_memory_manifest,
     },
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
-    record::extract::{KeyDyn, KeyExtractError},
+    record::extract::KeyExtractError,
     scan::RangeSet,
     transaction::{Snapshot as TxSnapshot, SnapshotError},
     wal::{
-        WalCommand, WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer,
+        DynBatchPayload, WalCommand, WalConfig, WalError, WalHandle,
+        frame::{DynAppendEvent, WalEvent},
+        replay::Replayer,
     },
 };
 
@@ -48,7 +51,6 @@ where
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
     immutables: Vec<Immutable<M>>,
-    immutable_wal_ids: Vec<Option<Vec<FileId>>>,
     // Sealing policy and last seal timestamp
     policy: Box<dyn SealPolicy + Send + Sync>,
     last_seal_at: Option<Instant>,
@@ -94,12 +96,14 @@ where
             match event {
                 WalEvent::DynAppend {
                     provisional_id,
-                    batch,
-                    commit_ts_hint,
-                    commit_ts_column,
-                    tombstones,
-                    ..
+                    payload,
                 } => {
+                    let DynAppendEvent {
+                        batch,
+                        commit_ts_hint,
+                        commit_ts_column,
+                        tombstones,
+                    } = payload;
                     pending.entry(provisional_id).or_default().push((
                         batch,
                         commit_ts_column,
@@ -139,7 +143,7 @@ where
     /// Scan the dynamic mutable memtable over key ranges, yielding owned dynamic rows.
     pub fn scan_mutable_rows<'a>(
         &'a self,
-        ranges: &'a RangeSet<KeyDyn>,
+        ranges: &'a RangeSet<KeyOwned>,
     ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
         self.mem.scan_rows(ranges)
     }
@@ -147,7 +151,7 @@ where
     /// Scan the dynamic mutable memtable with MVCC visibility at `read_ts`.
     pub fn scan_mutable_rows_at<'a>(
         &'a self,
-        ranges: &'a RangeSet<KeyDyn>,
+        ranges: &'a RangeSet<KeyOwned>,
         read_ts: Timestamp,
     ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
         self.mem.scan_rows_at(ranges, read_ts)
@@ -202,7 +206,6 @@ where
             mode,
             mem,
             immutables: Vec::new(),
-            immutable_wal_ids: Vec::new(),
             policy: crate::inmem::policy::default_policy(),
             last_seal_at: None,
             executor,
@@ -334,7 +337,7 @@ where
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable<M>, SsTableError>
     where
-        M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
+        M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
     {
         if self.immutables.is_empty() {
             return Err(SsTableError::NoImmutableSegments);
@@ -343,15 +346,27 @@ where
         for seg in &self.immutables {
             builder.add_immutable(seg)?;
         }
-        let wal_ids_flat: Vec<FileId> = self
-            .immutable_wal_ids
-            .iter()
-            .filter_map(|ids| ids.as_ref())
-            .flat_map(|ids| ids.clone())
-            .collect();
-        let wal_ids = (!wal_ids_flat.is_empty()).then_some(wal_ids_flat);
-        builder.set_wal_ids(wal_ids);
-
+        let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
+            match crate::wal::manifest_ext::collect_wal_segment_refs(cfg).await {
+                Ok(refs) if !refs.is_empty() => {
+                    let ids: Vec<FileId> = refs.iter().map(|ref_| ref_.file_id().clone()).collect();
+                    builder.set_wal_ids(Some(ids.clone()));
+                    (Some(ids), Some(refs))
+                }
+                Ok(_) => {
+                    builder.set_wal_ids(None);
+                    (None, None)
+                }
+                Err(_err) => {
+                    return Err(SsTableError::Manifest(ManifestError::Invariant(
+                        "failed to enumerate wal segments",
+                    )));
+                }
+            }
+        } else {
+            builder.set_wal_ids(None);
+            (None, None)
+        };
         match builder.finish().await {
             Ok(table) => {
                 // Persist Sst change into manifest
@@ -366,15 +381,11 @@ where
                         "sst descriptor missing mvcc path",
                     ))
                 })?;
-                let wal_ids: Vec<FileId> = descriptor_ref
-                    .wal_ids()
-                    .map(|ids| ids.to_vec())
-                    .unwrap_or_default();
                 let stats = descriptor_ref.stats().cloned();
                 let sst_entry = SstEntry::new(
                     descriptor_ref.id().clone(),
                     stats,
-                    (!wal_ids.is_empty()).then_some(wal_ids.clone()),
+                    wal_ids.clone(),
                     data_path,
                     mvcc_path,
                 );
@@ -383,11 +394,10 @@ where
                     entries: vec![sst_entry],
                 }];
 
-                if !wal_ids.is_empty() {
-                    let wal_refs = manifest_ext::mock_wal_segments(&wal_ids);
+                if let Some(refs) = wal_refs {
                     // For now just comput the floor WAL to be the latest one as we have
                     // successfully persist them in parquet table writer
-                    let wal_floor = wal_refs
+                    let wal_floor = refs
                         .iter()
                         .max_by_key(|segment| segment.seq())
                         .cloned()
@@ -400,7 +410,6 @@ where
 
                 // Cleanup immutable memtable
                 self.immutables.clear();
-                self.immutable_wal_ids.clear();
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -420,14 +429,6 @@ where
     #[allow(dead_code)]
     pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
         self.immutables.push(seg);
-        self.immutable_wal_ids.push(None);
-    }
-
-    /// Record the WAL identifiers for the most recently sealed immutable.
-    pub fn set_last_immutable_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
-        if let Some(slot) = self.immutable_wal_ids.last_mut() {
-            *slot = wal_ids;
-        }
     }
 
     /// Set or replace the sealing policy used by this DB.
@@ -461,11 +462,14 @@ where
 
     if let Some(handle) = db.wal_handle().cloned() {
         let provisional_id = handle.next_provisional_id();
-        let command = WalCommand::Autocommit {
-            provisional_id,
+        let payload = DynBatchPayload {
             batch: batch.clone(),
             commit_ts_column: Arc::clone(&commit_array),
             tombstone_column: Arc::clone(&tombstone_array),
+        };
+        let command = WalCommand::Autocommit {
+            provisional_id,
+            payload,
             commit_ts,
         };
         let ticket = handle
@@ -613,10 +617,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let rows = vec![vec![
-            Some(DynCell::Str("k".into())),
-            Some(DynCell::I32(1)),
-        ]];
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
@@ -657,19 +658,19 @@ mod tests {
 
         let chain_k1 = db
             .mem
-            .inspect_versions(&KeyDyn::from("k1"))
+            .inspect_versions(&KeyOwned::from("k1"))
             .expect("chain k1");
         assert_eq!(chain_k1.len(), 1);
         assert!(!chain_k1[0].1);
 
         let chain_k2 = db
             .mem
-            .inspect_versions(&KeyDyn::from("k2"))
+            .inspect_versions(&KeyOwned::from("k2"))
             .expect("chain k2");
         assert_eq!(chain_k2.len(), 1);
         assert!(chain_k2[0].1);
 
-        let all: RangeSet<KeyDyn> = RangeSet::all();
+        let all: RangeSet<KeyOwned> = RangeSet::all();
         let visible: Vec<String> = db
             .scan_mutable_rows(&all)
             .map(|row| match &row[0] {
@@ -698,10 +699,7 @@ mod tests {
         assert!(snapshot.head().last_manifest_txn.is_none());
         assert!(snapshot.latest_version().is_none());
 
-        let rows = vec![vec![
-            Some(DynCell::Str("k1".into())),
-            Some(DynCell::I32(1)),
-        ]];
+        let rows = vec![vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         block_on(db.ingest_with_tombstones(batch, vec![false])).expect("ingest");
 
@@ -775,10 +773,7 @@ mod tests {
             Ok(())
         });
 
-        let rows = vec![vec![
-            Some(DynCell::Str("k".into())),
-            Some(DynCell::I32(1)),
-        ]];
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
@@ -796,7 +791,7 @@ mod tests {
         release_ack_tx.send(()).expect("release ack");
         ingest_future.await.expect("ingest after ack");
 
-        let ranges = RangeSet::<KeyDyn>::all();
+        let ranges = RangeSet::<KeyOwned>::all();
         let rows: Vec<_> = db
             .scan_mutable_rows(&ranges)
             .map(|row| match &row[0] {
@@ -1003,8 +998,8 @@ mod tests {
         block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
-        let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(5i64)]);
-        let hi = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(10i64)]);
+        let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(5i64)]);
+        let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
         let rs = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
             B::Included(lo),
             B::Included(hi),
@@ -1056,8 +1051,8 @@ mod tests {
         block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
-        let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(1i64)]);
-        let hi = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(10i64)]);
+        let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(1i64)]);
+        let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
         let rs = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
             B::Included(lo),
             B::Included(hi),
@@ -1099,10 +1094,7 @@ mod tests {
         ]));
         let batch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(1)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]],
         )
         .expect("batch");
 
@@ -1129,13 +1121,16 @@ mod tests {
         runtime.shutdown_timeout(Duration::from_secs(0));
 
         // Replayed version retains commit_ts 42 and tombstone state.
-        let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
+        let chain = db
+            .mem
+            .inspect_versions(&KeyOwned::from("k"))
+            .expect("chain");
         assert_eq!(chain, vec![(Timestamp::new(42), true)]);
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
-            B::Included(KeyDyn::from("k")),
-            B::Included(KeyDyn::from("k")),
+            B::Included(KeyOwned::from("k")),
+            B::Included(KeyOwned::from("k")),
         )]);
         let visible: Vec<_> = db
             .scan_mutable_rows_at(&ranges, Timestamp::new(50))
@@ -1145,15 +1140,15 @@ mod tests {
         // New ingest should advance to > 42 (next clock tick).
         let new_batch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(2)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]],
         )
         .expect("batch2");
         block_on(db.ingest(new_batch)).expect("ingest new");
 
-        let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
+        let chain = db
+            .mem
+            .inspect_versions(&KeyOwned::from("k"))
+            .expect("chain");
         assert_eq!(
             chain,
             vec![(Timestamp::new(42), true), (Timestamp::new(43), false)]

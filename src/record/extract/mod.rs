@@ -5,7 +5,6 @@
 
 mod errors;
 mod extractors;
-mod key_dyn;
 mod traits;
 
 pub use errors::KeyExtractError;
@@ -14,5 +13,4 @@ pub use extractors::{
     I64KeyExtractor, U32KeyExtractor, U64KeyExtractor, Utf8KeyExtractor, dyn_extractor_for_field,
     row_from_batch,
 };
-pub use key_dyn::KeyDyn;
-pub use traits::{BatchKeyExtractor, DynFromBatch, DynKeyExtractor};
+pub use traits::{BatchKeyExtractor, DynKeyExtractor};

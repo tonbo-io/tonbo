@@ -192,26 +192,25 @@ mod tests {
         match &events[0] {
             WalEvent::DynAppend {
                 provisional_id,
-                batch: decoded,
-                commit_ts_hint,
-                commit_ts_column,
-                tombstones,
+                payload,
             } => {
                 assert_eq!(*provisional_id, 7);
-                assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                let commit_array = commit_ts_column
+                assert_eq!(payload.commit_ts_hint, Some(Timestamp::new(42)));
+                let commit_array = payload
+                    .commit_ts_column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .expect("u64 column");
                 assert_eq!(commit_array.len(), 1);
                 assert_eq!(commit_array.value(0), 42);
-                let tombstone_array = tombstones
+                let tombstone_array = payload
+                    .tombstones
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .expect("boolean column");
                 assert_eq!(tombstone_array.len(), 1);
                 assert!(!tombstone_array.value(0));
-                assert_eq!(decoded.num_rows(), 1);
+                assert_eq!(payload.batch.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -284,26 +283,25 @@ mod tests {
         match &events[0] {
             WalEvent::DynAppend {
                 provisional_id,
-                batch: decoded,
-                commit_ts_hint,
-                commit_ts_column,
-                tombstones,
+                payload,
             } => {
                 assert_eq!(*provisional_id, 9);
-                assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                let commit_array = commit_ts_column
+                assert_eq!(payload.commit_ts_hint, Some(Timestamp::new(42)));
+                let commit_array = payload
+                    .commit_ts_column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .expect("u64 column");
                 assert_eq!(commit_array.len(), 1);
                 assert_eq!(commit_array.value(0), 42);
-                let tombstone_array = tombstones
+                let tombstone_array = payload
+                    .tombstones
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .expect("boolean column");
                 assert_eq!(tombstone_array.len(), 1);
                 assert!(!tombstone_array.value(0));
-                assert_eq!(decoded.num_rows(), 1);
+                assert_eq!(payload.batch.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -360,8 +358,8 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         match events[0] {
-            WalEvent::DynAppend { ref batch, .. } => {
-                assert_eq!(batch.num_rows(), 1);
+            WalEvent::DynAppend { ref payload, .. } => {
+                assert_eq!(payload.batch.num_rows(), 1);
             }
             ref other => panic!("unexpected event: {other:?}"),
         }

@@ -75,7 +75,7 @@ This RFC records the design rationale, API impacts, and next steps.
   - Immutable scans continue to use key indexes internally but surface rows to callers.
 - Dynamic ingest:
 - `DB<DynMode, E>::insert_batch(RecordBatch)` remains; we build per-chunk key indexes and keep the batch payload zero-copy.
-  - Optional: add `insert_dyn_key<K: Into<KeyDyn>>(key: K)` for single-key updates without row objects.
+  - Optional: add `insert_dyn_key<K: Into<KeyOwned>>(key: K)` for single-key updates without row objects.
 - Typed ingest (planned once re-enabled):
   - `DB<TypedMode<R>>::insert(row: R)` appends and updates the last-writer index; optional `insert_key(R::Key)` may be added later.
 

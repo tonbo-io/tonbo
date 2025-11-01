@@ -3,20 +3,23 @@ use std::{
         BTreeMap,
         btree_map::{Entry as BTreeEntry, Range as BTreeRange},
     },
+    ops::Bound,
+    pin::Pin,
     time::Duration,
 };
 
 use arrow_array::{RecordBatch, new_null_array};
 use arrow_schema::SchemaRef;
 
-use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
+use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics, pinned::PinnedBatch};
 use crate::{
     inmem::{
         immutable::memtable::{ImmutableMemTable, VersionSlice, bundle_mvcc_sidecar},
         policy::{MemStats, StatsProvider},
     },
+    key::{KeyOwned, KeyViewRaw},
     mvcc::Timestamp,
-    record::extract::{DynKeyExtractor, KeyDyn},
+    record::extract::DynKeyExtractor,
     scan::{KeyRange, RangeSet},
 };
 
@@ -45,9 +48,9 @@ impl VersionLoc {
 /// - Maintains per-key version chains ordered by commit timestamp.
 pub struct DynMem {
     /// Version chains per key (oldest..newest).
-    versions: BTreeMap<KeyDyn, Vec<VersionLoc>>,
+    versions: BTreeMap<KeyViewRaw, Vec<VersionLoc>>,
     /// Attached batches held until compaction.
-    batches_attached: Vec<RecordBatch>,
+    batches_attached: Vec<Pin<Box<PinnedBatch>>>,
     metrics: MutableMemTableMetrics,
 }
 
@@ -86,15 +89,18 @@ impl DynMem {
         F: FnMut(usize) -> bool,
     {
         extractor.validate_schema(&batch.schema())?;
+        let pinned = PinnedBatch::new(batch);
+        let batch_ref = pinned.batch();
         let batch_id = self.batches_attached.len();
-        for row_idx in 0..batch.num_rows() {
-            let k = extractor.key_at(&batch, row_idx)?;
-            let key_size = k.key_heap_size();
+        for row_idx in 0..batch_ref.num_rows() {
+            let mut raw = KeyViewRaw::new();
+            extractor.key_view_at(batch_ref, row_idx, &mut raw)?;
+            let key_size = raw.key_heap_size();
             self.metrics.inserts += 1;
 
             let version_loc = VersionLoc::new(batch_id, row_idx, commit_ts, tombstone_at(row_idx));
 
-            match self.versions.entry(k) {
+            match self.versions.entry(raw) {
                 BTreeEntry::Vacant(v) => {
                     self.metrics.entries += 1;
                     self.metrics.approx_key_bytes += key_size;
@@ -106,32 +112,32 @@ impl DynMem {
                 }
             }
         }
-        self.batches_attached.push(batch);
+        self.batches_attached.push(pinned);
         Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) fn inspect_versions(&self, key: &KeyDyn) -> Option<Vec<(Timestamp, bool)>> {
+    pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
+        let raw = KeyViewRaw::from_owned(key);
         self.versions
-            .get(key)
+            .get(&raw)
             .map(|chain| chain.iter().map(|v| (v.commit_ts, v.tombstone)).collect())
     }
 
-    // Key-only scan helper removed.
-
     /// Scan dynamic rows in key order returning owned `Vec<Option<DynCell>>` for each key's
     /// latest visible version across attached batches.
-    pub(crate) fn scan_rows<'t, 's>(&'t self, ranges: &'s RangeSet<KeyDyn>) -> DynRowScan<'t, 's> {
+    pub(crate) fn scan_rows<'t>(&'t self, ranges: &RangeSet<KeyOwned>) -> DynRowScan<'t> {
         self.scan_rows_at(ranges, Timestamp::MAX)
     }
 
     /// Scan dynamic rows using MVCC visibility semantics at `read_ts`.
-    pub(crate) fn scan_rows_at<'t, 's>(
+    pub(crate) fn scan_rows_at<'t>(
         &'t self,
-        ranges: &'s RangeSet<KeyDyn>,
+        ranges: &RangeSet<KeyOwned>,
         read_ts: Timestamp,
-    ) -> DynRowScan<'t, 's> {
-        DynRowScan::new(&self.versions, &self.batches_attached, ranges, read_ts)
+    ) -> DynRowScan<'t> {
+        let converted = convert_ranges(ranges);
+        DynRowScan::new(&self.versions, &self.batches_attached, converted, read_ts)
     }
 
     /// Approximate memory usage for keys stored in the mutable table.
@@ -139,17 +145,27 @@ impl DynMem {
         self.metrics.approx_key_bytes + self.metrics.entries * self.metrics.entry_overhead
     }
 
-    /// Drain and return attached batches accumulated so far.
+    /// Consume the memtable and return any batches that were still pinned.
+    ///
+    /// This keeps the borrowed key views sound by dropping the pinned owners at
+    /// the same time the batches are released.
     #[allow(dead_code)]
-    pub(crate) fn take_attached_batches(&mut self) -> Vec<RecordBatch> {
-        std::mem::take(&mut self.batches_attached)
+    pub(crate) fn into_attached_batches(self) -> Vec<RecordBatch> {
+        self.batches_attached
+            .into_iter()
+            .map(|pinned| {
+                let batch = Pin::as_ref(&pinned).batch().clone();
+                drop(pinned);
+                batch
+            })
+            .collect()
     }
 
     pub(crate) fn seal_into_immutable(
         &mut self,
         schema: &SchemaRef,
     ) -> Result<
-        Option<ImmutableMemTable<KeyDyn, RecordBatch>>,
+        Option<ImmutableMemTable<KeyOwned, RecordBatch>>,
         crate::record::extract::KeyExtractError,
     > {
         if self.versions.is_empty() {
@@ -161,7 +177,7 @@ impl DynMem {
         let mut slices = Vec::new();
         let mut commit_ts = Vec::new();
         let mut tombstone = Vec::new();
-        let mut index = BTreeMap::new();
+        let mut index: BTreeMap<KeyOwned, VersionSlice> = BTreeMap::new();
         let mut next_key: u32 = 0;
         let mut null_row_batch: Option<RecordBatch> = None;
 
@@ -187,7 +203,8 @@ impl DynMem {
                     }
                     null_row_batch.as_ref().unwrap().clone()
                 } else {
-                    let batch = &self.batches_attached[version.batch_idx];
+                    let batch_pin = &self.batches_attached[version.batch_idx];
+                    let batch = batch_pin.as_ref().get_ref().batch();
                     batch.slice(version.row_idx, 1)
                 };
                 slices.push(row_batch);
@@ -196,7 +213,8 @@ impl DynMem {
                 chain_rows += 1;
                 next_key += 1;
             }
-            index.insert(key, VersionSlice::new(start, chain_rows));
+            let owned_key = key.to_owned();
+            index.insert(owned_key, VersionSlice::new(start, chain_rows));
         }
 
         self.batches_attached.clear();
@@ -217,7 +235,7 @@ impl Default for DynMem {
     }
 }
 
-impl MutableLayout<KeyDyn> for DynMem {
+impl MutableLayout<KeyOwned> for DynMem {
     fn approx_bytes(&self) -> usize {
         self.approx_bytes()
     }
@@ -242,26 +260,33 @@ impl StatsProvider for DynMem {
 }
 
 /// Iterator over dynamic rows by key ranges, materializing from `RecordBatch`es.
-pub(crate) struct DynRowScan<'t, 's> {
-    versions: &'t BTreeMap<KeyDyn, Vec<VersionLoc>>,
-    batches: &'t [RecordBatch],
-    ranges: &'s [KeyRange<KeyDyn>],
+struct ConvertedRanges {
+    owned: RangeSet<KeyOwned>,
+    raw: RangeSet<KeyViewRaw>,
+}
+
+pub(crate) struct DynRowScan<'t> {
+    versions: &'t BTreeMap<KeyViewRaw, Vec<VersionLoc>>,
+    batches: &'t [Pin<Box<PinnedBatch>>],
+    _owned_ranges: RangeSet<KeyOwned>,
+    raw_ranges: RangeSet<KeyViewRaw>,
     range_idx: usize,
-    cursor: Option<BTreeRange<'t, KeyDyn, Vec<VersionLoc>>>,
+    cursor: Option<BTreeRange<'t, KeyViewRaw, Vec<VersionLoc>>>,
     read_ts: Timestamp,
 }
 
-impl<'t, 's> DynRowScan<'t, 's> {
+impl<'t> DynRowScan<'t> {
     fn new(
-        versions: &'t BTreeMap<KeyDyn, Vec<VersionLoc>>,
-        batches: &'t [RecordBatch],
-        ranges: &'s RangeSet<KeyDyn>,
+        versions: &'t BTreeMap<KeyViewRaw, Vec<VersionLoc>>,
+        batches: &'t [Pin<Box<PinnedBatch>>],
+        converted: ConvertedRanges,
         read_ts: Timestamp,
     ) -> Self {
         Self {
             versions,
             batches,
-            ranges: ranges.as_slice(),
+            _owned_ranges: converted.owned,
+            raw_ranges: converted.raw,
             range_idx: 0,
             cursor: None,
             read_ts,
@@ -269,15 +294,15 @@ impl<'t, 's> DynRowScan<'t, 's> {
     }
 }
 
-impl<'t, 's> Iterator for DynRowScan<'t, 's> {
+impl<'t> Iterator for DynRowScan<'t> {
     type Item = Vec<Option<typed_arrow_dyn::DynCell>>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
-                if self.range_idx >= self.ranges.len() {
+                if self.range_idx >= self.raw_ranges.as_slice().len() {
                     return None;
                 }
-                let (start, end) = self.ranges[self.range_idx].as_borrowed_bounds();
+                let (start, end) = self.raw_ranges.as_slice()[self.range_idx].as_borrowed_bounds();
                 self.cursor = Some(self.versions.range((start, end)));
                 self.range_idx += 1;
             }
@@ -290,15 +315,42 @@ impl<'t, 's> Iterator for DynRowScan<'t, 's> {
                     let Some(version) = candidate else {
                         continue;
                     };
-                    let b = &self.batches[version.batch_idx];
-                    // Safe: version locations originate from these attached batches.
-                    let row = crate::record::extract::row_from_batch(b, version.row_idx).unwrap();
+                    let batch_pin = &self.batches[version.batch_idx];
+                    let batch = batch_pin.as_ref().get_ref().batch();
+                    let row =
+                        crate::record::extract::row_from_batch(batch, version.row_idx).unwrap();
                     return Some(row);
                 }
                 self.cursor = None;
                 continue;
             }
         }
+    }
+}
+
+fn convert_ranges(ranges: &RangeSet<KeyOwned>) -> ConvertedRanges {
+    let owned = ranges.clone();
+
+    let raw_ranges: Vec<KeyRange<KeyViewRaw>> = owned
+        .as_slice()
+        .iter()
+        .map(|range| {
+            KeyRange::new(
+                convert_bound_raw(&range.start),
+                convert_bound_raw(&range.end),
+            )
+        })
+        .collect();
+    let raw = RangeSet::from_ranges(raw_ranges);
+
+    ConvertedRanges { owned, raw }
+}
+
+fn convert_bound_raw(bound: &Bound<KeyOwned>) -> Bound<KeyViewRaw> {
+    match bound {
+        Bound::Unbounded => Bound::Unbounded,
+        Bound::Included(key) => Bound::Included(KeyViewRaw::from_owned(key)),
+        Bound::Excluded(key) => Bound::Excluded(KeyViewRaw::from_owned(key)),
     }
 }
 
@@ -340,7 +392,7 @@ mod tests {
         // Scan >= "b" -> rows where id >= "b" (latest per key)
         use std::ops::Bound as B;
         let rs = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyDyn::from("b")),
+            B::Included(KeyOwned::from("b")),
             B::Unbounded,
         )]);
         let got: Vec<String> = m
@@ -353,7 +405,7 @@ mod tests {
         assert_eq!(got, vec!["b".to_string()]);
 
         // Drain attached batches
-        let drained = m.take_attached_batches();
+        let drained = m.into_attached_batches();
         assert_eq!(drained.len(), 1);
     }
 
@@ -368,28 +420,19 @@ mod tests {
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
 
         // First commit at ts=10
-        let rows_v1 = vec![vec![
-            Some(DynCell::Str("k".into())),
-            Some(DynCell::I32(1)),
-        ]];
+        let rows_v1 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
         let batch_v1: RecordBatch = build_batch(schema.clone(), rows_v1).expect("batch v1");
         m.insert_batch(extractor.as_ref(), batch_v1, Timestamp::new(10))
             .expect("insert v1");
 
         // Second commit overwrites key at ts=20
-        let rows_v2 = vec![vec![
-            Some(DynCell::Str("k".into())),
-            Some(DynCell::I32(2)),
-        ]];
+        let rows_v2 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]];
         let batch_v2: RecordBatch = build_batch(schema.clone(), rows_v2).expect("batch v2");
         m.insert_batch(extractor.as_ref(), batch_v2, Timestamp::new(20))
             .expect("insert v2");
 
         // Third commit overwrites key at ts=30
-        let rows_v3 = vec![vec![
-            Some(DynCell::Str("k".into())),
-            Some(DynCell::I32(3)),
-        ]];
+        let rows_v3 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]];
         let batch_v3: RecordBatch = build_batch(schema.clone(), rows_v3).expect("batch v3");
         m.insert_batch(extractor.as_ref(), batch_v3, Timestamp::new(30))
             .expect("insert v3");
@@ -445,10 +488,7 @@ mod tests {
         // four versions for the same key
         let batch1: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(1)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]],
         )
         .expect("batch1");
         layout
@@ -457,10 +497,7 @@ mod tests {
 
         let batch2: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(2)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]],
         )
         .expect("batch2");
         layout
@@ -469,10 +506,7 @@ mod tests {
 
         let batch3: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(3)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]],
         )
         .expect("batch3");
         layout
@@ -481,10 +515,7 @@ mod tests {
 
         let batch4: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(4)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(4))]],
         )
         .expect("batch4");
         layout
@@ -499,8 +530,8 @@ mod tests {
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyDyn::from("k")),
-            B::Included(KeyDyn::from("k")),
+            B::Included(KeyOwned::from("k")),
+            B::Included(KeyOwned::from("k")),
         )]);
 
         let visible_after_first: Vec<u32> = segment
@@ -611,10 +642,7 @@ mod tests {
 
         let batch1: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(1)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]],
         )
         .expect("batch1");
         layout
@@ -623,10 +651,7 @@ mod tests {
 
         let batch2: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(2)),
-            ]],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]],
         )
         .expect("batch2");
         layout
@@ -636,13 +661,10 @@ mod tests {
             .expect("insert batch2");
 
         let chain = layout
-            .versions
-            .get(&KeyDyn::from("k"))
+            .inspect_versions(&KeyOwned::from("k"))
             .expect("version chain");
         assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0].commit_ts, Timestamp::new(10));
-        assert!(!chain[0].tombstone);
-        assert_eq!(chain[1].commit_ts, Timestamp::new(20));
-        assert!(chain[1].tombstone);
+        assert_eq!(chain[0], (Timestamp::new(10), false));
+        assert_eq!(chain[1], (Timestamp::new(20), true));
     }
 }

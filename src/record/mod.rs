@@ -6,7 +6,4 @@
 
 pub mod extract;
 
-pub use extract::{
-    BatchKeyExtractor, DynFromBatch, DynKeyExtractor, KeyDyn, KeyExtractError,
-    dyn_extractor_for_field,
-};
+pub use extract::{BatchKeyExtractor, DynKeyExtractor, KeyExtractError, dyn_extractor_for_field};

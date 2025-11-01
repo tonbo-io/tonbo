@@ -8,7 +8,9 @@ use crc32c::crc32c;
 
 use crate::{
     mvcc::Timestamp,
-    wal::{WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns},
+    wal::{
+        DynBatchPayload, WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns,
+    },
 };
 
 /// Maximum supported frame version.
@@ -272,15 +274,13 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
     match command {
         WalCommand::Autocommit {
             provisional_id,
-            batch,
-            commit_ts_column,
-            tombstone_column,
+            payload,
             commit_ts,
         } => encode_autocommit(
             provisional_id,
-            &batch,
-            &commit_ts_column,
-            &tombstone_column,
+            &payload.batch,
+            &payload.commit_ts_column,
+            &payload.tombstone_column,
             commit_ts,
         ),
         WalCommand::TxnBegin { provisional_id } => {
@@ -289,15 +289,13 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
         }
         WalCommand::TxnAppend {
             provisional_id,
-            batch,
-            commit_ts_column,
-            tombstone_column,
+            payload,
             commit_ts,
         } => encode_txn_append(
             provisional_id,
-            &batch,
-            &commit_ts_column,
-            &tombstone_column,
+            &payload.batch,
+            &payload.commit_ts_column,
+            &payload.tombstone_column,
             commit_ts,
         ),
         WalCommand::TxnCommit {
@@ -358,11 +356,14 @@ pub fn encode_autocommit_frames(
     let commit_array: ArrayRef =
         Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
     let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones)) as ArrayRef;
-    let command = WalCommand::Autocommit {
-        provisional_id,
+    let payload = DynBatchPayload {
         batch,
         commit_ts_column: commit_array,
         tombstone_column: tombstone_array,
+    };
+    let command = WalCommand::Autocommit {
+        provisional_id,
+        payload,
         commit_ts,
     };
     encode_command(command)
@@ -464,12 +465,16 @@ fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
 
     let (stripped, commit_ts_hint, commit_ts_column, tombstones) = split_mvcc_columns(batch)?;
 
-    Ok(WalEvent::DynAppend {
-        provisional_id,
+    let payload = DynAppendEvent {
         batch: stripped,
         commit_ts_hint,
         commit_ts_column,
         tombstones,
+    };
+
+    Ok(WalEvent::DynAppend {
+        provisional_id,
+        payload,
     })
 }
 
@@ -513,6 +518,26 @@ where
     WalError::Codec(err.to_string())
 }
 
+/// Dynamic append payload surfaced during WAL replay.
+#[derive(Debug)]
+pub struct DynAppendEvent {
+    /// Record batch payload (without MVCC columns).
+    pub batch: RecordBatch,
+    /// Commit timestamp derived from the append payload (if available).
+    pub commit_ts_hint: Option<Timestamp>,
+    /// Commit timestamp column recovered from the payload.
+    pub commit_ts_column: ArrayRef,
+    /// Tombstone bitmap associated with the batch.
+    pub tombstones: ArrayRef,
+}
+
+impl DynAppendEvent {
+    /// Number of rows stored in the batch.
+    pub fn num_rows(&self) -> usize {
+        self.batch.num_rows()
+    }
+}
+
 /// High-level events produced by the frame decoder during recovery.
 #[derive(Debug)]
 pub enum WalEvent {
@@ -525,14 +550,8 @@ pub enum WalEvent {
     DynAppend {
         /// Provisional identifier.
         provisional_id: u64,
-        /// Record batch payload (without MVCC columns).
-        batch: RecordBatch,
-        /// Commit timestamp derived from the append payload (if available).
-        commit_ts_hint: Option<Timestamp>,
-        /// Commit timestamp column recovered from the payload.
-        commit_ts_column: ArrayRef,
-        /// Tombstone bitmap associated with the batch.
-        tombstones: ArrayRef,
+        /// Decoded append payload.
+        payload: DynAppendEvent,
     },
     /// Commit the transaction at the supplied timestamp.
     TxnCommit {
@@ -678,14 +697,12 @@ mod tests {
         {
             WalEvent::DynAppend {
                 provisional_id: decoded_id,
-                batch: decoded_batch,
-                commit_ts_hint: append_ts,
-                commit_ts_column,
-                tombstones,
+                payload,
             } => {
                 assert_eq!(decoded_id, provisional_id);
-                assert_eq!(append_ts, Some(commit_ts));
-                let commit_array = commit_ts_column
+                assert_eq!(payload.commit_ts_hint, Some(commit_ts));
+                let commit_array = payload
+                    .commit_ts_column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .expect("u64 column");
@@ -695,7 +712,8 @@ mod tests {
                         .iter()
                         .all(|value| value.expect("non-null") == commit_ts.get())
                 );
-                let tombstone_array = tombstones
+                let tombstone_array = payload
+                    .tombstones
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .expect("boolean array");
@@ -704,10 +722,10 @@ mod tests {
                 assert_eq!(tombstone_array.value(1), false);
                 assert_eq!(tombstone_array.value(2), true);
                 assert_eq!(
-                    decoded_batch.schema().as_ref(),
+                    payload.batch.schema().as_ref(),
                     user_expected.schema().as_ref()
                 );
-                assert_eq!(decoded_batch.num_rows(), user_expected.num_rows());
+                assert_eq!(payload.batch.num_rows(), user_expected.num_rows());
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -743,14 +761,12 @@ mod tests {
         {
             WalEvent::DynAppend {
                 provisional_id,
-                batch,
-                commit_ts_hint,
-                commit_ts_column,
-                tombstones: decoded_tombstones,
+                payload,
             } => {
                 assert_eq!(provisional_id, 11);
-                assert_eq!(commit_ts_hint, Some(commit_ts));
-                let commit_array = commit_ts_column
+                assert_eq!(payload.commit_ts_hint, Some(commit_ts));
+                let commit_array = payload
+                    .commit_ts_column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .expect("u64 column");
@@ -760,7 +776,8 @@ mod tests {
                         .iter()
                         .all(|value| value.expect("non-null") == commit_ts.get())
                 );
-                let tombstone_array = decoded_tombstones
+                let tombstone_array = payload
+                    .tombstones
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .expect("boolean column");
@@ -768,7 +785,7 @@ mod tests {
                 for (idx, expected) in tombstones.iter().enumerate() {
                     assert_eq!(tombstone_array.value(idx), *expected);
                 }
-                assert_eq!(batch.num_rows(), 12);
+                assert_eq!(payload.batch.num_rows(), 12);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -781,12 +798,15 @@ mod tests {
         let tombstone_array = Arc::new(BooleanArray::from(vec![false; base.num_rows()]));
         let commit_ref: ArrayRef = Arc::clone(&commit_array) as ArrayRef;
         let tombstone_ref: ArrayRef = Arc::clone(&tombstone_array) as ArrayRef;
-
-        let command = WalCommand::Autocommit {
-            provisional_id: 9,
+        let payload = DynBatchPayload {
             batch: base,
             commit_ts_column: commit_ref,
             tombstone_column: tombstone_ref,
+        };
+
+        let command = WalCommand::Autocommit {
+            provisional_id: 9,
+            payload,
             commit_ts: Timestamp::new(42),
         };
 

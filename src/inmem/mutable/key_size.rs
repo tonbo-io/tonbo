@@ -1,6 +1,6 @@
 use crate::{
     inmem::immutable::keys::{BinKey, StrKey},
-    record::extract::KeyDyn,
+    key::{KeyComponentOwned, KeyOwned, KeyViewRaw},
 };
 
 /// Estimate heap usage of key types used in the mutable memtable.
@@ -40,13 +40,26 @@ impl<A: KeyHeapSize, B: KeyHeapSize, C: KeyHeapSize> KeyHeapSize for (A, B, C) {
     }
 }
 
-impl KeyHeapSize for KeyDyn {
+impl KeyHeapSize for KeyOwned {
     fn key_heap_size(&self) -> usize {
-        match self {
-            KeyDyn::Str(s) => s.as_bytes().len(),
-            KeyDyn::Bin(b) => b.as_bytes().len(),
-            KeyDyn::Tuple(parts) => parts.iter().map(|k| k.key_heap_size()).sum(),
-            _ => 0,
-        }
+        key_owned_heap_size(self.component())
+    }
+}
+
+fn key_owned_heap_size(component: &KeyComponentOwned) -> usize {
+    match component {
+        KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => s.len(),
+        KeyComponentOwned::Binary(b)
+        | KeyComponentOwned::LargeBinary(b)
+        | KeyComponentOwned::FixedSizeBinary(b) => b.len(),
+        KeyComponentOwned::Dictionary(inner) => key_owned_heap_size(inner),
+        KeyComponentOwned::Struct(parts) => parts.iter().map(key_owned_heap_size).sum(),
+        _ => 0,
+    }
+}
+
+impl KeyHeapSize for KeyViewRaw {
+    fn key_heap_size(&self) -> usize {
+        self.heap_size()
     }
 }

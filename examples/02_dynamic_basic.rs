@@ -6,9 +6,9 @@ use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
+    key::KeyOwned,
     mode::DynModeConfig,
     query::{Expr, Predicate},
-    record::extract::KeyDyn,
     scan::{KeyRange, RangeSet},
 };
 use typed_arrow::{
@@ -51,18 +51,9 @@ fn main() {
 
     // Build a RecordBatch from dynamic rows
     let rows = vec![
-        vec![
-            Some(DynCell::Str("carol".into())),
-            Some(DynCell::I32(30)),
-        ],
-        vec![
-            Some(DynCell::Str("dave".into())),
-            Some(DynCell::I32(40)),
-        ],
-        vec![
-            Some(DynCell::Str("erin".into())),
-            Some(DynCell::I32(50)),
-        ],
+        vec![Some(DynCell::Str("carol".into())), Some(DynCell::I32(30))],
+        vec![Some(DynCell::Str("dave".into())), Some(DynCell::I32(40))],
+        vec![Some(DynCell::Str("erin".into())), Some(DynCell::I32(50))],
     ];
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
@@ -72,10 +63,10 @@ fn main() {
         DB::new(config, Arc::new(BlockingExecutor)).expect("schema ok");
     block_on(db.ingest(batch)).expect("insert dynamic batch");
 
-    // Scan for a specific key (id == "carol") using KeyDyn
+    // Scan for a specific key (id == "carol") using KeyOwned
     let carol = RangeSet::from_ranges(vec![KeyRange::new(
-        Bound::Included(KeyDyn::from("carol")),
-        Bound::Included(KeyDyn::from("carol")),
+        Bound::Included(KeyOwned::from("carol")),
+        Bound::Included(KeyOwned::from("carol")),
     )]);
     let out: Vec<(String, i32)> = db
         .scan_mutable_rows(&carol)
@@ -88,7 +79,7 @@ fn main() {
 
     // Query expression: id == "dave"
     let expr = Expr::Pred(Predicate::Eq {
-        value: KeyDyn::from("dave"),
+        value: KeyOwned::from("dave"),
     });
     let rs = tonbo::query::extract_key_ranges(&expr);
     let out_q: Vec<(String, i32)> = db
@@ -101,7 +92,7 @@ fn main() {
     println!("dynamic query rows (id == dave): {:?}", out_q);
 
     // Or scan all dynamic rows
-    let all = RangeSet::<KeyDyn>::all();
+    let all = RangeSet::<KeyOwned>::all();
     let all_rows: Vec<(String, i32)> = db
         .scan_mutable_rows(&all)
         .map(|r| match (&r[0], &r[1]) {

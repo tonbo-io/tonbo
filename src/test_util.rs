@@ -1,9 +1,7 @@
 //! Test-only helpers for building dynamic Arrow batches.
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use typed_arrow_dyn::{
-    DynCell, DynColumnBuilder, DynError, new_dyn_builder, validate_nullability,
-};
+use typed_arrow_dyn::{DynCell, DynColumnBuilder, DynError, new_dyn_builder, validate_nullability};
 
 /// Build a `RecordBatch` from dynamic rows, validating nullability.
 ///

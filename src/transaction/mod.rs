@@ -9,13 +9,13 @@ use std::{collections::BTreeMap, fmt};
 
 use fusio_manifest::snapshot::Snapshot as ManifestLease;
 use thiserror::Error;
+use typed_arrow_dyn::DynCell;
 
 use crate::{
+    key::KeyOwned,
     manifest::{ManifestError, TableHead, TableSnapshot, VersionState, WalSegmentRef},
     mvcc::{ReadView, Timestamp},
-    record::extract::KeyDyn,
 };
-use typed_arrow_dyn::DynCell;
 
 /// Errors surfaced while constructing a read-only snapshot.
 #[derive(Debug, Error)]
@@ -92,7 +92,7 @@ pub(crate) struct StagedMutations {
     /// Snapshot timestamp guarding conflict detection for this transaction.
     snapshot_ts: Timestamp,
     /// Per-key mutation map preserving deterministic commit ordering.
-    entries: BTreeMap<KeyDyn, DynMutation>,
+    entries: BTreeMap<KeyOwned, DynMutation>,
 }
 
 impl fmt::Debug for DynMutation {
@@ -134,17 +134,17 @@ impl StagedMutations {
     }
 
     /// Stage an upsert mutation for `key`, replacing any prior staged value.
-    pub(crate) fn upsert(&mut self, key: KeyDyn, row: Vec<Option<DynCell>>) {
+    pub(crate) fn upsert(&mut self, key: KeyOwned, row: Vec<Option<DynCell>>) {
         self.entries.insert(key, DynMutation::Upsert { row });
     }
 
     /// Stage a delete mutation for `key`, overwriting any previous staged value.
-    pub(crate) fn delete(&mut self, key: KeyDyn) {
+    pub(crate) fn delete(&mut self, key: KeyOwned) {
         self.entries.insert(key, DynMutation::Delete);
     }
 
     /// Iterate over staged entries in key order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&KeyDyn, &DynMutation)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&KeyOwned, &DynMutation)> {
         self.entries.iter()
     }
 }

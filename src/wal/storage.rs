@@ -153,6 +153,33 @@ impl WalStorage {
         Ok(entries)
     }
 
+    /// Decode the frame bounds for the specified WAL segment.
+    ///
+    /// Returns `Ok(None)` if the segment contains no frames. Callers should treat a `None` result
+    /// as an empty segment and typically skip emitting a manifest reference.
+    pub async fn segment_frame_bounds(&self, path: &Path) -> WalResult<Option<SegmentFrameBounds>> {
+        let mut file = self
+            .fs
+            .open_options(path, Self::read_options())
+            .await
+            .map_err(|err| {
+                WalError::Storage(format!(
+                    "failed to open wal segment {} for frame bounds: {}",
+                    path, err
+                ))
+            })?;
+
+        let (read_res, data) = file.read_to_end_at(Vec::new(), 0).await;
+        let data = read_res.map(|_| data).map_err(|err| {
+            WalError::Storage(format!(
+                "failed to read wal segment {} for frame bounds: {}",
+                path, err
+            ))
+        })?;
+
+        Ok(decode_frame_bounds(&data)?)
+    }
+
     /// Inspect the on-disk WAL tail, returning metadata about the active segment and frame
     /// sequence.
     pub async fn tail_metadata(&self) -> WalResult<Option<TailMetadata>> {
@@ -372,6 +399,15 @@ pub struct SegmentDescriptor {
     pub bytes: usize,
 }
 
+/// Inclusive frame sequence bounds for a WAL segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegmentFrameBounds {
+    /// First frame sequence stored in the segment.
+    pub first_seq: u64,
+    /// Last frame sequence stored in the segment.
+    pub last_seq: u64,
+}
+
 /// Snapshot describing the WAL tail state.
 ///
 /// The writer relies on this bundle to resume cleanly after restart: `active`
@@ -391,6 +427,32 @@ pub struct TailMetadata {
     pub last_valid_offset: Option<usize>,
     /// Indicates whether truncated bytes were observed (and repaired) at the tail.
     pub truncated_tail: bool,
+}
+
+fn decode_frame_bounds(data: &[u8]) -> WalResult<Option<SegmentFrameBounds>> {
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    let mut remaining = data;
+    let mut first = None;
+    let mut last = None;
+    while !remaining.is_empty() {
+        let (header, rest) = FrameHeader::decode_from(remaining)?;
+        if first.is_none() {
+            first = Some(header.seq);
+        }
+        last = Some(header.seq);
+        remaining = rest;
+    }
+
+    match (first, last) {
+        (Some(first_seq), Some(last_seq)) => Ok(Some(SegmentFrameBounds {
+            first_seq,
+            last_seq,
+        })),
+        _ => Ok(None),
+    }
 }
 
 fn segment_sequence(filename: Option<&str>) -> Option<u64> {

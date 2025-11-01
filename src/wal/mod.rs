@@ -186,6 +186,24 @@ pub struct WalAck {
     pub elapsed: Duration,
 }
 
+/// Dynamic ingest payload handed to WAL commands.
+#[derive(Debug, Clone)]
+pub struct DynBatchPayload {
+    /// Record batch supplied by the caller (without MVCC columns).
+    pub batch: RecordBatch,
+    /// Arrow column containing the `_commit_ts` values for the batch.
+    pub commit_ts_column: ArrayRef,
+    /// Arrow column containing the `_tombstone` bitmap for the batch.
+    pub tombstone_column: ArrayRef,
+}
+
+impl DynBatchPayload {
+    /// Number of rows carried by the batch.
+    pub fn num_rows(&self) -> usize {
+        self.batch.num_rows()
+    }
+}
+
 /// Logical commands accepted by the WAL writer queue.
 #[derive(Debug, Clone)]
 pub enum WalCommand {
@@ -193,12 +211,8 @@ pub enum WalCommand {
     Autocommit {
         /// Provisional identifier used for WAL frames.
         provisional_id: u64,
-        /// Record batch supplied by the caller (without MVCC columns).
-        batch: RecordBatch,
-        /// Arrow column containing the `_commit_ts` values for the batch.
-        commit_ts_column: ArrayRef,
-        /// Arrow column containing the `_tombstone` bitmap for the batch.
-        tombstone_column: ArrayRef,
+        /// Ingest payload containing the data and MVCC columns.
+        payload: DynBatchPayload,
         /// Commit timestamp captured at enqueue.
         commit_ts: Timestamp,
     },
@@ -211,12 +225,8 @@ pub enum WalCommand {
     TxnAppend {
         /// Provisional identifier associated with the transaction.
         provisional_id: u64,
-        /// Record batch payload (without MVCC columns).
-        batch: RecordBatch,
-        /// Arrow column containing the `_commit_ts` values for the batch.
-        commit_ts_column: ArrayRef,
-        /// Arrow column containing the `_tombstone` bitmap for the batch.
-        tombstone_column: ArrayRef,
+        /// Ingest payload containing the data and MVCC columns.
+        payload: DynBatchPayload,
         /// Commit timestamp assigned to these rows (should match the eventual commit).
         commit_ts: Timestamp,
     },
@@ -537,11 +547,14 @@ where
         let commit_values =
             Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
         let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
-        let command = WalCommand::Autocommit {
-            provisional_id,
+        let payload = DynBatchPayload {
             batch: batch.clone(),
             commit_ts_column: Arc::clone(&commit_values),
             tombstone_column: Arc::clone(&tombstone_values),
+        };
+        let command = WalCommand::Autocommit {
+            provisional_id,
+            payload,
             commit_ts,
         };
         self.enqueue_command(command, provisional_id).await
@@ -606,11 +619,14 @@ where
         let commit_values =
             Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
         let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
-        let command = WalCommand::TxnAppend {
-            provisional_id,
+        let payload = DynBatchPayload {
             batch: batch.clone(),
             commit_ts_column: Arc::clone(&commit_values),
             tombstone_column: Arc::clone(&tombstone_values),
+        };
+        let command = WalCommand::TxnAppend {
+            provisional_id,
+            payload,
             commit_ts,
         };
         self.enqueue_command(command, provisional_id).await
