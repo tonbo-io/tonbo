@@ -24,6 +24,7 @@ typed-arrow-dyn = { version = "0.0.2" }
 thiserror = "2.0.17"
 ulid = { version = "1", features = ["serde"] }
 parquet = "56.2.0"
+lockable = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fusio_manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest" }

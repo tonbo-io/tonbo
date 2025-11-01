@@ -6,6 +6,7 @@
 
 use std::{
     fmt,
+    hash::Hash,
     marker::PhantomData,
     sync::{
         Arc, Mutex,
@@ -211,7 +212,7 @@ pub struct WalAck {
     pub elapsed: Duration,
 }
 
-/// Logical command accepted by the WAL writer queue.
+/// Logical commands accepted by the WAL writer queue.
 #[derive(Debug, Clone)]
 pub enum WalCommand {
     /// Autocommit ingest (legacy path): append + commit in a single submission.
@@ -421,8 +422,7 @@ where
 {
     sender: mpsc::Sender<writer::WriterMsg>,
     queue_depth: Arc<AtomicUsize>, // current queue occupancy
-    next_payload_seq: AtomicU64,   /* logical seq handed to each submitted payload (embedded in
-                                    * frames) */
+    next_payload_seq: AtomicU64,   // monotonic sequence handed to payloads and commands
     join: Mutex<Option<E::JoinHandle<WalResult<()>>>>,
 }
 
@@ -455,6 +455,10 @@ where
 
     fn take_join(&self) -> Option<E::JoinHandle<WalResult<()>>> {
         self.join.lock().expect("wal join mutex poisoned").take()
+    }
+
+    fn next_payload_seq(&self) -> u64 {
+        self.next_payload_seq.fetch_add(1, Ordering::SeqCst)
     }
 }
 
@@ -503,12 +507,12 @@ where
 
     /// Allocate the next provisional identifier suitable for WAL commands.
     pub fn next_provisional_id(&self) -> u64 {
-        self.inner.next_payload_seq.fetch_add(1, Ordering::SeqCst)
+        self.inner.next_payload_seq()
     }
 
     /// Enqueue a command to the WAL writer.
     pub async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
-        let submission_seq = self.next_provisional_id();
+        let submission_seq = self.inner.next_payload_seq();
         self.enqueue_command(command, submission_seq).await
     }
 
@@ -523,7 +527,7 @@ where
         self.inner.queue_depth.fetch_add(1, Ordering::SeqCst);
 
         let msg = writer::WriterMsg::Enqueue {
-            submission_seq,
+            _submission_seq: submission_seq,
             command,
             enqueued_at,
             ack_tx,
@@ -555,7 +559,6 @@ where
                 actual: tombstones.len(),
             });
         }
-
         let provisional_id = self.next_provisional_id();
         let commit_values =
             Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
@@ -604,6 +607,61 @@ where
         start_seq: u64,
     ) -> Self {
         Self::from_parts(sender, queue_depth, join, start_seq)
+    }
+
+    /// Log a transaction begin marker.
+    pub async fn txn_begin(&self, provisional_id: u64) -> WalResult<WalTicket<E>> {
+        self.enqueue_command(WalCommand::TxnBegin { provisional_id }, provisional_id)
+            .await
+    }
+
+    /// Log a transaction append frame carrying a batch and tombstone bitmap.
+    pub async fn txn_append(
+        &self,
+        provisional_id: u64,
+        batch: &RecordBatch,
+        tombstones: &[bool],
+        commit_ts: Timestamp,
+    ) -> WalResult<WalTicket<E>> {
+        if batch.num_rows() != tombstones.len() {
+            return Err(WalError::TombstoneLengthMismatch {
+                expected: batch.num_rows(),
+                actual: tombstones.len(),
+            });
+        }
+        let commit_values =
+            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
+        let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
+        let command = WalCommand::TxnAppend {
+            provisional_id,
+            batch: batch.clone(),
+            commit_ts_column: Arc::clone(&commit_values),
+            tombstone_column: Arc::clone(&tombstone_values),
+            commit_ts,
+        };
+        self.enqueue_command(command, provisional_id).await
+    }
+
+    /// Log a transaction commit marker.
+    pub async fn txn_commit(
+        &self,
+        provisional_id: u64,
+        commit_ts: Timestamp,
+    ) -> WalResult<WalTicket<E>> {
+        self.enqueue_command(
+            WalCommand::TxnCommit {
+                provisional_id,
+                commit_ts,
+            },
+            provisional_id,
+        )
+        .await
+    }
+
+    /// Log a transaction abort marker.
+    pub async fn txn_abort(&self, provisional_id: u64) -> WalResult<WalTicket<E>> {
+        self.enqueue_command(WalCommand::TxnAbort { provisional_id }, provisional_id)
+            .await
     }
 }
 
@@ -721,6 +779,7 @@ pub trait WalExt<M: Mode, E: Executor + Timer> {
 impl<M, E> WalExt<M, E> for crate::db::DB<M, E>
 where
     M: Mode,
+    M::Key: Eq + Hash + Clone,
     E: Executor + Timer,
 {
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {

@@ -4,12 +4,13 @@
 //! trait-driven structure remains so that compile-time typed dispatch can be
 //! reintroduced without reshaping the API.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, hash::Hash, sync::Arc, time::Instant};
 
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
+use lockable::LockableHashMap;
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
@@ -23,10 +24,11 @@ use crate::{
         InMemoryManifest, ManifestError, SstEntry, TableId, VersionEdit, WalSegmentRef,
         init_in_memory_manifest,
     },
-    mvcc::{CommitClock, Timestamp},
+    mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
+    transaction::{Snapshot as TxSnapshot, SnapshotError},
     wal::{
         WalCommand, WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext,
         replay::Replayer, state::WalStateHandle,
@@ -34,9 +36,15 @@ use crate::{
 };
 
 type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, ArrayRef, Option<Timestamp>)>>;
+type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
-pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
+pub struct DB<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer + Send + Sync,
+{
     mode: M,
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
@@ -53,8 +61,11 @@ pub struct DB<M: Mode, E: Executor + Timer + Send + Sync> {
     wal_config: Option<WalConfig>,
     /// Monotonic commit timestamp assigned to ingests (autocommit path for now).
     commit_clock: CommitClock,
+    /// Manifest handle used by the dev branch manifest integration (in-memory for now).
     manifest: InMemoryManifest,
     manifest_table: TableId,
+    /// Per-key transactional locks (wired once transactional writes arrive).
+    _key_locks: LockMap<M::Key>,
 }
 
 impl<E> DB<DynMode, E>
@@ -174,7 +185,12 @@ where
 }
 
 // Methods common to all modes
-impl<M: Mode, E: Executor + Timer> DB<M, E> {
+impl<M, E> DB<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
     /// Construct a new DB in mode `M` using its configuration.
     pub fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError>
     where
@@ -196,6 +212,7 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
             commit_clock: CommitClock::default(),
             manifest,
             manifest_table,
+            _key_locks: Arc::new(LockableHashMap::new()),
         })
     }
 
@@ -274,6 +291,19 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     /// Access the executor powering async subsystems.
     pub(crate) fn executor(&self) -> &Arc<E> {
         &self.executor
+    }
+
+    /// Open a read-only snapshot pinned to the current manifest head.
+    #[allow(dead_code)]
+    pub(crate) fn begin_snapshot(&self) -> Result<TxSnapshot, SnapshotError> {
+        let manifest_snapshot = block_on(self.manifest.snapshot_latest(self.manifest_table))?;
+        let next_ts = self.commit_clock.peek();
+        let read_ts = next_ts.saturating_sub(1);
+        let read_view = ReadView::new(read_ts);
+        Ok(TxSnapshot::from_table_snapshot(
+            read_view,
+            manifest_snapshot,
+        ))
     }
 
     /// Allocate the next commit timestamp for WAL/autocommit flows.
@@ -391,7 +421,12 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
 }
 
 // Segment management (generic, zero-cost)
-impl<M: Mode, E: Executor + Timer> DB<M, E> {
+impl<M, E> DB<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
     #[allow(dead_code)]
     pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
         self.immutables.push(seg);
@@ -408,6 +443,12 @@ impl<M: Mode, E: Executor + Timer> DB<M, E> {
     /// Set or replace the sealing policy used by this DB.
     pub fn set_seal_policy(&mut self, policy: Box<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
+    }
+
+    /// Access the per-key transactional lock map.
+    #[allow(dead_code)]
+    pub(crate) fn key_locks(&self) -> &LockMap<M::Key> {
+        &self._key_locks
     }
 }
 
@@ -556,7 +597,6 @@ fn validate_vec_tombstone_bitmap(
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
@@ -648,6 +688,37 @@ mod tests {
             })
             .collect();
         assert_eq!(visible, vec!["k1".to_string()]);
+    }
+
+    #[test]
+    fn begin_snapshot_tracks_commit_clock() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+        let executor = Arc::new(BlockingExecutor);
+        let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+        let mut db: DB<DynMode, BlockingExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+
+        let snapshot = db.begin_snapshot().expect("snapshot");
+        assert_eq!(snapshot.read_view().read_ts(), Timestamp::MIN);
+        assert!(snapshot.head().last_manifest_txn.is_none());
+        assert!(snapshot.latest_version().is_none());
+
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k1".into())),
+            Some(DynCell::I32(1)),
+        ])];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+        block_on(db.ingest_with_tombstones(batch, vec![false])).expect("ingest");
+
+        let snapshot_after = db.begin_snapshot().expect("snapshot after ingest");
+        assert_eq!(snapshot_after.read_view().read_ts(), Timestamp::new(0));
+        assert!(snapshot_after.head().last_manifest_txn.is_none());
+        assert!(snapshot_after.latest_version().is_none());
     }
 
     #[test]

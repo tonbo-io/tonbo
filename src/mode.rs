@@ -3,6 +3,8 @@
 //! The `Mode` trait describes the storage primitives plugged into the core DB,
 //! while concrete mode implementations (today only `DynMode`) live alongside it.
 
+use std::hash::Hash;
+
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
@@ -20,7 +22,7 @@ mod dyn_config;
 /// Trait describing how a Tonbo `DB` instance stores and accesses data.
 pub trait Mode {
     /// Logical key type stored in the memtable.
-    type Key: Ord;
+    type Key: Ord + Hash + Clone;
 
     /// Storage type inside the immutable segments for this mode.
     type ImmLayout;
