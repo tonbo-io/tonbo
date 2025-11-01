@@ -730,7 +730,7 @@ mod tests {
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
-    use typed_arrow_dyn::{DynCell, DynRow};
+    use typed_arrow_dyn::DynCell;
 
     use super::*;
     use crate::{
@@ -761,11 +761,11 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let mut keys: Vec<String> = Vec::with_capacity(rows.len());
-        let dyn_rows: Vec<DynRow> = rows
+        let dyn_rows: Vec<Vec<Option<DynCell>>> = rows
             .into_iter()
             .map(|(k, v)| {
                 keys.push(k.clone());
-                DynRow(vec![Some(DynCell::Str(k.into())), Some(DynCell::I32(v))])
+                vec![Some(DynCell::Str(k.into())), Some(DynCell::I32(v))]
             })
             .collect();
         let batch = build_batch(schema.clone(), dyn_rows).expect("record batch");

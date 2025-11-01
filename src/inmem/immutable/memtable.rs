@@ -339,7 +339,7 @@ impl<'t, K: Ord, S> Iterator for ImmutableRowIter<'t, K, S> {
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema};
-    use typed_arrow_dyn::{DynCell, DynRow};
+    use typed_arrow_dyn::DynCell;
 
     use super::*;
     use crate::test_util::build_batch;
@@ -352,9 +352,9 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("c".into())), Some(DynCell::I32(2))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(3))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("c".into())), Some(DynCell::I32(2))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(3))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let seg = segment_from_batch_with_key_name(batch, "id").expect("seg");
@@ -380,10 +380,10 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(4))]),
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]),
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
+            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(4))],
+            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))],
+            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))],
+            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
@@ -420,12 +420,12 @@ mod tests {
         assert_eq!(latest, vec![0]);
 
         let batch = seg.storage();
-        let value_at = |idx: u32| match &crate::record::extract::row_from_batch(batch, idx as usize)
-            .expect("row")
-            .0[1]
-        {
-            Some(DynCell::I32(v)) => *v,
-            _ => panic!("unexpected cell"),
+        let value_at = |idx: u32| {
+            let row = crate::record::extract::row_from_batch(batch, idx as usize).expect("row");
+            match row[1].as_ref() {
+                Some(DynCell::I32(v)) => *v,
+                _ => panic!("unexpected cell"),
+            }
         };
 
         assert_eq!(value_at(first_visible[0]), 1);
@@ -440,9 +440,9 @@ mod tests {
         ]));
         // Newest → oldest rows to align with commit timestamp ordering.
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]),
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
-            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
+            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))],
+            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))],
+            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();
@@ -477,10 +477,9 @@ mod tests {
         assert_eq!(visible, vec![2]);
 
         let batch = seg.storage();
-        let value = match &crate::record::extract::row_from_batch(batch, visible[0] as usize)
-            .expect("row")
-            .0[1]
-        {
+        let cells =
+            crate::record::extract::row_from_batch(batch, visible[0] as usize).expect("row");
+        let value = match cells[1].as_ref() {
             Some(DynCell::I32(v)) => *v,
             _ => panic!("unexpected cell"),
         };
@@ -495,9 +494,9 @@ mod tests {
         ]));
         // rows stored newest → oldest
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(10))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(8))]),
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(9))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(10))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(8))],
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(9))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut index = BTreeMap::new();

@@ -15,6 +15,7 @@ use crate::{
     mvcc::{ReadView, Timestamp},
     record::extract::KeyDyn,
 };
+use typed_arrow_dyn::DynCell;
 
 /// Errors surfaced while constructing a read-only snapshot.
 #[derive(Debug, Error)]
@@ -78,8 +79,8 @@ impl Snapshot {
 pub(crate) enum DynMutation {
     /// Insert or update payload at commit.
     Upsert {
-        /// Zero-copy dynamic row representation (placeholder, populated later).
-        row: typed_arrow_dyn::DynRow,
+        /// Dynamic cell values staged for commit (schema-aligned vector).
+        row: Vec<Option<DynCell>>,
     },
     /// Logical delete recorded at commit.
     Delete,
@@ -133,7 +134,7 @@ impl StagedMutations {
     }
 
     /// Stage an upsert mutation for `key`, replacing any prior staged value.
-    pub(crate) fn upsert(&mut self, key: KeyDyn, row: typed_arrow_dyn::DynRow) {
+    pub(crate) fn upsert(&mut self, key: KeyDyn, row: Vec<Option<DynCell>>) {
         self.entries.insert(key, DynMutation::Upsert { row });
     }
 

@@ -1,6 +1,6 @@
 // 04: Dynamic (runtime) schema: composite keys via metadata ordinals
 
-use std::{ops::Bound, sync::Arc};
+use std::{collections::HashMap, ops::Bound, sync::Arc};
 
 use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
@@ -14,23 +14,37 @@ use typed_arrow::{
     arrow_array::RecordBatch,
     arrow_schema::{DataType, Field, Schema},
 };
-use typed_arrow_dyn::{DynBuilders, DynCell, DynRow};
+use typed_arrow_dyn::{DynCell, DynColumnBuilder, new_dyn_builder, validate_nullability};
 
-fn build_batch(schema: Arc<Schema>, rows: Vec<DynRow>) -> RecordBatch {
-    let mut builders = DynBuilders::new(schema.clone(), rows.len());
+fn build_batch(schema: Arc<Schema>, rows: Vec<Vec<Option<DynCell>>>) -> RecordBatch {
+    let mut builders: Vec<Box<dyn DynColumnBuilder>> = schema
+        .fields()
+        .iter()
+        .map(|f| new_dyn_builder(f.data_type()))
+        .collect();
     for row in rows {
-        builders
-            .append_option_row(Some(row))
-            .expect("row matches schema");
+        assert_eq!(row.len(), builders.len(), "row width mismatch");
+        for (idx, cell) in row.into_iter().enumerate() {
+            let builder = &mut builders[idx];
+            match cell {
+                None => builder.append_null(),
+                Some(cell) => builder.append_dyn(cell).expect("append cell"),
+            }
+        }
     }
-    builders.finish_into_batch()
+    let mut arrays = Vec::with_capacity(builders.len());
+    for builder in builders.iter_mut() {
+        arrays.push(builder.try_finish().expect("finish column"));
+    }
+    validate_nullability(&schema, &arrays).expect("nullability");
+    RecordBatch::try_new(schema, arrays).expect("record batch")
 }
 
 fn main() {
     // Field-level metadata: tonbo.key ordinals define lexicographic order
-    let mut m1 = std::collections::HashMap::new();
+    let mut m1 = HashMap::new();
     m1.insert("tonbo.key".to_string(), "1".to_string());
-    let mut m2 = std::collections::HashMap::new();
+    let mut m2 = HashMap::new();
     m2.insert("tonbo.key".to_string(), "2".to_string());
     let f_id = Field::new("id", DataType::Utf8, false).with_metadata(m1);
     let f_ts = Field::new("ts", DataType::Int64, false).with_metadata(m2);
@@ -44,21 +58,21 @@ fn main() {
 
     // Build a batch with three rows
     let rows = vec![
-        DynRow(vec![
+        vec![
             Some(DynCell::Str("a".into())),
             Some(DynCell::I64(10)),
             Some(DynCell::I32(1)),
-        ]),
-        DynRow(vec![
+        ],
+        vec![
             Some(DynCell::Str("a".into())),
             Some(DynCell::I64(5)),
             Some(DynCell::I32(2)),
-        ]),
-        DynRow(vec![
+        ],
+        vec![
             Some(DynCell::Str("b".into())),
             Some(DynCell::I64(1)),
             Some(DynCell::I32(3)),
-        ]),
+        ],
     ];
     let batch: RecordBatch = build_batch(schema.clone(), rows);
     block_on(db.ingest(batch)).expect("insert");
@@ -72,7 +86,7 @@ fn main() {
     )]);
     let got: Vec<(String, i64)> = db
         .scan_mutable_rows(&rs)
-        .map(|r| match (&r.0[0], &r.0[1]) {
+        .map(|r| match (&r[0], &r[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I64(ts))) => (s.clone(), *ts),
             _ => unreachable!(),
         })

@@ -76,7 +76,7 @@ mod tests {
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{disk::LocalFs, dynamic::DynFs, executor::BlockingExecutor, path::Path};
-    use typed_arrow_dyn::{DynCell, DynRow};
+    use typed_arrow_dyn::DynCell;
 
     use super::MinorCompactor;
     use crate::{
@@ -128,10 +128,10 @@ mod tests {
         db.set_seal_policy(Box::new(crate::inmem::policy::BatchesThreshold {
             batches: 1,
         }));
-        let rows = vec![DynRow(vec![
+        let rows = vec![vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(1)),
-        ])];
+        ]];
         let batch = build_batch(cfg.schema().clone(), rows).expect("batch");
         block_on(db.ingest(batch)).expect("ingest");
         assert_eq!(db.num_immutable_segments(), 1);

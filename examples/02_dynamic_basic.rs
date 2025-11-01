@@ -15,16 +15,31 @@ use typed_arrow::{
     arrow_array::RecordBatch,
     arrow_schema::{DataType, Field, Schema},
 };
-use typed_arrow_dyn::{DynBuilders, DynCell, DynRow};
+use typed_arrow_dyn::{DynCell, DynColumnBuilder, new_dyn_builder, validate_nullability};
 
-fn build_batch(schema: Arc<Schema>, rows: Vec<DynRow>) -> RecordBatch {
-    let mut builders = DynBuilders::new(schema.clone(), rows.len());
+fn build_batch(schema: Arc<Schema>, rows: Vec<Vec<Option<DynCell>>>) -> RecordBatch {
+    let mut builders: Vec<Box<dyn DynColumnBuilder>> = schema
+        .fields()
+        .iter()
+        .map(|f| new_dyn_builder(f.data_type()))
+        .collect();
     for row in rows {
-        builders
-            .append_option_row(Some(row))
-            .expect("row matches schema");
+        assert_eq!(row.len(), builders.len(), "row width mismatch");
+        for (idx, cell) in row.into_iter().enumerate() {
+            let builder = &mut builders[idx];
+            match cell {
+                None => builder.append_null(),
+                Some(cell) => builder.append_dyn(cell).expect("append cell"),
+            }
+        }
     }
-    builders.finish_into_batch()
+
+    let mut arrays = Vec::with_capacity(builders.len());
+    for builder in builders.iter_mut() {
+        arrays.push(builder.try_finish().expect("finish column"));
+    }
+    validate_nullability(&schema, &arrays).expect("nullability");
+    RecordBatch::try_new(schema, arrays).expect("record batch")
 }
 
 fn main() {
@@ -36,18 +51,18 @@ fn main() {
 
     // Build a RecordBatch from dynamic rows
     let rows = vec![
-        DynRow(vec![
+        vec![
             Some(DynCell::Str("carol".into())),
             Some(DynCell::I32(30)),
-        ]),
-        DynRow(vec![
+        ],
+        vec![
             Some(DynCell::Str("dave".into())),
             Some(DynCell::I32(40)),
-        ]),
-        DynRow(vec![
+        ],
+        vec![
             Some(DynCell::Str("erin".into())),
             Some(DynCell::I32(50)),
-        ]),
+        ],
     ];
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
@@ -64,7 +79,7 @@ fn main() {
     )]);
     let out: Vec<(String, i32)> = db
         .scan_mutable_rows(&carol)
-        .map(|r| match (&r.0[0], &r.0[1]) {
+        .map(|r| match (&r[0], &r[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
             _ => unreachable!(),
         })
@@ -78,7 +93,7 @@ fn main() {
     let rs = tonbo::query::extract_key_ranges(&expr);
     let out_q: Vec<(String, i32)> = db
         .scan_mutable_rows(&rs)
-        .map(|r| match (&r.0[0], &r.0[1]) {
+        .map(|r| match (&r[0], &r[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
             _ => unreachable!(),
         })
@@ -89,7 +104,7 @@ fn main() {
     let all = RangeSet::<KeyDyn>::all();
     let all_rows: Vec<(String, i32)> = db
         .scan_mutable_rows(&all)
-        .map(|r| match (&r.0[0], &r.0[1]) {
+        .map(|r| match (&r[0], &r[1]) {
             (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
             _ => unreachable!(),
         })

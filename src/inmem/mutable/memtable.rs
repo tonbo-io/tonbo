@@ -119,7 +119,7 @@ impl DynMem {
 
     // Key-only scan helper removed.
 
-    /// Scan dynamic rows in key order returning owned `DynRow`s for each key's
+    /// Scan dynamic rows in key order returning owned `Vec<Option<DynCell>>` for each key's
     /// latest visible version across attached batches.
     pub(crate) fn scan_rows<'t, 's>(&'t self, ranges: &'s RangeSet<KeyDyn>) -> DynRowScan<'t, 's> {
         self.scan_rows_at(ranges, Timestamp::MAX)
@@ -270,7 +270,7 @@ impl<'t, 's> DynRowScan<'t, 's> {
 }
 
 impl<'t, 's> Iterator for DynRowScan<'t, 's> {
-    type Item = typed_arrow_dyn::DynRow;
+    type Item = Vec<Option<typed_arrow_dyn::DynCell>>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
@@ -305,7 +305,7 @@ impl<'t, 's> Iterator for DynRowScan<'t, 's> {
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema};
-    use typed_arrow_dyn::{DynCell, DynRow};
+    use typed_arrow_dyn::DynCell;
 
     use super::*;
     use crate::{inmem::policy::StatsProvider, test_util::build_batch};
@@ -319,9 +319,9 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(3))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(3))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let extractor =
@@ -345,7 +345,7 @@ mod tests {
         )]);
         let got: Vec<String> = m
             .scan_rows(&rs)
-            .map(|row| match &row.0[0] {
+            .map(|row| match &row[0] {
                 Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
                 _ => unreachable!(),
             })
@@ -368,28 +368,28 @@ mod tests {
             crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
 
         // First commit at ts=10
-        let rows_v1 = vec![DynRow(vec![
+        let rows_v1 = vec![vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(1)),
-        ])];
+        ]];
         let batch_v1: RecordBatch = build_batch(schema.clone(), rows_v1).expect("batch v1");
         m.insert_batch(extractor.as_ref(), batch_v1, Timestamp::new(10))
             .expect("insert v1");
 
         // Second commit overwrites key at ts=20
-        let rows_v2 = vec![DynRow(vec![
+        let rows_v2 = vec![vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(2)),
-        ])];
+        ]];
         let batch_v2: RecordBatch = build_batch(schema.clone(), rows_v2).expect("batch v2");
         m.insert_batch(extractor.as_ref(), batch_v2, Timestamp::new(20))
             .expect("insert v2");
 
         // Third commit overwrites key at ts=30
-        let rows_v3 = vec![DynRow(vec![
+        let rows_v3 = vec![vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(3)),
-        ])];
+        ]];
         let batch_v3: RecordBatch = build_batch(schema.clone(), rows_v3).expect("batch v3");
         m.insert_batch(extractor.as_ref(), batch_v3, Timestamp::new(30))
             .expect("insert v3");
@@ -397,14 +397,14 @@ mod tests {
         let ranges = RangeSet::all();
 
         // Before the first commit nothing should be visible
-        let rows_before: Vec<typed_arrow_dyn::DynRow> =
+        let rows_before: Vec<Vec<Option<DynCell>>> =
             m.scan_rows_at(&ranges, Timestamp::new(5)).collect();
         assert!(rows_before.is_empty());
 
         // Between first and second commits the first value is visible
         let rows_after_first: Vec<i32> = m
             .scan_rows_at(&ranges, Timestamp::new(15))
-            .map(|row| match &row.0[1] {
+            .map(|row| match &row[1] {
                 Some(DynCell::I32(v)) => *v,
                 _ => unreachable!(),
             })
@@ -414,7 +414,7 @@ mod tests {
         // Between second and third commits the second value is visible
         let rows_after_second: Vec<i32> = m
             .scan_rows_at(&ranges, Timestamp::new(25))
-            .map(|row| match &row.0[1] {
+            .map(|row| match &row[1] {
                 Some(DynCell::I32(v)) => *v,
                 _ => unreachable!(),
             })
@@ -424,7 +424,7 @@ mod tests {
         // Between third and fourth commits the third value is visible
         let row_latest: Vec<i32> = m
             .scan_rows_at(&ranges, Timestamp::new(35))
-            .map(|row| match &row.0[1] {
+            .map(|row| match &row[1] {
                 Some(DynCell::I32(v)) => *v,
                 _ => unreachable!(),
             })
@@ -445,10 +445,10 @@ mod tests {
         // four versions for the same key
         let batch1: RecordBatch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(1)),
-            ])],
+            ]],
         )
         .expect("batch1");
         layout
@@ -457,10 +457,10 @@ mod tests {
 
         let batch2: RecordBatch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(2)),
-            ])],
+            ]],
         )
         .expect("batch2");
         layout
@@ -469,10 +469,10 @@ mod tests {
 
         let batch3: RecordBatch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(3)),
-            ])],
+            ]],
         )
         .expect("batch3");
         layout
@@ -481,10 +481,10 @@ mod tests {
 
         let batch4: RecordBatch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(4)),
-            ])],
+            ]],
         )
         .expect("batch4");
         layout
@@ -540,7 +540,7 @@ mod tests {
         let row_latest =
             crate::record::extract::row_from_batch(batch, visible_latest[0] as usize).expect("row");
 
-        let cell_value = |row: &typed_arrow_dyn::DynRow| match &row.0[1] {
+        let cell_value = |row: &[Option<DynCell>]| match &row[1] {
             Some(DynCell::I32(v)) => *v,
             _ => panic!("unexpected cell"),
         };
@@ -564,10 +564,10 @@ mod tests {
         let insert = |layout: &mut DynMem, val: i32, ts: u64, tomb: bool| {
             let batch: RecordBatch = build_batch(
                 schema.clone(),
-                vec![DynRow(vec![
+                vec![vec![
                     Some(DynCell::Str("k".into())),
                     Some(DynCell::I32(val)),
-                ])],
+                ]],
             )
             .expect("batch");
             layout
@@ -611,10 +611,10 @@ mod tests {
 
         let batch1: RecordBatch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(1)),
-            ])],
+            ]],
         )
         .expect("batch1");
         layout
@@ -623,10 +623,10 @@ mod tests {
 
         let batch2: RecordBatch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(2)),
-            ])],
+            ]],
         )
         .expect("batch2");
         layout

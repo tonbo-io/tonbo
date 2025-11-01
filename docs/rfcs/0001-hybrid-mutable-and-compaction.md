@@ -60,7 +60,7 @@ This RFC records the design rationale, API impacts, and next steps.
 
 ### Why Not Require Per-row DynRecord?
 
-- `typed_arrow_dyn::DynRow` owns `String/Vec<u8>`, causing copies for strings/binary on each insert.
+- Row shims that clone payloads (for example `Vec<Option<DynCell>>`) still imply copying strings/binary per insert.
 - Indexing from a `RecordBatch` allows reading keys once and keeping payloads zero-copy (via `Arc<RecordBatch>`), which is preferable for batch-oriented ingestion.
 
 ### Why Not Sort on Insert?

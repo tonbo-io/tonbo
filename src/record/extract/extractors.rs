@@ -66,11 +66,11 @@ pub fn dyn_extractor_for_field(
     Ok(ex)
 }
 
-/// Build a `DynRow` by reading a single row from a `RecordBatch`.
+/// Build a row of dynamic cells by reading a single row from a `RecordBatch`.
 pub fn row_from_batch(
     batch: &RecordBatch,
     row: usize,
-) -> Result<typed_arrow_dyn::DynRow, KeyExtractError> {
+) -> Result<Vec<Option<typed_arrow_dyn::DynCell>>, KeyExtractError> {
     use typed_arrow_dyn::DynCell as C;
     if row >= batch.num_rows() {
         return Err(KeyExtractError::RowOutOfBounds(row, batch.num_rows()));
@@ -153,7 +153,7 @@ pub fn row_from_batch(
         };
         cells.push(cell);
     }
-    Ok(typed_arrow_dyn::DynRow(cells))
+    Ok(cells)
 }
 
 /// Utf8 key from a single column.

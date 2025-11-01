@@ -66,7 +66,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -165,7 +165,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -265,7 +265,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -364,7 +364,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     let rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -402,7 +402,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     let mut rows_after: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -480,7 +480,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -526,7 +526,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     let mut rows_final: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 

@@ -140,7 +140,7 @@ where
     pub fn scan_mutable_rows<'a>(
         &'a self,
         ranges: &'a RangeSet<KeyDyn>,
-    ) -> impl Iterator<Item = typed_arrow_dyn::DynRow> + 'a {
+    ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
         self.mem.scan_rows(ranges)
     }
 
@@ -149,7 +149,7 @@ where
         &'a self,
         ranges: &'a RangeSet<KeyDyn>,
         read_ts: Timestamp,
-    ) -> impl Iterator<Item = typed_arrow_dyn::DynRow> + 'a {
+    ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
         self.mem.scan_rows_at(ranges, read_ts)
     }
 
@@ -596,7 +596,7 @@ mod tests {
     };
     use futures::{StreamExt, channel::mpsc, executor::block_on};
     use tokio::sync::{Mutex, oneshot};
-    use typed_arrow_dyn::{DynCell, DynRow};
+    use typed_arrow_dyn::DynCell;
 
     use super::*;
     use crate::{
@@ -613,10 +613,10 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let rows = vec![DynRow(vec![
+        let rows = vec![vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(1)),
-        ])];
+        ]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
@@ -648,8 +648,8 @@ mod tests {
             DB::new(config, Arc::clone(&executor)).expect("db");
 
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let result = block_on(db.ingest_with_tombstones(batch, vec![false, true]));
@@ -672,7 +672,7 @@ mod tests {
         let all: RangeSet<KeyDyn> = RangeSet::all();
         let visible: Vec<String> = db
             .scan_mutable_rows(&all)
-            .map(|row| match &row.0[0] {
+            .map(|row| match &row[0] {
                 Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
                 _ => panic!("unexpected cell variant"),
             })
@@ -698,10 +698,10 @@ mod tests {
         assert!(snapshot.head().last_manifest_txn.is_none());
         assert!(snapshot.latest_version().is_none());
 
-        let rows = vec![DynRow(vec![
+        let rows = vec![vec![
             Some(DynCell::Str("k1".into())),
             Some(DynCell::I32(1)),
-        ])];
+        ]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         block_on(db.ingest_with_tombstones(batch, vec![false])).expect("ingest");
 
@@ -720,8 +720,8 @@ mod tests {
         ]));
         // Build one batch with two rows
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
 
@@ -775,10 +775,10 @@ mod tests {
             Ok(())
         });
 
-        let rows = vec![DynRow(vec![
+        let rows = vec![vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(1)),
-        ])];
+        ]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
@@ -799,7 +799,7 @@ mod tests {
         let ranges = RangeSet::<KeyDyn>::all();
         let rows: Vec<_> = db
             .scan_mutable_rows(&ranges)
-            .map(|row| match &row.0[0] {
+            .map(|row| match &row[0] {
                 Some(DynCell::Str(s)) => s.clone(),
                 _ => panic!("unexpected row"),
             })
@@ -822,8 +822,8 @@ mod tests {
 
         // Build one batch and insert to ensure extractor wired
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
@@ -843,8 +843,8 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("schema metadata key");
 
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
@@ -910,8 +910,8 @@ mod tests {
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -983,21 +983,21 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("composite field metadata");
 
         let rows = vec![
-            DynRow(vec![
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(10)),
                 Some(DynCell::I32(1)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(5)),
                 Some(DynCell::I32(2)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("b".into())),
                 Some(DynCell::I64(1)),
                 Some(DynCell::I32(3)),
-            ]),
+            ],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
@@ -1011,7 +1011,7 @@ mod tests {
         )]);
         let got: Vec<(String, i64)> = db
             .scan_mutable_rows(&rs)
-            .map(|row| match (&row.0[0], &row.0[1]) {
+            .map(|row| match (&row[0], &row[1]) {
                 (
                     Some(typed_arrow_dyn::DynCell::Str(s)),
                     Some(typed_arrow_dyn::DynCell::I64(ts)),
@@ -1036,21 +1036,21 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("composite schema metadata");
 
         let rows = vec![
-            DynRow(vec![
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(5)),
                 Some(DynCell::I32(1)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(10)),
                 Some(DynCell::I32(2)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("b".into())),
                 Some(DynCell::I64(1)),
                 Some(DynCell::I32(3)),
-            ]),
+            ],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
@@ -1064,7 +1064,7 @@ mod tests {
         )]);
         let got: Vec<(String, i64)> = db
             .scan_mutable_rows(&rs)
-            .map(|row| match (&row.0[0], &row.0[1]) {
+            .map(|row| match (&row[0], &row[1]) {
                 (
                     Some(typed_arrow_dyn::DynCell::Str(s)),
                     Some(typed_arrow_dyn::DynCell::I64(ts)),
@@ -1099,10 +1099,10 @@ mod tests {
         ]));
         let batch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(1)),
-            ])],
+            ]],
         )
         .expect("batch");
 
@@ -1145,10 +1145,10 @@ mod tests {
         // New ingest should advance to > 42 (next clock tick).
         let new_batch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
+            vec![vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(2)),
-            ])],
+            ]],
         )
         .expect("batch2");
         block_on(db.ingest(new_batch)).expect("ingest new");
