@@ -125,7 +125,7 @@ ulid = { version = "1", features = ["serde"] }
 
 # Only used for benchmarks
 log = "0.4.22"
-redb = { version = "2", optional = true }
+redb = { version = "3", optional = true }
 rocksdb = { version = "0.23", optional = true }
 sled = { version = "0.34", optional = true }
 
