@@ -265,7 +265,10 @@ fn convert_ranges(ranges: &RangeSet<KeyOwned>) -> ConvertedRanges {
     ConvertedRanges::new(key_backing, RangeSet::from_ranges(converted))
 }
 
-fn convert_lower_bound(bound: &Bound<KeyOwned>, storage: &mut Vec<KeyOwned>) -> Bound<KeyTsViewRaw> {
+fn convert_lower_bound(
+    bound: &Bound<KeyOwned>,
+    storage: &mut Vec<KeyOwned>,
+) -> Bound<KeyTsViewRaw> {
     match bound {
         Bound::Unbounded => Bound::Unbounded,
         Bound::Included(key) => {
@@ -281,7 +284,10 @@ fn convert_lower_bound(bound: &Bound<KeyOwned>, storage: &mut Vec<KeyOwned>) -> 
     }
 }
 
-fn convert_upper_bound(bound: &Bound<KeyOwned>, storage: &mut Vec<KeyOwned>) -> Bound<KeyTsViewRaw> {
+fn convert_upper_bound(
+    bound: &Bound<KeyOwned>,
+    storage: &mut Vec<KeyOwned>,
+) -> Bound<KeyTsViewRaw> {
     match bound {
         Bound::Unbounded => Bound::Unbounded,
         Bound::Included(key) => {

@@ -6,13 +6,12 @@ use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
+#[cfg(test)]
+use crate::wal::DynBatchPayload;
 use crate::{
     mvcc::Timestamp,
     wal::{WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns},
 };
-
-#[cfg(test)]
-use crate::wal::DynBatchPayload;
 
 /// Maximum supported frame version.
 pub const FRAME_VERSION: u16 = 1;
@@ -326,12 +325,7 @@ pub fn encode_autocommit_frames(
     let commit_array: ArrayRef =
         Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
     let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones)) as ArrayRef;
-    let append_frames = encode_txn_append(
-        provisional_id,
-        &batch,
-        &commit_array,
-        &tombstone_array,
-    )?;
+    let append_frames = encode_txn_append(provisional_id, &batch, &commit_array, &tombstone_array)?;
     let mut frames = append_frames;
     let commit_frame = Frame::new(
         FrameType::TxnCommit,

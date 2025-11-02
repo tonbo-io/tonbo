@@ -5,9 +5,8 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use crate::mvcc::Timestamp;
-
 use super::{KeyOwned, KeyViewRaw};
+use crate::mvcc::Timestamp;
 
 /// Borrowed composite key pairing a raw key view with its commit timestamp.
 #[derive(Clone, Debug)]

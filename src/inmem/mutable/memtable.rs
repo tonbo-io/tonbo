@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::SchemaRef;
 
 use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
@@ -20,20 +20,51 @@ use crate::{
     scan::{KeyRange, RangeSet},
 };
 
+struct BatchAttachment {
+    storage: Arc<RecordBatch>,
+    commit_ts: Arc<UInt64Array>,
+    tombstones: Arc<BooleanArray>,
+}
+
+impl BatchAttachment {
+    fn new(
+        storage: Arc<RecordBatch>,
+        commit_ts: Arc<UInt64Array>,
+        tombstones: Arc<BooleanArray>,
+    ) -> Self {
+        Self {
+            storage,
+            commit_ts,
+            tombstones,
+        }
+    }
+
+    fn storage(&self) -> &RecordBatch {
+        self.storage.as_ref()
+    }
+
+    fn tombstone(&self, row: usize) -> bool {
+        self.tombstones.value(row)
+    }
+
+    fn commit_ts(&self, row: usize) -> Timestamp {
+        Timestamp::new(self.commit_ts.value(row))
+    }
+
+    fn into_storage(self) -> RecordBatch {
+        Arc::try_unwrap(self.storage).unwrap_or_else(|rc| rc.as_ref().clone())
+    }
+}
+
 #[derive(Clone, Debug)]
 struct BatchRowLoc {
     batch_idx: usize,
     row_idx: usize,
-    tombstone: bool,
 }
 
 impl BatchRowLoc {
-    fn new(batch_idx: usize, row_idx: usize, tombstone: bool) -> Self {
-        Self {
-            batch_idx,
-            row_idx,
-            tombstone,
-        }
+    fn new(batch_idx: usize, row_idx: usize) -> Self {
+        Self { batch_idx, row_idx }
     }
 }
 
@@ -45,7 +76,7 @@ pub struct DynMem {
     /// Ordered versions keyed by `(key, commit_ts)` (ts desc per key).
     versions: BTreeMap<KeyTsViewRaw, BatchRowLoc>,
     /// Attached batches held until compaction.
-    batches_attached: Vec<Arc<RecordBatch>>,
+    batches_attached: Vec<BatchAttachment>,
     metrics: MutableMemTableMetrics,
 }
 
@@ -69,36 +100,67 @@ impl DynMem {
         batch: RecordBatch,
         commit_ts: Timestamp,
     ) -> Result<(), crate::extractor::KeyExtractError> {
-        self.insert_batch_with_ts(extractor, batch, commit_ts, |_| false)
+        let rows = batch.num_rows();
+        let commit_ts_column = UInt64Array::from(vec![commit_ts.get(); rows]);
+        let tombstone_column = BooleanArray::from(vec![false; rows]);
+        self.insert_batch_with_mvcc(extractor, batch, commit_ts_column, tombstone_column)
     }
 
-    /// Insert a batch using supplied commit timestamps (replay path).
-    pub(crate) fn insert_batch_with_ts<F>(
+    /// Insert a batch using explicit MVCC metadata columns.
+    pub(crate) fn insert_batch_with_mvcc(
         &mut self,
         extractor: &dyn KeyProjection,
         batch: RecordBatch,
-        commit_ts: Timestamp,
-        mut tombstone_at: F,
-    ) -> Result<(), crate::extractor::KeyExtractError>
-    where
-        F: FnMut(usize) -> bool,
-    {
+        commit_ts_column: UInt64Array,
+        tombstone_column: BooleanArray,
+    ) -> Result<(), crate::extractor::KeyExtractError> {
         extractor.validate_schema(&batch.schema())?;
+        let rows = batch.num_rows();
+        if commit_ts_column.len() != rows {
+            return Err(crate::extractor::KeyExtractError::Arrow(
+                arrow_schema::ArrowError::ComputeError(
+                    "commit_ts column length mismatch record batch".to_string(),
+                ),
+            ));
+        }
+        if tombstone_column.len() != rows {
+            return Err(crate::extractor::KeyExtractError::TombstoneLengthMismatch {
+                expected: rows,
+                actual: tombstone_column.len(),
+            });
+        }
+        if tombstone_column.null_count() > 0 {
+            return Err(crate::extractor::KeyExtractError::Arrow(
+                arrow_schema::ArrowError::ComputeError(
+                    "tombstone column contained null".to_string(),
+                ),
+            ));
+        }
+        if commit_ts_column.null_count() > 0 {
+            return Err(crate::extractor::KeyExtractError::Arrow(
+                arrow_schema::ArrowError::ComputeError(
+                    "commit_ts column contained null".to_string(),
+                ),
+            ));
+        }
+
         let batch_arc = Arc::new(batch);
+        let commit_arc = Arc::new(commit_ts_column);
+        let tombstone_arc = Arc::new(tombstone_column);
         let batch_ref = batch_arc.as_ref();
         let batch_id = self.batches_attached.len();
         for row_idx in 0..batch_ref.num_rows() {
             let mut raw = KeyViewRaw::new();
             extractor.project_view(batch_ref, row_idx, &mut raw)?;
             let key_size = raw.key_heap_size();
-            let has_existing = self
-                .versions
-                .range(
-                    unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }
-                        ..=unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN) },
-                )
-                .next()
-                .is_some();
+            let has_existing =
+                self.versions
+                    .range(
+                        unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }
+                            ..=unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN) },
+                    )
+                    .next()
+                    .is_some();
             self.metrics.inserts += 1;
             if has_existing {
                 self.metrics.replaces += 1;
@@ -107,11 +169,13 @@ impl DynMem {
                 self.metrics.approx_key_bytes += key_size;
             }
 
-            let version_loc = BatchRowLoc::new(batch_id, row_idx, tombstone_at(row_idx));
+            let commit_ts = Timestamp::new(commit_arc.value(row_idx));
+            let version_loc = BatchRowLoc::new(batch_id, row_idx);
             let composite = unsafe { KeyTsViewRaw::new_unchecked(raw, commit_ts) };
             self.versions.insert(composite, version_loc);
         }
-        self.batches_attached.push(batch_arc);
+        self.batches_attached
+            .push(BatchAttachment::new(batch_arc, commit_arc, tombstone_arc));
         Ok(())
     }
 
@@ -120,13 +184,15 @@ impl DynMem {
         let raw = KeyViewRaw::from_owned(key);
         let mut out = Vec::new();
         for (composite, loc) in self.versions.range(
-            unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }
-                ..=unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN) },
+            unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }..=unsafe {
+                KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN)
+            },
         ) {
             if composite.key() != &raw {
                 break;
             }
-            out.push((composite.timestamp(), loc.tombstone));
+            let attachment = &self.batches_attached[loc.batch_idx];
+            out.push((composite.timestamp(), attachment.tombstone(loc.row_idx)));
         }
         if out.is_empty() {
             None
@@ -165,7 +231,7 @@ impl DynMem {
     pub(crate) fn into_attached_batches(self) -> Vec<RecordBatch> {
         self.batches_attached
             .into_iter()
-            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|rc| rc.as_ref().clone()))
+            .map(BatchAttachment::into_storage)
             .collect()
     }
 
@@ -197,12 +263,14 @@ impl DynMem {
         );
 
         for (_key, commit, version) in entries.into_iter() {
-            let batch_arc = &self.batches_attached[version.batch_idx];
-            let batch = batch_arc.as_ref();
+            let attachment = &self.batches_attached[version.batch_idx];
+            let batch = attachment.storage();
             let row_batch = batch.slice(version.row_idx, 1);
             slices.push(row_batch);
-            commit_ts.push(commit);
-            tombstone.push(version.tombstone);
+            let attachment_commit = attachment.commit_ts(version.row_idx);
+            debug_assert_eq!(attachment_commit, commit);
+            commit_ts.push(attachment_commit);
+            tombstone.push(attachment.tombstone(version.row_idx));
         }
 
         self.batches_attached.clear();
@@ -267,7 +335,7 @@ struct ConvertedRanges {
 
 pub(crate) struct DynRowScan<'t> {
     versions: &'t BTreeMap<KeyTsViewRaw, BatchRowLoc>,
-    batches: &'t [Arc<RecordBatch>],
+    batches: &'t [BatchAttachment],
     _owned_ranges: RangeSet<KeyOwned>,
     composite_ranges: RangeSet<KeyTsViewRaw>,
     range_idx: usize,
@@ -280,7 +348,7 @@ pub(crate) struct DynRowScan<'t> {
 impl<'t> DynRowScan<'t> {
     fn new(
         versions: &'t BTreeMap<KeyTsViewRaw, BatchRowLoc>,
-        batches: &'t [Arc<RecordBatch>],
+        batches: &'t [BatchAttachment],
         converted: ConvertedRanges,
         read_ts: Timestamp,
     ) -> Self {
@@ -334,11 +402,12 @@ impl<'t> Iterator for DynRowScan<'t> {
                         continue;
                     }
 
-                    if loc.tombstone {
+                    let attachment = &self.batches[loc.batch_idx];
+                    if attachment.tombstone(loc.row_idx) {
                         continue;
                     }
 
-                    let batch = self.batches[loc.batch_idx].as_ref();
+                    let batch = attachment.storage();
                     let row = crate::extractor::row_from_batch(batch, loc.row_idx).unwrap();
                     self.emitted_for_key = true;
                     return Some(row);
@@ -371,24 +440,16 @@ fn convert_ranges(ranges: &RangeSet<KeyOwned>) -> ConvertedRanges {
 fn convert_lower_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
     match bound {
         Bound::Unbounded => Bound::Unbounded,
-        Bound::Included(key) => {
-            Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MAX))
-        }
-        Bound::Excluded(key) => {
-            Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MIN))
-        }
+        Bound::Included(key) => Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MAX)),
+        Bound::Excluded(key) => Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MIN)),
     }
 }
 
 fn convert_upper_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
     match bound {
         Bound::Unbounded => Bound::Unbounded,
-        Bound::Included(key) => {
-            Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MIN))
-        }
-        Bound::Excluded(key) => {
-            Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MAX))
-        }
+        Bound::Included(key) => Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MIN)),
+        Bound::Excluded(key) => Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MAX)),
     }
 }
 
@@ -637,7 +698,12 @@ mod tests {
             )
             .expect("batch");
             layout
-                .insert_batch_with_ts(extractor.as_ref(), batch, Timestamp::new(ts), move |_| tomb)
+                .insert_batch_with_mvcc(
+                    extractor.as_ref(),
+                    batch,
+                    UInt64Array::from(vec![ts]),
+                    BooleanArray::from(vec![tomb]),
+                )
                 .expect("insert");
         };
 
@@ -665,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_batch_with_ts_preserves_metadata() {
+    fn insert_batch_with_mvcc_preserves_metadata() {
         let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -680,7 +746,12 @@ mod tests {
         )
         .expect("batch1");
         layout
-            .insert_batch_with_ts(extractor.as_ref(), batch1, Timestamp::new(10), |_| false)
+            .insert_batch_with_mvcc(
+                extractor.as_ref(),
+                batch1,
+                UInt64Array::from(vec![10]),
+                BooleanArray::from(vec![false]),
+            )
             .expect("insert batch1");
 
         let batch2: RecordBatch = build_batch(
@@ -689,9 +760,12 @@ mod tests {
         )
         .expect("batch2");
         layout
-            .insert_batch_with_ts(extractor.as_ref(), batch2, Timestamp::new(20), |row| {
-                row == 0
-            })
+            .insert_batch_with_mvcc(
+                extractor.as_ref(),
+                batch2,
+                UInt64Array::from(vec![20]),
+                BooleanArray::from(vec![true]),
+            )
             .expect("insert batch2");
 
         let chain = layout

@@ -525,10 +525,12 @@ where
         })?
         .clone();
     validate_tombstone_bitmap(&batch, &tombstone_array)?;
-    db.mem
-        .insert_batch_with_ts(db.mode.extractor.as_ref(), batch, commit_ts, move |row| {
-            tombstone_array.value(row)
-        })?;
+    db.mem.insert_batch_with_mvcc(
+        db.mode.extractor.as_ref(),
+        batch,
+        commit_array,
+        tombstone_array,
+    )?;
     db.maybe_seal_after_insert()?;
     Ok(())
 }
@@ -745,21 +747,52 @@ mod tests {
 
         let ack_slot_clone = Arc::clone(&ack_slot);
         let join = executor.spawn(async move {
-            if let Some(writer::WriterMsg::Enqueue { ack_tx, .. }) = receiver.next().await {
-                {
-                    let mut slot = ack_slot_clone.lock().await;
-                    *slot = Some(ack_tx);
-                }
-                let _ = ack_ready_tx.send(());
-                let _ = release_ack_rx.await;
-                let ack = WalAck {
-                    seq: frame::INITIAL_FRAME_SEQ,
-                    bytes_flushed: 0,
-                    elapsed: Duration::from_millis(0),
-                };
-                let mut slot = ack_slot_clone.lock().await;
-                if let Some(sender) = slot.take() {
-                    let _ = sender.send(Ok(ack));
+            let mut release_ack_rx = Some(release_ack_rx);
+            while let Some(msg) = receiver.next().await {
+                match msg {
+                    writer::WriterMsg::Enqueue {
+                        command, ack_tx, ..
+                    } => match command {
+                        crate::wal::WalCommand::TxnAppend { .. } => {
+                            let ack = WalAck {
+                                seq: frame::INITIAL_FRAME_SEQ,
+                                bytes_flushed: 0,
+                                elapsed: Duration::from_millis(0),
+                            };
+                            let _ = ack_tx.send(Ok(ack));
+                        }
+                        crate::wal::WalCommand::TxnCommit { .. } => {
+                            {
+                                let mut slot = ack_slot_clone.lock().await;
+                                *slot = Some(ack_tx);
+                            }
+                            let _ = ack_ready_tx.send(());
+                            if let Some(rx) = release_ack_rx.take() {
+                                let _ = rx.await;
+                            }
+                            let ack = WalAck {
+                                seq: frame::INITIAL_FRAME_SEQ + 1,
+                                bytes_flushed: 0,
+                                elapsed: Duration::from_millis(0),
+                            };
+                            let mut slot = ack_slot_clone.lock().await;
+                            if let Some(sender) = slot.take() {
+                                let _ = sender.send(Ok(ack));
+                            }
+                            break;
+                        }
+                        _ => {
+                            let ack = WalAck {
+                                seq: frame::INITIAL_FRAME_SEQ,
+                                bytes_flushed: 0,
+                                elapsed: Duration::from_millis(0),
+                            };
+                            let _ = ack_tx.send(Ok(ack));
+                        }
+                    },
+                    writer::WriterMsg::Rotate { ack_tx } => {
+                        let _ = ack_tx.send(Ok(()));
+                    }
                 }
             }
             Ok(())
