@@ -161,7 +161,10 @@ where
         let since = self.last_seal_at.map(|t| t.elapsed());
         let stats = self.mem.build_stats(since);
         if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
-            if let Some(seg) = self.mem.seal_into_immutable(&self.mode.schema)? {
+            if let Some(seg) = self
+                .mem
+                .seal_into_immutable(&self.mode.schema, self.mode.extractor.as_ref())?
+            {
                 self.add_immutable(seg);
             }
             self.last_seal_at = Some(Instant::now());

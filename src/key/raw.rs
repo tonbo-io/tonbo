@@ -134,7 +134,12 @@ impl KeyViewRaw {
     }
 
     /// Push a component captured during extraction.
-    pub fn push(&mut self, component: KeyComponentRaw) {
+    ///
+    /// # Safety
+    ///
+    /// Callers must guarantee that any borrowed data referenced by
+    /// `component` outlives the `KeyViewRaw`.
+    pub unsafe fn push(&mut self, component: KeyComponentRaw) {
         self.components.push(component);
     }
 
@@ -144,7 +149,12 @@ impl KeyViewRaw {
     }
 
     /// Extend the raw view with additional components.
-    pub fn extend_from_slice(&mut self, components: &[KeyComponentRaw]) {
+    /// Extend the view with borrowed components.
+    ///
+    /// # Safety
+    ///
+    /// Borrowed data inside `components` must outlive the view.
+    pub unsafe fn extend_from_slice(&mut self, components: &[KeyComponentRaw]) {
         self.components.extend_from_slice(components);
     }
 

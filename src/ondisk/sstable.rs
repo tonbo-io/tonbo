@@ -467,7 +467,7 @@ where
         );
 
         if let (Some(min_key), Some(max_key)) = (segment.min_key(), segment.max_key()) {
-            self.staged.update_key_bounds(min_key, max_key);
+            self.staged.update_key_bounds(&min_key, &max_key);
         }
 
         if let (Some(min_ts), Some(max_ts)) = (seg_min_ts, seg_max_ts) {
@@ -734,8 +734,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        inmem::immutable::memtable::{ImmutableMemTable, VersionSlice, bundle_mvcc_sidecar},
-        key::{KeyComponentOwned, KeyOwned},
+        inmem::immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
+        key::{KeyComponentOwned, KeyTsViewRaw, KeyViewRaw},
         mvcc::Timestamp,
         test_util::build_batch,
     };
@@ -753,33 +753,36 @@ mod tests {
         rows: Vec<(String, i32)>,
         commits: Vec<u64>,
         tombstones: Vec<bool>,
-    ) -> ImmutableMemTable<KeyOwned, arrow_array::RecordBatch> {
+    ) -> ImmutableMemTable<arrow_array::RecordBatch> {
         assert_eq!(rows.len(), commits.len());
         assert_eq!(rows.len(), tombstones.len());
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, true),
             Field::new("v", DataType::Int32, true),
         ]));
-        let mut keys: Vec<String> = Vec::with_capacity(rows.len());
         let dyn_rows: Vec<Vec<Option<DynCell>>> = rows
             .into_iter()
-            .map(|(k, v)| {
-                keys.push(k.clone());
-                vec![Some(DynCell::Str(k.into())), Some(DynCell::I32(v))]
-            })
+            .map(|(k, v)| vec![Some(DynCell::Str(k.into())), Some(DynCell::I32(v))])
             .collect();
         let batch = build_batch(schema.clone(), dyn_rows).expect("record batch");
-        let mut index = BTreeMap::new();
-        for (offset, key) in keys.into_iter().enumerate() {
-            index.insert(KeyOwned::from(key), VersionSlice::new(offset as u32, 1));
+        let commit_ts: Vec<Timestamp> = commits.iter().copied().map(Timestamp::new).collect();
+        let (batch, mvcc) =
+            bundle_mvcc_sidecar(batch, commit_ts, tombstones).expect("mvcc columns");
+        let extractor =
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+        let mut view = KeyViewRaw::new();
+        let mut composite = BTreeMap::new();
+        for row in 0..batch.num_rows() {
+            view.clear();
+            extractor
+                .project_view(&batch, row, &mut view)
+                .expect("project view");
+            composite.insert(
+                unsafe { KeyTsViewRaw::new_unchecked(view.clone(), mvcc.commit_ts[row]) },
+                row as u32,
+            );
         }
-        let (batch, mvcc) = bundle_mvcc_sidecar(
-            batch,
-            commits.into_iter().map(Timestamp::new).collect(),
-            tombstones,
-        )
-        .expect("mvcc columns");
-        ImmutableMemTable::new(batch, index, mvcc)
+        ImmutableMemTable::new(batch, composite, mvcc)
     }
 
     fn tokio_block_on<F: std::future::Future>(future: F) -> F::Output {

@@ -7,8 +7,10 @@
 //! where durability requires it.
 mod owned;
 mod raw;
+mod ts;
 mod view;
 
 pub use owned::{KeyComponentOwned, KeyOwned};
 pub use raw::{KeyComponentRaw, KeyViewRaw, SlicePtr};
+pub use ts::{KeyTsOwned, KeyTsViewRaw};
 pub use view::KeyView;

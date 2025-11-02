@@ -290,13 +290,11 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
         WalCommand::TxnAppend {
             provisional_id,
             payload,
-            commit_ts,
         } => encode_txn_append(
             provisional_id,
             &payload.batch,
             &payload.commit_ts_column,
             &payload.tombstone_column,
-            commit_ts,
         ),
         WalCommand::TxnCommit {
             provisional_id,
@@ -333,7 +331,6 @@ fn encode_txn_append(
     batch: &RecordBatch,
     commit_ts_column: &ArrayRef,
     tombstones: &ArrayRef,
-    _commit_ts: Timestamp,
 ) -> WalResult<Vec<Frame>> {
     let wal_batch = append_mvcc_columns(batch, commit_ts_column, tombstones)?;
     let append = encode_txn_append_batch(provisional_id, wal_batch)?;

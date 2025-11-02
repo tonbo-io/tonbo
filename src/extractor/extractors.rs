@@ -180,7 +180,7 @@ impl KeyProjection for Utf8KeyExtractor {
         let data = arr.value_data();
         let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
         out.clear();
-        out.push(KeyComponentRaw::Utf8(ptr));
+        unsafe { out.push(KeyComponentRaw::Utf8(ptr)) };
         Ok(())
     }
 }
@@ -230,7 +230,7 @@ impl KeyProjection for BinaryKeyExtractor {
         let data = arr.value_data();
         let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
         out.clear();
-        out.push(KeyComponentRaw::Binary(ptr));
+        unsafe { out.push(KeyComponentRaw::Binary(ptr)) };
         Ok(())
     }
 }
@@ -275,7 +275,7 @@ macro_rules! impl_prim_projection {
                     .expect("schema validated");
                 let value = arr.value(row);
                 out.clear();
-                out.push(($component)(value));
+                unsafe { out.push(($component)(value)) };
                 Ok(())
             }
         }
@@ -347,7 +347,7 @@ impl KeyProjection for CompositeProjection {
             part.project_view(batch, row, &mut tmp)?;
             components.extend_from_slice(tmp.as_slice());
         }
-        out.push(KeyComponentRaw::Struct(components));
+        unsafe { out.push(KeyComponentRaw::Struct(components)) };
         Ok(())
     }
 }

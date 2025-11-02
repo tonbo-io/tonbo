@@ -227,8 +227,6 @@ pub enum WalCommand {
         provisional_id: u64,
         /// Ingest payload containing the data and MVCC columns.
         payload: DynBatchPayload,
-        /// Commit timestamp assigned to these rows (should match the eventual commit).
-        commit_ts: Timestamp,
     },
     /// Commit an explicit transaction.
     TxnCommit {
@@ -627,7 +625,6 @@ where
         let command = WalCommand::TxnAppend {
             provisional_id,
             payload,
-            commit_ts,
         };
         self.enqueue_command(command, provisional_id).await
     }

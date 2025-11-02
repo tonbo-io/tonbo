@@ -7,7 +7,6 @@
 mod key_size;
 pub(crate) mod memtable;
 mod metrics;
-mod pinned;
 
 pub(crate) use key_size::KeyHeapSize;
 pub(crate) use memtable::DynMem;

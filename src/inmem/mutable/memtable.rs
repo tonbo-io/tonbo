@@ -1,42 +1,37 @@
 use std::{
-    collections::{
-        BTreeMap,
-        btree_map::{Entry as BTreeEntry, Range as BTreeRange},
-    },
+    collections::{BTreeMap, btree_map::Range as BTreeRange},
     ops::Bound,
-    pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
-use arrow_array::{RecordBatch, new_null_array};
+use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 
-use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics, pinned::PinnedBatch};
+use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
 use crate::{
     extractor::KeyProjection,
     inmem::{
-        immutable::memtable::{ImmutableMemTable, VersionSlice, bundle_mvcc_sidecar},
+        immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
         policy::{MemStats, StatsProvider},
     },
-    key::{KeyOwned, KeyViewRaw},
+    key::{KeyOwned, KeyTsViewRaw, KeyViewRaw},
     mvcc::Timestamp,
     scan::{KeyRange, RangeSet},
 };
 
 #[derive(Clone, Debug)]
-struct VersionLoc {
+struct BatchRowLoc {
     batch_idx: usize,
     row_idx: usize,
-    commit_ts: Timestamp,
     tombstone: bool,
 }
 
-impl VersionLoc {
-    fn new(batch_idx: usize, row_idx: usize, commit_ts: Timestamp, tombstone: bool) -> Self {
+impl BatchRowLoc {
+    fn new(batch_idx: usize, row_idx: usize, tombstone: bool) -> Self {
         Self {
             batch_idx,
             row_idx,
-            commit_ts,
             tombstone,
         }
     }
@@ -47,10 +42,10 @@ impl VersionLoc {
 /// - Accepts `RecordBatch` inserts; each batch is stored as a sealed chunk.
 /// - Maintains per-key version chains ordered by commit timestamp.
 pub struct DynMem {
-    /// Version chains per key (oldest..newest).
-    versions: BTreeMap<KeyViewRaw, Vec<VersionLoc>>,
+    /// Ordered versions keyed by `(key, commit_ts)` (ts desc per key).
+    versions: BTreeMap<KeyTsViewRaw, BatchRowLoc>,
     /// Attached batches held until compaction.
-    batches_attached: Vec<Pin<Box<PinnedBatch>>>,
+    batches_attached: Vec<Arc<RecordBatch>>,
     metrics: MutableMemTableMetrics,
 }
 
@@ -89,39 +84,56 @@ impl DynMem {
         F: FnMut(usize) -> bool,
     {
         extractor.validate_schema(&batch.schema())?;
-        let pinned = PinnedBatch::new(batch);
-        let batch_ref = pinned.batch();
+        let batch_arc = Arc::new(batch);
+        let batch_ref = batch_arc.as_ref();
         let batch_id = self.batches_attached.len();
         for row_idx in 0..batch_ref.num_rows() {
             let mut raw = KeyViewRaw::new();
             extractor.project_view(batch_ref, row_idx, &mut raw)?;
             let key_size = raw.key_heap_size();
+            let has_existing = self
+                .versions
+                .range(
+                    unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }
+                        ..=unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN) },
+                )
+                .next()
+                .is_some();
             self.metrics.inserts += 1;
-
-            let version_loc = VersionLoc::new(batch_id, row_idx, commit_ts, tombstone_at(row_idx));
-
-            match self.versions.entry(raw) {
-                BTreeEntry::Vacant(v) => {
-                    self.metrics.entries += 1;
-                    self.metrics.approx_key_bytes += key_size;
-                    v.insert(vec![version_loc]);
-                }
-                BTreeEntry::Occupied(mut o) => {
-                    self.metrics.replaces += 1;
-                    o.get_mut().push(version_loc);
-                }
+            if has_existing {
+                self.metrics.replaces += 1;
+            } else {
+                self.metrics.entries += 1;
+                self.metrics.approx_key_bytes += key_size;
             }
+
+            let version_loc = BatchRowLoc::new(batch_id, row_idx, tombstone_at(row_idx));
+            let composite = unsafe { KeyTsViewRaw::new_unchecked(raw, commit_ts) };
+            self.versions.insert(composite, version_loc);
         }
-        self.batches_attached.push(pinned);
+        self.batches_attached.push(batch_arc);
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
         let raw = KeyViewRaw::from_owned(key);
-        self.versions
-            .get(&raw)
-            .map(|chain| chain.iter().map(|v| (v.commit_ts, v.tombstone)).collect())
+        let mut out = Vec::new();
+        for (composite, loc) in self.versions.range(
+            unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }
+                ..=unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN) },
+        ) {
+            if composite.key() != &raw {
+                break;
+            }
+            out.push((composite.timestamp(), loc.tombstone));
+        }
+        if out.is_empty() {
+            None
+        } else {
+            out.reverse();
+            Some(out)
+        }
     }
 
     /// Scan dynamic rows in key order returning owned `Vec<Option<DynCell>>` for each key's
@@ -153,19 +165,15 @@ impl DynMem {
     pub(crate) fn into_attached_batches(self) -> Vec<RecordBatch> {
         self.batches_attached
             .into_iter()
-            .map(|pinned| {
-                let batch = Pin::as_ref(&pinned).batch().clone();
-                drop(pinned);
-                batch
-            })
+            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|rc| rc.as_ref().clone()))
             .collect()
     }
 
     pub(crate) fn seal_into_immutable(
         &mut self,
         schema: &SchemaRef,
-    ) -> Result<Option<ImmutableMemTable<KeyOwned, RecordBatch>>, crate::extractor::KeyExtractError>
-    {
+        extractor: &dyn KeyProjection,
+    ) -> Result<Option<ImmutableMemTable<RecordBatch>>, crate::extractor::KeyExtractError> {
         if self.versions.is_empty() {
             return Ok(None);
         }
@@ -175,44 +183,26 @@ impl DynMem {
         let mut slices = Vec::new();
         let mut commit_ts = Vec::new();
         let mut tombstone = Vec::new();
-        let mut index: BTreeMap<KeyOwned, VersionSlice> = BTreeMap::new();
-        let mut next_key: u32 = 0;
-        let mut null_row_batch: Option<RecordBatch> = None;
 
         let versions = std::mem::take(&mut self.versions);
-        for (key, chain) in versions.into_iter() {
-            if chain.is_empty() {
-                continue;
-            }
-            let start = next_key;
-            let mut chain_rows = 0u32;
-            // Versions are appended to each chain in commit order (oldest → newest) as we ingest
-            // into the mutable table. By iterating in reverse we emit newest → oldest so the
-            // immutable run stores rows per key in descending commit timestamp order.
-            for version in chain.iter().rev() {
-                let row_batch = if version.tombstone {
-                    if null_row_batch.is_none() {
-                        let arrays = schema
-                            .fields()
-                            .iter()
-                            .map(|f| new_null_array(f.data_type(), 1))
-                            .collect::<Vec<_>>();
-                        null_row_batch = Some(RecordBatch::try_new(schema.clone(), arrays)?);
-                    }
-                    null_row_batch.as_ref().unwrap().clone()
-                } else {
-                    let batch_pin = &self.batches_attached[version.batch_idx];
-                    let batch = batch_pin.as_ref().get_ref().batch();
-                    batch.slice(version.row_idx, 1)
-                };
-                slices.push(row_batch);
-                commit_ts.push(version.commit_ts);
-                tombstone.push(version.tombstone);
-                chain_rows += 1;
-                next_key += 1;
-            }
-            let owned_key = key.to_owned();
-            index.insert(owned_key, VersionSlice::new(start, chain_rows));
+        let mut entries: Vec<(KeyOwned, Timestamp, BatchRowLoc)> = versions
+            .into_iter()
+            .map(|(view, loc)| (view.key().to_owned(), view.timestamp(), loc))
+            .collect();
+        entries.sort_by(
+            |(key_a, ts_a, _), (key_b, ts_b, _)| match key_a.cmp(key_b) {
+                std::cmp::Ordering::Equal => ts_b.cmp(ts_a),
+                other => other,
+            },
+        );
+
+        for (_key, commit, version) in entries.into_iter() {
+            let batch_arc = &self.batches_attached[version.batch_idx];
+            let batch = batch_arc.as_ref();
+            let row_batch = batch.slice(version.row_idx, 1);
+            slices.push(row_batch);
+            commit_ts.push(commit);
+            tombstone.push(version.tombstone);
         }
 
         self.batches_attached.clear();
@@ -223,7 +213,19 @@ impl DynMem {
 
         let batch = concat_batches(schema, &slices)?;
         let (batch, mvcc) = bundle_mvcc_sidecar(batch, commit_ts, tombstone)?;
-        Ok(Some(ImmutableMemTable::new(batch, index, mvcc)))
+
+        let mut view = KeyViewRaw::new();
+        let mut composite_index: BTreeMap<KeyTsViewRaw, u32> = BTreeMap::new();
+        for row in 0..batch.num_rows() {
+            view.clear();
+            extractor.project_view(&batch, row, &mut view)?;
+            composite_index.insert(
+                unsafe { KeyTsViewRaw::new_unchecked(view.clone(), mvcc.commit_ts[row]) },
+                row as u32,
+            );
+        }
+
+        Ok(Some(ImmutableMemTable::new(batch, composite_index, mvcc)))
     }
 }
 
@@ -260,23 +262,25 @@ impl StatsProvider for DynMem {
 /// Iterator over dynamic rows by key ranges, materializing from `RecordBatch`es.
 struct ConvertedRanges {
     owned: RangeSet<KeyOwned>,
-    raw: RangeSet<KeyViewRaw>,
+    composite: RangeSet<KeyTsViewRaw>,
 }
 
 pub(crate) struct DynRowScan<'t> {
-    versions: &'t BTreeMap<KeyViewRaw, Vec<VersionLoc>>,
-    batches: &'t [Pin<Box<PinnedBatch>>],
+    versions: &'t BTreeMap<KeyTsViewRaw, BatchRowLoc>,
+    batches: &'t [Arc<RecordBatch>],
     _owned_ranges: RangeSet<KeyOwned>,
-    raw_ranges: RangeSet<KeyViewRaw>,
+    composite_ranges: RangeSet<KeyTsViewRaw>,
     range_idx: usize,
-    cursor: Option<BTreeRange<'t, KeyViewRaw, Vec<VersionLoc>>>,
+    cursor: Option<BTreeRange<'t, KeyTsViewRaw, BatchRowLoc>>,
     read_ts: Timestamp,
+    current_key: Option<KeyViewRaw>,
+    emitted_for_key: bool,
 }
 
 impl<'t> DynRowScan<'t> {
     fn new(
-        versions: &'t BTreeMap<KeyViewRaw, Vec<VersionLoc>>,
-        batches: &'t [Pin<Box<PinnedBatch>>],
+        versions: &'t BTreeMap<KeyTsViewRaw, BatchRowLoc>,
+        batches: &'t [Arc<RecordBatch>],
         converted: ConvertedRanges,
         read_ts: Timestamp,
     ) -> Self {
@@ -284,10 +288,12 @@ impl<'t> DynRowScan<'t> {
             versions,
             batches,
             _owned_ranges: converted.owned,
-            raw_ranges: converted.raw,
+            composite_ranges: converted.composite,
             range_idx: 0,
             cursor: None,
             read_ts,
+            current_key: None,
+            emitted_for_key: false,
         }
     }
 }
@@ -297,25 +303,44 @@ impl<'t> Iterator for DynRowScan<'t> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
-                if self.range_idx >= self.raw_ranges.as_slice().len() {
+                if self.range_idx >= self.composite_ranges.as_slice().len() {
                     return None;
                 }
-                let (start, end) = self.raw_ranges.as_slice()[self.range_idx].as_borrowed_bounds();
+                let (start, end) =
+                    self.composite_ranges.as_slice()[self.range_idx].as_borrowed_bounds();
                 self.cursor = Some(self.versions.range((start, end)));
                 self.range_idx += 1;
+                self.current_key = None;
+                self.emitted_for_key = false;
             }
             if let Some(cur) = &mut self.cursor {
-                if let Some((_k, chain)) = cur.next() {
-                    let candidate = chain
-                        .iter()
-                        .rev()
-                        .find(|v| v.commit_ts <= self.read_ts && !v.tombstone);
-                    let Some(version) = candidate else {
+                while let Some((composite, loc)) = cur.next() {
+                    let key_raw = composite.key();
+                    if self
+                        .current_key
+                        .as_ref()
+                        .map(|k| k == key_raw)
+                        .unwrap_or(false)
+                    {
+                        if self.emitted_for_key {
+                            continue;
+                        }
+                    } else {
+                        self.current_key = Some(key_raw.clone());
+                        self.emitted_for_key = false;
+                    }
+
+                    if composite.timestamp() > self.read_ts {
                         continue;
-                    };
-                    let batch_pin = &self.batches[version.batch_idx];
-                    let batch = batch_pin.as_ref().get_ref().batch();
-                    let row = crate::extractor::row_from_batch(batch, version.row_idx).unwrap();
+                    }
+
+                    if loc.tombstone {
+                        continue;
+                    }
+
+                    let batch = self.batches[loc.batch_idx].as_ref();
+                    let row = crate::extractor::row_from_batch(batch, loc.row_idx).unwrap();
+                    self.emitted_for_key = true;
                     return Some(row);
                 }
                 self.cursor = None;
@@ -328,26 +353,42 @@ impl<'t> Iterator for DynRowScan<'t> {
 fn convert_ranges(ranges: &RangeSet<KeyOwned>) -> ConvertedRanges {
     let owned = ranges.clone();
 
-    let raw_ranges: Vec<KeyRange<KeyViewRaw>> = owned
+    let composite_ranges: Vec<KeyRange<KeyTsViewRaw>> = owned
         .as_slice()
         .iter()
         .map(|range| {
             KeyRange::new(
-                convert_bound_raw(&range.start),
-                convert_bound_raw(&range.end),
+                convert_lower_bound(&range.start),
+                convert_upper_bound(&range.end),
             )
         })
         .collect();
-    let raw = RangeSet::from_ranges(raw_ranges);
+    let composite = RangeSet::from_ranges(composite_ranges);
 
-    ConvertedRanges { owned, raw }
+    ConvertedRanges { owned, composite }
 }
 
-fn convert_bound_raw(bound: &Bound<KeyOwned>) -> Bound<KeyViewRaw> {
+fn convert_lower_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
     match bound {
         Bound::Unbounded => Bound::Unbounded,
-        Bound::Included(key) => Bound::Included(KeyViewRaw::from_owned(key)),
-        Bound::Excluded(key) => Bound::Excluded(KeyViewRaw::from_owned(key)),
+        Bound::Included(key) => {
+            Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MAX))
+        }
+        Bound::Excluded(key) => {
+            Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MIN))
+        }
+    }
+}
+
+fn convert_upper_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
+    match bound {
+        Bound::Unbounded => Bound::Unbounded,
+        Bound::Included(key) => {
+            Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MIN))
+        }
+        Bound::Excluded(key) => {
+            Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MAX))
+        }
     }
 }
 
@@ -520,7 +561,7 @@ mod tests {
             .expect("insert");
 
         let segment = layout
-            .seal_into_immutable(&schema)
+            .seal_into_immutable(&schema, extractor.as_ref())
             .expect("seal ok")
             .expect("segment");
         assert_eq!(segment.len(), 4);
@@ -600,15 +641,14 @@ mod tests {
                 .expect("insert");
         };
 
-        // NOTE: tombstoned versions are materialised as all-null rows during sealing. That matches
-        // the current immutable representation but raises an open question: do we really expect
-        // user schemas to allow nulls solely so tombstones can be encoded this way?
+        // NOTE: tombstoned versions retain their original key/value payloads. They are filtered
+        // at read time via the `tombstone` flag rather than by zeroing the row.
         insert(&mut layout, 1, 10, false);
         insert(&mut layout, 2, 20, true);
         insert(&mut layout, 3, 30, false);
 
         let segment = layout
-            .seal_into_immutable(&schema)
+            .seal_into_immutable(&schema, extractor.as_ref())
             .expect("sealed")
             .expect("segment");
 
