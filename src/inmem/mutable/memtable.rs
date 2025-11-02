@@ -13,13 +13,13 @@ use arrow_schema::SchemaRef;
 
 use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics, pinned::PinnedBatch};
 use crate::{
+    extractor::KeyProjection,
     inmem::{
         immutable::memtable::{ImmutableMemTable, VersionSlice, bundle_mvcc_sidecar},
         policy::{MemStats, StatsProvider},
     },
     key::{KeyOwned, KeyViewRaw},
     mvcc::Timestamp,
-    record::extract::DynKeyExtractor,
     scan::{KeyRange, RangeSet},
 };
 
@@ -70,21 +70,21 @@ impl DynMem {
     /// Insert a dynamic batch by indexing each row's key.
     pub(crate) fn insert_batch(
         &mut self,
-        extractor: &dyn DynKeyExtractor,
+        extractor: &dyn KeyProjection,
         batch: RecordBatch,
         commit_ts: Timestamp,
-    ) -> Result<(), crate::record::extract::KeyExtractError> {
+    ) -> Result<(), crate::extractor::KeyExtractError> {
         self.insert_batch_with_ts(extractor, batch, commit_ts, |_| false)
     }
 
     /// Insert a batch using supplied commit timestamps (replay path).
     pub(crate) fn insert_batch_with_ts<F>(
         &mut self,
-        extractor: &dyn DynKeyExtractor,
+        extractor: &dyn KeyProjection,
         batch: RecordBatch,
         commit_ts: Timestamp,
         mut tombstone_at: F,
-    ) -> Result<(), crate::record::extract::KeyExtractError>
+    ) -> Result<(), crate::extractor::KeyExtractError>
     where
         F: FnMut(usize) -> bool,
     {
@@ -94,7 +94,7 @@ impl DynMem {
         let batch_id = self.batches_attached.len();
         for row_idx in 0..batch_ref.num_rows() {
             let mut raw = KeyViewRaw::new();
-            extractor.key_view_at(batch_ref, row_idx, &mut raw)?;
+            extractor.project_view(batch_ref, row_idx, &mut raw)?;
             let key_size = raw.key_heap_size();
             self.metrics.inserts += 1;
 
@@ -164,10 +164,8 @@ impl DynMem {
     pub(crate) fn seal_into_immutable(
         &mut self,
         schema: &SchemaRef,
-    ) -> Result<
-        Option<ImmutableMemTable<KeyOwned, RecordBatch>>,
-        crate::record::extract::KeyExtractError,
-    > {
+    ) -> Result<Option<ImmutableMemTable<KeyOwned, RecordBatch>>, crate::extractor::KeyExtractError>
+    {
         if self.versions.is_empty() {
             return Ok(None);
         }
@@ -317,8 +315,7 @@ impl<'t> Iterator for DynRowScan<'t> {
                     };
                     let batch_pin = &self.batches[version.batch_idx];
                     let batch = batch_pin.as_ref().get_ref().batch();
-                    let row =
-                        crate::record::extract::row_from_batch(batch, version.row_idx).unwrap();
+                    let row = crate::extractor::row_from_batch(batch, version.row_idx).unwrap();
                     return Some(row);
                 }
                 self.cursor = None;
@@ -377,7 +374,7 @@ mod tests {
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
         m.insert_batch(extractor.as_ref(), batch, Timestamp::MIN)
             .expect("insert");
 
@@ -417,7 +414,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
 
         // First commit at ts=10
         let rows_v1 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
@@ -483,7 +480,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
 
         // four versions for the same key
         let batch1: RecordBatch = build_batch(
@@ -560,16 +557,13 @@ mod tests {
 
         let batch = segment.storage();
         let row_after_first =
-            crate::record::extract::row_from_batch(batch, visible_after_first[0] as usize)
-                .expect("row");
+            crate::extractor::row_from_batch(batch, visible_after_first[0] as usize).expect("row");
         let row_after_second =
-            crate::record::extract::row_from_batch(batch, visible_after_second[0] as usize)
-                .expect("row");
+            crate::extractor::row_from_batch(batch, visible_after_second[0] as usize).expect("row");
         let row_after_third =
-            crate::record::extract::row_from_batch(batch, visible_after_third[0] as usize)
-                .expect("row");
+            crate::extractor::row_from_batch(batch, visible_after_third[0] as usize).expect("row");
         let row_latest =
-            crate::record::extract::row_from_batch(batch, visible_latest[0] as usize).expect("row");
+            crate::extractor::row_from_batch(batch, visible_latest[0] as usize).expect("row");
 
         let cell_value = |row: &[Option<DynCell>]| match &row[1] {
             Some(DynCell::I32(v)) => *v,
@@ -590,7 +584,7 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
 
         let insert = |layout: &mut DynMem, val: i32, ts: u64, tomb: bool| {
             let batch: RecordBatch = build_batch(
@@ -638,7 +632,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
 
         let batch1: RecordBatch = build_batch(
             schema.clone(),

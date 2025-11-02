@@ -14,7 +14,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::inmem::immutable::keys::{BinKey, StrKey};
 use super::raw::{
     KeyViewRaw, component_from_owned, components_cmp, components_equal, hash_component,
 };
@@ -146,20 +145,6 @@ impl KeyOwned {
     }
 }
 
-impl From<StrKey> for KeyOwned {
-    fn from(value: StrKey) -> Self {
-        let arc = Arc::new(value.as_str().to_owned());
-        KeyOwned::new(KeyComponentOwned::Utf8(arc))
-    }
-}
-
-impl From<BinKey> for KeyOwned {
-    fn from(value: BinKey) -> Self {
-        let arc = Arc::new(value.as_bytes().to_vec());
-        KeyOwned::new(KeyComponentOwned::Binary(arc))
-    }
-}
-
 impl From<&str> for KeyOwned {
     fn from(value: &str) -> Self {
         KeyOwned::new(KeyComponentOwned::Utf8(Arc::new(value.to_owned())))
@@ -235,8 +220,9 @@ impl Hash for KeyOwned {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::hash_map::DefaultHasher;
+
+    use super::*;
     use crate::key::raw::{KeyComponentRaw, KeyViewRaw};
 
     fn hash<T: Hash>(value: &T) -> u64 {

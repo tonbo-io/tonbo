@@ -11,10 +11,10 @@ use fusio::executor::{Executor, Timer};
 
 use crate::{
     db::DB,
+    extractor::{KeyExtractError, KeyProjection},
     inmem::mutable::{DynMem, MutableLayout},
     key::KeyOwned,
     mvcc::Timestamp,
-    record::extract::{DynKeyExtractor, KeyExtractError},
     wal::frame::WalEvent,
 };
 
@@ -65,7 +65,7 @@ pub trait Mode {
 /// Dynamic runtime-schema mode backed by Arrow `RecordBatch` values.
 pub struct DynMode {
     pub(crate) schema: SchemaRef,
-    pub(crate) extractor: Box<dyn DynKeyExtractor>,
+    pub(crate) extractor: Box<dyn KeyProjection>,
 }
 
 /// Configuration bundle for constructing a `DynMode`.
@@ -73,14 +73,14 @@ pub struct DynModeConfig {
     /// Arrow schema describing the dynamic table.
     pub schema: SchemaRef,
     /// Extractor used to derive logical keys from dynamic batches.
-    pub extractor: Box<dyn DynKeyExtractor>,
+    pub extractor: Box<dyn KeyProjection>,
 }
 
 impl DynModeConfig {
     /// Validate the extractor against `schema` and construct the config bundle.
     pub fn new(
         schema: SchemaRef,
-        extractor: Box<dyn DynKeyExtractor>,
+        extractor: Box<dyn KeyProjection>,
     ) -> Result<Self, KeyExtractError> {
         extractor.validate_schema(&schema)?;
         Ok(Self { schema, extractor })

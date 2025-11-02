@@ -6,11 +6,11 @@
 //! The `Mode` trait and surrounding structure keep the door open for
 //! re-introducing compile-time typed dispatch in the future.
 
+pub mod extractor;
 mod inmem;
 /// Zero-copy key projection scaffolding and owned key wrapper.
 pub mod key;
 pub mod mode;
-pub mod record;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
 pub use crate::db::DB;

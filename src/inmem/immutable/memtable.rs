@@ -6,9 +6,9 @@ use std::collections::{
 use arrow_array::RecordBatch;
 
 use crate::{
+    extractor::{KeyExtractError, KeyProjection, projection_for_field},
     key::KeyOwned,
     mvcc::Timestamp,
-    record::extract::{DynKeyExtractor, KeyExtractError, dyn_extractor_for_field},
     scan::{KeyRange, RangeSet},
 };
 
@@ -100,13 +100,13 @@ impl VersionSlice {
 #[allow(unused)]
 pub(crate) fn segment_from_batch_with_extractor(
     batch: RecordBatch,
-    extractor: &dyn DynKeyExtractor,
+    extractor: &dyn KeyProjection,
 ) -> Result<ImmutableMemTable<KeyOwned, RecordBatch>, KeyExtractError> {
     extractor.validate_schema(&batch.schema())?;
     let len = batch.num_rows();
     let mut index: BTreeMap<KeyOwned, VersionSlice> = BTreeMap::new();
     for row in 0..len {
-        let k = extractor.key_at(&batch, row)?;
+        let k = extractor.project_owned(&batch, row)?;
         index.insert(k, VersionSlice::new(row as u32, 1));
     }
     let commit_ts = vec![Timestamp::MIN; len];
@@ -128,7 +128,7 @@ pub(crate) fn segment_from_batch_with_key_col(
         return Err(KeyExtractError::ColumnOutOfBounds(key_col, fields.len()));
     }
     let dt = fields[key_col].data_type();
-    let extractor = dyn_extractor_for_field(key_col, dt)?;
+    let extractor = projection_for_field(key_col, dt)?;
     segment_from_batch_with_extractor(batch, extractor.as_ref())
 }
 
@@ -442,7 +442,7 @@ mod tests {
 
         let batch = seg.storage();
         let value_at = |idx: u32| {
-            let row = crate::record::extract::row_from_batch(batch, idx as usize).expect("row");
+            let row = crate::extractor::row_from_batch(batch, idx as usize).expect("row");
             match row[1].as_ref() {
                 Some(DynCell::I32(v)) => *v,
                 _ => panic!("unexpected cell"),
@@ -498,8 +498,7 @@ mod tests {
         assert_eq!(visible, vec![2]);
 
         let batch = seg.storage();
-        let cells =
-            crate::record::extract::row_from_batch(batch, visible[0] as usize).expect("row");
+        let cells = crate::extractor::row_from_batch(batch, visible[0] as usize).expect("row");
         let value = match cells[1].as_ref() {
             Some(DynCell::I32(v)) => *v,
             _ => panic!("unexpected cell"),

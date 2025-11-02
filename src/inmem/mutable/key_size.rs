@@ -1,25 +1,10 @@
-use crate::{
-    inmem::immutable::keys::{BinKey, StrKey},
-    key::{KeyComponentOwned, KeyOwned, KeyViewRaw},
-};
+use crate::key::{KeyComponentOwned, KeyOwned, KeyViewRaw};
 
 /// Estimate heap usage of key types used in the mutable memtable.
 /// For primitives and bools returns 0; for buffer-backed keys returns the byte length;
 /// for tuples returns the sum of parts.
 pub trait KeyHeapSize {
     fn key_heap_size(&self) -> usize;
-}
-
-impl KeyHeapSize for StrKey {
-    fn key_heap_size(&self) -> usize {
-        self.as_bytes().len()
-    }
-}
-
-impl KeyHeapSize for BinKey {
-    fn key_heap_size(&self) -> usize {
-        self.as_bytes().len()
-    }
 }
 
 macro_rules! impl_key_size_prim {
