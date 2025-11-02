@@ -1,14 +1,23 @@
-use crate::key::{KeyComponentOwned, KeyOwned, KeyViewRaw};
+use super::{KeyComponentOwned, KeyOwned, KeyViewRaw};
 
-/// Estimate heap usage of key types used in the mutable memtable.
-/// For primitives and bools returns 0; for buffer-backed keys returns the byte length;
-/// for tuples returns the sum of parts.
+/// Estimate heap usage of key types used across memtables and indexes.
+/// Primitives and booleans report zero; buffer-backed components return their
+/// byte length; tuples sum their parts.
 pub trait KeyHeapSize {
+    /// Approximate heap bytes consumed by the key representation.
     fn key_heap_size(&self) -> usize;
 }
 
 macro_rules! impl_key_size_prim {
-    ($($t:ty),* $(,)?) => { $( impl KeyHeapSize for $t { fn key_heap_size(&self) -> usize { 0 } } )* };
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl KeyHeapSize for $t {
+                fn key_heap_size(&self) -> usize {
+                    0
+                }
+            }
+        )*
+    };
 }
 
 impl_key_size_prim!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, bool);

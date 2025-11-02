@@ -4,11 +4,10 @@
 //! last-writer-wins key index. Today only the dynamic runtime-schema layout
 //! (`DynMem`) is active; new typed layouts can slot in beside it later.
 
-mod key_size;
 pub(crate) mod memtable;
 mod metrics;
 
-pub(crate) use key_size::KeyHeapSize;
+pub(crate) use crate::key::KeyHeapSize;
 pub(crate) use memtable::DynMem;
 pub(crate) use metrics::MutableMemTableMetrics;
 
