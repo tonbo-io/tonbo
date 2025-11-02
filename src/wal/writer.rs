@@ -880,7 +880,48 @@ mod tests {
         RecordBatch::try_new(schema, vec![data]).expect("valid batch")
     }
 
-    fn sample_command(batch: &RecordBatch, commit_ts: u64, provisional_id: u64) -> WalCommand {
+    fn queue_autocommit(
+        sender: &mut mpsc::Sender<WriterMsg>,
+        queue_depth: &Arc<AtomicUsize>,
+        seq_append: u64,
+        seq_commit: u64,
+        commands: (WalCommand, WalCommand),
+    ) -> (
+        oneshot::Receiver<WalResult<WalAck>>,
+        oneshot::Receiver<WalResult<WalAck>>,
+    ) {
+        let (append_command, commit_command) = commands;
+
+        let (append_ack_tx, append_ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                seq_append,
+                append_command,
+                Instant::now(),
+                append_ack_tx,
+            ))
+            .expect("append send");
+
+        let (commit_ack_tx, commit_ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                seq_commit,
+                commit_command,
+                Instant::now(),
+                commit_ack_tx,
+            ))
+            .expect("commit send");
+
+        (append_ack_rx, commit_ack_rx)
+    }
+
+    fn sample_commands(
+        batch: &RecordBatch,
+        commit_ts: u64,
+        provisional_id: u64,
+    ) -> (WalCommand, WalCommand) {
         let commit_array: ArrayRef =
             Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()])) as ArrayRef;
         let tombstone_array: ArrayRef =
@@ -890,11 +931,15 @@ mod tests {
             commit_ts_column: commit_array,
             tombstone_column: tombstone_array,
         };
-        WalCommand::Autocommit {
+        let append = WalCommand::TxnAppend {
             provisional_id,
             payload,
+        };
+        let commit = WalCommand::TxnCommit {
+            provisional_id,
             commit_ts: Timestamp::new(commit_ts),
-        }
+        };
+        (append, commit)
     }
 
     #[test]
@@ -940,24 +985,22 @@ mod tests {
 
         let base = sample_batch();
         let payload_seq = 777;
-        let command = sample_command(&base, 42, payload_seq);
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        sender
-            .try_send(WriterMsg::queued(
-                payload_seq,
-                command,
-                Instant::now(),
-                ack_tx,
-            ))
-            .expect("send");
+        let (append_ack_rx, commit_ack_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            payload_seq,
+            payload_seq + 1,
+            sample_commands(&base, 42, payload_seq),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_ack_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_ack_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -1020,19 +1063,22 @@ mod tests {
             .expect("spawn writer");
 
         let seq1 = 42;
-        let (ack1_tx, ack1_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command1 = sample_command(&sample_batch(), 1, seq1);
-        sender
-            .try_send(WriterMsg::queued(seq1, command1, Instant::now(), ack1_tx))
-            .expect("first send");
+        let (append_rx1, commit_rx1) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            seq1,
+            seq1 + 1,
+            sample_commands(&sample_batch(), 1, seq1),
+        );
 
         let ack1_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack1_cell_clone = Rc::clone(&ack1_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack1_rx.await.expect("oneshot1");
-                *ack1_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx1.await.expect("append ack1");
+                append_ack.expect("append ack1 ok");
+                let commit_ack = commit_rx1.await.expect("commit ack1");
+                *ack1_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack1");
 
@@ -1046,24 +1092,22 @@ mod tests {
         assert_eq!(ack1.seq, frame::INITIAL_FRAME_SEQ + 1);
         assert_eq!(queue_depth.load(Ordering::SeqCst), 0);
 
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let (ack2_tx, ack2_rx) = oneshot::channel();
-        let command2 = sample_command(&sample_batch(), 2, seq1 + 1);
-        sender
-            .try_send(WriterMsg::queued(
-                seq1 + 1,
-                command2,
-                Instant::now(),
-                ack2_tx,
-            ))
-            .expect("second send");
+        let (append_rx2, commit_rx2) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            seq1 + 2,
+            seq1 + 3,
+            sample_commands(&sample_batch(), 2, seq1 + 2),
+        );
 
         let ack2_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack2_cell_clone = Rc::clone(&ack2_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack2_rx.await.expect("oneshot2");
-                *ack2_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx2.await.expect("append ack2");
+                append_ack.expect("append ack2 ok");
+                let commit_ack = commit_rx2.await.expect("commit ack2");
+                *ack2_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack2");
 
@@ -1127,19 +1171,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 11, 99);
-        sender
-            .try_send(WriterMsg::queued(99, command, Instant::now(), ack_tx))
-            .expect("send");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            99,
+            100,
+            sample_commands(&sample_batch(), 11, 99),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -1202,19 +1249,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 21, 7);
-        sender
-            .try_send(WriterMsg::queued(7, command, Instant::now(), ack_tx))
-            .expect("send");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            7,
+            8,
+            sample_commands(&sample_batch(), 21, 7),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -1279,19 +1329,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 55, 17);
-        sender
-            .try_send(WriterMsg::queued(17, command, Instant::now(), ack_tx))
-            .expect("send payload");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            17,
+            18,
+            sample_commands(&sample_batch(), 55, 17),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("ack oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -1389,19 +1442,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 90, 31);
-        sender
-            .try_send(WriterMsg::queued(31, command, Instant::now(), ack_tx))
-            .expect("send payload");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            31,
+            32,
+            sample_commands(&sample_batch(), 90, 31),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("ack oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack listener");
 
@@ -1476,20 +1532,23 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let mut enqueue_payload = |seq: u64, commit_ts: u64| {
-            let (ack_tx, ack_rx) = oneshot::channel();
-            queue_depth.fetch_add(1, Ordering::SeqCst);
-            let command = sample_command(&sample_batch(), commit_ts, seq);
-            sender
-                .try_send(WriterMsg::queued(seq, command, Instant::now(), ack_tx))
-                .expect("send payload");
+        let mut enqueue_payload = |seq_base: u64, commit_ts: u64| {
+            let (append_rx, commit_rx) = queue_autocommit(
+                &mut sender,
+                &queue_depth,
+                seq_base,
+                seq_base + 1,
+                sample_commands(&sample_batch(), commit_ts, seq_base),
+            );
 
             let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
             let ack_cell_clone = Rc::clone(&ack_cell);
             spawner
                 .spawn_local(async move {
-                    let ack = ack_rx.await.expect("oneshot ack");
-                    *ack_cell_clone.borrow_mut() = Some(ack);
+                    let append_ack = append_rx.await.expect("append ack");
+                    append_ack.expect("append ack ok");
+                    let commit_ack = commit_rx.await.expect("commit ack");
+                    *ack_cell_clone.borrow_mut() = Some(commit_ack);
                 })
                 .expect("spawn ack listener");
 
@@ -1497,7 +1556,7 @@ mod tests {
         };
 
         let ack1_cell = enqueue_payload(10, 1);
-        let ack2_cell = enqueue_payload(11, 2);
+        let ack2_cell = enqueue_payload(12, 2);
 
         sender.close_channel();
         pool.run();
@@ -1528,7 +1587,7 @@ mod tests {
             segments[0]
                 .path
                 .as_ref()
-                .ends_with("wal-00000000000000000002.tonwal")
+                .ends_with("wal-00000000000000000004.tonwal")
         );
     }
 }

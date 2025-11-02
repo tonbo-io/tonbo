@@ -207,15 +207,6 @@ impl DynBatchPayload {
 /// Logical commands accepted by the WAL writer queue.
 #[derive(Debug, Clone)]
 pub enum WalCommand {
-    /// Autocommit ingest (legacy path): append + commit in a single submission.
-    Autocommit {
-        /// Provisional identifier used for WAL frames.
-        provisional_id: u64,
-        /// Ingest payload containing the data and MVCC columns.
-        payload: DynBatchPayload,
-        /// Commit timestamp captured at enqueue.
-        commit_ts: Timestamp,
-    },
     /// Open an explicit transaction.
     TxnBegin {
         /// Provisional identifier reserved for this transaction.
@@ -542,20 +533,11 @@ where
             });
         }
         let provisional_id = self.next_provisional_id();
-        let commit_values =
-            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
-        let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
-        let payload = DynBatchPayload {
-            batch: batch.clone(),
-            commit_ts_column: Arc::clone(&commit_values),
-            tombstone_column: Arc::clone(&tombstone_values),
-        };
-        let command = WalCommand::Autocommit {
-            provisional_id,
-            payload,
-            commit_ts,
-        };
-        self.enqueue_command(command, provisional_id).await
+        let append_ticket = self
+            .txn_append(provisional_id, batch, tombstones, commit_ts)
+            .await?;
+        append_ticket.durable().await?;
+        self.txn_commit(provisional_id, commit_ts).await
     }
 
     /// Force manual rotation of the active WAL segment.

@@ -8,10 +8,11 @@ use crc32c::crc32c;
 
 use crate::{
     mvcc::Timestamp,
-    wal::{
-        DynBatchPayload, WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns,
-    },
+    wal::{WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns},
 };
+
+#[cfg(test)]
+use crate::wal::DynBatchPayload;
 
 /// Maximum supported frame version.
 pub const FRAME_VERSION: u16 = 1;
@@ -272,17 +273,6 @@ impl FrameHeader {
 /// Encode a WAL command into one or more frames.
 pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
     match command {
-        WalCommand::Autocommit {
-            provisional_id,
-            payload,
-            commit_ts,
-        } => encode_autocommit(
-            provisional_id,
-            &payload.batch,
-            &payload.commit_ts_column,
-            &payload.tombstone_column,
-            commit_ts,
-        ),
         WalCommand::TxnBegin { provisional_id } => {
             let begin = encode_txn_begin(provisional_id);
             Ok(vec![Frame::new(FrameType::TxnBegin, begin)])
@@ -309,23 +299,6 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
         }
     }
 }
-fn encode_autocommit(
-    provisional_id: u64,
-    batch: &RecordBatch,
-    commit_ts_column: &ArrayRef,
-    tombstones: &ArrayRef,
-    commit_ts: Timestamp,
-) -> WalResult<Vec<Frame>> {
-    let wal_batch = append_mvcc_columns(batch, commit_ts_column, tombstones)?;
-    let append = encode_txn_append_batch(provisional_id, wal_batch)?;
-    let commit = encode_txn_commit(provisional_id, commit_ts);
-
-    Ok(vec![
-        Frame::new(FrameType::TxnAppend, append),
-        Frame::new(FrameType::TxnCommit, commit),
-    ])
-}
-
 fn encode_txn_append(
     provisional_id: u64,
     batch: &RecordBatch,
@@ -337,7 +310,7 @@ fn encode_txn_append(
     Ok(vec![Frame::new(FrameType::TxnAppend, append)])
 }
 
-/// Convenience helper used mainly by tests to encode an autocommit command from raw inputs.
+/// Convenience helper used mainly by tests to encode a single append + commit from raw inputs.
 pub fn encode_autocommit_frames(
     batch: RecordBatch,
     tombstones: Vec<bool>,
@@ -353,17 +326,19 @@ pub fn encode_autocommit_frames(
     let commit_array: ArrayRef =
         Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
     let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones)) as ArrayRef;
-    let payload = DynBatchPayload {
-        batch,
-        commit_ts_column: commit_array,
-        tombstone_column: tombstone_array,
-    };
-    let command = WalCommand::Autocommit {
+    let append_frames = encode_txn_append(
         provisional_id,
-        payload,
-        commit_ts,
-    };
-    encode_command(command)
+        &batch,
+        &commit_array,
+        &tombstone_array,
+    )?;
+    let mut frames = append_frames;
+    let commit_frame = Frame::new(
+        FrameType::TxnCommit,
+        encode_txn_commit(provisional_id, commit_ts),
+    );
+    frames.push(commit_frame);
+    Ok(frames)
 }
 
 fn encode_txn_append_batch(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
@@ -801,14 +776,13 @@ mod tests {
             tombstone_column: tombstone_ref,
         };
 
-        let command = WalCommand::Autocommit {
+        let command = WalCommand::TxnAppend {
             provisional_id: 9,
             payload,
-            commit_ts: Timestamp::new(42),
         };
 
         let frames = encode_command(command).expect("encode succeeds");
-        assert_eq!(frames.len(), 2);
+        assert_eq!(frames.len(), 1);
         assert_eq!(Arc::strong_count(&commit_array), 1);
         assert_eq!(Arc::strong_count(&tombstone_array), 1);
     }

@@ -31,7 +31,7 @@ use crate::{
     scan::RangeSet,
     transaction::{Snapshot as TxSnapshot, SnapshotError},
     wal::{
-        DynBatchPayload, WalCommand, WalConfig, WalError, WalHandle,
+        WalConfig, WalError, WalHandle,
         frame::{DynAppendEvent, WalEvent},
         replay::Replayer,
     },
@@ -464,19 +464,8 @@ where
     let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones.clone())) as ArrayRef;
 
     if let Some(handle) = db.wal_handle().cloned() {
-        let provisional_id = handle.next_provisional_id();
-        let payload = DynBatchPayload {
-            batch: batch.clone(),
-            commit_ts_column: Arc::clone(&commit_array),
-            tombstone_column: Arc::clone(&tombstone_array),
-        };
-        let command = WalCommand::Autocommit {
-            provisional_id,
-            payload,
-            commit_ts,
-        };
         let ticket = handle
-            .submit_command(command)
+            .append(&batch, &tombstones, commit_ts)
             .await
             .map_err(KeyExtractError::from)?;
         ticket.durable().await.map_err(KeyExtractError::from)?;
