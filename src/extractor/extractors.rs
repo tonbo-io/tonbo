@@ -4,7 +4,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, SchemaRef};
 
-use super::{errors::KeyExtractError, traits::KeyProjection};
+use super::{KeyProjection, errors::KeyExtractError};
 use crate::{
     inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
     key::{KeyComponentRaw, KeyViewRaw, SlicePtr},
@@ -46,7 +46,7 @@ pub fn projection_for_field(
 }
 
 /// Build a row of dynamic cells by reading a single row from a `RecordBatch`.
-pub fn row_from_batch(
+pub(crate) fn row_from_batch(
     batch: &RecordBatch,
     row: usize,
 ) -> Result<Vec<Option<typed_arrow_dyn::DynCell>>, KeyExtractError> {
@@ -164,24 +164,28 @@ impl KeyProjection for Utf8KeyExtractor {
     fn project_view(
         &self,
         batch: &RecordBatch,
-        row: usize,
-        out: &mut KeyViewRaw,
-    ) -> Result<(), KeyExtractError> {
-        check_bounds(batch, self.col, row)?;
+        rows: &[usize],
+    ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
         let arr = batch
             .column(self.col)
             .as_any()
             .downcast_ref::<StringArray>()
             .expect("schema validated");
         let offsets = arr.value_offsets();
-        let start = offsets[row] as usize;
-        let end = offsets[row + 1] as usize;
-        let len = end - start;
         let data = arr.value_data();
-        let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
-        out.clear();
-        unsafe { out.push(KeyComponentRaw::Utf8(ptr)) };
-        Ok(())
+
+        let mut out = Vec::with_capacity(rows.len());
+        for &row in rows {
+            check_bounds(batch, self.col, row)?;
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            let len = end - start;
+            let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
+            let mut view = KeyViewRaw::new();
+            unsafe { view.push(KeyComponentRaw::Utf8(ptr)) };
+            out.push(view);
+        }
+        Ok(out)
     }
 }
 
@@ -214,24 +218,28 @@ impl KeyProjection for BinaryKeyExtractor {
     fn project_view(
         &self,
         batch: &RecordBatch,
-        row: usize,
-        out: &mut KeyViewRaw,
-    ) -> Result<(), KeyExtractError> {
-        check_bounds(batch, self.col, row)?;
+        rows: &[usize],
+    ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
         let arr = batch
             .column(self.col)
             .as_any()
             .downcast_ref::<BinaryArray>()
             .expect("schema validated");
         let offsets = arr.value_offsets();
-        let start = offsets[row] as usize;
-        let end = offsets[row + 1] as usize;
-        let len = end - start;
         let data = arr.value_data();
-        let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
-        out.clear();
-        unsafe { out.push(KeyComponentRaw::Binary(ptr)) };
-        Ok(())
+
+        let mut out = Vec::with_capacity(rows.len());
+        for &row in rows {
+            check_bounds(batch, self.col, row)?;
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            let len = end - start;
+            let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
+            let mut view = KeyViewRaw::new();
+            unsafe { view.push(KeyComponentRaw::Binary(ptr)) };
+            out.push(view);
+        }
+        Ok(out)
     }
 }
 
@@ -264,19 +272,22 @@ macro_rules! impl_prim_projection {
             fn project_view(
                 &self,
                 batch: &RecordBatch,
-                row: usize,
-                out: &mut KeyViewRaw,
-            ) -> Result<(), KeyExtractError> {
-                check_bounds(batch, self.col, row)?;
+                rows: &[usize],
+            ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
                 let arr = batch
                     .column(self.col)
                     .as_any()
                     .downcast_ref::<$arr>()
                     .expect("schema validated");
-                let value = arr.value(row);
-                out.clear();
-                unsafe { out.push(($component)(value)) };
-                Ok(())
+                let mut out = Vec::with_capacity(rows.len());
+                for &row in rows {
+                    check_bounds(batch, self.col, row)?;
+                    let value = arr.value(row);
+                    let mut view = KeyViewRaw::new();
+                    unsafe { view.push(($component)(value)) };
+                    out.push(view);
+                }
+                Ok(out)
             }
         }
     };
@@ -337,18 +348,23 @@ impl KeyProjection for CompositeProjection {
     fn project_view(
         &self,
         batch: &RecordBatch,
-        row: usize,
-        out: &mut KeyViewRaw,
-    ) -> Result<(), KeyExtractError> {
-        out.clear();
-        let mut components: Vec<KeyComponentRaw> = Vec::with_capacity(self.parts.len());
-        let mut tmp = KeyViewRaw::new();
+        rows: &[usize],
+    ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
+        let mut combined = vec![KeyViewRaw::new(); rows.len()];
         for part in &self.parts {
-            part.project_view(batch, row, &mut tmp)?;
-            components.extend_from_slice(tmp.as_slice());
+            let part_views = part.project_view(batch, rows)?;
+            if part_views.len() != rows.len() {
+                return Err(KeyExtractError::Arrow(
+                    arrow_schema::ArrowError::ComputeError(
+                        "composite projection length mismatch".to_string(),
+                    ),
+                ));
+            }
+            for (dst, src) in combined.iter_mut().zip(part_views.iter()) {
+                unsafe { dst.extend_from_slice(src.as_slice()) };
+            }
         }
-        unsafe { out.push(KeyComponentRaw::Struct(components)) };
-        Ok(())
+        Ok(combined)
     }
 }
 
@@ -357,7 +373,7 @@ mod tests {
     use typed_arrow::schema::BuildRows;
 
     use super::{KeyProjection, *};
-    use crate::key::{KeyComponentOwned, KeyViewRaw};
+    use crate::key::KeyComponentOwned;
 
     #[derive(typed_arrow::Record, Clone)]
     struct User {
@@ -392,16 +408,23 @@ mod tests {
         KeyProjection::validate_schema(&utf8, &batch.schema()).unwrap();
         KeyProjection::validate_schema(&i32k, &batch.schema()).unwrap();
 
-        let k0 = utf8.project_owned(&batch, 0).unwrap();
+        let k0 = utf8
+            .project_view(&batch, &[0])
+            .unwrap()
+            .remove(0)
+            .to_owned();
         assert_eq!(k0.as_utf8(), Some("a"));
-        let k1 = i32k.project_owned(&batch, 1).unwrap();
+        let k1 = i32k
+            .project_view(&batch, &[1])
+            .unwrap()
+            .remove(0)
+            .to_owned();
         assert!(matches!(k1.component(), KeyComponentOwned::I32(2)));
 
-        let mut reuse = KeyViewRaw::new();
-        utf8.project_view(&batch, 0, &mut reuse).unwrap();
-        let first = reuse.to_owned();
-        utf8.project_view(&batch, 1, &mut reuse).unwrap();
-        let second = reuse.to_owned();
+        let first_view = utf8.project_view(&batch, &[0]).unwrap();
+        let first = first_view[0].to_owned();
+        let second_view = utf8.project_view(&batch, &[1]).unwrap();
+        let second = second_view[0].to_owned();
         assert_eq!(first.as_utf8(), Some("a"));
         assert_eq!(second.as_utf8(), Some("b"));
 
@@ -410,7 +433,11 @@ mod tests {
             Box::new(Utf8KeyExtractor { col: 0 }),
             Box::new(I32KeyExtractor { col: 1 }),
         ]);
-        let owned = composite.project_owned(&batch, 1).unwrap();
+        let owned = composite
+            .project_view(&batch, &[1])
+            .unwrap()
+            .remove(0)
+            .to_owned();
         match owned.component() {
             KeyComponentOwned::Struct(parts) => {
                 assert_eq!(parts.len(), 2);
@@ -421,9 +448,8 @@ mod tests {
             other => panic!("expected struct component, got {other:?}"),
         }
 
-        let mut view = KeyViewRaw::new();
-        composite.project_view(&batch, 1, &mut view).unwrap();
-        let roundtrip = view.to_owned();
+        let views = composite.project_view(&batch, &[1]).unwrap();
+        let roundtrip = views[0].to_owned();
         assert_eq!(roundtrip.component(), owned.component());
     }
 }

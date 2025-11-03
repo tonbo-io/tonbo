@@ -735,7 +735,7 @@ mod tests {
     use super::*;
     use crate::{
         inmem::immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
-        key::{KeyComponentOwned, KeyTsViewRaw, KeyViewRaw},
+        key::{KeyComponentOwned, KeyTsViewRaw},
         mvcc::Timestamp,
         test_util::build_batch,
     };
@@ -770,15 +770,14 @@ mod tests {
             bundle_mvcc_sidecar(batch, commit_ts, tombstones).expect("mvcc columns");
         let extractor =
             crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
-        let mut view = KeyViewRaw::new();
         let mut composite = BTreeMap::new();
-        for row in 0..batch.num_rows() {
-            view.clear();
-            extractor
-                .project_view(&batch, row, &mut view)
-                .expect("project view");
+        let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+        let views = extractor
+            .project_view(&batch, &row_indices)
+            .expect("project view");
+        for (row, view) in views.into_iter().enumerate() {
             composite.insert(
-                unsafe { KeyTsViewRaw::new_unchecked(view.clone(), mvcc.commit_ts[row]) },
+                unsafe { KeyTsViewRaw::new_unchecked(view, mvcc.commit_ts[row]) },
                 row as u32,
             );
         }

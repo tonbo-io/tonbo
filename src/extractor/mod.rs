@@ -7,12 +7,23 @@
 
 mod errors;
 mod extractors;
-mod traits;
 
-pub use errors::KeyExtractError;
-pub use extractors::{
-    BinaryKeyExtractor, CompositeProjection, F32KeyExtractor, F64KeyExtractor, I32KeyExtractor,
-    I64KeyExtractor, U32KeyExtractor, U64KeyExtractor, Utf8KeyExtractor, projection_for_field,
-    row_from_batch,
-};
-pub use traits::KeyProjection;
+use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
+pub(crate) use errors::KeyExtractError;
+pub(crate) use extractors::{CompositeProjection, projection_for_field, row_from_batch};
+
+use crate::key::KeyViewRaw;
+
+/// Schema-validated projection that can materialise logical keys from record batches.
+pub trait KeyProjection {
+    /// Ensure the projection is compatible with `schema`.
+    fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError>;
+
+    /// Project borrowed key views for the requested `rows` (in order) from `batch`.
+    fn project_view(
+        &self,
+        batch: &RecordBatch,
+        rows: &[usize],
+    ) -> Result<Vec<KeyViewRaw>, KeyExtractError>;
+}

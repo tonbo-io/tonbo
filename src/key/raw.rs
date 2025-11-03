@@ -249,18 +249,9 @@ fn component_to_owned(component: &KeyComponentRaw) -> KeyComponentOwned {
 }
 
 fn components_from_owned(component: &KeyComponentOwned) -> Vec<KeyComponentRaw> {
-    match component {
-        KeyComponentOwned::Struct(parts) => {
-            let mut flat = Vec::new();
-            for part in parts {
-                match component_from_owned(part) {
-                    KeyComponentRaw::Struct(mut nested) => flat.append(&mut nested),
-                    other => flat.push(other),
-                }
-            }
-            vec![KeyComponentRaw::Struct(flat)]
-        }
-        other => vec![component_from_owned(other)],
+    match component_from_owned(component) {
+        KeyComponentRaw::Struct(parts) => parts,
+        other => vec![other],
     }
 }
 
@@ -283,14 +274,11 @@ pub(crate) fn component_from_owned(component: &KeyComponentOwned) -> KeyComponen
         O::FixedSizeBinary(bytes) => slice_ptr_from_bytes(bytes, R::FixedSizeBinary),
         O::Dictionary(inner) => R::Dictionary(Box::new(component_from_owned(inner))),
         O::Struct(parts) => {
-            let mut flat = Vec::new();
+            let mut raw_parts = Vec::with_capacity(parts.len());
             for part in parts {
-                match component_from_owned(part) {
-                    R::Struct(mut nested) => flat.append(&mut nested),
-                    other => flat.push(other),
-                }
+                raw_parts.push(component_from_owned(part));
             }
-            R::Struct(flat)
+            R::Struct(raw_parts)
         }
     }
 }

@@ -85,13 +85,12 @@ pub(crate) fn segment_from_batch_with_extractor(
     let (batch, mvcc) =
         bundle_mvcc_sidecar(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
 
-    let mut view = KeyViewRaw::new();
     let mut index: BTreeMap<KeyTsViewRaw, u32> = BTreeMap::new();
-    for row in 0..batch.num_rows() {
-        view.clear();
-        extractor.project_view(&batch, row, &mut view)?;
+    let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+    let views = extractor.project_view(&batch, &row_indices)?;
+    for (row, view) in views.into_iter().enumerate() {
         index.insert(
-            unsafe { KeyTsViewRaw::new_unchecked(view.clone(), mvcc.commit_ts[row]) },
+            unsafe { KeyTsViewRaw::new_unchecked(view, mvcc.commit_ts[row]) },
             row as u32,
         );
     }
