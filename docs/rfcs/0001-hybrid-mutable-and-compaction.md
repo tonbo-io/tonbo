@@ -60,7 +60,7 @@ This RFC records the design rationale, API impacts, and next steps.
 
 ### Why Not Require Per-row DynRecord?
 
-- `typed_arrow_dyn::DynRow` owns `String/Vec<u8>`, causing copies for strings/binary on each insert.
+- Row shims that clone payloads (for example `Vec<Option<DynCell>>`) still imply copying strings/binary per insert.
 - Indexing from a `RecordBatch` allows reading keys once and keeping payloads zero-copy (via `Arc<RecordBatch>`), which is preferable for batch-oriented ingestion.
 
 ### Why Not Sort on Insert?
@@ -75,7 +75,7 @@ This RFC records the design rationale, API impacts, and next steps.
   - Immutable scans continue to use key indexes internally but surface rows to callers.
 - Dynamic ingest:
 - `DB<DynMode, E>::insert_batch(RecordBatch)` remains; we build per-chunk key indexes and keep the batch payload zero-copy.
-  - Optional: add `insert_dyn_key<K: Into<KeyDyn>>(key: K)` for single-key updates without row objects.
+  - Optional: add `insert_dyn_key<K: Into<KeyOwned>>(key: K)` for single-key updates without row objects.
 - Typed ingest (planned once re-enabled):
   - `DB<TypedMode<R>>::insert(row: R)` appends and updates the last-writer index; optional `insert_key(R::Key)` may be added later.
 

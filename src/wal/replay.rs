@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fusio::Read;
 #[cfg(test)]
-use fusio::{DynFs, path::Path as FusioPath};
+use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
 
 use crate::wal::{
     WalConfig, WalError, WalResult,
@@ -16,14 +16,14 @@ use crate::wal::{
 pub struct Replayer {
     /// Configuration snapshot guiding where segments reside.
     cfg: WalConfig,
-    /// Storage facade shared with the WAL writer for filesystem access.
+    /// Storage facade shared with the WAL writer for segment access.
     storage: WalStorage,
 }
 
 impl Replayer {
     /// Create a new replayer using the provided configuration.
     pub fn new(cfg: WalConfig) -> Self {
-        let storage = WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
+        let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
         Self { cfg, storage }
     }
 
@@ -137,15 +137,18 @@ mod tests {
         wal::{
             WalRecoveryMode,
             frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+            state::FsWalStateStore,
             storage::WalStorage,
         },
     };
 
     #[test]
     fn replayer_returns_logged_events() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::parse("wal-test").expect("wal path");
-        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -184,7 +187,8 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.segment_backend = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
         let events = futures::executor::block_on(replayer.scan()).expect("scan");
         assert_eq!(events.len(), 2);
@@ -192,26 +196,25 @@ mod tests {
         match &events[0] {
             WalEvent::DynAppend {
                 provisional_id,
-                batch: decoded,
-                commit_ts_hint,
-                commit_ts_column,
-                tombstones,
+                payload,
             } => {
                 assert_eq!(*provisional_id, 7);
-                assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                let commit_array = commit_ts_column
+                assert_eq!(payload.commit_ts_hint, Some(Timestamp::new(42)));
+                let commit_array = payload
+                    .commit_ts_column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .expect("u64 column");
                 assert_eq!(commit_array.len(), 1);
                 assert_eq!(commit_array.value(0), 42);
-                let tombstone_array = tombstones
+                let tombstone_array = payload
+                    .tombstones
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .expect("boolean column");
                 assert_eq!(tombstone_array.len(), 1);
                 assert!(!tombstone_array.value(0));
-                assert_eq!(decoded.num_rows(), 1);
+                assert_eq!(payload.batch.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -230,9 +233,11 @@ mod tests {
 
     #[test]
     fn replayer_stops_after_truncated_tail() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::parse("wal-truncated").expect("wal path");
-        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
         let storage_clone = storage.clone();
         let wal_root_for_dir = wal_root.clone();
         futures::executor::block_on(async move {
@@ -276,7 +281,8 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.segment_backend = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
         let events = futures::executor::block_on(replayer.scan()).expect("scan succeeds");
 
@@ -284,26 +290,25 @@ mod tests {
         match &events[0] {
             WalEvent::DynAppend {
                 provisional_id,
-                batch: decoded,
-                commit_ts_hint,
-                commit_ts_column,
-                tombstones,
+                payload,
             } => {
                 assert_eq!(*provisional_id, 9);
-                assert_eq!(*commit_ts_hint, Some(Timestamp::new(42)));
-                let commit_array = commit_ts_column
+                assert_eq!(payload.commit_ts_hint, Some(Timestamp::new(42)));
+                let commit_array = payload
+                    .commit_ts_column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .expect("u64 column");
                 assert_eq!(commit_array.len(), 1);
                 assert_eq!(commit_array.value(0), 42);
-                let tombstone_array = tombstones
+                let tombstone_array = payload
+                    .tombstones
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .expect("boolean column");
                 assert_eq!(tombstone_array.len(), 1);
                 assert!(!tombstone_array.value(0));
-                assert_eq!(decoded.num_rows(), 1);
+                assert_eq!(payload.batch.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -314,9 +319,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let wal_dir = dir.path().join("wal");
 
-        let fs: Arc<dyn DynFs> = Arc::new(TokioFs);
+        let backend = Arc::new(TokioFs);
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
         let wal_root = FusioPath::from_filesystem_path(&wal_dir).expect("wal path");
-        let storage = WalStorage::new(Arc::clone(&fs), wal_root.clone());
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
 
         storage
             .ensure_dir(storage.root())
@@ -353,15 +359,16 @@ mod tests {
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.segment_backend = fs_dyn;
+        cfg.state_store = None;
 
         let replayer = Replayer::new(cfg);
         let events = replayer.scan().await.expect("scan");
 
         assert_eq!(events.len(), 2);
         match events[0] {
-            WalEvent::DynAppend { ref batch, .. } => {
-                assert_eq!(batch.num_rows(), 1);
+            WalEvent::DynAppend { ref payload, .. } => {
+                assert_eq!(payload.batch.num_rows(), 1);
             }
             ref other => panic!("unexpected event: {other:?}"),
         }
@@ -373,12 +380,15 @@ mod tests {
 
     #[test]
     fn replayer_rejects_unimplemented_recovery_mode() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let wal_root = FusioPath::parse("wal-unimplemented").expect("wal path");
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
-        cfg.filesystem = fs;
+        cfg.segment_backend = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         cfg.recovery = WalRecoveryMode::AbsoluteConsistency;
 
         let replayer = Replayer::new(cfg);

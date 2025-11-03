@@ -4,13 +4,10 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, SchemaRef};
 
-use super::{
-    errors::KeyExtractError,
-    traits::{BatchKeyExtractor, DynFromBatch, DynKeyExtractor},
-};
-use crate::inmem::immutable::{
-    keys::{BinKey, StrKey},
-    memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
+use super::{KeyProjection, errors::KeyExtractError};
+use crate::{
+    inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
+    key::{KeyComponentRaw, KeyViewRaw, SlicePtr},
 };
 
 fn check_bounds(batch: &RecordBatch, col: usize, row: usize) -> Result<(), KeyExtractError> {
@@ -23,39 +20,21 @@ fn check_bounds(batch: &RecordBatch, col: usize, row: usize) -> Result<(), KeyEx
     Ok(())
 }
 
-/// Build a boxed dynamic extractor from a schema field's data type and column index.
-pub fn dyn_extractor_for_field(
+/// Build a boxed key projection from a schema field's data type and column index.
+pub fn projection_for_field(
     col: usize,
     dt: &DataType,
-) -> Result<Box<dyn DynKeyExtractor>, KeyExtractError> {
-    let ex: Box<dyn DynKeyExtractor> = match dt {
-        DataType::Utf8 => Box::new(DynFromBatch::<Utf8KeyExtractor, StrKey>::new(
-            Utf8KeyExtractor { col },
-        )),
-        DataType::Binary => Box::new(DynFromBatch::<BinaryKeyExtractor, BinKey>::new(
-            BinaryKeyExtractor { col },
-        )),
-        DataType::UInt64 => Box::new(DynFromBatch::<U64KeyExtractor, u64>::new(U64KeyExtractor {
-            col,
-        })),
-        DataType::UInt32 => Box::new(DynFromBatch::<U32KeyExtractor, u32>::new(U32KeyExtractor {
-            col,
-        })),
-        DataType::Int64 => Box::new(DynFromBatch::<I64KeyExtractor, i64>::new(I64KeyExtractor {
-            col,
-        })),
-        DataType::Int32 => Box::new(DynFromBatch::<I32KeyExtractor, i32>::new(I32KeyExtractor {
-            col,
-        })),
-        DataType::Float64 => Box::new(DynFromBatch::<F64KeyExtractor, f64>::new(F64KeyExtractor {
-            col,
-        })),
-        DataType::Float32 => Box::new(DynFromBatch::<F32KeyExtractor, f32>::new(F32KeyExtractor {
-            col,
-        })),
-        DataType::Boolean => Box::new(DynFromBatch::<BoolKeyExtractor, bool>::new(
-            BoolKeyExtractor { col },
-        )),
+) -> Result<Box<dyn KeyProjection>, KeyExtractError> {
+    let ex: Box<dyn KeyProjection> = match dt {
+        DataType::Utf8 => Box::new(Utf8KeyExtractor { col }),
+        DataType::Binary => Box::new(BinaryKeyExtractor { col }),
+        DataType::UInt64 => Box::new(U64KeyExtractor { col }),
+        DataType::UInt32 => Box::new(U32KeyExtractor { col }),
+        DataType::Int64 => Box::new(I64KeyExtractor { col }),
+        DataType::Int32 => Box::new(I32KeyExtractor { col }),
+        DataType::Float64 => Box::new(F64KeyExtractor { col }),
+        DataType::Float32 => Box::new(F32KeyExtractor { col }),
+        DataType::Boolean => Box::new(BoolKeyExtractor { col }),
         other => {
             return Err(KeyExtractError::UnsupportedType {
                 col,
@@ -66,11 +45,11 @@ pub fn dyn_extractor_for_field(
     Ok(ex)
 }
 
-/// Build a `DynRow` by reading a single row from a `RecordBatch`.
-pub fn row_from_batch(
+/// Build a row of dynamic cells by reading a single row from a `RecordBatch`.
+pub(crate) fn row_from_batch(
     batch: &RecordBatch,
     row: usize,
-) -> Result<typed_arrow_dyn::DynRow, KeyExtractError> {
+) -> Result<Vec<Option<typed_arrow_dyn::DynCell>>, KeyExtractError> {
     use typed_arrow_dyn::DynCell as C;
     if row >= batch.num_rows() {
         return Err(KeyExtractError::RowOutOfBounds(row, batch.num_rows()));
@@ -153,18 +132,18 @@ pub fn row_from_batch(
         };
         cells.push(cell);
     }
-    Ok(typed_arrow_dyn::DynRow(cells))
+    Ok(cells)
 }
 
 /// Utf8 key from a single column.
 #[derive(Clone, Copy, Debug)]
-/// Extracts a `StrKey` from an `Utf8` column at `col`.
+/// Extracts a UTF-8 key view from column `col`.
 pub struct Utf8KeyExtractor {
     /// Zero-based column index of the key field.
     pub col: usize,
 }
 
-impl BatchKeyExtractor<StrKey> for Utf8KeyExtractor {
+impl KeyProjection for Utf8KeyExtractor {
     fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError> {
         let fields = schema.fields();
         if self.col >= fields.len() {
@@ -181,26 +160,44 @@ impl BatchKeyExtractor<StrKey> for Utf8KeyExtractor {
         }
         Ok(())
     }
-    fn key_at(&self, batch: &RecordBatch, row: usize) -> Result<StrKey, KeyExtractError> {
-        check_bounds(batch, self.col, row)?;
+
+    fn project_view(
+        &self,
+        batch: &RecordBatch,
+        rows: &[usize],
+    ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
         let arr = batch
             .column(self.col)
             .as_any()
             .downcast_ref::<StringArray>()
             .expect("schema validated");
-        Ok(StrKey::from_string_array(arr, row))
+        let offsets = arr.value_offsets();
+        let data = arr.value_data();
+
+        let mut out = Vec::with_capacity(rows.len());
+        for &row in rows {
+            check_bounds(batch, self.col, row)?;
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            let len = end - start;
+            let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
+            let mut view = KeyViewRaw::new();
+            unsafe { view.push(KeyComponentRaw::Utf8(ptr)) };
+            out.push(view);
+        }
+        Ok(out)
     }
 }
 
 /// Binary key from a single column.
 #[derive(Clone, Copy, Debug)]
-/// Extracts a `BinKey` from a `Binary` column at `col`.
+/// Extracts a binary key view from column `col`.
 pub struct BinaryKeyExtractor {
     /// Zero-based column index of the key field.
     pub col: usize,
 }
 
-impl BatchKeyExtractor<BinKey> for BinaryKeyExtractor {
+impl KeyProjection for BinaryKeyExtractor {
     fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError> {
         let fields = schema.fields();
         if self.col >= fields.len() {
@@ -217,26 +214,44 @@ impl BatchKeyExtractor<BinKey> for BinaryKeyExtractor {
         }
         Ok(())
     }
-    fn key_at(&self, batch: &RecordBatch, row: usize) -> Result<BinKey, KeyExtractError> {
-        check_bounds(batch, self.col, row)?;
+
+    fn project_view(
+        &self,
+        batch: &RecordBatch,
+        rows: &[usize],
+    ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
         let arr = batch
             .column(self.col)
             .as_any()
             .downcast_ref::<BinaryArray>()
             .expect("schema validated");
-        Ok(BinKey::from_binary_array(arr, row))
+        let offsets = arr.value_offsets();
+        let data = arr.value_data();
+
+        let mut out = Vec::with_capacity(rows.len());
+        for &row in rows {
+            check_bounds(batch, self.col, row)?;
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            let len = end - start;
+            let ptr = unsafe { SlicePtr::from_raw_parts(data.as_ptr().add(start), len) };
+            let mut view = KeyViewRaw::new();
+            unsafe { view.push(KeyComponentRaw::Binary(ptr)) };
+            out.push(view);
+        }
+        Ok(out)
     }
 }
 
-macro_rules! impl_prim_extractor {
-    ($name:ident, $t:ty, $arr:ty, $dt:expr) => {
+macro_rules! impl_prim_projection {
+    ($name:ident, $arr:ty, $dt:expr, $component:expr) => {
         #[derive(Clone, Copy, Debug)]
         /// Extracts a primitive key from a column with the expected Arrow data type.
         pub struct $name {
             /// Zero-based column index of the key field.
             pub col: usize,
         }
-        impl BatchKeyExtractor<$t> for $name {
+        impl KeyProjection for $name {
             fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError> {
                 let fields = schema.fields();
                 if self.col >= fields.len() {
@@ -253,94 +268,103 @@ macro_rules! impl_prim_extractor {
                 }
                 Ok(())
             }
-            fn key_at(&self, batch: &RecordBatch, row: usize) -> Result<$t, KeyExtractError> {
-                check_bounds(batch, self.col, row)?;
+
+            fn project_view(
+                &self,
+                batch: &RecordBatch,
+                rows: &[usize],
+            ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
                 let arr = batch
                     .column(self.col)
                     .as_any()
                     .downcast_ref::<$arr>()
                     .expect("schema validated");
-                Ok(arr.value(row))
+                let mut out = Vec::with_capacity(rows.len());
+                for &row in rows {
+                    check_bounds(batch, self.col, row)?;
+                    let value = arr.value(row);
+                    let mut view = KeyViewRaw::new();
+                    unsafe { view.push(($component)(value)) };
+                    out.push(view);
+                }
+                Ok(out)
             }
         }
     };
 }
 
-impl_prim_extractor!(U64KeyExtractor, u64, UInt64Array, DataType::UInt64);
-impl_prim_extractor!(U32KeyExtractor, u32, UInt32Array, DataType::UInt32);
-impl_prim_extractor!(I64KeyExtractor, i64, Int64Array, DataType::Int64);
-impl_prim_extractor!(I32KeyExtractor, i32, Int32Array, DataType::Int32);
-impl_prim_extractor!(F64KeyExtractor, f64, Float64Array, DataType::Float64);
-impl_prim_extractor!(F32KeyExtractor, f32, Float32Array, DataType::Float32);
-impl_prim_extractor!(BoolKeyExtractor, bool, BooleanArray, DataType::Boolean);
+impl_prim_projection!(U64KeyExtractor, UInt64Array, DataType::UInt64, |v: u64| {
+    KeyComponentRaw::U64(v)
+});
+impl_prim_projection!(U32KeyExtractor, UInt32Array, DataType::UInt32, |v: u32| {
+    KeyComponentRaw::U32(v)
+});
+impl_prim_projection!(I64KeyExtractor, Int64Array, DataType::Int64, |v: i64| {
+    KeyComponentRaw::I64(v)
+});
+impl_prim_projection!(I32KeyExtractor, Int32Array, DataType::Int32, |v: i32| {
+    KeyComponentRaw::I32(v)
+});
+impl_prim_projection!(
+    F64KeyExtractor,
+    Float64Array,
+    DataType::Float64,
+    |v: f64| KeyComponentRaw::F64(v.to_bits())
+);
+impl_prim_projection!(
+    F32KeyExtractor,
+    Float32Array,
+    DataType::Float32,
+    |v: f32| KeyComponentRaw::F32(v.to_bits())
+);
+impl_prim_projection!(
+    BoolKeyExtractor,
+    BooleanArray,
+    DataType::Boolean,
+    |v: bool| KeyComponentRaw::Bool(v)
+);
 
-/// Composite dynamic extractor that produces `KeyDyn::Tuple` by delegating to parts.
-pub struct CompositeDynExtractor {
-    parts: Vec<Box<dyn DynKeyExtractor>>,
+/// Composite projection that produces tuple keys by delegating to parts.
+pub struct CompositeProjection {
+    parts: Vec<Box<dyn KeyProjection>>,
 }
 
-impl CompositeDynExtractor {
-    /// Construct a composite dynamic key extractor from individual part extractors.
+impl CompositeProjection {
+    /// Construct a composite key projection from individual part projections.
     /// Parts are evaluated in the provided order to build a lexicographic tuple key.
-    pub fn new(parts: Vec<Box<dyn DynKeyExtractor>>) -> Self {
+    pub fn new(parts: Vec<Box<dyn KeyProjection>>) -> Self {
         Self { parts }
     }
 }
 
-impl DynKeyExtractor for CompositeDynExtractor {
+impl KeyProjection for CompositeProjection {
     fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError> {
         for p in &self.parts {
             p.validate_schema(schema)?;
         }
         Ok(())
     }
-    fn key_at(
+
+    fn project_view(
         &self,
         batch: &RecordBatch,
-        row: usize,
-    ) -> Result<super::key_dyn::KeyDyn, KeyExtractError> {
-        let mut out = Vec::with_capacity(self.parts.len());
-        for p in &self.parts {
-            out.push(p.key_at(batch, row)?);
+        rows: &[usize],
+    ) -> Result<Vec<KeyViewRaw>, KeyExtractError> {
+        let mut combined = vec![KeyViewRaw::new(); rows.len()];
+        for part in &self.parts {
+            let part_views = part.project_view(batch, rows)?;
+            if part_views.len() != rows.len() {
+                return Err(KeyExtractError::Arrow(
+                    arrow_schema::ArrowError::ComputeError(
+                        "composite projection length mismatch".to_string(),
+                    ),
+                ));
+            }
+            for (dst, src) in combined.iter_mut().zip(part_views.iter()) {
+                unsafe { dst.extend_from_slice(src.as_slice()) };
+            }
         }
-        Ok(super::key_dyn::KeyDyn::Tuple(out))
-    }
-}
-
-/// Compose two extractors into a tuple key.
-impl<A, KA, B, KB> BatchKeyExtractor<(KA, KB)> for (A, B)
-where
-    A: BatchKeyExtractor<KA>,
-    B: BatchKeyExtractor<KB>,
-{
-    fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError> {
-        self.0.validate_schema(schema)?;
-        self.1.validate_schema(schema)
-    }
-    fn key_at(&self, batch: &RecordBatch, row: usize) -> Result<(KA, KB), KeyExtractError> {
-        let a = self.0.key_at(batch, row)?;
-        let b = self.1.key_at(batch, row)?;
-        Ok((a, b))
-    }
-}
-
-/// Compose three extractors into a triple key.
-impl<A, KA, B, KB, C, KC> BatchKeyExtractor<(KA, KB, KC)> for (A, B, C)
-where
-    A: BatchKeyExtractor<KA>,
-    B: BatchKeyExtractor<KB>,
-    C: BatchKeyExtractor<KC>,
-{
-    fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError> {
-        self.0.validate_schema(schema)?;
-        self.1.validate_schema(schema)?;
-        self.2.validate_schema(schema)
-    }
-    fn key_at(&self, batch: &RecordBatch, row: usize) -> Result<(KA, KB, KC), KeyExtractError> {
-        let a = self.0.key_at(batch, row)?;
-        let b = self.1.key_at(batch, row)?;
-        let c = self.2.key_at(batch, row)?;
-        Ok((a, b, c))
+        Ok(combined)
     }
 }
 
@@ -348,7 +372,8 @@ where
 mod tests {
     use typed_arrow::schema::BuildRows;
 
-    use super::*;
+    use super::{KeyProjection, *};
+    use crate::key::KeyComponentOwned;
 
     #[derive(typed_arrow::Record, Clone)]
     struct User {
@@ -380,18 +405,51 @@ mod tests {
         let utf8 = Utf8KeyExtractor { col: 0 };
         let i32k = I32KeyExtractor { col: 1 };
 
-        utf8.validate_schema(&batch.schema()).unwrap();
-        i32k.validate_schema(&batch.schema()).unwrap();
+        KeyProjection::validate_schema(&utf8, &batch.schema()).unwrap();
+        KeyProjection::validate_schema(&i32k, &batch.schema()).unwrap();
 
-        let k0 = utf8.key_at(&batch, 0).unwrap();
-        assert_eq!(k0.as_str(), "a");
-        let k1 = i32k.key_at(&batch, 1).unwrap();
-        assert_eq!(k1, 2);
+        let k0 = utf8
+            .project_view(&batch, &[0])
+            .unwrap()
+            .remove(0)
+            .to_owned();
+        assert_eq!(k0.as_utf8(), Some("a"));
+        let k1 = i32k
+            .project_view(&batch, &[1])
+            .unwrap()
+            .remove(0)
+            .to_owned();
+        assert!(matches!(k1.component(), KeyComponentOwned::I32(2)));
+
+        let first_view = utf8.project_view(&batch, &[0]).unwrap();
+        let first = first_view[0].to_owned();
+        let second_view = utf8.project_view(&batch, &[1]).unwrap();
+        let second = second_view[0].to_owned();
+        assert_eq!(first.as_utf8(), Some("a"));
+        assert_eq!(second.as_utf8(), Some("b"));
 
         // Tuple composition
-        let tup = (utf8, i32k);
-        let (k_s, k_i) = tup.key_at(&batch, 1).unwrap();
-        assert_eq!(k_s.as_str(), "b");
-        assert_eq!(k_i, 2);
+        let composite = CompositeProjection::new(vec![
+            Box::new(Utf8KeyExtractor { col: 0 }),
+            Box::new(I32KeyExtractor { col: 1 }),
+        ]);
+        let owned = composite
+            .project_view(&batch, &[1])
+            .unwrap()
+            .remove(0)
+            .to_owned();
+        match owned.component() {
+            KeyComponentOwned::Struct(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(parts[0], KeyComponentOwned::Utf8(_)));
+                assert!(matches!(parts[1], KeyComponentOwned::I32(2)));
+                assert_eq!(parts[0].as_utf8(), Some("b"));
+            }
+            other => panic!("expected struct component, got {other:?}"),
+        }
+
+        let views = composite.project_view(&batch, &[1]).unwrap();
+        let roundtrip = views[0].to_owned();
+        assert_eq!(roundtrip.component(), owned.component());
     }
 }

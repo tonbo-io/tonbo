@@ -119,7 +119,7 @@ impl MinorCompactor {
    * `DB::flush_immutables_with_descriptor` drains immutables on success and propagates WAL IDs into the descriptor.
    * `MinorCompactor` provides a baseline orchestrator; richer policies can replace it.
 3. **Reader + Row Filter**
-   * Port `get_range_filter` logic from main to dynamic `KeyDyn`.
+   * Port `get_range_filter` logic from main to dynamic `KeyOwned`.
    * Implement `SsTableReader::open` using fusio LRU cache.
    * Materialize `SsTableScanPlan::execute` -> Parquet stream + selection vector.
 4. **Testing & Validation**

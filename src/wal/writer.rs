@@ -24,11 +24,15 @@ use futures::{
     future::{Fuse, FutureExt},
 };
 
-use crate::wal::{
-    WalAck, WalCommand, WalConfig, WalError, WalResult, WalSyncPolicy,
-    frame::{self, Frame, encode_command},
-    metrics::WalMetrics,
-    storage::{SegmentDescriptor, WalSegment, WalStorage},
+use crate::{
+    mvcc::Timestamp,
+    wal::{
+        WalAck, WalCommand, WalConfig, WalError, WalResult, WalSyncPolicy,
+        frame::{self, Frame, encode_command},
+        metrics::WalMetrics,
+        state::WalStateHandle,
+        storage::{SegmentDescriptor, WalSegment, WalStorage},
+    },
 };
 
 // Wrapper around executor-specific sleep futures so we can store them in the timer slot.
@@ -322,6 +326,8 @@ where
     next_frame_seq: u64,
     next_segment_seq: u64,
     completed_segments: VecDeque<SegmentMeta>,
+    state: Option<WalStateHandle>,
+    state_dirty: bool,
 }
 
 impl<E> WriterContext<E>
@@ -342,7 +348,7 @@ where
         let tail = storage.tail_metadata().await?;
 
         let mut next_frame_seq = frame::INITIAL_FRAME_SEQ;
-        let (segment_seq, mut segment_bytes, next_segment_seq) = if let Some(tail) = tail {
+        let (segment_seq, mut segment_bytes, mut next_segment_seq) = if let Some(tail) = tail {
             for descriptor in tail.completed.into_iter() {
                 completed_segments.push_back(SegmentMeta::from_descriptor(descriptor));
             }
@@ -368,6 +374,21 @@ where
             } as usize;
         }
 
+        let state = if let Some(store) = cfg.state_store.as_ref() {
+            Some(WalStateHandle::load(Arc::clone(store), storage.root()).await?)
+        } else {
+            None
+        };
+
+        if let Some(handle) = state.as_ref() {
+            if let Some(seq) = handle.state().last_frame_seq {
+                next_frame_seq = next_frame_seq.max(seq.saturating_add(1));
+            }
+            if let Some(seg_seq) = handle.state().last_segment_seq {
+                next_segment_seq = next_segment_seq.max(seg_seq.saturating_add(1));
+            }
+        }
+
         let mut ctx = Self {
             exec,
             storage,
@@ -388,6 +409,8 @@ where
             next_frame_seq,
             next_segment_seq,
             completed_segments,
+            state,
+            state_dirty: false,
         };
         if ctx.segment_bytes > 0
             && let Some(max_age) = ctx.cfg.segment_max_age
@@ -408,6 +431,10 @@ where
         enqueued_at: Instant,
     ) -> WalResult<HandleOutcome> {
         let was_empty = self.segment_bytes == 0;
+        let commit_hint = match &command {
+            WalCommand::TxnCommit { commit_ts, .. } => Some(*commit_ts),
+            _ => None,
+        };
         let mut frames = encode_command(command)?;
         if frames.is_empty() {
             return Err(WalError::Corrupt("wal payload produced no frames"));
@@ -444,6 +471,8 @@ where
         }
 
         let durable_seq = self.current_frame_seq();
+        self.record_frame_progress(durable_seq, commit_hint);
+        self.persist_state_if_dirty().await?;
 
         let ack = WalAck {
             seq: durable_seq,
@@ -565,6 +594,7 @@ where
 
         let old_path = self.segment.path().clone();
         let old_bytes = self.segment_bytes;
+        let sealed_seq = self.segment_seq;
 
         let new_seq = self.next_segment_seq;
         let mut new_segment = self.storage.open_segment(new_seq).await?;
@@ -596,6 +626,7 @@ where
             path: old_path,
             bytes: old_bytes,
         });
+        self.record_sealed_segment(sealed_seq);
         self.enforce_retention_limit().await?;
 
         Ok(RotationOutcome {
@@ -612,7 +643,9 @@ where
             });
         }
 
-        self.rotate_active_segment().await
+        let outcome = self.rotate_active_segment().await?;
+        self.persist_state_if_dirty().await?;
+        Ok(outcome)
     }
 
     async fn sync_data(&mut self) -> WalResult<()> {
@@ -631,8 +664,10 @@ where
             self.sync_all().await?;
             self.bytes_since_sync = 0;
             self.last_sync = Instant::now();
+            self.persist_state_if_dirty().await?;
             return Ok(true);
         }
+        self.persist_state_if_dirty().await?;
         Ok(false)
     }
 
@@ -672,6 +707,34 @@ where
 
     fn current_frame_seq(&self) -> u64 {
         self.next_frame_seq.saturating_sub(1)
+    }
+
+    fn record_frame_progress(&mut self, seq: u64, commit_ts: Option<Timestamp>) {
+        if let Some(handle) = self.state.as_mut() {
+            let state = handle.state_mut();
+            state.set_frame_seq(seq);
+            if let Some(ts) = commit_ts {
+                state.set_commit_ts(ts);
+            }
+            self.state_dirty = true;
+        }
+    }
+
+    fn record_sealed_segment(&mut self, seq: u64) {
+        if let Some(handle) = self.state.as_mut() {
+            handle.state_mut().set_segment_seq(seq);
+            self.state_dirty = true;
+        }
+    }
+
+    async fn persist_state_if_dirty(&mut self) -> WalResult<()> {
+        if self.state_dirty {
+            if let Some(handle) = self.state.as_mut() {
+                handle.persist().await?;
+            }
+            self.state_dirty = false;
+        }
+        Ok(())
     }
 
     fn apply_timer_directive(&mut self, directive: TimerDirective, timer_slot: &mut SleepSlot) {
@@ -732,6 +795,7 @@ where
                 if rotation.sync_performed {
                     sync_performed = true;
                 }
+                self.persist_state_if_dirty().await?;
             }
             self.rotation_deadline = None;
         }
@@ -861,7 +925,9 @@ mod tests {
     };
 
     use arrow_array::{ArrayRef, BooleanArray, UInt64Array};
-    use fusio::{DynFs, executor::BlockingExecutor, impls::mem::fs::InMemoryFs, path::Path};
+    use fusio::{
+        DynFs, executor::BlockingExecutor, fs::FsCas, impls::mem::fs::InMemoryFs, path::Path,
+    };
     use futures::{channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
     use typed_arrow::{
         arrow_array::{Int64Array, RecordBatch},
@@ -871,7 +937,10 @@ mod tests {
     use super::*;
     use crate::{
         mvcc::Timestamp,
-        wal::{WalCommand, WalResult},
+        wal::{
+            DynBatchPayload, WalCommand, WalResult,
+            state::{FsWalStateStore, WalStateStore},
+        },
     };
 
     fn sample_batch() -> RecordBatch {
@@ -880,31 +949,177 @@ mod tests {
         RecordBatch::try_new(schema, vec![data]).expect("valid batch")
     }
 
-    fn sample_command(batch: &RecordBatch, commit_ts: u64, provisional_id: u64) -> WalCommand {
+    fn queue_autocommit(
+        sender: &mut mpsc::Sender<WriterMsg>,
+        queue_depth: &Arc<AtomicUsize>,
+        seq_append: u64,
+        seq_commit: u64,
+        commands: (WalCommand, WalCommand),
+    ) -> (
+        oneshot::Receiver<WalResult<WalAck>>,
+        oneshot::Receiver<WalResult<WalAck>>,
+    ) {
+        let (append_command, commit_command) = commands;
+
+        let (append_ack_tx, append_ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                seq_append,
+                append_command,
+                Instant::now(),
+                append_ack_tx,
+            ))
+            .expect("append send");
+
+        let (commit_ack_tx, commit_ack_rx) = oneshot::channel();
+        queue_depth.fetch_add(1, Ordering::SeqCst);
+        sender
+            .try_send(WriterMsg::queued(
+                seq_commit,
+                commit_command,
+                Instant::now(),
+                commit_ack_tx,
+            ))
+            .expect("commit send");
+
+        (append_ack_rx, commit_ack_rx)
+    }
+
+    fn sample_commands(
+        batch: &RecordBatch,
+        commit_ts: u64,
+        provisional_id: u64,
+    ) -> (WalCommand, WalCommand) {
         let commit_array: ArrayRef =
             Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()])) as ArrayRef;
         let tombstone_array: ArrayRef =
             Arc::new(BooleanArray::from(vec![false; batch.num_rows()])) as ArrayRef;
-        WalCommand::Autocommit {
-            provisional_id,
+        let payload = DynBatchPayload {
             batch: batch.clone(),
             commit_ts_column: commit_array,
             tombstone_column: tombstone_array,
+        };
+        let append = WalCommand::TxnAppend {
+            provisional_id,
+            payload,
+        };
+        let commit = WalCommand::TxnCommit {
+            provisional_id,
             commit_ts: Timestamp::new(commit_ts),
-        }
+        };
+        (append, commit)
+    }
+
+    fn in_memory_env(
+        queue_size: usize,
+        sync: WalSyncPolicy,
+        root: &str,
+    ) -> (WalStorage, WalConfig) {
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), Path::parse(root).expect("path"));
+        let mut cfg = WalConfig::default();
+        cfg.queue_size = queue_size;
+        cfg.sync = sync;
+        cfg.segment_backend = fs_dyn;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
+        (storage, cfg)
+    }
+
+    #[test]
+    fn state_json_tracks_commit_progress() {
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_writer: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
+        let root = Path::parse("wal-state-progress").expect("path");
+        let storage = WalStorage::new(Arc::clone(&fs_writer), root.clone());
+
+        let mut cfg = WalConfig::default();
+        cfg.queue_size = 2;
+        cfg.sync = WalSyncPolicy::Always;
+        cfg.segment_backend = fs_writer;
+        let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
+        cfg.state_store = Some(Arc::clone(&state_store));
+
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
+        let ack_cell_clone = Rc::clone(&ack_cell);
+
+        let provisional_id = 5;
+        let (append_ack_rx, commit_ack_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            provisional_id,
+            provisional_id + 1,
+            sample_commands(&sample_batch(), 123, provisional_id),
+        );
+
+        spawner
+            .spawn_local(async move {
+                let _ = append_ack_rx.await.expect("append ack");
+            })
+            .expect("spawn append ack");
+
+        spawner
+            .spawn_local(async move {
+                let ack = commit_ack_rx.await.expect("commit ack oneshot");
+                *ack_cell_clone.borrow_mut() = Some(ack);
+            })
+            .expect("spawn ack");
+
+        sender.close_channel();
+        pool.run();
+
+        let ack = ack_cell
+            .borrow()
+            .clone()
+            .expect("ack result")
+            .expect("ack ok");
+        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+
+        let state_handle = futures::executor::block_on(WalStateHandle::load(state_store, &root))
+            .expect("load state");
+        let state = state_handle.state().clone();
+        assert_eq!(state.last_frame_seq, Some(frame::INITIAL_FRAME_SEQ + 1));
+        assert_eq!(state.last_commit_ts, Some(123));
+        assert!(state.last_segment_seq.is_none());
     }
 
     #[test]
     fn submit_and_drain_on_shutdown() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-        let root = Path::parse("wal-test").expect("path");
-        let storage = WalStorage::new(fs, root);
-
-        let cfg = WalConfig {
-            queue_size: 4,
-            sync: WalSyncPolicy::Always,
-            ..WalConfig::default()
-        };
+        let (storage, cfg) = in_memory_env(4, WalSyncPolicy::Always, "wal-test");
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
@@ -937,24 +1152,22 @@ mod tests {
 
         let base = sample_batch();
         let payload_seq = 777;
-        let command = sample_command(&base, 42, payload_seq);
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        sender
-            .try_send(WriterMsg::queued(
-                payload_seq,
-                command,
-                Instant::now(),
-                ack_tx,
-            ))
-            .expect("send");
+        let (append_ack_rx, commit_ack_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            payload_seq,
+            payload_seq + 1,
+            sample_commands(&base, 42, payload_seq),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_ack_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_ack_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -978,15 +1191,7 @@ mod tests {
 
     #[test]
     fn queue_backpressure_and_metrics() {
-        let cfg = WalConfig {
-            queue_size: 1,
-            sync: WalSyncPolicy::Always,
-            ..WalConfig::default()
-        };
-
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-        let root = Path::parse("wal-backpressure").expect("path");
-        let storage = WalStorage::new(fs, root);
+        let (storage, cfg) = in_memory_env(1, WalSyncPolicy::Always, "wal-backpressure");
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
 
@@ -1017,19 +1222,22 @@ mod tests {
             .expect("spawn writer");
 
         let seq1 = 42;
-        let (ack1_tx, ack1_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command1 = sample_command(&sample_batch(), 1, seq1);
-        sender
-            .try_send(WriterMsg::queued(seq1, command1, Instant::now(), ack1_tx))
-            .expect("first send");
+        let (append_rx1, commit_rx1) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            seq1,
+            seq1 + 1,
+            sample_commands(&sample_batch(), 1, seq1),
+        );
 
         let ack1_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack1_cell_clone = Rc::clone(&ack1_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack1_rx.await.expect("oneshot1");
-                *ack1_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx1.await.expect("append ack1");
+                append_ack.expect("append ack1 ok");
+                let commit_ack = commit_rx1.await.expect("commit ack1");
+                *ack1_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack1");
 
@@ -1043,24 +1251,22 @@ mod tests {
         assert_eq!(ack1.seq, frame::INITIAL_FRAME_SEQ + 1);
         assert_eq!(queue_depth.load(Ordering::SeqCst), 0);
 
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let (ack2_tx, ack2_rx) = oneshot::channel();
-        let command2 = sample_command(&sample_batch(), 2, seq1 + 1);
-        sender
-            .try_send(WriterMsg::queued(
-                seq1 + 1,
-                command2,
-                Instant::now(),
-                ack2_tx,
-            ))
-            .expect("second send");
+        let (append_rx2, commit_rx2) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            seq1 + 2,
+            seq1 + 3,
+            sample_commands(&sample_batch(), 2, seq1 + 2),
+        );
 
         let ack2_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack2_cell_clone = Rc::clone(&ack2_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack2_rx.await.expect("oneshot2");
-                *ack2_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx2.await.expect("append ack2");
+                append_ack.expect("append ack2 ok");
+                let commit_ack = commit_rx2.await.expect("commit ack2");
+                *ack2_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack2");
 
@@ -1085,15 +1291,11 @@ mod tests {
 
     #[test]
     fn interval_time_policy_triggers_sync_without_additional_writes() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-        let root = Path::parse("wal-interval-time").expect("path");
-        let storage = WalStorage::new(fs, root);
-
-        let cfg = WalConfig {
-            queue_size: 2,
-            sync: WalSyncPolicy::IntervalTime(Duration::from_millis(0)),
-            ..WalConfig::default()
-        };
+        let (storage, cfg) = in_memory_env(
+            2,
+            WalSyncPolicy::IntervalTime(Duration::from_millis(0)),
+            "wal-interval-time",
+        );
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
@@ -1124,19 +1326,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 11, 99);
-        sender
-            .try_send(WriterMsg::queued(99, command, Instant::now(), ack_tx))
-            .expect("send");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            99,
+            100,
+            sample_commands(&sample_batch(), 11, 99),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -1161,15 +1366,8 @@ mod tests {
 
     #[test]
     fn interval_bytes_policy_honors_threshold() {
-        let cfg = WalConfig {
-            queue_size: 4,
-            sync: WalSyncPolicy::IntervalBytes(1),
-            ..WalConfig::default()
-        };
-
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-        let root = Path::parse("wal-interval-bytes").expect("path");
-        let storage = WalStorage::new(fs, root);
+        let (storage, cfg) =
+            in_memory_env(4, WalSyncPolicy::IntervalBytes(1), "wal-interval-bytes");
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
 
@@ -1199,19 +1397,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 21, 7);
-        sender
-            .try_send(WriterMsg::queued(7, command, Instant::now(), ack_tx))
-            .expect("send");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            7,
+            8,
+            sample_commands(&sample_batch(), 21, 7),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -1236,17 +1437,21 @@ mod tests {
 
     #[test]
     fn manual_rotation_creates_new_segment() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_reader: Arc<dyn DynFs> = backend.clone();
+        let fs_writer: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let root = Path::parse("wal-manual-rotation").expect("path");
-        let storage_reader = WalStorage::new(Arc::clone(&fs), root.clone());
-        let storage_writer = WalStorage::new(fs, root.clone());
+        let storage_reader = WalStorage::new(fs_reader, root.clone());
+        let storage_writer = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let cfg = WalConfig {
-            queue_size: 4,
-            segment_max_bytes: 1024,
-            sync: WalSyncPolicy::Always,
-            ..WalConfig::default()
-        };
+        let mut cfg = WalConfig::default();
+        cfg.queue_size = 4;
+        cfg.segment_max_bytes = 1024;
+        cfg.sync = WalSyncPolicy::Always;
+        cfg.segment_backend = fs_writer;
+        let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
+        cfg.state_store = Some(Arc::clone(&state_store));
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
 
@@ -1276,19 +1481,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 55, 17);
-        sender
-            .try_send(WriterMsg::queued(17, command, Instant::now(), ack_tx))
-            .expect("send payload");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            17,
+            18,
+            sample_commands(&sample_batch(), 55, 17),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("ack oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack");
 
@@ -1342,21 +1550,32 @@ mod tests {
             "sealed segment should retain written bytes"
         );
         assert_eq!(segments[1].seq, 1);
+
+        let state_handle =
+            futures::executor::block_on(WalStateHandle::load(state_store, storage_reader.root()))
+                .expect("load state after rotation");
+        let state = state_handle.state();
+        assert_eq!(state.last_segment_seq, Some(0));
+        assert_eq!(state.last_frame_seq, Some(frame::INITIAL_FRAME_SEQ + 1));
+        assert_eq!(state.last_commit_ts, Some(55));
     }
 
     #[test]
     fn time_based_rotation_seals_segment() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_reader: Arc<dyn DynFs> = backend.clone();
+        let fs_writer: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let root = Path::parse("wal-time-rotation").expect("path");
-        let storage_reader = WalStorage::new(Arc::clone(&fs), root.clone());
-        let storage_writer = WalStorage::new(fs, root.clone());
+        let storage_reader = WalStorage::new(fs_reader, root.clone());
+        let storage_writer = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let cfg = WalConfig {
-            queue_size: 4,
-            segment_max_age: Some(Duration::from_millis(0)),
-            sync: WalSyncPolicy::Always,
-            ..WalConfig::default()
-        };
+        let mut cfg = WalConfig::default();
+        cfg.queue_size = 4;
+        cfg.segment_max_age = Some(Duration::from_millis(0));
+        cfg.sync = WalSyncPolicy::Always;
+        cfg.segment_backend = fs_writer;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
 
@@ -1386,19 +1605,22 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let (ack_tx, ack_rx) = oneshot::channel();
-        queue_depth.fetch_add(1, Ordering::SeqCst);
-        let command = sample_command(&sample_batch(), 90, 31);
-        sender
-            .try_send(WriterMsg::queued(31, command, Instant::now(), ack_tx))
-            .expect("send payload");
+        let (append_rx, commit_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            31,
+            32,
+            sample_commands(&sample_batch(), 90, 31),
+        );
 
         let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
         let ack_cell_clone = Rc::clone(&ack_cell);
         spawner
             .spawn_local(async move {
-                let ack = ack_rx.await.expect("ack oneshot");
-                *ack_cell_clone.borrow_mut() = Some(ack);
+                let append_ack = append_rx.await.expect("append ack");
+                append_ack.expect("append ack ok");
+                let commit_ack = commit_rx.await.expect("commit ack");
+                *ack_cell_clone.borrow_mut() = Some(commit_ack);
             })
             .expect("spawn ack listener");
 
@@ -1432,18 +1654,21 @@ mod tests {
 
     #[test]
     fn segment_rotation_enforces_retention() {
-        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_reader: Arc<dyn DynFs> = backend.clone();
+        let fs_writer: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
         let root = Path::parse("wal-rotation-retention").expect("path");
-        let storage_reader = WalStorage::new(Arc::clone(&fs), root.clone());
-        let storage_writer = WalStorage::new(fs, root.clone());
+        let storage_reader = WalStorage::new(fs_reader, root.clone());
+        let storage_writer = WalStorage::new(Arc::clone(&fs_writer), root.clone());
 
-        let cfg = WalConfig {
-            queue_size: 4,
-            segment_max_bytes: 1,
-            retention_bytes: Some(1),
-            sync: WalSyncPolicy::Disabled,
-            ..WalConfig::default()
-        };
+        let mut cfg = WalConfig::default();
+        cfg.queue_size = 4;
+        cfg.segment_max_bytes = 1;
+        cfg.retention_bytes = Some(1);
+        cfg.sync = WalSyncPolicy::Disabled;
+        cfg.segment_backend = fs_writer;
+        cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
 
@@ -1473,20 +1698,23 @@ mod tests {
             })
             .expect("spawn writer");
 
-        let mut enqueue_payload = |seq: u64, commit_ts: u64| {
-            let (ack_tx, ack_rx) = oneshot::channel();
-            queue_depth.fetch_add(1, Ordering::SeqCst);
-            let command = sample_command(&sample_batch(), commit_ts, seq);
-            sender
-                .try_send(WriterMsg::queued(seq, command, Instant::now(), ack_tx))
-                .expect("send payload");
+        let mut enqueue_payload = |seq_base: u64, commit_ts: u64| {
+            let (append_rx, commit_rx) = queue_autocommit(
+                &mut sender,
+                &queue_depth,
+                seq_base,
+                seq_base + 1,
+                sample_commands(&sample_batch(), commit_ts, seq_base),
+            );
 
             let ack_cell: Rc<RefCell<Option<WalResult<WalAck>>>> = Rc::new(RefCell::new(None));
             let ack_cell_clone = Rc::clone(&ack_cell);
             spawner
                 .spawn_local(async move {
-                    let ack = ack_rx.await.expect("oneshot ack");
-                    *ack_cell_clone.borrow_mut() = Some(ack);
+                    let append_ack = append_rx.await.expect("append ack");
+                    append_ack.expect("append ack ok");
+                    let commit_ack = commit_rx.await.expect("commit ack");
+                    *ack_cell_clone.borrow_mut() = Some(commit_ack);
                 })
                 .expect("spawn ack listener");
 
@@ -1494,7 +1722,7 @@ mod tests {
         };
 
         let ack1_cell = enqueue_payload(10, 1);
-        let ack2_cell = enqueue_payload(11, 2);
+        let ack2_cell = enqueue_payload(12, 2);
 
         sender.close_channel();
         pool.run();
@@ -1525,7 +1753,7 @@ mod tests {
             segments[0]
                 .path
                 .as_ref()
-                .ends_with("wal-00000000000000000002.tonwal")
+                .ends_with("wal-00000000000000000004.tonwal")
         );
     }
 }

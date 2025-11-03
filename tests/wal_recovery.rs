@@ -9,9 +9,9 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
     DB,
+    key::KeyOwned,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
-    record::extract::{KeyDyn, dyn_extractor_for_field},
     scan::RangeSet,
     wal::{
         WalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
@@ -33,8 +33,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
         Field::new("id", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
     ]));
-    let extractor = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
@@ -57,16 +56,15 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     db.disable_wal()?;
     drop(db);
 
-    let extractor_recover = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config_recover = DynModeConfig::new(schema.clone(), extractor_recover)?;
+    let mode_config_recover = DynModeConfig::from_key_name(schema.clone(), "id")?;
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -102,15 +100,14 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
         Field::new("id", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
     ]));
-    let extractor = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
 
     let mut wal_cfg = WalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
 
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.filesystem), wal_cfg.dir.clone());
+    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
     storage.ensure_dir(storage.root()).await?;
     let mut segment = storage.open_segment(1).await?;
 
@@ -161,11 +158,11 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -201,8 +198,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
         Field::new("id", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
     ]));
-    let extractor = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
 
@@ -210,7 +206,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
     wal_cfg.recovery = WalRecoveryMode::TolerateCorruptedTail;
 
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.filesystem), wal_cfg.dir.clone());
+    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
     storage.ensure_dir(storage.root()).await?;
     let mut segment = storage.open_segment(1).await?;
 
@@ -261,11 +257,11 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -301,15 +297,14 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
         Field::new("id", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
     ]));
-    let extractor = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
 
     let mut wal_cfg = WalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
 
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.filesystem), wal_cfg.dir.clone());
+    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
     storage.ensure_dir(storage.root()).await?;
     let mut segment = storage.open_segment(1).await?;
 
@@ -360,11 +355,11 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     let recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg.clone()).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -394,15 +389,14 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     recovered.disable_wal()?;
     drop(recovered);
 
-    let final_config =
-        DynModeConfig::new(schema.clone(), dyn_extractor_for_field(0, &DataType::Utf8)?)?;
+    let final_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
     let recovered_again: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(final_config, Arc::clone(&executor), wal_cfg.clone()).await?;
 
     let mut rows_after: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -438,8 +432,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
         Field::new("id", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
     ]));
-    let extractor = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
@@ -471,16 +464,15 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     db.disable_wal()?;
     drop(db);
 
-    let extractor_recover = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config_recover = DynModeConfig::new(schema.clone(), extractor_recover)?;
+    let mode_config_recover = DynModeConfig::from_key_name(schema.clone(), "id")?;
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), wal_cfg.clone()).await?;
 
-    let ranges = RangeSet::<KeyDyn>::all();
+    let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -518,15 +510,14 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     recovered.disable_wal()?;
     drop(recovered);
 
-    let extractor_final = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config_final = DynModeConfig::new(schema.clone(), extractor_final)?;
+    let mode_config_final = DynModeConfig::from_key_name(schema.clone(), "id")?;
     let recovered_again: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config_final, Arc::clone(&executor), wal_cfg.clone()).await?;
 
     let mut rows_final: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges)
         .map(|row| {
-            let mut cells = row.0.into_iter();
+            let mut cells = row.into_iter();
             let id_cell = cells.next().expect("id cell");
             let value_cell = cells.next().expect("value cell");
 
@@ -565,8 +556,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
         Field::new("id", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
     ]));
-    let extractor = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config = DynModeConfig::new(schema.clone(), extractor)?;
+    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
@@ -589,8 +579,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     db.disable_wal()?;
     drop(db);
 
-    let extractor_recover = dyn_extractor_for_field(0, &DataType::Utf8)?;
-    let mode_config_recover = DynModeConfig::new(schema.clone(), extractor_recover)?;
+    let mode_config_recover = DynModeConfig::from_key_name(schema.clone(), "id")?;
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
 

@@ -31,11 +31,11 @@ use crate::{
         Immutable,
         memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
     },
+    key::KeyOwned,
     manifest::ManifestError,
     mode::Mode,
     mvcc::Timestamp,
     query::Predicate,
-    record::extract::KeyDyn,
     scan::RangeSet,
 };
 
@@ -285,9 +285,9 @@ pub struct SsTableStats {
     /// Number of tombstoned rows recorded in the table.
     pub tombstones: usize,
     /// Minimum key observed across staged segments.
-    pub min_key: Option<KeyDyn>,
+    pub min_key: Option<KeyOwned>,
     /// Maximum key observed across staged segments.
-    pub max_key: Option<KeyDyn>,
+    pub max_key: Option<KeyOwned>,
     /// Oldest commit timestamp contained in the table.
     pub min_commit_ts: Option<Timestamp>,
     /// Newest commit timestamp contained in the table.
@@ -332,8 +332,8 @@ pub(crate) struct StagedTableStats {
     pub segments: usize,
     pub rows: usize,
     pub tombstones: usize,
-    pub min_key: Option<KeyDyn>,
-    pub max_key: Option<KeyDyn>,
+    pub min_key: Option<KeyOwned>,
+    pub max_key: Option<KeyOwned>,
     pub min_commit_ts: Option<Timestamp>,
     pub max_commit_ts: Option<Timestamp>,
 }
@@ -351,7 +351,7 @@ impl StagedTableStats {
         }
     }
 
-    fn update_key_bounds(&mut self, seg_min: &KeyDyn, seg_max: &KeyDyn) {
+    fn update_key_bounds(&mut self, seg_min: &KeyOwned, seg_max: &KeyOwned) {
         match self.min_key {
             Some(ref existing) if existing <= seg_min => {}
             _ => self.min_key = Some(seg_min.clone()),
@@ -422,7 +422,7 @@ pub(crate) struct ParquetTableWriter<M: Mode> {
 
 impl<M> ParquetTableWriter<M>
 where
-    M: Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
+    M: Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
 {
     pub(crate) fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
         Self {
@@ -467,7 +467,7 @@ where
         );
 
         if let (Some(min_key), Some(max_key)) = (segment.min_key(), segment.max_key()) {
-            self.staged.update_key_bounds(min_key, max_key);
+            self.staged.update_key_bounds(&min_key, &max_key);
         }
 
         if let (Some(min_ts), Some(max_ts)) = (seg_min_ts, seg_max_ts) {
@@ -638,7 +638,7 @@ pub struct SsTableBuilder<M: Mode> {
 }
 impl<M> SsTableBuilder<M>
 where
-    M: Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
+    M: Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
 {
     /// Create a new builder for the provided descriptor.
     pub fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
@@ -730,13 +730,13 @@ mod tests {
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
-    use typed_arrow_dyn::{DynCell, DynRow};
+    use typed_arrow_dyn::DynCell;
 
     use super::*;
     use crate::{
-        inmem::immutable::memtable::{ImmutableMemTable, VersionSlice, bundle_mvcc_sidecar},
+        inmem::immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
+        key::{KeyComponentOwned, KeyTsViewRaw},
         mvcc::Timestamp,
-        record::extract::KeyDyn,
         test_util::build_batch,
     };
 
@@ -753,33 +753,35 @@ mod tests {
         rows: Vec<(String, i32)>,
         commits: Vec<u64>,
         tombstones: Vec<bool>,
-    ) -> ImmutableMemTable<KeyDyn, arrow_array::RecordBatch> {
+    ) -> ImmutableMemTable<arrow_array::RecordBatch> {
         assert_eq!(rows.len(), commits.len());
         assert_eq!(rows.len(), tombstones.len());
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, true),
             Field::new("v", DataType::Int32, true),
         ]));
-        let mut keys: Vec<String> = Vec::with_capacity(rows.len());
-        let dyn_rows: Vec<DynRow> = rows
+        let dyn_rows: Vec<Vec<Option<DynCell>>> = rows
             .into_iter()
-            .map(|(k, v)| {
-                keys.push(k.clone());
-                DynRow(vec![Some(DynCell::Str(k.into())), Some(DynCell::I32(v))])
-            })
+            .map(|(k, v)| vec![Some(DynCell::Str(k.into())), Some(DynCell::I32(v))])
             .collect();
         let batch = build_batch(schema.clone(), dyn_rows).expect("record batch");
-        let mut index = BTreeMap::new();
-        for (offset, key) in keys.into_iter().enumerate() {
-            index.insert(KeyDyn::from(key), VersionSlice::new(offset as u32, 1));
+        let commit_ts: Vec<Timestamp> = commits.iter().copied().map(Timestamp::new).collect();
+        let (batch, mvcc) =
+            bundle_mvcc_sidecar(batch, commit_ts, tombstones).expect("mvcc columns");
+        let extractor =
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+        let mut composite = BTreeMap::new();
+        let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+        let views = extractor
+            .project_view(&batch, &row_indices)
+            .expect("project view");
+        for (row, view) in views.into_iter().enumerate() {
+            composite.insert(
+                unsafe { KeyTsViewRaw::new_unchecked(view, mvcc.commit_ts[row]) },
+                row as u32,
+            );
         }
-        let (batch, mvcc) = bundle_mvcc_sidecar(
-            batch,
-            commits.into_iter().map(Timestamp::new).collect(),
-            tombstones,
-        )
-        .expect("mvcc columns");
-        ImmutableMemTable::new(batch, index, mvcc)
+        ImmutableMemTable::new(batch, composite, mvcc)
     }
 
     fn tokio_block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -825,16 +827,16 @@ mod tests {
         let min_key = plan
             .min_key
             .as_ref()
-            .and_then(|k| match k {
-                KeyDyn::Str(s) => Some(s.as_str()),
+            .and_then(|k| match k.component() {
+                KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => Some(s.as_ref()),
                 _ => None,
             })
             .expect("min key");
         let max_key = plan
             .max_key
             .as_ref()
-            .and_then(|k| match k {
-                KeyDyn::Str(s) => Some(s.as_str()),
+            .and_then(|k| match k.component() {
+                KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => Some(s.as_ref()),
                 _ => None,
             })
             .expect("max key");

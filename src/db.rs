@@ -14,23 +14,28 @@ use lockable::LockableHashMap;
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
+    extractor::KeyExtractError,
     fs::FileId,
     inmem::{
         immutable::Immutable,
         mutable::MutableLayout,
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
+    key::KeyOwned,
     manifest::{
         InMemoryManifest, ManifestError, SstEntry, TableId, VersionEdit, WalSegmentRef,
         init_in_memory_manifest,
     },
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
-    record::extract::{KeyDyn, KeyExtractError},
     scan::RangeSet,
     transaction::{Snapshot as TxSnapshot, SnapshotError},
     wal::{
-        WalCommand, WalConfig, WalError, WalHandle, frame::WalEvent, manifest_ext, replay::Replayer,
+        WalConfig, WalError, WalHandle,
+        frame::{DynAppendEvent, WalEvent},
+        manifest_ext,
+        replay::Replayer,
+        state::WalStateHandle,
     },
 };
 
@@ -48,7 +53,6 @@ where
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
     immutables: Vec<Immutable<M>>,
-    immutable_wal_ids: Vec<Option<Vec<FileId>>>,
     // Sealing policy and last seal timestamp
     policy: Box<dyn SealPolicy + Send + Sync>,
     last_seal_at: Option<Instant>,
@@ -94,12 +98,14 @@ where
             match event {
                 WalEvent::DynAppend {
                     provisional_id,
-                    batch,
-                    commit_ts_hint,
-                    commit_ts_column,
-                    tombstones,
-                    ..
+                    payload,
                 } => {
+                    let DynAppendEvent {
+                        batch,
+                        commit_ts_hint,
+                        commit_ts_column,
+                        tombstones,
+                    } = payload;
                     pending.entry(provisional_id).or_default().push((
                         batch,
                         commit_ts_column,
@@ -139,17 +145,17 @@ where
     /// Scan the dynamic mutable memtable over key ranges, yielding owned dynamic rows.
     pub fn scan_mutable_rows<'a>(
         &'a self,
-        ranges: &'a RangeSet<KeyDyn>,
-    ) -> impl Iterator<Item = typed_arrow_dyn::DynRow> + 'a {
+        ranges: &'a RangeSet<KeyOwned>,
+    ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
         self.mem.scan_rows(ranges)
     }
 
     /// Scan the dynamic mutable memtable with MVCC visibility at `read_ts`.
     pub fn scan_mutable_rows_at<'a>(
         &'a self,
-        ranges: &'a RangeSet<KeyDyn>,
+        ranges: &'a RangeSet<KeyOwned>,
         read_ts: Timestamp,
-    ) -> impl Iterator<Item = typed_arrow_dyn::DynRow> + 'a {
+    ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
         self.mem.scan_rows_at(ranges, read_ts)
     }
 
@@ -157,7 +163,10 @@ where
         let since = self.last_seal_at.map(|t| t.elapsed());
         let stats = self.mem.build_stats(since);
         if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
-            if let Some(seg) = self.mem.seal_into_immutable(&self.mode.schema)? {
+            if let Some(seg) = self
+                .mem
+                .seal_into_immutable(&self.mode.schema, self.mode.extractor.as_ref())?
+            {
                 self.add_immutable(seg);
             }
             self.last_seal_at = Some(Instant::now());
@@ -202,7 +211,6 @@ where
             mode,
             mem,
             immutables: Vec::new(),
-            immutable_wal_ids: Vec::new(),
             policy: crate::inmem::policy::default_policy(),
             last_seal_at: None,
             executor,
@@ -224,6 +232,14 @@ where
     where
         M: Sized,
     {
+        let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
+            WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
+                .await?
+                .state()
+                .commit_ts()
+        } else {
+            None
+        };
         let mut db = Self::new(config, executor)?;
         db.set_wal_config(Some(wal_cfg.clone()));
 
@@ -235,7 +251,8 @@ where
         // references.
 
         let last_commit_ts = M::replay_wal(&mut db, events)?;
-        if let Some(ts) = last_commit_ts {
+        let effective_commit = last_commit_ts.or(state_commit_hint);
+        if let Some(ts) = effective_commit {
             db.commit_clock.advance_to_at_least(ts.saturating_add(1));
         }
 
@@ -334,7 +351,7 @@ where
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable<M>, SsTableError>
     where
-        M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyDyn>,
+        M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
     {
         if self.immutables.is_empty() {
             return Err(SsTableError::NoImmutableSegments);
@@ -343,15 +360,27 @@ where
         for seg in &self.immutables {
             builder.add_immutable(seg)?;
         }
-        let wal_ids_flat: Vec<FileId> = self
-            .immutable_wal_ids
-            .iter()
-            .filter_map(|ids| ids.as_ref())
-            .flat_map(|ids| ids.clone())
-            .collect();
-        let wal_ids = (!wal_ids_flat.is_empty()).then_some(wal_ids_flat);
-        builder.set_wal_ids(wal_ids);
-
+        let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
+            match manifest_ext::collect_wal_segment_refs(cfg).await {
+                Ok(refs) if !refs.is_empty() => {
+                    let ids: Vec<FileId> = refs.iter().map(|ref_| ref_.file_id().clone()).collect();
+                    builder.set_wal_ids(Some(ids.clone()));
+                    (Some(ids), Some(refs))
+                }
+                Ok(_) => {
+                    builder.set_wal_ids(None);
+                    (None, None)
+                }
+                Err(_err) => {
+                    return Err(SsTableError::Manifest(ManifestError::Invariant(
+                        "failed to enumerate wal segments",
+                    )));
+                }
+            }
+        } else {
+            builder.set_wal_ids(None);
+            (None, None)
+        };
         match builder.finish().await {
             Ok(table) => {
                 // Persist Sst change into manifest
@@ -366,15 +395,11 @@ where
                         "sst descriptor missing mvcc path",
                     ))
                 })?;
-                let wal_ids: Vec<FileId> = descriptor_ref
-                    .wal_ids()
-                    .map(|ids| ids.to_vec())
-                    .unwrap_or_default();
                 let stats = descriptor_ref.stats().cloned();
                 let sst_entry = SstEntry::new(
                     descriptor_ref.id().clone(),
                     stats,
-                    (!wal_ids.is_empty()).then_some(wal_ids.clone()),
+                    wal_ids.clone(),
                     data_path,
                     mvcc_path,
                 );
@@ -383,11 +408,10 @@ where
                     entries: vec![sst_entry],
                 }];
 
-                if !wal_ids.is_empty() {
-                    let wal_refs = manifest_ext::mock_wal_segments(&wal_ids);
+                if let Some(refs) = wal_refs {
                     // For now just comput the floor WAL to be the latest one as we have
                     // successfully persist them in parquet table writer
-                    let wal_floor = wal_refs
+                    let wal_floor = refs
                         .iter()
                         .max_by_key(|segment| segment.seq())
                         .cloned()
@@ -400,7 +424,6 @@ where
 
                 // Cleanup immutable memtable
                 self.immutables.clear();
-                self.immutable_wal_ids.clear();
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -420,14 +443,6 @@ where
     #[allow(dead_code)]
     pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
         self.immutables.push(seg);
-        self.immutable_wal_ids.push(None);
-    }
-
-    /// Record the WAL identifiers for the most recently sealed immutable.
-    pub fn set_last_immutable_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
-        if let Some(slot) = self.immutable_wal_ids.last_mut() {
-            *slot = wal_ids;
-        }
     }
 
     /// Set or replace the sealing policy used by this DB.
@@ -460,16 +475,8 @@ where
     let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones.clone())) as ArrayRef;
 
     if let Some(handle) = db.wal_handle().cloned() {
-        let provisional_id = handle.next_provisional_id();
-        let command = WalCommand::Autocommit {
-            provisional_id,
-            batch: batch.clone(),
-            commit_ts_column: Arc::clone(&commit_array),
-            tombstone_column: Arc::clone(&tombstone_array),
-            commit_ts,
-        };
         let ticket = handle
-            .submit_command(command)
+            .append(&batch, &tombstones, commit_ts)
             .await
             .map_err(KeyExtractError::from)?;
         ticket.durable().await.map_err(KeyExtractError::from)?;
@@ -529,10 +536,12 @@ where
         })?
         .clone();
     validate_tombstone_bitmap(&batch, &tombstone_array)?;
-    db.mem
-        .insert_batch_with_ts(db.mode.extractor.as_ref(), batch, commit_ts, move |row| {
-            tombstone_array.value(row)
-        })?;
+    db.mem.insert_batch_with_mvcc(
+        db.mode.extractor.as_ref(),
+        batch,
+        commit_array,
+        tombstone_array,
+    )?;
     db.maybe_seal_after_insert()?;
     Ok(())
 }
@@ -596,7 +605,7 @@ mod tests {
     };
     use futures::{StreamExt, channel::mpsc, executor::block_on};
     use tokio::sync::{Mutex, oneshot};
-    use typed_arrow_dyn::{DynCell, DynRow};
+    use typed_arrow_dyn::DynCell;
 
     use super::*;
     use crate::{
@@ -604,7 +613,10 @@ mod tests {
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
-        wal::frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+        wal::{
+            WalCommand,
+            frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+        },
     };
 
     #[test]
@@ -613,10 +625,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let rows = vec![DynRow(vec![
-            Some(DynCell::Str("k".into())),
-            Some(DynCell::I32(1)),
-        ])];
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
@@ -641,15 +650,15 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).expect("db");
 
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let result = block_on(db.ingest_with_tombstones(batch, vec![false, true]));
@@ -657,22 +666,22 @@ mod tests {
 
         let chain_k1 = db
             .mem
-            .inspect_versions(&KeyDyn::from("k1"))
+            .inspect_versions(&KeyOwned::from("k1"))
             .expect("chain k1");
         assert_eq!(chain_k1.len(), 1);
         assert!(!chain_k1[0].1);
 
         let chain_k2 = db
             .mem
-            .inspect_versions(&KeyDyn::from("k2"))
+            .inspect_versions(&KeyOwned::from("k2"))
             .expect("chain k2");
         assert_eq!(chain_k2.len(), 1);
         assert!(chain_k2[0].1);
 
-        let all: RangeSet<KeyDyn> = RangeSet::all();
+        let all: RangeSet<KeyOwned> = RangeSet::all();
         let visible: Vec<String> = db
             .scan_mutable_rows(&all)
-            .map(|row| match &row.0[0] {
+            .map(|row| match &row[0] {
                 Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
                 _ => panic!("unexpected cell variant"),
             })
@@ -687,7 +696,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
@@ -698,10 +707,7 @@ mod tests {
         assert!(snapshot.head().last_manifest_txn.is_none());
         assert!(snapshot.latest_version().is_none());
 
-        let rows = vec![DynRow(vec![
-            Some(DynCell::Str("k1".into())),
-            Some(DynCell::I32(1)),
-        ])];
+        let rows = vec![vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         block_on(db.ingest_with_tombstones(batch, vec![false])).expect("ingest");
 
@@ -720,8 +726,8 @@ mod tests {
         ]));
         // Build one batch with two rows
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
 
@@ -743,7 +749,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
 
         let executor = Arc::new(TokioExecutor::default());
@@ -755,30 +761,58 @@ mod tests {
 
         let ack_slot_clone = Arc::clone(&ack_slot);
         let join = executor.spawn(async move {
-            if let Some(writer::WriterMsg::Enqueue { ack_tx, .. }) = receiver.next().await {
-                {
-                    let mut slot = ack_slot_clone.lock().await;
-                    *slot = Some(ack_tx);
-                }
-                let _ = ack_ready_tx.send(());
-                let _ = release_ack_rx.await;
-                let ack = WalAck {
-                    seq: frame::INITIAL_FRAME_SEQ,
-                    bytes_flushed: 0,
-                    elapsed: Duration::from_millis(0),
-                };
-                let mut slot = ack_slot_clone.lock().await;
-                if let Some(sender) = slot.take() {
-                    let _ = sender.send(Ok(ack));
+            let mut release_ack_rx = Some(release_ack_rx);
+            while let Some(msg) = receiver.next().await {
+                match msg {
+                    writer::WriterMsg::Enqueue {
+                        command, ack_tx, ..
+                    } => match command {
+                        WalCommand::TxnAppend { .. } => {
+                            let ack = WalAck {
+                                seq: frame::INITIAL_FRAME_SEQ,
+                                bytes_flushed: 0,
+                                elapsed: Duration::from_millis(0),
+                            };
+                            let _ = ack_tx.send(Ok(ack));
+                        }
+                        WalCommand::TxnCommit { .. } => {
+                            {
+                                let mut slot = ack_slot_clone.lock().await;
+                                *slot = Some(ack_tx);
+                            }
+                            let _ = ack_ready_tx.send(());
+                            if let Some(rx) = release_ack_rx.take() {
+                                let _ = rx.await;
+                            }
+                            let ack = WalAck {
+                                seq: frame::INITIAL_FRAME_SEQ + 1,
+                                bytes_flushed: 0,
+                                elapsed: Duration::from_millis(0),
+                            };
+                            let mut slot = ack_slot_clone.lock().await;
+                            if let Some(sender) = slot.take() {
+                                let _ = sender.send(Ok(ack));
+                            }
+                            break;
+                        }
+                        _ => {
+                            let ack = WalAck {
+                                seq: frame::INITIAL_FRAME_SEQ,
+                                bytes_flushed: 0,
+                                elapsed: Duration::from_millis(0),
+                            };
+                            let _ = ack_tx.send(Ok(ack));
+                        }
+                    },
+                    writer::WriterMsg::Rotate { ack_tx } => {
+                        let _ = ack_tx.send(Ok(()));
+                    }
                 }
             }
             Ok(())
         });
 
-        let rows = vec![DynRow(vec![
-            Some(DynCell::Str("k".into())),
-            Some(DynCell::I32(1)),
-        ])];
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
@@ -796,10 +830,10 @@ mod tests {
         release_ack_tx.send(()).expect("release ack");
         ingest_future.await.expect("ingest after ack");
 
-        let ranges = RangeSet::<KeyDyn>::all();
+        let ranges = RangeSet::<KeyOwned>::all();
         let rows: Vec<_> = db
             .scan_mutable_rows(&ranges)
-            .map(|row| match &row.0[0] {
+            .map(|row| match &row[0] {
                 Some(DynCell::Str(s)) => s.clone(),
                 _ => panic!("unexpected row"),
             })
@@ -822,8 +856,8 @@ mod tests {
 
         // Build one batch and insert to ensure extractor wired
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
@@ -843,8 +877,8 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("schema metadata key");
 
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
@@ -902,7 +936,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
@@ -910,8 +944,8 @@ mod tests {
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let rows = vec![
-            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
-            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -983,35 +1017,35 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("composite field metadata");
 
         let rows = vec![
-            DynRow(vec![
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(10)),
                 Some(DynCell::I32(1)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(5)),
                 Some(DynCell::I32(2)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("b".into())),
                 Some(DynCell::I64(1)),
                 Some(DynCell::I32(3)),
-            ]),
+            ],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
-        let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(5i64)]);
-        let hi = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(10i64)]);
+        let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(5i64)]);
+        let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
         let rs = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
             B::Included(lo),
             B::Included(hi),
         )]);
         let got: Vec<(String, i64)> = db
             .scan_mutable_rows(&rs)
-            .map(|row| match (&row.0[0], &row.0[1]) {
+            .map(|row| match (&row[0], &row[1]) {
                 (
                     Some(typed_arrow_dyn::DynCell::Str(s)),
                     Some(typed_arrow_dyn::DynCell::I64(ts)),
@@ -1036,35 +1070,35 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("composite schema metadata");
 
         let rows = vec![
-            DynRow(vec![
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(5)),
                 Some(DynCell::I32(1)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(10)),
                 Some(DynCell::I32(2)),
-            ]),
-            DynRow(vec![
+            ],
+            vec![
                 Some(DynCell::Str("b".into())),
                 Some(DynCell::I64(1)),
                 Some(DynCell::I32(3)),
-            ]),
+            ],
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
 
         use std::ops::Bound as B;
-        let lo = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(1i64)]);
-        let hi = KeyDyn::Tuple(vec![KeyDyn::from("a"), KeyDyn::from(10i64)]);
+        let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(1i64)]);
+        let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
         let rs = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
             B::Included(lo),
             B::Included(hi),
         )]);
         let got: Vec<(String, i64)> = db
             .scan_mutable_rows(&rs)
-            .map(|row| match (&row.0[0], &row.0[1]) {
+            .map(|row| match (&row[0], &row[1]) {
                 (
                     Some(typed_arrow_dyn::DynCell::Str(s)),
                     Some(typed_arrow_dyn::DynCell::I64(ts)),
@@ -1099,10 +1133,7 @@ mod tests {
         ]));
         let batch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(1)),
-            ])],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]],
         )
         .expect("batch");
 
@@ -1117,7 +1148,7 @@ mod tests {
         fs::write(wal_dir.join("wal-00000000000000000001.tonwal"), bytes).expect("write wal");
 
         let extractor =
-            crate::record::extract::dyn_extractor_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
         let mut cfg = WalConfig::default();
         cfg.dir = fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path");
         let executor = Arc::new(BlockingExecutor);
@@ -1129,13 +1160,16 @@ mod tests {
         runtime.shutdown_timeout(Duration::from_secs(0));
 
         // Replayed version retains commit_ts 42 and tombstone state.
-        let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
+        let chain = db
+            .mem
+            .inspect_versions(&KeyOwned::from("k"))
+            .expect("chain");
         assert_eq!(chain, vec![(Timestamp::new(42), true)]);
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![crate::scan::KeyRange::new(
-            B::Included(KeyDyn::from("k")),
-            B::Included(KeyDyn::from("k")),
+            B::Included(KeyOwned::from("k")),
+            B::Included(KeyOwned::from("k")),
         )]);
         let visible: Vec<_> = db
             .scan_mutable_rows_at(&ranges, Timestamp::new(50))
@@ -1145,15 +1179,15 @@ mod tests {
         // New ingest should advance to > 42 (next clock tick).
         let new_batch = build_batch(
             schema.clone(),
-            vec![DynRow(vec![
-                Some(DynCell::Str("k".into())),
-                Some(DynCell::I32(2)),
-            ])],
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]],
         )
         .expect("batch2");
         block_on(db.ingest(new_batch)).expect("ingest new");
 
-        let chain = db.mem.inspect_versions(&KeyDyn::from("k")).expect("chain");
+        let chain = db
+            .mem
+            .inspect_versions(&KeyOwned::from("k"))
+            .expect("chain");
         assert_eq!(
             chain,
             vec![(Timestamp::new(42), true), (Timestamp::new(43), false)]

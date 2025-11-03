@@ -39,6 +39,7 @@ pub mod frame;
 pub mod manifest_ext;
 pub mod metrics;
 pub mod replay;
+pub mod state;
 pub mod storage;
 pub mod writer;
 // Writer logic will live here once the async queue is implemented.
@@ -106,13 +107,16 @@ pub struct WalConfig {
     pub retention_bytes: Option<usize>,
     /// Capacity of the writer's bounded queue.
     pub queue_size: usize,
-    /// Filesystem implementation backing the WAL directory.
-    pub filesystem: Arc<dyn DynFs>,
+    /// Backend used to create and append WAL segments.
+    pub segment_backend: Arc<dyn DynFs>,
+    /// Optional store used for `state.json` persistence.
+    pub state_store: Option<Arc<dyn state::WalStateStore>>,
 }
 
 impl Default for WalConfig {
     fn default() -> Self {
         let dir = Path::parse("wal").expect("static wal path");
+        let filesystem = crate::fs::local_fs();
         Self {
             dir,
             segment_max_bytes: 64 * 1024 * 1024,
@@ -122,14 +126,15 @@ impl Default for WalConfig {
             recovery: WalRecoveryMode::default(),
             retention_bytes: None,
             queue_size: 65_536,
-            filesystem: crate::fs::local_fs(),
+            segment_backend: filesystem,
+            state_store: None,
         }
     }
 }
 
 impl fmt::Debug for WalConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let fs_tag = self.filesystem.file_system();
+        let fs_tag = self.segment_backend.file_system();
         f.debug_struct("WalConfig")
             .field("dir", &self.dir)
             .field("segment_max_bytes", &self.segment_max_bytes)
@@ -139,8 +144,25 @@ impl fmt::Debug for WalConfig {
             .field("recovery", &self.recovery)
             .field("retention_bytes", &self.retention_bytes)
             .field("queue_size", &self.queue_size)
-            .field("filesystem", &fs_tag)
+            .field("segment_backend", &fs_tag)
+            .field("state_store_present", &self.state_store.is_some())
             .finish()
+    }
+}
+
+impl WalConfig {
+    /// Replace the store used for `state.json` bookkeeping.
+    #[must_use]
+    pub fn with_state_store(mut self, store: Arc<dyn state::WalStateStore>) -> Self {
+        self.state_store = Some(store);
+        self
+    }
+
+    /// Disable `state.json` persistence (primarily for tests).
+    #[must_use]
+    pub fn without_state_store(mut self) -> Self {
+        self.state_store = None;
+        self
     }
 }
 
@@ -170,6 +192,9 @@ pub enum WalError {
     /// The WAL is not currently enabled.
     #[error("wal not enabled")]
     Disabled,
+    /// State file persistence failed.
+    #[error("wal state error: {0}")]
+    State(String),
     /// Module has not been fully implemented yet.
     #[error("wal feature is not implemented: {0}")]
     Unimplemented(&'static str),
@@ -186,22 +211,27 @@ pub struct WalAck {
     pub elapsed: Duration,
 }
 
+/// Dynamic ingest payload handed to WAL commands.
+#[derive(Debug, Clone)]
+pub struct DynBatchPayload {
+    /// Record batch supplied by the caller (without MVCC columns).
+    pub batch: RecordBatch,
+    /// Arrow column containing the `_commit_ts` values for the batch.
+    pub commit_ts_column: ArrayRef,
+    /// Arrow column containing the `_tombstone` bitmap for the batch.
+    pub tombstone_column: ArrayRef,
+}
+
+impl DynBatchPayload {
+    /// Number of rows carried by the batch.
+    pub fn num_rows(&self) -> usize {
+        self.batch.num_rows()
+    }
+}
+
 /// Logical commands accepted by the WAL writer queue.
 #[derive(Debug, Clone)]
 pub enum WalCommand {
-    /// Autocommit ingest (legacy path): append + commit in a single submission.
-    Autocommit {
-        /// Provisional identifier used for WAL frames.
-        provisional_id: u64,
-        /// Record batch supplied by the caller (without MVCC columns).
-        batch: RecordBatch,
-        /// Arrow column containing the `_commit_ts` values for the batch.
-        commit_ts_column: ArrayRef,
-        /// Arrow column containing the `_tombstone` bitmap for the batch.
-        tombstone_column: ArrayRef,
-        /// Commit timestamp captured at enqueue.
-        commit_ts: Timestamp,
-    },
     /// Open an explicit transaction.
     TxnBegin {
         /// Provisional identifier reserved for this transaction.
@@ -211,14 +241,8 @@ pub enum WalCommand {
     TxnAppend {
         /// Provisional identifier associated with the transaction.
         provisional_id: u64,
-        /// Record batch payload (without MVCC columns).
-        batch: RecordBatch,
-        /// Arrow column containing the `_commit_ts` values for the batch.
-        commit_ts_column: ArrayRef,
-        /// Arrow column containing the `_tombstone` bitmap for the batch.
-        tombstone_column: ArrayRef,
-        /// Commit timestamp assigned to these rows (should match the eventual commit).
-        commit_ts: Timestamp,
+        /// Ingest payload containing the data and MVCC columns.
+        payload: DynBatchPayload,
     },
     /// Commit an explicit transaction.
     TxnCommit {
@@ -234,6 +258,18 @@ pub enum WalCommand {
     },
 }
 
+impl WalCommand {
+    /// Return the provisional identifier carried by this command.
+    fn provisional_id(&self) -> u64 {
+        match self {
+            WalCommand::TxnBegin { provisional_id }
+            | WalCommand::TxnAppend { provisional_id, .. }
+            | WalCommand::TxnCommit { provisional_id, .. }
+            | WalCommand::TxnAbort { provisional_id } => *provisional_id,
+        }
+    }
+}
+
 /// Append `_commit_ts` and `_tombstone` columns, returning a new batch for WAL storage.
 pub(crate) fn append_mvcc_columns(
     batch: &RecordBatch,
@@ -241,6 +277,7 @@ pub(crate) fn append_mvcc_columns(
     tombstones: &ArrayRef,
 ) -> WalResult<RecordBatch> {
     let rows = batch.num_rows();
+    let schema = batch.schema();
 
     if commit_ts.len() != rows {
         return Err(WalError::Codec(
@@ -282,8 +319,7 @@ pub(crate) fn append_mvcc_columns(
         return Err(WalError::Codec("null tombstone value".to_string()));
     }
 
-    if batch
-        .schema()
+    if schema
         .fields()
         .iter()
         .any(|f| f.name() == MVCC_TOMBSTONE_COL)
@@ -293,18 +329,13 @@ pub(crate) fn append_mvcc_columns(
         ));
     }
 
-    if batch
-        .schema()
-        .fields()
-        .iter()
-        .any(|f| f.name() == MVCC_COMMIT_COL)
-    {
+    if schema.fields().iter().any(|f| f.name() == MVCC_COMMIT_COL) {
         return Err(WalError::Codec(
             "record batch already contains _commit_ts column".to_string(),
         ));
     }
 
-    let mut fields = batch.schema().fields().to_vec();
+    let mut fields = schema.fields().to_vec();
     fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
     fields.push(Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false).into());
 
@@ -312,8 +343,9 @@ pub(crate) fn append_mvcc_columns(
     columns.push(Arc::clone(commit_ts));
     columns.push(Arc::clone(tombstones));
 
-    let schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(schema, columns).map_err(|err| WalError::Codec(err.to_string()))
+    let metadata = schema.metadata().clone();
+    let updated_schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    RecordBatch::try_new(updated_schema, columns).map_err(|err| WalError::Codec(err.to_string()))
 }
 
 /// Remove MVCC columns, returning the stripped batch, commit timestamps, and bitmap.
@@ -379,7 +411,9 @@ pub(crate) fn split_mvcc_columns(
         .map(|(_, column)| column.clone())
         .collect::<Vec<_>>();
 
-    let stripped = RecordBatch::try_new(Arc::new(Schema::new(stripped_fields)), stripped_columns)
+    let metadata = schema.metadata().clone();
+    let stripped_schema = Arc::new(Schema::new_with_metadata(stripped_fields, metadata));
+    let stripped = RecordBatch::try_new(stripped_schema, stripped_columns)
         .map_err(|err| WalError::Codec(err.to_string()))?;
 
     Ok((
@@ -486,7 +520,7 @@ where
 
     /// Enqueue a command to the WAL writer.
     pub async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
-        let submission_seq = self.inner.next_payload_seq();
+        let submission_seq = command.provisional_id();
         self.enqueue_command(command, submission_seq).await
     }
 
@@ -534,17 +568,11 @@ where
             });
         }
         let provisional_id = self.next_provisional_id();
-        let commit_values =
-            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
-        let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
-        let command = WalCommand::Autocommit {
-            provisional_id,
-            batch: batch.clone(),
-            commit_ts_column: Arc::clone(&commit_values),
-            tombstone_column: Arc::clone(&tombstone_values),
-            commit_ts,
-        };
-        self.enqueue_command(command, provisional_id).await
+        let append_ticket = self
+            .txn_append(provisional_id, batch, tombstones, commit_ts)
+            .await?;
+        append_ticket.durable().await?;
+        self.txn_commit(provisional_id, commit_ts).await
     }
 
     /// Force manual rotation of the active WAL segment.
@@ -606,12 +634,14 @@ where
         let commit_values =
             Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
         let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
-        let command = WalCommand::TxnAppend {
-            provisional_id,
+        let payload = DynBatchPayload {
             batch: batch.clone(),
             commit_ts_column: Arc::clone(&commit_values),
             tombstone_column: Arc::clone(&tombstone_values),
-            commit_ts,
+        };
+        let command = WalCommand::TxnAppend {
+            provisional_id,
+            payload,
         };
         self.enqueue_command(command, provisional_id).await
     }
@@ -757,7 +787,7 @@ where
     E: Executor + Timer,
 {
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
-        let storage = storage::WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
+        let storage = storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
 
         let tail_metadata = block_on(storage.tail_metadata())?;
         let next_payload_seq = tail_metadata
