@@ -107,7 +107,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     let mut wal_cfg = WalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
 
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.filesystem), wal_cfg.dir.clone());
+    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
     storage.ensure_dir(storage.root()).await?;
     let mut segment = storage.open_segment(1).await?;
 
@@ -206,7 +206,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
     wal_cfg.recovery = WalRecoveryMode::TolerateCorruptedTail;
 
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.filesystem), wal_cfg.dir.clone());
+    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
     storage.ensure_dir(storage.root()).await?;
     let mut segment = storage.open_segment(1).await?;
 
@@ -304,7 +304,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     let mut wal_cfg = WalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
 
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.filesystem), wal_cfg.dir.clone());
+    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
     storage.ensure_dir(storage.root()).await?;
     let mut segment = storage.open_segment(1).await?;
 
@@ -389,8 +389,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     recovered.disable_wal()?;
     drop(recovered);
 
-    let final_config =
-        DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let final_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
     let recovered_again: DB<DynMode, TokioExecutor> =
         DB::recover_with_wal(final_config, Arc::clone(&executor), wal_cfg.clone()).await?;
 

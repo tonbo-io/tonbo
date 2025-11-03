@@ -17,7 +17,7 @@ use crate::{
 pub(crate) async fn collect_wal_segment_refs(
     cfg: &WalConfig,
 ) -> Result<Vec<WalSegmentRef>, WalError> {
-    let storage = WalStorage::new(Arc::clone(&cfg.filesystem), cfg.dir.clone());
+    let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
     let Some(tail) = storage.tail_metadata().await? else {
         return Ok(Vec::new());
     };
@@ -128,11 +128,9 @@ mod tests {
                 .expect("flush second segment");
             drop(second_segment);
 
-            let cfg = WalConfig {
-                dir,
-                filesystem: Arc::clone(&fs),
-                ..WalConfig::default()
-            };
+            let mut cfg = WalConfig::default();
+            cfg.dir = dir.clone();
+            cfg.segment_backend = Arc::clone(&fs);
 
             let refs = collect_wal_segment_refs(&cfg)
                 .await

@@ -261,7 +261,10 @@ mod tests {
         let tuple = KeyOwned::tuple(vec![part_a.clone(), part_b.clone()]);
 
         let raw = KeyViewRaw::from_owned(&tuple);
-        assert!(matches!(raw.as_slice(), [KeyComponentRaw::Utf8(_), KeyComponentRaw::U64(_)]));
+        assert!(matches!(
+            raw.as_slice(),
+            [KeyComponentRaw::Utf8(_), KeyComponentRaw::U64(_)]
+        ));
         assert_eq!(raw.as_slice().len(), 2);
 
         let rebuilt = KeyOwned::tuple(vec![part_a, part_b]);

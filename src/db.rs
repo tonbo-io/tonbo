@@ -33,7 +33,9 @@ use crate::{
     wal::{
         WalConfig, WalError, WalHandle,
         frame::{DynAppendEvent, WalEvent},
+        manifest_ext,
         replay::Replayer,
+        state::WalStateHandle,
     },
 };
 
@@ -230,6 +232,14 @@ where
     where
         M: Sized,
     {
+        let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
+            WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
+                .await?
+                .state()
+                .commit_ts()
+        } else {
+            None
+        };
         let mut db = Self::new(config, executor)?;
         db.set_wal_config(Some(wal_cfg.clone()));
 
@@ -241,7 +251,8 @@ where
         // references.
 
         let last_commit_ts = M::replay_wal(&mut db, events)?;
-        if let Some(ts) = last_commit_ts {
+        let effective_commit = last_commit_ts.or(state_commit_hint);
+        if let Some(ts) = effective_commit {
             db.commit_clock.advance_to_at_least(ts.saturating_add(1));
         }
 
@@ -350,7 +361,7 @@ where
             builder.add_immutable(seg)?;
         }
         let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
-            match crate::wal::manifest_ext::collect_wal_segment_refs(cfg).await {
+            match manifest_ext::collect_wal_segment_refs(cfg).await {
                 Ok(refs) if !refs.is_empty() => {
                     let ids: Vec<FileId> = refs.iter().map(|ref_| ref_.file_id().clone()).collect();
                     builder.set_wal_ids(Some(ids.clone()));
@@ -602,7 +613,10 @@ mod tests {
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
-        wal::frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+        wal::{
+            WalCommand,
+            frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+        },
     };
 
     #[test]
@@ -753,7 +767,7 @@ mod tests {
                     writer::WriterMsg::Enqueue {
                         command, ack_tx, ..
                     } => match command {
-                        crate::wal::WalCommand::TxnAppend { .. } => {
+                        WalCommand::TxnAppend { .. } => {
                             let ack = WalAck {
                                 seq: frame::INITIAL_FRAME_SEQ,
                                 bytes_flushed: 0,
@@ -761,7 +775,7 @@ mod tests {
                             };
                             let _ = ack_tx.send(Ok(ack));
                         }
-                        crate::wal::WalCommand::TxnCommit { .. } => {
+                        WalCommand::TxnCommit { .. } => {
                             {
                                 let mut slot = ack_slot_clone.lock().await;
                                 *slot = Some(ack_tx);
