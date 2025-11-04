@@ -9,13 +9,13 @@ use std::{
 use arrow_array::{Array, ArrayRef, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use clap::{Parser, ValueEnum};
-use fusio::{executor::tokio::TokioExecutor, fs::FsCas, impls::mem::fs::InMemoryFs, path::Path};
+use fusio::executor::tokio::TokioExecutor;
 use tokio::runtime::Runtime;
 use tonbo::{
     db::DB,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
-    wal::{WalConfig, WalExt, WalSyncPolicy, state::FsWalStateStore},
+    wal::{WalExt, WalSyncPolicy},
 };
 use ulid::Ulid;
 
@@ -122,22 +122,18 @@ async fn bench_wal_append(cfg: &Config, schema: Arc<Schema>) -> (Duration, usize
 async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, TokioExecutor> {
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(config, executor).expect("db");
-    let cfg = wal_config(sync);
+    let label = format!("wal-bench-{}", Ulid::new());
+    let mut db: DB<DynMode, TokioExecutor> = DB::builder(config)
+        .in_memory(label)
+        .configure_wal(|cfg| cfg.sync = sync)
+        .build(Arc::clone(&executor))
+        .expect("db");
+    let cfg = db
+        .wal_config()
+        .cloned()
+        .expect("builder provides wal config");
     db.enable_wal(cfg).expect("enable wal");
     db
-}
-
-fn wal_config(sync: WalSyncPolicy) -> WalConfig {
-    let mut cfg = WalConfig::default();
-    let backend = Arc::new(InMemoryFs::new());
-    let fs_dyn: Arc<dyn fusio::DynFs> = backend.clone();
-    let fs_cas: Arc<dyn FsCas> = backend.clone();
-    cfg.segment_backend = fs_dyn;
-    cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
-    cfg.dir = Path::parse(format!("wal-bench-{}", Ulid::new())).expect("path");
-    cfg.sync = sync;
-    cfg
 }
 
 fn build_schema(value_columns: usize) -> Schema {

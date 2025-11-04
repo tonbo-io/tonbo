@@ -23,11 +23,11 @@ use typed_arrow_dyn::DynCell;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = std::env::temp_dir().join(format!(
+    let root_dir = std::env::temp_dir().join(format!(
         "tonbo-wal-e2e-{}",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
-    fs::create_dir_all(&wal_dir)?;
+    fs::create_dir_all(&root_dir)?;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -36,10 +36,16 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
+    let root_str = root_dir.to_string_lossy().into_owned();
+    let mut db: DB<DynMode, TokioExecutor> = DB::builder(mode_config)
+        .on_disk(root_str.clone())
+        .build(Arc::clone(&executor))
+        .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
 
-    let mut wal_cfg = WalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
+    let wal_cfg = db
+        .wal_config()
+        .cloned()
+        .expect("builder should set wal config");
     let recovery_cfg = wal_cfg.clone();
 
     db.enable_wal(wal_cfg)?;
@@ -83,7 +89,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     assert_eq!(rows, vec![("user-1".into(), 10), ("user-2".into(), 20)]);
 
     drop(recovered);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }
