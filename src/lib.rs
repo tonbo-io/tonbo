@@ -11,6 +11,7 @@ mod inmem;
 /// Zero-copy key projection scaffolding and owned key wrapper.
 pub mod key;
 pub mod mode;
+pub mod schema;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
 pub use crate::db::DB;

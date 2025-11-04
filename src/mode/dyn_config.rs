@@ -118,4 +118,9 @@ impl DynModeConfig {
             name: "<tonbo.key|tonbo.keys>".to_string(),
         })
     }
+
+    /// Build a config by first inspecting metadata and bubbling a descriptive error when absent.
+    pub fn from_schema(schema: SchemaRef) -> Result<Self, KeyExtractError> {
+        Self::from_metadata(schema)
+    }
 }
