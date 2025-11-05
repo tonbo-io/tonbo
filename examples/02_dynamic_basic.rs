@@ -2,7 +2,7 @@
 
 use std::{ops::Bound, sync::Arc};
 
-use fusio::executor::BlockingExecutor;
+use fusio::executor::tokio::TokioExecutor;
 use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
@@ -59,8 +59,8 @@ fn main() {
 
     // Create a dynamic DB by specifying the key field name
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key col");
-    let executor = Arc::new(BlockingExecutor);
-    let mut db: DB<DynMode, BlockingExecutor> = DB::builder(config)
+    let executor = Arc::new(TokioExecutor::default());
+    let mut db: DB<DynMode, TokioExecutor> = DB::builder(config)
         .in_memory("dynamic-basic")
         .build(Arc::clone(&executor))
         .expect("schema ok");
