@@ -12,10 +12,12 @@ arrow-schema = "56.2.0"
 arrow-select = "56.2.0"
 crc32c = "0.6"
 fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [
+    "aws",
     "dyn",
     "executor-tokio",
     "fs",
     "tokio",
+    "tokio-http",
 ] }
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet" }
 futures = "0.3"
@@ -37,10 +39,12 @@ fusio-parquet = { path = "../fusio/fusio-parquet", package = "fusio-parquet" }
 [dev-dependencies]
 typed-arrow = { version = "0.4.1", features = ["ext-hooks"] }
 fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [
+    "aws",
     "dyn",
     "executor-tokio",
     "fs",
     "tokio",
+    "tokio-http",
 ] }
 futures = "0.3"
 tokio = { version = "1", features = [
