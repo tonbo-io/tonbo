@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# S3 integration smoke harness. Run from the repo root via `./tests/s3_smoke.sh`.
 set -euo pipefail
 
 command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
