@@ -7,10 +7,11 @@
   1. Ensure Docker is available.
   2. From the repo root, run `./tests/s3_smoke.sh`.
      - The script starts LocalStack, provisions the bucket, seeds the required
-       `TONBO_S3_*` environment variables, and executes
-       `cargo run --example __s3_smoke_tmp`.
-  3. On success the script prints `SMOKE_OK`; on failure it tails the relevant
-     LocalStack logs for debugging.
+       `TONBO_S3_*` environment variables, and runs
+       `cargo test --features s3-smoke --test s3_smoke`.
+  3. On success it prints "Smoke test complete." and tails recent LocalStack
+     logs; on failure it exits non-zero and shows a longer log tail for
+     debugging.
 - **Alternative**: If you already have an S3-compatible endpoint up, export the
   `TONBO_S3_*` variables yourself and run
   `cargo test --features s3-smoke --test s3_smoke`.
