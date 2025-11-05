@@ -46,7 +46,6 @@ use crate::{
 type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, ArrayRef, Option<Timestamp>)>>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M, E>
 where

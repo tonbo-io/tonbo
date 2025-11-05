@@ -59,7 +59,7 @@ fn main() {
 
     // Create a dynamic DB by specifying the key field name
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key col");
-    let mut db: DB<DynMode, TokioExecutor> = DB::builder(config)
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(config)
         .in_memory("dynamic-basic")
         .build()
         .expect("schema ok");

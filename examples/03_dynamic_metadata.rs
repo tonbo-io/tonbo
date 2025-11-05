@@ -59,7 +59,7 @@ fn main() {
     // Create DB from metadata
     let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
     let executor = Arc::new(BlockingExecutor);
-    let mut db: DB<DynMode, BlockingExecutor> = DB::builder(config)
+    let mut db: DB<DynMode, BlockingExecutor> = DB::<DynMode, BlockingExecutor>::builder(config)
         .in_memory("dynamic-metadata")
         .build_with_executor(Arc::clone(&executor))
         .expect("metadata ok");

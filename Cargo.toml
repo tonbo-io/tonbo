@@ -29,6 +29,11 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 fusio_manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest" }
 
+[patch."https://github.com/tonbo-io/fusio.git"]
+fusio = { path = "../fusio/fusio", package = "fusio" }
+fusio_manifest = { path = "../fusio/fusio-manifest", package = "fusio-manifest" }
+fusio-parquet = { path = "../fusio/fusio-parquet", package = "fusio-parquet" }
+
 [dev-dependencies]
 typed-arrow = { version = "0.4.1", features = ["ext-hooks"] }
 fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [

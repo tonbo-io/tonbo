@@ -3,26 +3,22 @@ use std::{collections::HashMap, sync::Arc};
 use fusio::{
     DynFs,
     disk::LocalFs,
-    executor::{tokio::TokioExecutor, Executor, Timer},
+    executor::{Executor, Timer, tokio::TokioExecutor},
     fs::FsCas as FusioCas,
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
 use thiserror::Error;
 
+use super::{DB, Mode};
 use crate::{
     extractor::KeyExtractError,
-    manifest::{
-        ManifestError, TableId, TonboManifest,
-        init_in_memory_manifest,
-    },
+    manifest::{ManifestError, TableId, TonboManifest, init_fs_manifest},
     wal::{
         WalConfig,
         state::{FsWalStateStore, WalStateStore},
     },
 };
-
-use super::{DB, Mode};
 
 /// Builder-style configuration surface for constructing a [`DB`] instance.
 ///
@@ -241,9 +237,18 @@ impl ObjectStoreBuilder {
 
 #[derive(Clone)]
 struct StorageBackend {
-    fs: Arc<dyn DynFs>,
+    dyn_fs: Arc<dyn DynFs>,
     cas: Option<Arc<dyn FusioCas>>,
     root: Path,
+    kind: StorageBackendKind,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+enum StorageBackendKind {
+    InMemory { fs: Arc<InMemoryFs> },
+    Disk { fs: Arc<LocalFs> },
+    ObjectStore(ObjectStoreSpec),
 }
 
 #[derive(Clone)]
@@ -261,6 +266,10 @@ impl StorageLayout {
     fn new(spec: StorageBackendSpec) -> Result<Self, DbBuildError> {
         let backend = StorageBackend::from_spec(spec)?;
         Ok(Self { backend })
+    }
+
+    fn backend(&self) -> &StorageBackend {
+        &self.backend
     }
 
     fn wal_route(&self) -> Result<StorageRoute, DbBuildError> {
@@ -281,20 +290,12 @@ impl StorageLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum StorageClass {
     Wal,
-    ManifestHead,
-    ManifestSegments,
-    ManifestCheckpoints,
-    ManifestLeases,
 }
 
 impl StorageClass {
     fn components(self) -> &'static [&'static str] {
         match self {
             StorageClass::Wal => &["wal"],
-            StorageClass::ManifestHead => &["manifest", "head.json"],
-            StorageClass::ManifestSegments => &["manifest", "segments"],
-            StorageClass::ManifestCheckpoints => &["manifest", "checkpoints"],
-            StorageClass::ManifestLeases => &["manifest", "leases"],
         }
     }
 }
@@ -311,15 +312,16 @@ impl StorageBackend {
                 }
                 let raw_fs = Arc::new(InMemoryFs::new());
                 let dyn_fs: Arc<dyn DynFs> = raw_fs.clone();
-                let cas_fs: Arc<dyn FusioCas> = raw_fs;
+                let cas_fs: Arc<dyn FusioCas> = raw_fs.clone();
                 let root = Path::parse(&label).map_err(|err| DbBuildError::InvalidPath {
                     path: label,
                     reason: err.to_string(),
                 })?;
                 Ok(Self {
-                    fs: dyn_fs,
+                    dyn_fs,
                     cas: Some(cas_fs),
                     root,
+                    kind: StorageBackendKind::InMemory { fs: raw_fs },
                 })
             }
             StorageBackendSpec::Disk { root } => {
@@ -331,15 +333,17 @@ impl StorageBackend {
                 }
                 let raw_fs = Arc::new(LocalFs {});
                 let dyn_fs: Arc<dyn DynFs> = raw_fs.clone();
-                let cas_fs: Arc<dyn FusioCas> = raw_fs;
-                let root_path = Path::from_filesystem_path(&root).map_err(|err| DbBuildError::InvalidPath {
-                    path: root,
-                    reason: err.to_string(),
-                })?;
+                let cas_fs: Arc<dyn FusioCas> = raw_fs.clone();
+                let root_path =
+                    Path::from_filesystem_path(&root).map_err(|err| DbBuildError::InvalidPath {
+                        path: root,
+                        reason: err.to_string(),
+                    })?;
                 Ok(Self {
-                    fs: dyn_fs,
+                    dyn_fs,
                     cas: Some(cas_fs),
                     root: root_path,
+                    kind: StorageBackendKind::Disk { fs: raw_fs },
                 })
             }
             StorageBackendSpec::ObjectStore(spec) => build_object_store_backend(spec),
@@ -356,10 +360,18 @@ impl StorageBackend {
             current = current.child(parsed);
         }
         Ok(StorageRoute {
-            fs: Arc::clone(&self.fs),
+            fs: Arc::clone(&self.dyn_fs),
             path: current,
             cas: self.cas.clone(),
         })
+    }
+
+    fn kind(&self) -> &StorageBackendKind {
+        &self.kind
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
     }
 }
 
@@ -377,7 +389,17 @@ impl<'a> ManifestBootstrap<'a> {
     }
 
     fn init_manifest(&self) -> Result<(TonboManifest, TableId), DbBuildError> {
-        let _ = self.layout;
-        init_in_memory_manifest(0).map_err(DbBuildError::Manifest)
+        let backend = self.layout.backend();
+        match backend.kind() {
+            StorageBackendKind::InMemory { fs } => {
+                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0)
+                    .map_err(DbBuildError::Manifest)
+            }
+            StorageBackendKind::Disk { fs } => {
+                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0)
+                    .map_err(DbBuildError::Manifest)
+            }
+            StorageBackendKind::ObjectStore(_) => Err(DbBuildError::UnsupportedObjectStore),
+        }
     }
 }
