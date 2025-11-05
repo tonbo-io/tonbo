@@ -61,7 +61,7 @@ fn main() {
     let executor = Arc::new(BlockingExecutor);
     let mut db: DB<DynMode, BlockingExecutor> = DB::builder(config)
         .in_memory("dynamic-metadata")
-        .build(Arc::clone(&executor))
+        .build_with_executor(Arc::clone(&executor))
         .expect("metadata ok");
     block_on(db.ingest(batch)).expect("insert");
 

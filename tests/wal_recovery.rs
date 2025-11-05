@@ -39,7 +39,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let root_str = root_dir.to_string_lossy().into_owned();
     let mut db: DB<DynMode, TokioExecutor> = DB::builder(mode_config)
         .on_disk(root_str.clone())
-        .build(Arc::clone(&executor))
+        .build_with_executor(Arc::clone(&executor))
         .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
 
     let wal_cfg = db

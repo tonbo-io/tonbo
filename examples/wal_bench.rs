@@ -121,12 +121,11 @@ async fn bench_wal_append(cfg: &Config, schema: Arc<Schema>) -> (Duration, usize
 
 async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, TokioExecutor> {
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-    let executor = Arc::new(TokioExecutor::default());
     let label = format!("wal-bench-{}", Ulid::new());
     let mut db: DB<DynMode, TokioExecutor> = DB::builder(config)
         .in_memory(label)
         .configure_wal(|cfg| cfg.sync = sync)
-        .build(Arc::clone(&executor))
+        .build()
         .expect("db");
     let cfg = db
         .wal_config()

@@ -95,7 +95,7 @@ mod tests {
         let executor = Arc::new(BlockingExecutor);
         let db = DB::builder(config)
             .in_memory("compaction-test")
-            .build(Arc::clone(&executor))
+            .build_with_executor(Arc::clone(&executor))
             .expect("db init");
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});

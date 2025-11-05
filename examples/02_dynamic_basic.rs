@@ -59,10 +59,9 @@ fn main() {
 
     // Create a dynamic DB by specifying the key field name
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key col");
-    let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::builder(config)
         .in_memory("dynamic-basic")
-        .build(Arc::clone(&executor))
+        .build()
         .expect("schema ok");
     block_on(db.ingest(batch)).expect("insert dynamic batch");
 

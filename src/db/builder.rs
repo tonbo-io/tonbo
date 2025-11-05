@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use fusio::{
     DynFs,
     disk::LocalFs,
-    executor::{Executor, Timer},
+    executor::{tokio::TokioExecutor, Executor, Timer},
     fs::FsCas as FusioCas,
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
@@ -99,15 +99,20 @@ where
     }
 
     /// Materialise a [`DB`] using the accumulated builder state.
-    pub fn build<E>(self, executor: Arc<E>) -> Result<DB<M, E>, DbBuildError>
+    pub fn build(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
+        let executor = Arc::new(TokioExecutor::default());
+        self.build_with_executor(executor)
+    }
+
+    /// Materialise a [`DB`] using a caller-provided executor implementation.
+    pub fn build_with_executor<E>(self, executor: Arc<E>) -> Result<DB<M, E>, DbBuildError>
     where
-        M: Sized,
         E: Executor + Timer + Send + Sync + 'static,
     {
         self.build_internal(executor)
     }
 
-    pub(crate) fn build_internal<E>(self, executor: Arc<E>) -> Result<DB<M, E>, DbBuildError>
+    fn build_internal<E>(self, executor: Arc<E>) -> Result<DB<M, E>, DbBuildError>
     where
         M: Mode,
         E: Executor + Timer + Send + Sync + 'static,
