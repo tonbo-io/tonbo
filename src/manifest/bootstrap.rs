@@ -22,6 +22,9 @@ pub(crate) type InMemoryManifest = Manifest<
     LeaseStoreImpl<InMemoryFs, BlockingExecutor>,
 >;
 
+/// Primary manifest handle used by the DB; currently an alias to the in-memory implementation.
+pub(crate) type TonboManifest = InMemoryManifest;
+
 /// Construct an in-memory manifest and prime its head with the provided schema version.
 pub(crate) fn init_in_memory_manifest(
     schema_version: u32,

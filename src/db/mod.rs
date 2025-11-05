@@ -12,6 +12,10 @@ use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
 use lockable::LockableHashMap;
 
+mod builder;
+
+pub use builder::{DbBuildError, DbBuilder, ObjectStoreBuilder};
+
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
     extractor::KeyExtractError,
@@ -23,7 +27,7 @@ use crate::{
     },
     key::KeyOwned,
     manifest::{
-        InMemoryManifest, ManifestError, SstEntry, TableId, VersionEdit, WalSegmentRef,
+        ManifestError, SstEntry, TableId, TonboManifest, VersionEdit, WalSegmentRef,
         init_in_memory_manifest,
     },
     mvcc::{CommitClock, ReadView, Timestamp},
@@ -41,6 +45,7 @@ use crate::{
 
 type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, ArrayRef, Option<Timestamp>)>>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
+
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M, E>
@@ -65,7 +70,7 @@ where
     /// Monotonic commit timestamp assigned to ingests (autocommit path for now).
     commit_clock: CommitClock,
     /// Manifest handle used by the dev branch manifest integration (in-memory for now).
-    manifest: InMemoryManifest,
+    manifest: TonboManifest,
     manifest_table: TableId,
     /// Per-key transactional locks (wired once transactional writes arrive).
     _key_locks: LockMap<M::Key>,
@@ -199,6 +204,42 @@ where
     M::Key: Eq + Hash + Clone,
     E: Executor + Timer,
 {
+    /// Begin constructing a DB in mode `M` through the fluent builder API.
+    pub fn builder(config: M::Config) -> DbBuilder<M>
+    where
+        M: Sized,
+    {
+        DbBuilder::new(config)
+    }
+
+    /// Construct a database from pre-initialised components.
+    fn from_components(
+        mode: M,
+        mem: M::Mutable,
+        manifest: TonboManifest,
+        manifest_table: TableId,
+        wal_config: Option<WalConfig>,
+        executor: Arc<E>,
+    ) -> Self
+    where
+        M: Sized,
+    {
+        Self {
+            mode,
+            mem,
+            immutables: Vec::new(),
+            policy: crate::inmem::policy::default_policy(),
+            last_seal_at: None,
+            executor,
+            wal: None,
+            wal_config,
+            commit_clock: CommitClock::default(),
+            manifest,
+            manifest_table,
+            _key_locks: Arc::new(LockableHashMap::new()),
+        }
+    }
+
     /// Construct a new DB in mode `M` using its configuration.
     pub fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError>
     where
@@ -207,20 +248,14 @@ where
         let (mode, mem) = M::build(config)?;
         let (manifest, manifest_table) =
             init_in_memory_manifest(0).expect("manifest initialization");
-        Ok(Self {
+        Ok(Self::from_components(
             mode,
             mem,
-            immutables: Vec::new(),
-            policy: crate::inmem::policy::default_policy(),
-            last_seal_at: None,
-            executor,
-            wal: None,
-            wal_config: None,
-            commit_clock: CommitClock::default(),
             manifest,
             manifest_table,
-            _key_locks: Arc::new(LockableHashMap::new()),
-        })
+            None,
+            executor,
+        ))
     }
 
     /// Recover a DB by replaying WAL segments before enabling ingest.
