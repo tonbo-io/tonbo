@@ -353,7 +353,7 @@ impl StorageBackend {
                 let raw_fs = Arc::new(LocalFs {});
                 let dyn_fs: Arc<dyn DynFs> = raw_fs.clone();
                 let cas_fs: Arc<dyn FusioCas> = raw_fs;
-                let root_path = Path::parse(&root).map_err(|err| DbBuildError::InvalidPath {
+                let root_path = Path::from_filesystem_path(&root).map_err(|err| DbBuildError::InvalidPath {
                     path: root,
                     reason: err.to_string(),
                 })?;
