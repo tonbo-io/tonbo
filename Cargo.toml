@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 resolver = "2"
 
+[features]
+default = []
+# Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
+s3-smoke = []
+
 [dependencies]
 arrow-buffer = "56.2.0"
 arrow-ipc = "56.1.0"
