@@ -363,7 +363,7 @@ mod tests {
     use super::{super::domain::SstEntry, *};
     use crate::{
         fs::generate_file_id,
-        manifest::{bootstrap::init_in_memory_manifest, domain::TableId},
+        manifest::{bootstrap::init_in_memory_manifest_raw, domain::TableId},
         ondisk::sstable::{SsTableId, SsTableStats},
     };
 
@@ -389,7 +389,8 @@ mod tests {
 
     #[tokio::test]
     async fn apply_version_edits_snapshot_latest_and_list_versions_happy_path() {
-        let (manifest, table_id) = init_in_memory_manifest(1).expect("manifest should initialize");
+        let (manifest, table_id) =
+            init_in_memory_manifest_raw(1).expect("manifest should initialize");
 
         let wal_segment = WalSegmentRef::new(42, generate_file_id(), 0, 10);
         let (data0a, mvcc0a) = test_paths(7);

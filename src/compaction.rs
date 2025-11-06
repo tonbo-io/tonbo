@@ -93,7 +93,7 @@ mod tests {
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key field");
         let executor = Arc::new(BlockingExecutor);
-        let db = DB::builder(config)
+        let db = DB::<DynMode, BlockingExecutor>::builder(config)
             .in_memory("compaction-test")
             .build_with_executor(Arc::clone(&executor))
             .expect("db init");

@@ -46,9 +46,11 @@ impl WalStorage {
         self.ensure_dir(self.root()).await?;
 
         let segment_path = self.segment_path(seq)?;
+        let options = Self::write_options();
+
         let file = self
             .fs
-            .open_options(&segment_path, Self::write_options())
+            .open_options(&segment_path, options)
             .await
             .map_err(|err| {
                 WalError::Storage(format!(
@@ -177,7 +179,7 @@ impl WalStorage {
             ))
         })?;
 
-        Ok(decode_frame_bounds(&data)?)
+        decode_frame_bounds(&data)
     }
 
     /// Inspect the on-disk WAL tail, returning metadata about the active segment and frame

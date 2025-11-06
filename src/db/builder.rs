@@ -3,26 +3,22 @@ use std::{collections::HashMap, sync::Arc};
 use fusio::{
     DynFs,
     disk::LocalFs,
-    executor::{tokio::TokioExecutor, Executor, Timer},
+    executor::{Executor, Timer, tokio::TokioExecutor},
     fs::FsCas as FusioCas,
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
 use thiserror::Error;
 
+use super::{DB, Mode};
 use crate::{
     extractor::KeyExtractError,
-    manifest::{
-        ManifestError, TableId, TonboManifest,
-        init_in_memory_manifest,
-    },
+    manifest::{ManifestError, TableId, TonboManifest, init_fs_manifest},
     wal::{
         WalConfig,
         state::{FsWalStateStore, WalStateStore},
     },
 };
-
-use super::{DB, Mode};
 
 /// Builder-style configuration surface for constructing a [`DB`] instance.
 ///
@@ -158,6 +154,12 @@ pub enum DbBuildError {
     /// Object-store backends are not wired yet.
     #[error("object-store backend support not implemented")]
     UnsupportedObjectStore,
+    /// Object-store configuration missing or invalid.
+    #[error("object-store configuration error: {reason}")]
+    ObjectStoreConfig {
+        /// Human-readable explanation of the failure.
+        reason: String,
+    },
     /// Mode initialisation failed while building the DB.
     #[error(transparent)]
     Mode(#[from] KeyExtractError),
@@ -182,6 +184,10 @@ pub(crate) struct ObjectStoreSpec {
     pub(crate) root: Option<String>,
     pub(crate) access_key: Option<String>,
     pub(crate) secret_key: Option<String>,
+    pub(crate) session_token: Option<String>,
+    pub(crate) region: Option<String>,
+    pub(crate) sign_payload: Option<bool>,
+    pub(crate) checksum: Option<bool>,
     pub(crate) extra: HashMap<String, String>,
 }
 
@@ -228,6 +234,30 @@ impl ObjectStoreBuilder {
         self
     }
 
+    /// Set the optional session token used for temporary credentials.
+    pub fn session_token(&mut self, token: impl Into<String>) -> &mut Self {
+        self.spec.session_token = Some(token.into());
+        self
+    }
+
+    /// Set the AWS region for S3 backends.
+    pub fn region(&mut self, region: impl Into<String>) -> &mut Self {
+        self.spec.region = Some(region.into());
+        self
+    }
+
+    /// Configure whether payload signing should be enforced for requests.
+    pub fn sign_payload(&mut self, sign: bool) -> &mut Self {
+        self.spec.sign_payload = Some(sign);
+        self
+    }
+
+    /// Configure whether checksum validation should be enforced for uploads.
+    pub fn checksum(&mut self, checksum: bool) -> &mut Self {
+        self.spec.checksum = Some(checksum);
+        self
+    }
+
     /// Attach an arbitrary key/value option.
     pub fn option(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
         self.spec.extra.insert(key.into(), value.into());
@@ -241,9 +271,25 @@ impl ObjectStoreBuilder {
 
 #[derive(Clone)]
 struct StorageBackend {
-    fs: Arc<dyn DynFs>,
+    dyn_fs: Arc<dyn DynFs>,
     cas: Option<Arc<dyn FusioCas>>,
     root: Path,
+    kind: StorageBackendKind,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+enum StorageBackendKind {
+    InMemory { fs: Arc<InMemoryFs> },
+    Disk { fs: Arc<LocalFs> },
+    ObjectStore(ObjectStoreBackend),
+}
+
+#[derive(Clone)]
+enum ObjectStoreBackend {
+    S3 {
+        fs: fusio::impls::remotes::aws::fs::AmazonS3,
+    },
 }
 
 #[derive(Clone)]
@@ -251,6 +297,36 @@ struct StorageRoute {
     fs: Arc<dyn DynFs>,
     path: Path,
     cas: Option<Arc<dyn FusioCas>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn builds_s3_backend_with_minimal_config() {
+        let spec = ObjectStoreSpec {
+            provider: Some("s3".into()),
+            endpoint: Some("http://localhost:9000".into()),
+            bucket: Some("tonbo-test".into()),
+            root: Some("tenant-a".into()),
+            access_key: Some("access".into()),
+            secret_key: Some("secret".into()),
+            session_token: None,
+            region: Some("us-east-2".into()),
+            sign_payload: Some(true),
+            checksum: Some(false),
+            extra: HashMap::new(),
+        };
+
+        let backend = build_object_store_backend(spec).expect("s3 backend");
+        match backend.kind {
+            StorageBackendKind::ObjectStore(ObjectStoreBackend::S3 { .. }) => {}
+            _ => panic!("unexpected backend kind"),
+        }
+    }
 }
 
 struct StorageLayout {
@@ -261,6 +337,10 @@ impl StorageLayout {
     fn new(spec: StorageBackendSpec) -> Result<Self, DbBuildError> {
         let backend = StorageBackend::from_spec(spec)?;
         Ok(Self { backend })
+    }
+
+    fn backend(&self) -> &StorageBackend {
+        &self.backend
     }
 
     fn wal_route(&self) -> Result<StorageRoute, DbBuildError> {
@@ -281,20 +361,12 @@ impl StorageLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum StorageClass {
     Wal,
-    ManifestHead,
-    ManifestSegments,
-    ManifestCheckpoints,
-    ManifestLeases,
 }
 
 impl StorageClass {
     fn components(self) -> &'static [&'static str] {
         match self {
             StorageClass::Wal => &["wal"],
-            StorageClass::ManifestHead => &["manifest", "head.json"],
-            StorageClass::ManifestSegments => &["manifest", "segments"],
-            StorageClass::ManifestCheckpoints => &["manifest", "checkpoints"],
-            StorageClass::ManifestLeases => &["manifest", "leases"],
         }
     }
 }
@@ -311,15 +383,16 @@ impl StorageBackend {
                 }
                 let raw_fs = Arc::new(InMemoryFs::new());
                 let dyn_fs: Arc<dyn DynFs> = raw_fs.clone();
-                let cas_fs: Arc<dyn FusioCas> = raw_fs;
+                let cas_fs: Arc<dyn FusioCas> = raw_fs.clone();
                 let root = Path::parse(&label).map_err(|err| DbBuildError::InvalidPath {
                     path: label,
                     reason: err.to_string(),
                 })?;
                 Ok(Self {
-                    fs: dyn_fs,
+                    dyn_fs,
                     cas: Some(cas_fs),
                     root,
+                    kind: StorageBackendKind::InMemory { fs: raw_fs },
                 })
             }
             StorageBackendSpec::Disk { root } => {
@@ -331,15 +404,17 @@ impl StorageBackend {
                 }
                 let raw_fs = Arc::new(LocalFs {});
                 let dyn_fs: Arc<dyn DynFs> = raw_fs.clone();
-                let cas_fs: Arc<dyn FusioCas> = raw_fs;
-                let root_path = Path::from_filesystem_path(&root).map_err(|err| DbBuildError::InvalidPath {
-                    path: root,
-                    reason: err.to_string(),
-                })?;
+                let cas_fs: Arc<dyn FusioCas> = raw_fs.clone();
+                let root_path =
+                    Path::from_filesystem_path(&root).map_err(|err| DbBuildError::InvalidPath {
+                        path: root,
+                        reason: err.to_string(),
+                    })?;
                 Ok(Self {
-                    fs: dyn_fs,
+                    dyn_fs,
                     cas: Some(cas_fs),
                     root: root_path,
+                    kind: StorageBackendKind::Disk { fs: raw_fs },
                 })
             }
             StorageBackendSpec::ObjectStore(spec) => build_object_store_backend(spec),
@@ -356,15 +431,125 @@ impl StorageBackend {
             current = current.child(parsed);
         }
         Ok(StorageRoute {
-            fs: Arc::clone(&self.fs),
+            fs: Arc::clone(&self.dyn_fs),
             path: current,
             cas: self.cas.clone(),
         })
     }
+
+    fn kind(&self) -> &StorageBackendKind {
+        &self.kind
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
-fn build_object_store_backend(_spec: ObjectStoreSpec) -> Result<StorageBackend, DbBuildError> {
-    Err(DbBuildError::UnsupportedObjectStore)
+fn build_object_store_backend(spec: ObjectStoreSpec) -> Result<StorageBackend, DbBuildError> {
+    let provider = spec
+        .provider
+        .as_deref()
+        .unwrap_or("s3")
+        .to_ascii_lowercase();
+
+    match provider.as_str() {
+        "s3" => build_s3_backend(spec),
+        other => Err(DbBuildError::ObjectStoreConfig {
+            reason: format!("unsupported object-store provider `{other}`"),
+        }),
+    }
+}
+
+fn build_s3_backend(spec: ObjectStoreSpec) -> Result<StorageBackend, DbBuildError> {
+    use fusio::impls::remotes::aws::{credential::AwsCredential, fs::AmazonS3Builder};
+
+    let mut extra = spec.extra;
+
+    let bucket = spec.bucket.ok_or_else(|| DbBuildError::ObjectStoreConfig {
+        reason: "bucket must be provided for s3 backends".into(),
+    })?;
+
+    let region = spec
+        .region
+        .or_else(|| extra.remove("region"))
+        .unwrap_or_else(|| "us-east-1".into());
+    let mut builder = AmazonS3Builder::new(bucket.clone()).region(region);
+
+    if let Some(endpoint) = spec.endpoint {
+        builder = builder.endpoint(endpoint);
+    }
+
+    let session_token = spec.session_token.or_else(|| extra.remove("session_token"));
+
+    if let (Some(access_key), Some(secret_key)) = (spec.access_key, spec.secret_key) {
+        let credential = AwsCredential {
+            key_id: access_key,
+            secret_key,
+            token: session_token,
+        };
+        builder = builder.credential(credential);
+    } else if session_token.is_some() {
+        return Err(DbBuildError::ObjectStoreConfig {
+            reason: "session token provided without access/secret keys".into(),
+        });
+    }
+
+    let sign_flag = if let Some(flag) = spec.sign_payload {
+        Some(flag)
+    } else {
+        take_extra_bool(&mut extra, "sign_payload")?
+    };
+    if let Some(sign) = sign_flag {
+        builder = builder.sign_payload(sign);
+    }
+
+    let checksum_flag = if let Some(flag) = spec.checksum {
+        Some(flag)
+    } else {
+        take_extra_bool(&mut extra, "checksum")?
+    };
+    if let Some(checksum) = checksum_flag {
+        builder = builder.checksum(checksum);
+    }
+
+    let fs = builder.build();
+    let root_input = spec.root.unwrap_or_default();
+    let root = if root_input.is_empty() {
+        Path::default()
+    } else {
+        Path::parse(&root_input).map_err(|err| DbBuildError::InvalidPath {
+            path: root_input.clone(),
+            reason: err.to_string(),
+        })?
+    };
+
+    let dyn_fs: Arc<dyn DynFs> = Arc::new(fs.clone());
+    let cas_fs: Arc<dyn FusioCas> = Arc::new(fs.clone());
+
+    Ok(StorageBackend {
+        dyn_fs,
+        cas: Some(cas_fs),
+        root,
+        kind: StorageBackendKind::ObjectStore(ObjectStoreBackend::S3 { fs }),
+    })
+}
+
+fn take_extra_bool(
+    extra: &mut HashMap<String, String>,
+    key: &str,
+) -> Result<Option<bool>, DbBuildError> {
+    if let Some(raw) = extra.remove(key) {
+        match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(Some(true)),
+            "false" | "0" => Ok(Some(false)),
+            other => Err(DbBuildError::ObjectStoreConfig {
+                reason: format!("invalid boolean value `{other}` for `{key}`"),
+            }),
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 struct ManifestBootstrap<'a> {
@@ -377,7 +562,19 @@ impl<'a> ManifestBootstrap<'a> {
     }
 
     fn init_manifest(&self) -> Result<(TonboManifest, TableId), DbBuildError> {
-        let _ = self.layout;
-        init_in_memory_manifest(0).map_err(DbBuildError::Manifest)
+        let backend = self.layout.backend();
+        match backend.kind() {
+            StorageBackendKind::InMemory { fs } => {
+                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0)
+                    .map_err(DbBuildError::Manifest)
+            }
+            StorageBackendKind::Disk { fs } => {
+                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0)
+                    .map_err(DbBuildError::Manifest)
+            }
+            StorageBackendKind::ObjectStore(ObjectStoreBackend::S3 { fs }) => {
+                init_fs_manifest(fs.clone(), backend.root(), 0).map_err(DbBuildError::Manifest)
+            }
+        }
     }
 }

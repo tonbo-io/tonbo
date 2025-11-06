@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 resolver = "2"
 
+[features]
+default = []
+# Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
+s3-smoke = []
+
 [dependencies]
 arrow-buffer = "56.2.0"
 arrow-ipc = "56.1.0"
@@ -12,10 +17,12 @@ arrow-schema = "56.2.0"
 arrow-select = "56.2.0"
 crc32c = "0.6"
 fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [
+    "aws",
     "dyn",
     "executor-tokio",
     "fs",
     "tokio",
+    "tokio-http",
 ] }
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet" }
 futures = "0.3"
@@ -29,13 +36,16 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 fusio_manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest" }
 
+
 [dev-dependencies]
 typed-arrow = { version = "0.4.1", features = ["ext-hooks"] }
 fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [
+    "aws",
     "dyn",
     "executor-tokio",
     "fs",
     "tokio",
+    "tokio-http",
 ] }
 futures = "0.3"
 tokio = { version = "1", features = [

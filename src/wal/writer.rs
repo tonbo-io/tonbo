@@ -2,6 +2,8 @@
 
 use std::{
     collections::VecDeque,
+    error::Error,
+    io,
     pin::Pin,
     sync::{
         Arc,
@@ -366,12 +368,7 @@ where
 
         let mut segment = storage.open_segment(segment_seq).await?;
         if segment_bytes == 0 {
-            segment_bytes = {
-                let file = segment.file_mut();
-                file.size()
-                    .await
-                    .map_err(|err| backend_err("determine wal segment size", err))?
-            } as usize;
+            segment_bytes = self_initial_size(fs_tag, segment.file_mut()).await?;
         }
 
         let state = if let Some(store) = cfg.state_store.as_ref() {
@@ -598,12 +595,7 @@ where
 
         let new_seq = self.next_segment_seq;
         let mut new_segment = self.storage.open_segment(new_seq).await?;
-        let new_bytes = {
-            let file = new_segment.file_mut();
-            file.size()
-                .await
-                .map_err(|err| backend_err("determine wal segment size", err))?
-        } as usize;
+        let new_bytes = self_initial_size(self.fs_tag, new_segment.file_mut()).await?;
 
         let old_segment = std::mem::replace(&mut self.segment, new_segment);
         drop(old_segment);
@@ -816,6 +808,41 @@ where
     }
 }
 
+async fn self_initial_size(
+    fs_tag: FileSystemTag,
+    file: &mut dyn fusio::dynamic::fs::DynFile,
+) -> WalResult<usize> {
+    match file.size().await {
+        Ok(len) => Ok(len as usize),
+        Err(err) if fs_tag == FileSystemTag::S3 && is_not_found(&err) => Ok(0),
+        Err(err) => Err(backend_err("determine wal segment size", err)),
+    }
+}
+
+fn is_not_found(err: &FusioError) -> bool {
+    fn inner_contains(not_found: &str, err: &dyn Error) -> bool {
+        if err.to_string().contains(not_found) {
+            return true;
+        }
+        let mut current = err;
+        while let Some(source) = current.source() {
+            if source.to_string().contains(not_found) {
+                return true;
+            }
+            current = source;
+        }
+        false
+    }
+
+    match err {
+        FusioError::Remote(inner) | FusioError::Other(inner) => {
+            inner_contains("404", inner.as_ref()) || inner_contains("NotFound", inner.as_ref())
+        }
+        FusioError::Io(io_err) => io_err.kind() == io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
 enum SyncVariant {
     Data,
     All,
@@ -858,7 +885,7 @@ async fn perform_sync(
                 }),
             }
         }
-        FileSystemTag::Memory => Ok(()),
+        FileSystemTag::Memory | FileSystemTag::S3 => Ok(()),
         _ => Err(WalError::Storage(format!(
             "wal backend {:?} does not support durability sync",
             fs_tag
