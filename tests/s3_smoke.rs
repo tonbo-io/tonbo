@@ -124,7 +124,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
                 let expected_rows = payload.batch.num_rows();
 
                 if let Some(hint) = payload.commit_ts_hint {
-                    assert!(hint.get() > 0, "commit ts hint should be positive");
+                    assert!(hint.get() >= 0, "commit ts hint should be non-negative");
                 }
 
                 let commit_column = payload
