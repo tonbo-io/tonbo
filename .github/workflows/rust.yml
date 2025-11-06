@@ -1,4 +1,4 @@
-name: Rust
+name: cargo
 
 on:
   push:
@@ -11,10 +11,9 @@ env:
 
 jobs:
   fmt:
-    name: format
+    name: +nightly fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -29,7 +28,7 @@ jobs:
           args: -- --check
 
   build:
-    name: build
+    name: clippy && build && test
     runs-on: ubuntu-latest
     steps:
       - name: Rust Cache
@@ -45,7 +44,7 @@ jobs:
           args: --workspace -- -D warnings
 
       - uses: actions/checkout@v4
-      - name: Build
+      - name: Run cargo build
         run: cargo build --verbose
-      - name: Run typed-arrow tests
+      - name: Run cargo test
         run: cargo test --verbose
