@@ -6,7 +6,7 @@ use fusio::{
     DynFs, Read, Write,
     dynamic::fs::DynFile,
     error::Error as FusioError,
-    fs::{FileSystemTag, OpenOptions},
+    fs::OpenOptions,
     path::{Path, PathPart},
 };
 use futures::StreamExt;
@@ -46,12 +46,7 @@ impl WalStorage {
         self.ensure_dir(self.root()).await?;
 
         let segment_path = self.segment_path(seq)?;
-        let mut options = Self::write_options();
-        if matches!(self.fs.file_system(), FileSystemTag::S3) {
-            // S3 allows writes only when truncate=true. WAL segments are created per rotation,
-            // so enabling truncate keeps the backend happy without affecting durability.
-            options = options.truncate(true);
-        }
+        let options = Self::write_options();
 
         let file = self
             .fs
@@ -184,7 +179,7 @@ impl WalStorage {
             ))
         })?;
 
-        Ok(decode_frame_bounds(&data)?)
+        decode_frame_bounds(&data)
     }
 
     /// Inspect the on-disk WAL tail, returning metadata about the active segment and frame
