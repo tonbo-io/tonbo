@@ -121,24 +121,24 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
     for event in events {
         match event {
             WalEvent::DynAppend { payload, .. } => {
-                let _ = payload
-                    .commit_ts_hint
-                    .ok_or_else(|| "missing commit ts hint".to_string())?;
-
                 let expected_rows = payload.batch.num_rows();
+
+                if let Some(hint) = payload.commit_ts_hint {
+                    assert!(hint.get() > 0, "commit ts hint should be positive");
+                }
 
                 let commit_column = payload
                     .commit_ts_column
                     .as_any()
                     .downcast_ref::<UInt64Array>()
-                    .ok_or_else(|| "commit column missing".to_string())?;
+                    .expect("commit column missing");
                 assert_eq!(commit_column.len(), expected_rows);
 
                 let tombstone_column = payload
                     .tombstones
                     .as_any()
                     .downcast_ref::<BooleanArray>()
-                    .ok_or_else(|| "tombstone column missing".to_string())?;
+                    .expect("tombstone column missing");
                 assert_eq!(tombstone_column.len(), expected_rows);
                 assert!(
                     tombstone_column
@@ -151,7 +151,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
                     .column(0)
                     .as_any()
                     .downcast_ref::<StringArray>()
-                    .ok_or_else(|| "id column missing".to_string())?;
+                    .expect("id column missing");
                 assert_eq!(ids.len(), 2);
                 assert_eq!(ids.value(0), "alice");
                 assert_eq!(ids.value(1), "bob");
@@ -161,7 +161,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
                     .column(1)
                     .as_any()
                     .downcast_ref::<Int32Array>()
-                    .ok_or_else(|| "value column missing".to_string())?;
+                    .expect("value column missing");
                 assert_eq!(values.len(), 2);
                 assert_eq!(values.value(0), 10);
                 assert_eq!(values.value(1), 20);
