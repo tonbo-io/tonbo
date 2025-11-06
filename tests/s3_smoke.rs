@@ -4,17 +4,18 @@
 //! (requires the TONBO_S3_* environment variables).
 
 use std::{
+    io,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{Int32Array, RecordBatch, StringArray};
+use arrow_array::{BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
 use tonbo::{
     db::{DB, DynMode},
     mode::DynModeConfig,
-    wal::{WalConfig, WalExt, WalSyncPolicy},
+    wal::{WalConfig, WalExt, WalSyncPolicy, frame::WalEvent, replay::Replayer},
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -107,6 +108,81 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
 
     db.ingest(batch).await?;
     db.disable_wal()?;
+
+    // Verify we can stream the newly written WAL frames back from the backend.
+    let replayer = Replayer::new(wal_cfg.clone());
+    let events = replayer
+        .scan()
+        .await
+        .map_err(|err| format!("failed to replay wal from s3: {err}"))?;
+    let mut events_iter = events.iter();
+    let append_event = events_iter.next().ok_or("expected wal append event")?;
+    let commit_event = events_iter.next().ok_or("expected wal commit event")?;
+
+    match append_event {
+        WalEvent::DynAppend { payload, .. } => {
+            let _ = payload.commit_ts_hint.ok_or("missing commit ts hint")?;
+
+            let expected_rows = payload.batch.num_rows();
+
+            let commit_column = payload
+                .commit_ts_column
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or("commit column missing")?;
+            assert_eq!(commit_column.len(), expected_rows);
+
+            let tombstone_column = payload
+                .tombstones
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or("tombstone column missing")?;
+            assert_eq!(tombstone_column.len(), expected_rows);
+            assert!(
+                tombstone_column
+                    .iter()
+                    .all(|val| matches!(val, Some(false)))
+            );
+
+            let ids = payload
+                .batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("id column missing")?;
+            assert_eq!(ids.len(), 2);
+            assert_eq!(ids.value(0), "alice");
+            assert_eq!(ids.value(1), "bob");
+
+            let values = payload
+                .batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or("value column missing")?;
+            assert_eq!(values.len(), 2);
+            assert_eq!(values.value(0), 10);
+            assert_eq!(values.value(1), 20);
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("unexpected wal event {other:?}"),
+            )
+            .into());
+        }
+    }
+
+    match commit_event {
+        WalEvent::TxnCommit { .. } => {}
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("unexpected wal event {other:?}"),
+            )
+            .into());
+        }
+    }
 
     Ok(())
 }
