@@ -7,6 +7,8 @@
 //! re-introducing compile-time typed dispatch in the future.
 
 pub mod extractor;
+/// File and object identifiers.
+pub mod id;
 mod inmem;
 /// Zero-copy key projection scaffolding and owned key wrapper.
 pub mod key;
@@ -21,9 +23,6 @@ mod test_util;
 
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;
-
-/// File system for Tonbo
-pub mod fs;
 
 /// Shared scan utilities (key ranges, range sets).
 pub mod scan;

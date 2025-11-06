@@ -17,7 +17,7 @@ use super::{
     driver::{Manifest, ManifestError, ManifestResult, Stores, TableSnapshot},
     version::VersionEdit,
 };
-use crate::mvcc::Timestamp;
+use crate::{id::FileIdGenerator, mvcc::Timestamp};
 
 /// In-memory manifest type wired against `fusio`'s memory FS for dev/test flows.
 pub(crate) type InMemoryManifest = Manifest<
@@ -173,12 +173,13 @@ where
 fn bootstrap_manifest<M>(
     manifest: M,
     schema_version: u32,
+    file_ids: &FileIdGenerator,
 ) -> ManifestResult<(TonboManifest, TableId)>
 where
     ManifestHandle<M>: ManifestRuntime,
     M: Send + Sync + 'static,
 {
-    let table_id = TableId::new();
+    let table_id = TableId::new(file_ids);
     let tonbo = wrap_manifest(manifest);
     block_on(async {
         tonbo
@@ -199,6 +200,7 @@ where
 /// Raw helper used by tests needing direct access to the concrete manifest.
 pub(crate) fn init_in_memory_manifest_raw(
     schema_version: u32,
+    file_ids: &FileIdGenerator,
 ) -> ManifestResult<(InMemoryManifest, TableId)> {
     let fs = InMemoryFs::new();
     let head = HeadStoreImpl::new(fs.clone(), "head.json");
@@ -207,7 +209,7 @@ pub(crate) fn init_in_memory_manifest_raw(
     let lease = LeaseStoreImpl::new(fs, "", BackoffPolicy::default(), BlockingExecutor);
     let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
     let manifest = Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx);
-    let table_id = TableId::new();
+    let table_id = TableId::new(file_ids);
     block_on(async {
         manifest
             .init_table_head(
@@ -227,8 +229,9 @@ pub(crate) fn init_in_memory_manifest_raw(
 /// Construct an in-memory manifest and wrap it in the dynamic handle.
 pub(crate) fn init_in_memory_manifest(
     schema_version: u32,
+    file_ids: &FileIdGenerator,
 ) -> ManifestResult<(TonboManifest, TableId)> {
-    let (manifest, table_id) = init_in_memory_manifest_raw(schema_version)?;
+    let (manifest, table_id) = init_in_memory_manifest_raw(schema_version, file_ids)?;
     Ok((wrap_manifest(manifest), table_id))
 }
 
@@ -237,6 +240,7 @@ pub(crate) fn init_fs_manifest<FS>(
     fs: FS,
     root: &Path,
     schema_version: u32,
+    file_ids: &FileIdGenerator,
 ) -> ManifestResult<(TonboManifest, TableId)>
 where
     FS: Fs + FsCas + Clone + Send + Sync + 'static,
@@ -267,7 +271,7 @@ where
     let lease = LeaseStoreImpl::new(fs, lease_prefix, BackoffPolicy::default(), BlockingExecutor);
     let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
     let manifest = Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx);
-    bootstrap_manifest(manifest, schema_version)
+    bootstrap_manifest(manifest, schema_version, file_ids)
 }
 
 fn ensure_dir<FS>(path: &str) -> ManifestResult<()>

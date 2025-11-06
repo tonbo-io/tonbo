@@ -19,7 +19,7 @@ pub use builder::{DbBuildError, DbBuilder, ObjectStoreBuilder};
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
     extractor::KeyExtractError,
-    fs::FileId,
+    id::{FileId, FileIdGenerator},
     inmem::{
         immutable::Immutable,
         mutable::MutableLayout,
@@ -71,6 +71,9 @@ where
     /// Manifest handle used by the dev branch manifest integration (in-memory for now).
     manifest: TonboManifest,
     manifest_table: TableId,
+    /// File identifier allocator scoped to this DB instance.
+    #[allow(dead_code)]
+    file_ids: FileIdGenerator,
     /// Per-key transactional locks (wired once transactional writes arrive).
     _key_locks: LockMap<M::Key>,
 }
@@ -218,6 +221,7 @@ where
         manifest: TonboManifest,
         manifest_table: TableId,
         wal_config: Option<WalConfig>,
+        file_ids: FileIdGenerator,
         executor: Arc<E>,
     ) -> Self
     where
@@ -235,6 +239,7 @@ where
             commit_clock: CommitClock::default(),
             manifest,
             manifest_table,
+            file_ids,
             _key_locks: Arc::new(LockableHashMap::new()),
         }
     }
@@ -245,14 +250,16 @@ where
         M: Sized,
     {
         let (mode, mem) = M::build(config)?;
+        let file_ids = FileIdGenerator::default();
         let (manifest, manifest_table) =
-            init_in_memory_manifest(0).expect("manifest initialization");
+            init_in_memory_manifest(0, &file_ids).expect("manifest initialization");
         Ok(Self::from_components(
             mode,
             mem,
             manifest,
             manifest_table,
             None,
+            file_ids,
             executor,
         ))
     }
@@ -350,6 +357,12 @@ where
     /// Allocate the next commit timestamp for WAL/autocommit flows.
     pub(crate) fn next_commit_ts(&mut self) -> Timestamp {
         self.commit_clock.alloc()
+    }
+
+    /// Allocate a new process-unique file identifier.
+    #[allow(dead_code)]
+    pub(crate) fn next_file_id(&self) -> FileId {
+        self.file_ids.generate()
     }
 
     /// Access the active WAL handle, if any.

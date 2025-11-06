@@ -26,7 +26,7 @@ use parquet::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    fs::FileId,
+    id::FileId,
     inmem::immutable::{
         Immutable,
         memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},

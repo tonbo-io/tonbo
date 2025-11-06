@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ulid::Ulid;
 
 use crate::{
-    fs::FileId,
+    id::FileId,
     manifest::WalSegmentRef,
     wal::{
         WalConfig, WalError,

@@ -19,6 +19,7 @@ use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{
     DynFs,
+    disk::LocalFs,
     executor::{Executor, JoinHandle, Timer},
     path::Path,
 };
@@ -116,7 +117,7 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         let dir = Path::parse("wal").expect("static wal path");
-        let filesystem = crate::fs::local_fs();
+        let filesystem = Arc::new(LocalFs {});
         Self {
             dir,
             segment_max_bytes: 64 * 1024 * 1024,

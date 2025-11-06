@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::{
-    fs::{FileId, generate_file_id},
+    id::{FileId, FileIdGenerator},
     manifest::{ManifestError, ManifestResult, VersionEdit},
     mvcc::Timestamp,
     ondisk::sstable::{SsTableId, SsTableStats},
@@ -20,15 +20,9 @@ use crate::{
 pub(crate) struct TableId(Ulid);
 
 impl TableId {
-    /// Create a new identifier using a freshly generated ULID.
-    pub(crate) fn new() -> Self {
-        Self(generate_file_id())
-    }
-}
-
-impl Default for TableId {
-    fn default() -> Self {
-        Self::new()
+    /// Create a new identifier using the provided file-id allocator.
+    pub(crate) fn new(generator: &FileIdGenerator) -> Self {
+        Self(generator.generate())
     }
 }
 

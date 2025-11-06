@@ -362,7 +362,7 @@ mod tests {
 
     use super::{super::domain::SstEntry, *};
     use crate::{
-        fs::generate_file_id,
+        id::FileIdGenerator,
         manifest::{bootstrap::init_in_memory_manifest_raw, domain::TableId},
         ondisk::sstable::{SsTableId, SsTableStats},
     };
@@ -389,10 +389,11 @@ mod tests {
 
     #[tokio::test]
     async fn apply_version_edits_snapshot_latest_and_list_versions_happy_path() {
+        let file_ids = FileIdGenerator::default();
         let (manifest, table_id) =
-            init_in_memory_manifest_raw(1).expect("manifest should initialize");
+            init_in_memory_manifest_raw(1, &file_ids).expect("manifest should initialize");
 
-        let wal_segment = WalSegmentRef::new(42, generate_file_id(), 0, 10);
+        let wal_segment = WalSegmentRef::new(42, file_ids.generate(), 0, 10);
         let (data0a, mvcc0a) = test_paths(7);
         let sst_level0_a = SstEntry::new(
             SsTableId::new(7),
@@ -405,7 +406,7 @@ mod tests {
         let sst_level0_b = SstEntry::new(
             SsTableId::new(8),
             Some(SsTableStats::default()),
-            Some(vec![generate_file_id()]),
+            Some(vec![file_ids.generate()]),
             data0b.clone(),
             mvcc0b.clone(),
         );
@@ -413,7 +414,7 @@ mod tests {
         let sst_level1 = SstEntry::new(
             SsTableId::new(21),
             Some(SsTableStats::default()),
-            Some(vec![generate_file_id()]),
+            Some(vec![file_ids.generate()]),
             data1.clone(),
             mvcc1.clone(),
         );
@@ -498,7 +499,7 @@ mod tests {
         assert_eq!(listed_versions[0], latest_version);
 
         // Now Simulate a compaction where it delete some sst files
-        let new_wal_segment = WalSegmentRef::new(128, generate_file_id(), 11, 42);
+        let new_wal_segment = WalSegmentRef::new(128, file_ids.generate(), 11, 42);
         let removal_edits = vec![
             VersionEdit::RemoveSsts {
                 level: 0,
@@ -606,7 +607,8 @@ mod tests {
     #[tokio::test]
     async fn apply_version_edits_failure() {
         let manifest = bare_manifest();
-        let table_id = TableId::new();
+        let file_ids = FileIdGenerator::default();
+        let table_id = TableId::new(&file_ids);
         let (failure_data_path, failure_mvcc_path) = test_paths(11);
         let err = manifest
             .apply_version_edits(
@@ -616,7 +618,7 @@ mod tests {
                     entries: vec![SstEntry::new(
                         SsTableId::new(11),
                         Some(SsTableStats::default()),
-                        Some(vec![generate_file_id()]),
+                        Some(vec![file_ids.generate()]),
                         failure_data_path.clone(),
                         failure_mvcc_path.clone(),
                     )],

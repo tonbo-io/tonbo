@@ -13,6 +13,7 @@ use thiserror::Error;
 use super::{DB, Mode};
 use crate::{
     extractor::KeyExtractError,
+    id::FileIdGenerator,
     manifest::{ManifestError, TableId, TonboManifest, init_fs_manifest},
     wal::{
         WalConfig,
@@ -118,9 +119,10 @@ where
         let storage_spec = self.storage.ok_or(DbBuildError::MissingStorage)?;
         let layout = StorageLayout::new(storage_spec)?;
         let manifest_init = ManifestBootstrap::new(&layout);
+        let file_ids = FileIdGenerator::default();
 
         let (mode, mem) = M::build(self.mode_config).map_err(DbBuildError::Mode)?;
-        let (manifest, manifest_table) = manifest_init.init_manifest()?;
+        let (manifest, manifest_table) = manifest_init.init_manifest(&file_ids)?;
 
         let mut wal_cfg = WalConfig::default();
         layout.apply_wal_defaults(&mut wal_cfg)?;
@@ -134,6 +136,7 @@ where
             manifest,
             manifest_table,
             Some(wal_cfg),
+            file_ids,
             executor,
         ))
     }
@@ -568,19 +571,23 @@ impl<'a> ManifestBootstrap<'a> {
         Self { layout }
     }
 
-    fn init_manifest(&self) -> Result<(TonboManifest, TableId), DbBuildError> {
+    fn init_manifest(
+        &self,
+        file_ids: &FileIdGenerator,
+    ) -> Result<(TonboManifest, TableId), DbBuildError> {
         let backend = self.layout.backend();
         match backend.kind() {
             StorageBackendKind::InMemory { fs } => {
-                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0)
+                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0, file_ids)
                     .map_err(DbBuildError::Manifest)
             }
             StorageBackendKind::Disk { fs } => {
-                init_fs_manifest(*Arc::as_ref(fs), backend.root(), 0)
+                init_fs_manifest(*Arc::as_ref(fs), backend.root(), 0, file_ids)
                     .map_err(DbBuildError::Manifest)
             }
             StorageBackendKind::ObjectStore(ObjectStoreBackend::S3 { fs }) => {
-                init_fs_manifest(fs.clone(), backend.root(), 0).map_err(DbBuildError::Manifest)
+                init_fs_manifest(fs.clone(), backend.root(), 0, file_ids)
+                    .map_err(DbBuildError::Manifest)
             }
         }
     }
