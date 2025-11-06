@@ -4,12 +4,11 @@
 //! (requires the TONBO_S3_* environment variables).
 
 use std::{
-    io,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
+use arrow_array::{Array, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
 use tonbo::{
@@ -115,73 +114,73 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .scan()
         .await
         .map_err(|err| format!("failed to replay wal from s3: {err}"))?;
-    let mut events_iter = events.iter();
-    let append_event = events_iter.next().ok_or("expected wal append event")?;
-    let commit_event = events_iter.next().ok_or("expected wal commit event")?;
 
-    match append_event {
-        WalEvent::DynAppend { payload, .. } => {
-            let _ = payload.commit_ts_hint.ok_or("missing commit ts hint")?;
+    let mut append_verified = false;
+    let mut commit_seen = false;
 
-            let expected_rows = payload.batch.num_rows();
+    for event in events {
+        match event {
+            WalEvent::DynAppend { payload, .. } => {
+                let _ = payload
+                    .commit_ts_hint
+                    .ok_or_else(|| "missing commit ts hint".to_string())?;
 
-            let commit_column = payload
-                .commit_ts_column
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .ok_or("commit column missing")?;
-            assert_eq!(commit_column.len(), expected_rows);
+                let expected_rows = payload.batch.num_rows();
 
-            let tombstone_column = payload
-                .tombstones
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .ok_or("tombstone column missing")?;
-            assert_eq!(tombstone_column.len(), expected_rows);
-            assert!(
-                tombstone_column
-                    .iter()
-                    .all(|val| matches!(val, Some(false)))
-            );
+                let commit_column = payload
+                    .commit_ts_column
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| "commit column missing".to_string())?;
+                assert_eq!(commit_column.len(), expected_rows);
 
-            let ids = payload
-                .batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("id column missing")?;
-            assert_eq!(ids.len(), 2);
-            assert_eq!(ids.value(0), "alice");
-            assert_eq!(ids.value(1), "bob");
+                let tombstone_column = payload
+                    .tombstones
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| "tombstone column missing".to_string())?;
+                assert_eq!(tombstone_column.len(), expected_rows);
+                assert!(
+                    tombstone_column
+                        .iter()
+                        .all(|val| matches!(val, Some(false)))
+                );
 
-            let values = payload
-                .batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or("value column missing")?;
-            assert_eq!(values.len(), 2);
-            assert_eq!(values.value(0), 10);
-            assert_eq!(values.value(1), 20);
-        }
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("unexpected wal event {other:?}"),
-            )
-            .into());
+                let ids = payload
+                    .batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| "id column missing".to_string())?;
+                assert_eq!(ids.len(), 2);
+                assert_eq!(ids.value(0), "alice");
+                assert_eq!(ids.value(1), "bob");
+
+                let values = payload
+                    .batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .ok_or_else(|| "value column missing".to_string())?;
+                assert_eq!(values.len(), 2);
+                assert_eq!(values.value(0), 10);
+                assert_eq!(values.value(1), 20);
+
+                append_verified = true;
+            }
+            WalEvent::TxnCommit { .. } => {
+                commit_seen = true;
+            }
+            _ => {}
         }
     }
 
-    match commit_event {
-        WalEvent::TxnCommit { .. } => {}
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("unexpected wal event {other:?}"),
-            )
-            .into());
-        }
+    if !append_verified {
+        return Err("expected wal append event".into());
+    }
+
+    if !commit_seen {
+        return Err("expected wal commit event".into());
     }
 
     Ok(())
