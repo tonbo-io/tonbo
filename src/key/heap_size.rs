@@ -1,4 +1,6 @@
-use super::{KeyComponentOwned, KeyOwned, KeyViewRaw};
+use typed_arrow_dyn::DynCell;
+
+use super::{KeyOwned, KeyRow};
 
 /// Estimate heap usage of key types used across memtables and indexes.
 /// Primitives and booleans report zero; buffer-backed components return their
@@ -36,23 +38,48 @@ impl<A: KeyHeapSize, B: KeyHeapSize, C: KeyHeapSize> KeyHeapSize for (A, B, C) {
 
 impl KeyHeapSize for KeyOwned {
     fn key_heap_size(&self) -> usize {
-        key_owned_heap_size(self.component())
+        self.as_row()
+            .cells()
+            .iter()
+            .filter_map(|cell| cell.as_ref())
+            .map(dyn_cell_owned_heap_size)
+            .sum()
     }
 }
 
-fn key_owned_heap_size(component: &KeyComponentOwned) -> usize {
-    match component {
-        KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => s.len(),
-        KeyComponentOwned::Binary(b)
-        | KeyComponentOwned::LargeBinary(b)
-        | KeyComponentOwned::FixedSizeBinary(b) => b.len(),
-        KeyComponentOwned::Dictionary(inner) => key_owned_heap_size(inner),
-        KeyComponentOwned::Struct(parts) => parts.iter().map(key_owned_heap_size).sum(),
+fn dyn_cell_owned_heap_size(cell: &DynCell) -> usize {
+    match cell {
+        DynCell::Str(value) => value.len(),
+        DynCell::Bin(bytes) => bytes.len(),
+        DynCell::Struct(values) => values
+            .iter()
+            .filter_map(|cell| cell.as_ref())
+            .map(dyn_cell_owned_heap_size)
+            .sum(),
+        DynCell::List(values) | DynCell::FixedSizeList(values) => values
+            .iter()
+            .filter_map(|cell| cell.as_ref())
+            .map(dyn_cell_owned_heap_size)
+            .sum(),
+        DynCell::Map(entries) => entries
+            .iter()
+            .map(|(key, value)| {
+                dyn_cell_owned_heap_size(key)
+                    + value
+                        .as_ref()
+                        .map(dyn_cell_owned_heap_size)
+                        .unwrap_or_default()
+            })
+            .sum(),
+        DynCell::Union { value, .. } => value
+            .as_deref()
+            .map(dyn_cell_owned_heap_size)
+            .unwrap_or_default(),
         _ => 0,
     }
 }
 
-impl KeyHeapSize for KeyViewRaw {
+impl KeyHeapSize for KeyRow {
     fn key_heap_size(&self) -> usize {
         self.heap_size()
     }

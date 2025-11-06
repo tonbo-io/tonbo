@@ -1,6 +1,6 @@
 // 03: Dynamic (runtime) schema: infer key from Arrow metadata
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
@@ -34,10 +34,15 @@ fn build_batch(schema: Arc<Schema>, rows: Vec<Vec<Option<DynCell>>>) -> RecordBa
     }
 
     let mut arrays = Vec::with_capacity(builders.len());
+    let mut union_null_rows: HashMap<usize, Vec<usize>> = HashMap::new();
     for builder in builders.iter_mut() {
-        arrays.push(builder.try_finish().expect("finish column"));
+        let finished = builder.try_finish().expect("finish column");
+        for (array_key, rows) in finished.union_metadata {
+            union_null_rows.entry(array_key).or_default().extend(rows);
+        }
+        arrays.push(finished.array);
     }
-    validate_nullability(&schema, &arrays).expect("nullability");
+    validate_nullability(schema.as_ref(), &arrays, &union_null_rows).expect("nullability");
     RecordBatch::try_new(schema, arrays).expect("record batch")
 }
 

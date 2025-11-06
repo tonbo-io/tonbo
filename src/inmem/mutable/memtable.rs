@@ -8,14 +8,14 @@ use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::SchemaRef;
 use arrow_select::concat::concat_batches;
 
-use super::{KeyHeapSize, MutableLayout, MutableMemTableMetrics};
+use super::{MutableLayout, MutableMemTableMetrics};
 use crate::{
     extractor::KeyProjection,
     inmem::{
         immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
         policy::{MemStats, StatsProvider},
     },
-    key::{KeyOwned, KeyTsViewRaw, KeyViewRaw},
+    key::{KeyOwned, KeyRow, KeyTsViewRaw},
     mvcc::Timestamp,
     scan::{KeyRange, RangeSet},
 };
@@ -142,17 +142,17 @@ impl DynMem {
 
         let batch_id = self.batches_attached.len();
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
-        let key_views = extractor.project_view(&batch, &row_indices)?;
-        for (row_idx, raw) in key_views.into_iter().enumerate() {
-            let key_size = raw.key_heap_size();
-            let has_existing =
-                self.index
-                    .range(
-                        unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }
-                            ..=unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN) },
-                    )
-                    .next()
-                    .is_some();
+        let key_rows = extractor.project_view(&batch, &row_indices)?;
+        for (row_idx, key_row) in key_rows.into_iter().enumerate() {
+            let key_size = key_row.heap_size();
+            let has_existing = self
+                .index
+                .range(
+                    KeyTsViewRaw::new(key_row.clone(), Timestamp::MAX)
+                        ..=KeyTsViewRaw::new(key_row.clone(), Timestamp::MIN),
+                )
+                .next()
+                .is_some();
             self.metrics.inserts += 1;
             if has_existing {
                 self.metrics.replaces += 1;
@@ -163,7 +163,7 @@ impl DynMem {
 
             let commit_ts = Timestamp::new(commit_ts_column.value(row_idx));
             let version_loc = BatchRowLoc::new(batch_id, row_idx);
-            let composite = unsafe { KeyTsViewRaw::new_unchecked(raw, commit_ts) };
+            let composite = KeyTsViewRaw::new(key_row, commit_ts);
             self.index.insert(composite, version_loc);
         }
         self.batches_attached.push(BatchAttachment::new(
@@ -176,14 +176,14 @@ impl DynMem {
 
     #[cfg(test)]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
-        let raw = KeyViewRaw::from_owned(key);
+        let key_row =
+            KeyRow::from_owned(key).expect("test keys should only contain supported components");
         let mut out = Vec::new();
         for (composite, loc) in self.index.range(
-            unsafe { KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MAX) }..=unsafe {
-                KeyTsViewRaw::new_unchecked(raw.clone(), Timestamp::MIN)
-            },
+            KeyTsViewRaw::new(key_row.clone(), Timestamp::MAX)
+                ..=KeyTsViewRaw::new(key_row.clone(), Timestamp::MIN),
         ) {
-            if composite.key() != &raw {
+            if composite.key() != &key_row {
                 break;
             }
             let attachment = &self.batches_attached[loc.batch_idx];
@@ -277,12 +277,9 @@ impl DynMem {
 
         let mut composite_index: BTreeMap<KeyTsViewRaw, u32> = BTreeMap::new();
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
-        let views = extractor.project_view(&batch, &row_indices)?;
-        for (row, view) in views.into_iter().enumerate() {
-            composite_index.insert(
-                unsafe { KeyTsViewRaw::new_unchecked(view, mvcc.commit_ts[row]) },
-                row as u32,
-            );
+        let key_rows = extractor.project_view(&batch, &row_indices)?;
+        for (row, key_row) in key_rows.into_iter().enumerate() {
+            composite_index.insert(KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]), row as u32);
         }
 
         Ok(Some(ImmutableMemTable::new(batch, composite_index, mvcc)))
@@ -333,7 +330,7 @@ pub(crate) struct DynRowScan<'t> {
     range_idx: usize,
     cursor: Option<BTreeRange<'t, KeyTsViewRaw, BatchRowLoc>>,
     read_ts: Timestamp,
-    current_key: Option<KeyViewRaw>,
+    current_key: Option<KeyRow>,
     emitted_for_key: bool,
 }
 
@@ -468,7 +465,7 @@ mod tests {
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         m.insert_batch(extractor.as_ref(), batch, Timestamp::MIN)
             .expect("insert");
 
@@ -508,7 +505,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
         // First commit at ts=10
         let rows_v1 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
@@ -574,7 +571,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
         // four versions for the same key
         let batch1: RecordBatch = build_batch(
@@ -678,7 +675,7 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
         let insert = |layout: &mut DynMem, val: i32, ts: u64, tomb: bool| {
             let batch: RecordBatch = build_batch(
@@ -730,7 +727,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
         let batch1: RecordBatch = build_batch(
             schema.clone(),

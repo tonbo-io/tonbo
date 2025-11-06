@@ -10,8 +10,6 @@ mod metrics;
 pub(crate) use memtable::DynMem;
 pub(crate) use metrics::MutableMemTableMetrics;
 
-pub(crate) use crate::key::KeyHeapSize;
-
 /// Shared metrics interface implemented by mutable memtables.
 ///
 /// This abstraction keeps the `Mode` trait flexible if additional layouts are

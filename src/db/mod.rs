@@ -684,7 +684,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
@@ -730,7 +730,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
@@ -783,7 +783,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
 
         let executor = Arc::new(TokioExecutor::default());
@@ -970,7 +970,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
@@ -1182,7 +1182,7 @@ mod tests {
         fs::write(wal_dir.join("wal-00000000000000000001.tonwal"), bytes).expect("write wal");
 
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let mut cfg = WalConfig::default();
         cfg.dir = fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path");
         let executor = Arc::new(BlockingExecutor);

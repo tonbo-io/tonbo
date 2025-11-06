@@ -5,36 +5,32 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use super::{KeyOwned, KeyViewRaw};
+use super::{KeyOwned, KeyRow};
 use crate::mvcc::Timestamp;
 
 /// Borrowed composite key pairing a raw key view with its commit timestamp.
 #[derive(Clone, Debug)]
 pub struct KeyTsViewRaw {
-    key: KeyViewRaw,
+    key: KeyRow,
     ts: Timestamp,
 }
 
 impl KeyTsViewRaw {
-    /// Build a new `(key, timestamp)` view from a raw key.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure the `KeyViewRaw`'s borrowed slices remain valid for
-    /// the lifetime of the returned view.
-    pub unsafe fn new_unchecked(key: KeyViewRaw, ts: Timestamp) -> Self {
+    /// Build a new `(key, timestamp)` view from a key row.
+    pub fn new(key: KeyRow, ts: Timestamp) -> Self {
         Self { key, ts }
     }
 
     /// Build a raw view derived from an owned key. Safe because the owned key
     /// retains the backing buffers.
     pub fn from_owned(key: &KeyOwned, ts: Timestamp) -> Self {
-        // Safe because `KeyViewRaw::from_owned` borrows from an owned `Arc`.
-        unsafe { Self::new_unchecked(KeyViewRaw::from_owned(key), ts) }
+        let key_row =
+            KeyRow::from_owned(key).expect("KeyOwned should only contain supported key components");
+        Self::new(key_row, ts)
     }
 
     /// Borrow the key component.
-    pub fn key(&self) -> &KeyViewRaw {
+    pub fn key(&self) -> &KeyRow {
         &self.key
     }
 
@@ -44,7 +40,7 @@ impl KeyTsViewRaw {
     }
 
     /// Decompose the view.
-    pub fn into_parts(self) -> (KeyViewRaw, Timestamp) {
+    pub fn into_parts(self) -> (KeyRow, Timestamp) {
         (self.key, self.ts)
     }
 

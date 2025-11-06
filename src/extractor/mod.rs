@@ -11,9 +11,9 @@ mod extractors;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 pub(crate) use errors::KeyExtractError;
-pub(crate) use extractors::{CompositeProjection, projection_for_field, row_from_batch};
+pub(crate) use extractors::{projection_for_columns, projection_for_field, row_from_batch};
 
-use crate::key::KeyViewRaw;
+use crate::key::KeyRow;
 
 /// Schema-validated projection that can materialise logical keys from record batches.
 pub trait KeyProjection {
@@ -25,5 +25,5 @@ pub trait KeyProjection {
         &self,
         batch: &RecordBatch,
         rows: &[usize],
-    ) -> Result<Vec<KeyViewRaw>, KeyExtractError>;
+    ) -> Result<Vec<KeyRow>, KeyExtractError>;
 }

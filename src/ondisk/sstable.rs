@@ -735,7 +735,7 @@ mod tests {
     use super::*;
     use crate::{
         inmem::immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
-        key::{KeyComponentOwned, KeyTsViewRaw},
+        key::KeyTsViewRaw,
         mvcc::Timestamp,
         test_util::build_batch,
     };
@@ -769,17 +769,14 @@ mod tests {
         let (batch, mvcc) =
             bundle_mvcc_sidecar(batch, commit_ts, tombstones).expect("mvcc columns");
         let extractor =
-            crate::extractor::projection_for_field(0, &DataType::Utf8).expect("extractor");
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let mut composite = BTreeMap::new();
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
-        let views = extractor
+        let key_rows = extractor
             .project_view(&batch, &row_indices)
             .expect("project view");
-        for (row, view) in views.into_iter().enumerate() {
-            composite.insert(
-                unsafe { KeyTsViewRaw::new_unchecked(view, mvcc.commit_ts[row]) },
-                row as u32,
-            );
+        for (row, key_row) in key_rows.into_iter().enumerate() {
+            composite.insert(KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]), row as u32);
         }
         ImmutableMemTable::new(batch, composite, mvcc)
     }
@@ -827,18 +824,12 @@ mod tests {
         let min_key = plan
             .min_key
             .as_ref()
-            .and_then(|k| match k.component() {
-                KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => Some(s.as_ref()),
-                _ => None,
-            })
+            .and_then(|k| k.as_utf8())
             .expect("min key");
         let max_key = plan
             .max_key
             .as_ref()
-            .and_then(|k| match k.component() {
-                KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => Some(s.as_ref()),
-                _ => None,
-            })
+            .and_then(|k| k.as_utf8())
             .expect("max key");
         assert_eq!(min_key, "a");
         assert_eq!(max_key, "e");

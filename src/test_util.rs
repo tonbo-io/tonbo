@@ -1,4 +1,6 @@
 //! Test-only helpers for building dynamic Arrow batches.
+use std::collections::HashMap;
+
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use typed_arrow_dyn::{DynCell, DynColumnBuilder, DynError, new_dyn_builder, validate_nullability};
@@ -40,11 +42,16 @@ fn finish_builders(
     mut builders: Vec<Box<dyn DynColumnBuilder>>,
 ) -> Result<RecordBatch, DynError> {
     let mut arrays = Vec::with_capacity(builders.len());
+    let mut union_null_rows: HashMap<usize, Vec<usize>> = HashMap::new();
     for builder in builders.iter_mut() {
-        arrays.push(builder.try_finish()?);
+        let finished = builder.try_finish()?;
+        for (array_key, rows) in finished.union_metadata {
+            union_null_rows.entry(array_key).or_default().extend(rows);
+        }
+        arrays.push(finished.array);
     }
 
-    validate_nullability(&schema, &arrays)?;
+    validate_nullability(schema.as_ref(), &arrays, &union_null_rows)?;
     RecordBatch::try_new(schema, arrays).map_err(|e| DynError::Builder {
         message: e.to_string(),
     })

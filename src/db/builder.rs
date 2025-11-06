@@ -308,6 +308,11 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "reqwest client initialisation relies on SystemConfiguration which is blocked in \
+                  the macOS sandbox used for tests"
+    )]
     fn builds_s3_backend_with_minimal_config() {
         let spec = ObjectStoreSpec {
             provider: Some("s3".into()),

@@ -4,7 +4,7 @@ use arrow_array::RecordBatch;
 
 use crate::{
     extractor::{KeyExtractError, KeyProjection, projection_for_field},
-    key::{KeyOwned, KeyTsViewRaw, KeyViewRaw},
+    key::{KeyOwned, KeyRow, KeyTsViewRaw},
     mvcc::Timestamp,
     scan::{KeyRange, RangeSet},
 };
@@ -87,12 +87,9 @@ pub(crate) fn segment_from_batch_with_extractor(
 
     let mut index: BTreeMap<KeyTsViewRaw, u32> = BTreeMap::new();
     let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
-    let views = extractor.project_view(&batch, &row_indices)?;
-    for (row, view) in views.into_iter().enumerate() {
-        index.insert(
-            unsafe { KeyTsViewRaw::new_unchecked(view, mvcc.commit_ts[row]) },
-            row as u32,
-        );
+    let key_rows = extractor.project_view(&batch, &row_indices)?;
+    for (row, key_row) in key_rows.into_iter().enumerate() {
+        index.insert(KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]), row as u32);
     }
 
     Ok(ImmutableMemTable::new(batch, index, mvcc))
@@ -109,8 +106,7 @@ pub(crate) fn segment_from_batch_with_key_col(
     if key_col >= fields.len() {
         return Err(KeyExtractError::ColumnOutOfBounds(key_col, fields.len()));
     }
-    let dt = fields[key_col].data_type();
-    let extractor = projection_for_field(key_col, dt)?;
+    let extractor = projection_for_field(schema.clone(), key_col)?;
     segment_from_batch_with_extractor(batch, extractor.as_ref())
 }
 
@@ -162,7 +158,7 @@ pub(crate) struct ImmutableVisibleScan<'t, S> {
     range_idx: usize,
     cursor: Option<std::collections::btree_map::Range<'t, KeyTsViewRaw, u32>>,
     read_ts: Timestamp,
-    current_key: Option<KeyViewRaw>,
+    current_key: Option<KeyRow>,
     emitted_for_key: bool,
 }
 
@@ -371,7 +367,7 @@ mod tests {
     use typed_arrow_dyn::DynCell;
 
     use super::*;
-    use crate::{key::KeyComponentOwned, test_util::build_batch};
+    use crate::test_util::build_batch;
 
     fn push_view(storage: &mut Vec<KeyOwned>, key: &str, ts: Timestamp) -> KeyTsViewRaw {
         storage.push(KeyOwned::from(key));
@@ -400,12 +396,7 @@ mod tests {
         let got: Vec<String> = seg
             .scan_visible(&ranges, Timestamp::MAX)
             .map(|(key, _)| key)
-            .map(|k| match k.component() {
-                KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => {
-                    s.as_ref().to_string()
-                }
-                other => panic!("unexpected key variant: {other:?}"),
-            })
+            .map(|k| k.as_utf8().expect("utf8 key").to_string())
             .collect();
         assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
     }
@@ -561,12 +552,7 @@ mod tests {
         let got: Vec<(String, u32, u64, bool)> = seg
             .row_iter()
             .map(|entry| {
-                let key = match entry.key.component() {
-                    KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => {
-                        s.as_ref().to_string()
-                    }
-                    other => panic!("unexpected key type: {other:?}"),
-                };
+                let key = entry.key.as_utf8().expect("utf8 key").to_string();
                 (key, entry.row, entry.commit_ts.get(), entry.tombstone)
             })
             .collect();
@@ -579,14 +565,12 @@ mod tests {
             ]
         );
 
-        let min_key = seg.min_key().map(|k| match k.component() {
-            KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => s.as_ref().to_string(),
-            other => panic!("unexpected key type: {other:?}"),
-        });
-        let max_key = seg.max_key().map(|k| match k.component() {
-            KeyComponentOwned::Utf8(s) | KeyComponentOwned::LargeUtf8(s) => s.as_ref().to_string(),
-            other => panic!("unexpected key type: {other:?}"),
-        });
+        let min_key = seg
+            .min_key()
+            .map(|k| k.as_utf8().expect("utf8 key").to_string());
+        let max_key = seg
+            .max_key()
+            .map(|k| k.as_utf8().expect("utf8 key").to_string());
         assert_eq!(min_key.as_deref(), Some("a"));
         assert_eq!(max_key.as_deref(), Some("b"));
         assert_eq!(seg.len(), 3);

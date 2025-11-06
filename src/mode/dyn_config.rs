@@ -1,7 +1,7 @@
 use arrow_schema::SchemaRef;
 
 use super::DynModeConfig;
-use crate::extractor::{self, KeyExtractError, KeyProjection};
+use crate::extractor::{self, KeyExtractError};
 
 impl DynModeConfig {
     /// Build a config from a key column index within `schema`.
@@ -10,8 +10,7 @@ impl DynModeConfig {
         if key_col >= fields.len() {
             return Err(KeyExtractError::ColumnOutOfBounds(key_col, fields.len()));
         }
-        let dt = fields[key_col].data_type();
-        let extractor = extractor::projection_for_field(key_col, dt)?;
+        let extractor = extractor::projection_for_field(schema.clone(), key_col)?;
         Self::new(schema, extractor)
     }
 
@@ -77,14 +76,8 @@ impl DynModeConfig {
                 });
             }
             marks.sort_by_key(|(o, _)| o.unwrap());
-            let mut parts: Vec<Box<dyn KeyProjection>> = Vec::with_capacity(marks.len());
-            for (_, idx) in marks.into_iter() {
-                let dt = fields[idx].data_type();
-                let ex = extractor::projection_for_field(idx, dt)?;
-                parts.push(ex);
-            }
-            let extractor =
-                Box::new(extractor::CompositeProjection::new(parts)) as Box<dyn KeyProjection>;
+            let indices: Vec<usize> = marks.into_iter().map(|(_, idx)| idx).collect();
+            let extractor = extractor::projection_for_columns(schema.clone(), indices)?;
             return Self::new(schema, extractor);
         }
 
@@ -100,17 +93,14 @@ impl DynModeConfig {
             if names.len() == 1 {
                 return Self::from_key_name(schema, &names[0]);
             }
-            let mut parts: Vec<Box<dyn KeyProjection>> = Vec::with_capacity(names.len());
+            let mut indices: Vec<usize> = Vec::with_capacity(names.len());
             for n in names.iter() {
-                let Some((idx, f)) = fields.iter().enumerate().find(|(_, f)| f.name() == n) else {
+                let Some((idx, _)) = fields.iter().enumerate().find(|(_, f)| f.name() == n) else {
                     return Err(KeyExtractError::NoSuchField { name: n.clone() });
                 };
-                let dt = f.data_type();
-                let ex = extractor::projection_for_field(idx, dt)?;
-                parts.push(ex);
+                indices.push(idx);
             }
-            let extractor =
-                Box::new(extractor::CompositeProjection::new(parts)) as Box<dyn KeyProjection>;
+            let extractor = extractor::projection_for_columns(schema.clone(), indices)?;
             return Self::new(schema, extractor);
         }
 

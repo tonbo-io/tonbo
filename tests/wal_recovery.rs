@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{Int32Array, RecordBatch, StringArray};
+use arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
@@ -90,6 +90,91 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
 
     drop(recovered);
     fs::remove_dir_all(&root_dir)?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error::Error>> {
+    let wal_dir = std::env::temp_dir().join(format!(
+        "tonbo-wal-composite-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    fs::create_dir_all(&wal_dir)?;
+
+    let metadata: std::collections::HashMap<_, _> = std::iter::once((
+        "tonbo.keys".to_string(),
+        r#"["tenant","bucket"]"#.to_string(),
+    ))
+    .collect();
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("tenant", DataType::Utf8, false),
+            Field::new("bucket", DataType::Int64, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        metadata,
+    ));
+    let mode_config = DynModeConfig::from_metadata(schema.clone())?;
+
+    let executor = Arc::new(TokioExecutor::default());
+    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
+
+    let mut wal_cfg = WalConfig::default();
+    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
+    let recovery_cfg = wal_cfg.clone();
+
+    db.enable_wal(wal_cfg)?;
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["tenant2", "tenant1", "tenant1"])) as _,
+            Arc::new(Int64Array::from(vec![5_i64, 7, 3])) as _,
+            Arc::new(Int32Array::from(vec![20, 10, 15])) as _,
+        ],
+    )?;
+    db.ingest(batch).await?;
+
+    db.disable_wal()?;
+    drop(db);
+
+    let mode_config_recover = DynModeConfig::from_metadata(schema.clone())?;
+    let recovered: DB<DynMode, TokioExecutor> =
+        DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
+
+    let ranges = RangeSet::<KeyOwned>::all();
+    let rows: Vec<((String, i64), i32)> = recovered
+        .scan_mutable_rows(&ranges)
+        .map(|row| {
+            let mut cells = row.into_iter();
+            let tenant = match cells.next().expect("tenant cell") {
+                Some(DynCell::Str(value)) => value,
+                other => panic!("unexpected tenant cell {other:?}"),
+            };
+            let bucket = match cells.next().expect("bucket cell") {
+                Some(DynCell::I64(value)) => value,
+                other => panic!("unexpected bucket cell {other:?}"),
+            };
+            let value = match cells.next().expect("value cell") {
+                Some(DynCell::I32(v)) => v,
+                other => panic!("unexpected value cell {other:?}"),
+            };
+            ((tenant, bucket), value)
+        })
+        .collect();
+
+    assert_eq!(
+        rows,
+        vec![
+            (("tenant1".into(), 3), 15),
+            (("tenant1".into(), 7), 10),
+            (("tenant2".into(), 5), 20),
+        ]
+    );
+
+    drop(recovered);
+    fs::remove_dir_all(&wal_dir)?;
 
     Ok(())
 }

@@ -6,7 +6,7 @@ use arrow_schema::{Schema, SchemaRef};
 use serde_json::json;
 
 use crate::{
-    extractor::{self, CompositeProjection, KeyExtractError, KeyProjection},
+    extractor::{self, KeyExtractError},
     mode::DynModeConfig,
 };
 
@@ -70,22 +70,13 @@ impl SchemaBuilder {
         }
 
         let fields = self.schema.fields();
-        let mut projections: Vec<Box<dyn KeyProjection>> = Vec::with_capacity(self.key_parts.len());
+        let mut indices = Vec::with_capacity(self.key_parts.len());
         for name in &self.key_parts {
-            let Some((idx, field)) = fields.iter().enumerate().find(|(_, f)| f.name() == name)
-            else {
+            let Some((idx, _)) = fields.iter().enumerate().find(|(_, f)| f.name() == name) else {
                 return Err(KeyExtractError::NoSuchField { name: name.clone() });
             };
-            let dt = field.data_type();
-            let proj = extractor::projection_for_field(idx, dt)?;
-            projections.push(proj);
+            indices.push(idx);
         }
-
-        let extractor: Box<dyn KeyProjection> = if projections.len() == 1 {
-            projections.pop().expect("single projection")
-        } else {
-            Box::new(CompositeProjection::new(projections))
-        };
 
         let schema = if self.write_metadata {
             let mut metadata = self.schema.metadata().clone();
@@ -95,6 +86,8 @@ impl SchemaBuilder {
         } else {
             Arc::clone(&self.schema)
         };
+
+        let extractor = extractor::projection_for_columns(Arc::clone(&schema), indices)?;
 
         DynModeConfig::new(schema, extractor)
     }
