@@ -72,7 +72,7 @@ impl<'batch> Eq for KeyView<'batch> {}
 
 impl<'batch> PartialOrd for KeyView<'batch> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.raw.partial_cmp(&other.raw)
+        Some(self.cmp(other))
     }
 }
 

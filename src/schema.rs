@@ -5,8 +5,10 @@ use std::sync::Arc;
 use arrow_schema::{Schema, SchemaRef};
 use serde_json::json;
 
-use crate::extractor::{self, CompositeProjection, KeyExtractError, KeyProjection};
-use crate::mode::DynModeConfig;
+use crate::{
+    extractor::{self, CompositeProjection, KeyExtractError, KeyProjection},
+    mode::DynModeConfig,
+};
 
 /// Builder for declaring primary keys against an Arrow schema.
 ///
@@ -100,8 +102,9 @@ impl SchemaBuilder {
 
 #[cfg(test)]
 mod tests {
-    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    use arrow_schema::{DataType, Field, Schema};
 
     use super::SchemaBuilder;
 
@@ -141,10 +144,13 @@ mod tests {
     fn missing_field_errors() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
 
-        let err = SchemaBuilder::from_schema(schema)
+        let err = match SchemaBuilder::from_schema(schema)
             .primary_key("missing")
             .build()
-            .expect_err("builder should fail");
+        {
+            Ok(_) => panic!("builder should fail"),
+            Err(err) => err,
+        };
         assert!(matches!(
             err,
             crate::extractor::KeyExtractError::NoSuchField { .. }

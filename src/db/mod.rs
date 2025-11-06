@@ -397,7 +397,7 @@ where
         let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
             match manifest_ext::collect_wal_segment_refs(cfg).await {
                 Ok(refs) if !refs.is_empty() => {
-                    let ids: Vec<FileId> = refs.iter().map(|ref_| ref_.file_id().clone()).collect();
+                    let ids: Vec<FileId> = refs.iter().map(|ref_| *ref_.file_id()).collect();
                     builder.set_wal_ids(Some(ids.clone()));
                     (Some(ids), Some(refs))
                 }

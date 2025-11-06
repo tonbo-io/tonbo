@@ -374,7 +374,7 @@ impl<'t> Iterator for DynRowScan<'t> {
                 self.emitted_for_key = false;
             }
             if let Some(cur) = &mut self.cursor {
-                while let Some((composite, loc)) = cur.next() {
+                for (composite, loc) in cur.by_ref() {
                     let key_raw = composite.key();
                     if self
                         .current_key

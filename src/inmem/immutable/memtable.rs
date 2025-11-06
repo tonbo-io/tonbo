@@ -200,7 +200,7 @@ impl<'t, S> Iterator for ImmutableVisibleScan<'t, S> {
                 self.emitted_for_key = false;
             }
             if let Some(cur) = &mut self.cursor {
-                while let Some((view, row)) = cur.next() {
+                for (view, row) in cur.by_ref() {
                     let key_view = view.key();
                     if self
                         .current_key

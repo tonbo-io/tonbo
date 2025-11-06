@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 use fusio::path::Path;
 use serde::{Deserialize, Serialize};
@@ -6,10 +9,7 @@ use ulid::Ulid;
 
 use crate::{
     fs::{FileId, generate_file_id},
-    manifest::{
-        ManifestError, ManifestResult, VersionEdit,
-        version::{apply_add_ssts, apply_remove_ssts, trim_trailing_empty_levels},
-    },
+    manifest::{ManifestError, ManifestResult, VersionEdit},
     mvcc::Timestamp,
     ondisk::sstable::{SsTableId, SsTableStats},
 };
@@ -281,15 +281,11 @@ impl VersionState {
         }
     }
 
-    pub(super) fn apply_edits(self: &mut Self, edits: &[VersionEdit]) -> ManifestResult<()> {
+    pub(super) fn apply_edits(&mut self, edits: &[VersionEdit]) -> ManifestResult<()> {
         for edit in edits {
             match edit {
-                VersionEdit::AddSsts { level, entries } => {
-                    apply_add_ssts(&mut self.ssts, *level, entries)?
-                }
-                VersionEdit::RemoveSsts { level, sst_ids } => {
-                    apply_remove_ssts(&mut self.ssts, *level, sst_ids)?
-                }
+                VersionEdit::AddSsts { level, entries } => self.add_ssts(*level, entries)?,
+                VersionEdit::RemoveSsts { level, sst_ids } => self.remove_ssts(*level, sst_ids)?,
                 VersionEdit::SetWalSegment { segment } => {
                     self.wal_floor = Some(segment.clone());
                 }
@@ -302,9 +298,51 @@ impl VersionState {
         for bucket in &mut self.ssts {
             bucket.sort_by_key(|entry| entry.sst_id.raw());
         }
-        trim_trailing_empty_levels(&mut self.ssts);
+        self.trim_trailing_empty_levels();
 
         Ok(())
+    }
+
+    fn add_ssts(&mut self, level: u32, entries: &[SstEntry]) -> ManifestResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let bucket = self.ensure_level(level);
+        for entry in entries {
+            bucket.retain(|existing| existing.sst_id() != entry.sst_id());
+            bucket.push(entry.clone());
+        }
+        Ok(())
+    }
+
+    fn remove_ssts(&mut self, level: u32, sst_ids: &[SsTableId]) -> ManifestResult<()> {
+        if sst_ids.is_empty() {
+            return Ok(());
+        }
+        let index = level as usize;
+        if index >= self.ssts.len() {
+            return Err(ManifestError::Invariant(
+                "attempted to remove SSTs from a missing level",
+            ));
+        }
+        let bucket = &mut self.ssts[index];
+        let targets: HashSet<SsTableId> = sst_ids.iter().cloned().collect();
+        bucket.retain(|entry| !targets.contains(entry.sst_id()));
+        Ok(())
+    }
+
+    fn ensure_level(&mut self, level: u32) -> &mut Vec<SstEntry> {
+        let index = level as usize;
+        if self.ssts.len() <= index {
+            self.ssts.resize_with(index + 1, Vec::new);
+        }
+        &mut self.ssts[index]
+    }
+
+    fn trim_trailing_empty_levels(&mut self) {
+        while self.ssts.last().is_some_and(|entries| entries.is_empty()) {
+            self.ssts.pop();
+        }
     }
     pub(crate) fn commit_timestamp(&self) -> Timestamp {
         self.commit_timestamp

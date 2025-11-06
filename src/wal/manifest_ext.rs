@@ -30,7 +30,7 @@ pub(crate) async fn collect_wal_segment_refs(
         let bounds = storage
             .segment_frame_bounds(&descriptor.path)
             .await?
-            .ok_or_else(|| {
+            .ok_or({
                 WalError::Corrupt("wal segment contained no frames despite non-zero length")
             })?;
         refs.push(wal_segment_ref_from_descriptor(descriptor, bounds));
@@ -40,7 +40,7 @@ pub(crate) async fn collect_wal_segment_refs(
         let bounds = storage
             .segment_frame_bounds(&tail.active.path)
             .await?
-            .ok_or_else(|| {
+            .ok_or({
                 WalError::Corrupt("active wal segment contained no frames despite non-zero length")
             })?;
         refs.push(wal_segment_ref_from_descriptor(&tail.active, bounds));

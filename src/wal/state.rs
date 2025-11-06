@@ -14,6 +14,8 @@ use super::{WalError, WalResult};
 use crate::mvcc::Timestamp;
 
 const STATE_FILE_NAME: &str = "state.json";
+type WalStateLoadFuture<'a> = BoxFuture<'a, WalResult<Option<(Vec<u8>, String)>>>;
+type WalStatePutFuture<'a> = BoxFuture<'a, WalResult<String>>;
 
 /// Serialized WAL metadata persisted alongside segments in `wal/state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -128,7 +130,7 @@ fn state_path(dir: &Path) -> WalResult<Path> {
 /// Storage interface used by [`WalStateHandle`].
 pub trait WalStateStore: Send + Sync {
     /// Load the payload and tag associated with the state file.
-    fn load<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, WalResult<Option<(Vec<u8>, String)>>>;
+    fn load<'a>(&'a self, path: &'a Path) -> WalStateLoadFuture<'a>;
 
     /// Write a new payload conditionally and return the new tag.
     fn put<'a>(
@@ -136,7 +138,7 @@ pub trait WalStateStore: Send + Sync {
         path: &'a Path,
         payload: &'a [u8],
         expect: Option<&'a str>,
-    ) -> BoxFuture<'a, WalResult<String>>;
+    ) -> WalStatePutFuture<'a>;
 }
 
 /// [`WalStateStore`] implementation backed by an `FsCas` filesystem.
@@ -153,7 +155,7 @@ impl FsWalStateStore {
 }
 
 impl WalStateStore for FsWalStateStore {
-    fn load<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, WalResult<Option<(Vec<u8>, String)>>> {
+    fn load<'a>(&'a self, path: &'a Path) -> WalStateLoadFuture<'a> {
         Box::pin(async move {
             match self
                 .cas
@@ -172,7 +174,7 @@ impl WalStateStore for FsWalStateStore {
         path: &'a Path,
         payload: &'a [u8],
         expect: Option<&'a str>,
-    ) -> BoxFuture<'a, WalResult<String>> {
+    ) -> WalStatePutFuture<'a> {
         Box::pin(async move {
             let condition = match expect {
                 Some(tag) => CasCondition::IfMatch(tag.to_string()),

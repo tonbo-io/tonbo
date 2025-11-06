@@ -20,6 +20,8 @@ use crate::{
     },
 };
 
+type WalTuningHook = dyn FnMut(&mut WalConfig) + Send + 'static;
+
 /// Builder-style configuration surface for constructing a [`DB`] instance.
 ///
 /// The builder enforces that callers explicitly select a storage backend
@@ -33,7 +35,7 @@ where
 {
     mode_config: M::Config,
     storage: Option<StorageBackendSpec>,
-    wal_tuning: Option<Box<dyn FnMut(&mut WalConfig) + Send + 'static>>,
+    wal_tuning: Option<Box<WalTuningHook>>,
 }
 
 impl<M> DbBuilder<M>
@@ -73,7 +75,7 @@ where
     {
         let mut builder = ObjectStoreBuilder::default();
         configure(&mut builder);
-        self.set_storage(StorageBackendSpec::ObjectStore(builder.finish()));
+        self.set_storage(StorageBackendSpec::ObjectStore(Box::new(builder.finish())));
         self
     }
 
@@ -172,7 +174,7 @@ pub enum DbBuildError {
 pub(crate) enum StorageBackendSpec {
     InMemory { label: String },
     Disk { root: String },
-    ObjectStore(ObjectStoreSpec),
+    ObjectStore(Box<ObjectStoreSpec>),
 }
 
 /// Structured object-store specification captured by `DbBuilder`.
@@ -417,7 +419,7 @@ impl StorageBackend {
                     kind: StorageBackendKind::Disk { fs: raw_fs },
                 })
             }
-            StorageBackendSpec::ObjectStore(spec) => build_object_store_backend(spec),
+            StorageBackendSpec::ObjectStore(spec) => build_object_store_backend(*spec),
         }
     }
 
@@ -569,7 +571,7 @@ impl<'a> ManifestBootstrap<'a> {
                     .map_err(DbBuildError::Manifest)
             }
             StorageBackendKind::Disk { fs } => {
-                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0)
+                init_fs_manifest(*Arc::as_ref(fs), backend.root(), 0)
                     .map_err(DbBuildError::Manifest)
             }
             StorageBackendKind::ObjectStore(ObjectStoreBackend::S3 { fs }) => {
