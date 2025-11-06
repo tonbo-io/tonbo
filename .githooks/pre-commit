@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "${ROOT_DIR}"
+
+HOOK_NAME="lotus-agent pre-commit"
+
+log() {
+  echo "[${HOOK_NAME}] $1"
+}
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "[${HOOK_NAME}] skipping: cargo not found" >&2
+  exit 0
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+  echo "[${HOOK_NAME}] rustup not detected; install rustup and the nightly toolchain" >&2
+  exit 1
+fi
+
+if ! rustup toolchain list | grep -q "nightly"; then
+  echo "[${HOOK_NAME}] nightly toolchain required (rustup toolchain install nightly)" >&2
+  exit 1
+fi
+
+FMT_CHECK_CMD="cargo +nightly fmt --all -- --check"
+CLIPPY_CMD="cargo clippy --workspace -- -D warnings"
+BUILD_CMD="cargo build --verbose"
+TEST_CMD="cargo test --verbose"
+
+run_step() {
+  local cmd="$1"
+  log "$cmd"
+  if ! eval "$cmd"; then
+    echo "[${HOOK_NAME}] command failed: $cmd" >&2
+    if [[ "$cmd" == "$FMT_CHECK_CMD" ]]; then
+      echo "[${HOOK_NAME}] run 'cargo +nightly fmt --all' to apply formatting and re-stage changes before committing." >&2
+    fi
+    exit 1
+  fi
+}
+
+run_step "$FMT_CHECK_CMD"
+run_step "$CLIPPY_CMD"
+run_step "$BUILD_CMD"
+run_step "$TEST_CMD"
+
+exit 0
