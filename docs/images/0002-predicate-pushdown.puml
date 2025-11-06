@@ -1,0 +1,42 @@
+@startuml
+top to bottom direction
+
+title "Predicate Pushdown"
+
+rectangle "Step 1: Plan" {
+  collections "SST" as SSTs
+  collections "Transaction" as Transactions
+  collections "Memtable" as Memtables
+
+  [Transactions] --> [PrunedRowSet\n(Transaction)] : Predicate
+  [Memtables] --> [PrunedRowSet\n(Memtable)] : Predicate
+  [SSTs] --> [PrunedRowSet\n(SST)] : Predicate
+}
+
+
+rectangle "Step 2: Execute" {
+  [PrunedRowSet\n(Transaction)] --> [FilteredRowSet\n(Transaction)] : Predicate
+  [PrunedRowSet\n(Memtable)] --> [FilteredRowSet\n(Memtable)] : Predicate
+  [PrunedRowSet\n(SST)] --> (Pushdown Filter) : Predicate
+  (Pushdown Filter) --> [FilteredRowSet\n(SST)] : pushdown predicate
+}
+
+rectangle "Step 3: Merge" {
+  rectangle "Merged Stream" as MS {
+    rectangle "DedupedRowSetMaps" as Inner
+  }
+
+  [FilteredRowSet\n(Transaction)] --> Inner : deduplicate & MVCC
+  [FilteredRowSet\n(Memtable)] --> Inner
+  [FilteredRowSet\n(SST)] --> Inner
+}
+
+rectangle "Step 4: Materialize" {
+  MS--> [Materialized Row Stream] : materialize row from sources&\napply residual predicates
+}
+
+rectangle "Step 5: Package/Aggregation" {
+  [Materialized Row Stream] --> [RecordBatch] : aggregate & package
+}
+
+@enduml

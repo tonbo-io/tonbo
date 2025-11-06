@@ -1,0 +1,30 @@
+@startuml
+' Automatically number the steps
+autonumber
+
+' Define participants (poles)
+participant User
+participant SQL
+participant QueryEngine
+participant Predicate
+participant Tonbo
+participant Parquet
+
+' Define the sequence of events
+SQL -> QueryEngine: SQL 
+QueryEngine -> Predicate : scan() (translation)
+Predicate -> Tonbo : [predicates], projection
+Tonbo -> Parquet : read metadata & prune
+Parquet -> Tonbo : RowSet
+Tonbo -> Predicate: scan plan with statistic
+Predicate -> QueryEngine : ExecutionPlan (translation) 
+QueryEngine -> QueryEngine : plan optimization
+QueryEngine -> Predicate : optimizaed ExecutionPlan
+Predicate -> Tonbo : scan plan (translation)
+Tonbo -> Tonbo: execute()
+Tonbo -> Parquet : push down filter
+Parquet -> Tonbo: materialized record batch
+Tonbo -> Tonbo: aggregate
+Tonbo -> User : Data
+
+@enduml

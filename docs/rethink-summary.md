@@ -106,7 +106,7 @@ Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar c
 | GC & Watermarks | Not started | Watermark tracking or object deletion logic absent across crate. |
 | Table Catalog & Admin Surface | Not started | No catalog/admin modules exported (`src/lib.rs:9-41`). |
 | Range Planner MVP | Not started | Only `RangeSet` utilities exist; no planner implementation (`src/scan.rs:1-160`). |
-| Merge Executor | Not started | MergeStream/ordered merge code missing entirely. |
+| Merge Executor | In progress | MergeStream/ordered merge code missing entirely. |
 | SST Integration | Not started | `SsTableReader::collect` returns `Unimplemented` (`src/ondisk/sstable.rs:335-347`). |
 | Projection & Filters | Not started | Read path materializes full rows; no projection helpers (`src/inmem/mutable/memtable.rs:42-200`). |
 | Minor Flush Pipeline | In progress | Parquet writer stages immutables but lacks publish wiring (`src/ondisk/sstable.rs:180-310`). |
