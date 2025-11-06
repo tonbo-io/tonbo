@@ -588,7 +588,6 @@ where
             self.last_sync = Instant::now();
             sync_performed = true;
         }
-        self.close_active_segment().await?;
 
         let old_path = self.segment.path().clone();
         let old_bytes = self.segment_bytes;
@@ -598,6 +597,7 @@ where
         let mut new_segment = self.storage.open_segment(new_seq).await?;
         let new_bytes = self_initial_size(self.fs_tag, new_segment.file_mut()).await?;
 
+        self.close_active_segment().await?;
         let old_segment = std::mem::replace(&mut self.segment, new_segment);
         drop(old_segment);
 
