@@ -597,6 +597,7 @@ where
         let mut new_segment = self.storage.open_segment(new_seq).await?;
         let new_bytes = self_initial_size(self.fs_tag, new_segment.file_mut()).await?;
 
+        self.close_active_segment().await?;
         let old_segment = std::mem::replace(&mut self.segment, new_segment);
         drop(old_segment);
 
@@ -652,15 +653,16 @@ where
 
     async fn flush_and_sync_for_shutdown(&mut self) -> WalResult<bool> {
         self.flush_if_needed(true).await?;
+        let mut synced = false;
         if !matches!(self.cfg.sync, WalSyncPolicy::Disabled) {
             self.sync_all().await?;
             self.bytes_since_sync = 0;
             self.last_sync = Instant::now();
-            self.persist_state_if_dirty().await?;
-            return Ok(true);
+            synced = true;
         }
+        self.close_active_segment().await?;
         self.persist_state_if_dirty().await?;
-        Ok(false)
+        Ok(synced)
     }
 
     async fn record_bytes_written(&self, bytes: usize) {
@@ -695,6 +697,14 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn close_active_segment(&mut self) -> WalResult<()> {
+        self.segment
+            .file_mut()
+            .close()
+            .await
+            .map_err(|err| backend_err("close wal segment", err))
     }
 
     fn current_frame_seq(&self) -> u64 {

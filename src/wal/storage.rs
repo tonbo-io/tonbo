@@ -6,7 +6,7 @@ use fusio::{
     DynFs, Read, Write,
     dynamic::fs::DynFile,
     error::Error as FusioError,
-    fs::OpenOptions,
+    fs::{FileSystemTag, OpenOptions},
     path::{Path, PathPart},
 };
 use futures::StreamExt;
@@ -126,28 +126,37 @@ impl WalStorage {
                     err
                 ))
             })?;
-            if let Some(seq) = segment_sequence(meta.path.filename()) {
-                let path = meta.path;
-                let file = self
-                    .fs
-                    .open_options(&path, Self::read_options())
-                    .await
-                    .map_err(|err| {
-                        WalError::Storage(format!(
-                            "failed to open wal segment {} for size: {}",
-                            path, err
-                        ))
-                    })?;
-                let size = file
-                    .size()
-                    .await
-                    .map_err(|err| backend_err("determine wal segment size", err))?
-                    as usize;
-                entries.push(SegmentDescriptor {
-                    seq,
-                    path,
-                    bytes: size,
-                });
+            if let Some(descriptor) = self.describe_segment(meta.path).await? {
+                entries.push(descriptor);
+            }
+        }
+
+        if entries.is_empty() && matches!(self.fs.file_system(), FileSystemTag::S3) {
+            let root_prefix = Path::default();
+            let mut fallback_stream = self.fs.list(&root_prefix).await.map_err(|err| {
+                WalError::Storage(format!(
+                    "failed fallback listing for wal dir {}: {}",
+                    self.root.as_ref(),
+                    err
+                ))
+            })?;
+
+            while let Some(meta_result) = fallback_stream.next().await {
+                let meta = meta_result.map_err(|err| {
+                    WalError::Storage(format!(
+                        "failed to read wal metadata under {} during fallback: {}",
+                        self.root.as_ref(),
+                        err
+                    ))
+                })?;
+
+                if !meta.path.prefix_matches(&self.root) {
+                    continue;
+                }
+
+                if let Some(descriptor) = self.describe_segment(meta.path).await? {
+                    entries.push(descriptor);
+                }
             }
         }
 
@@ -352,6 +361,34 @@ impl WalStorage {
             ))
         })?;
         Ok(())
+    }
+}
+
+impl WalStorage {
+    async fn describe_segment(&self, path: Path) -> WalResult<Option<SegmentDescriptor>> {
+        let Some(seq) = segment_sequence(path.filename()) else {
+            return Ok(None);
+        };
+        let file = self
+            .fs
+            .open_options(&path, Self::read_options())
+            .await
+            .map_err(|err| {
+                WalError::Storage(format!(
+                    "failed to open wal segment {} for size: {}",
+                    path, err
+                ))
+            })?;
+        let size = file
+            .size()
+            .await
+            .map_err(|err| backend_err("determine wal segment size", err))?
+            as usize;
+        Ok(Some(SegmentDescriptor {
+            seq,
+            path,
+            bytes: size,
+        }))
     }
 }
 
