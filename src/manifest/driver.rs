@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use fusio_manifest::{
     BlockingExecutor, CheckpointStore, HeadStore, LeaseStore, SegmentIo,
@@ -181,7 +181,7 @@ where
         // Update table version and commit timestamp
         let next_txn = state.commit_timestamp().next();
         state.set_commit_timestamp(next_txn);
-        let wal_floor = state.cloned_wal_floor();
+        let wal_floor = reduce_wal_floor(head.wal_floor.clone(), state.cloned_wal_floor());
 
         session.put(
             VersionKey::TableVersion {
@@ -335,6 +335,24 @@ where
     }
 }
 
+fn reduce_wal_floor(
+    current: Option<WalSegmentRef>,
+    candidate: Option<WalSegmentRef>,
+) -> Option<WalSegmentRef> {
+    match (current, candidate) {
+        (Some(existing), Some(candidate)) => {
+            if WalSegmentRef::cmp(&candidate, &existing) == Ordering::Less {
+                Some(candidate)
+            } else {
+                Some(existing)
+            }
+        }
+        (None, Some(candidate)) => Some(candidate),
+        (Some(existing), None) => Some(existing),
+        (None, None) => None,
+    }
+}
+
 impl<C, HS, SS, CS, LS> Clone for Manifest<C, HS, SS, CS, LS>
 where
     C: ManifestCodec,
@@ -393,12 +411,14 @@ mod tests {
         let (manifest, table_id) =
             init_in_memory_manifest_raw(1, &file_ids).expect("manifest should initialize");
 
-        let wal_segment = WalSegmentRef::new(42, file_ids.generate(), 0, 10);
+        let wal_segment_a = WalSegmentRef::new(40, file_ids.generate(), 0, 10);
+        let wal_segment_b = WalSegmentRef::new(42, file_ids.generate(), 5, 20);
+        let first_wal_segments = vec![wal_segment_b.clone(), wal_segment_a.clone()];
         let (data0a, mvcc0a) = test_paths(7);
         let sst_level0_a = SstEntry::new(
             SsTableId::new(7),
             Some(SsTableStats::default()),
-            Some(vec![wal_segment.file_id().clone()]),
+            Some(vec![wal_segment_b.file_id().clone()]),
             data0a.clone(),
             mvcc0a.clone(),
         );
@@ -425,8 +445,8 @@ mod tests {
                 level: 0,
                 entries: vec![sst_level0_a.clone(), sst_level0_b.clone()],
             },
-            VersionEdit::SetWalSegment {
-                segment: wal_segment.clone(),
+            VersionEdit::SetWalSegments {
+                segments: first_wal_segments.clone(),
             },
             VersionEdit::SetTombstoneWatermark { watermark: 99 },
         ];
@@ -460,7 +480,16 @@ mod tests {
             latest_version.ssts()[0].contains(&sst_level0_a)
                 && latest_version.ssts()[0].contains(&sst_level0_b)
         );
-        assert_eq!(latest_version.wal_floor(), Some(&wal_segment));
+        assert_eq!(
+            latest_version.wal_floor(),
+            Some(&wal_segment_a),
+            "wal floor should resolve to the lowest seq across segments"
+        );
+        assert_eq!(
+            latest_version.wal_segments(),
+            &[wal_segment_a.clone(), wal_segment_b.clone()],
+            "wal segments should be normalised and sorted"
+        );
         let persisted_level0 = &latest_version.ssts()[0];
         let persisted_a = persisted_level0
             .iter()
@@ -486,8 +515,8 @@ mod tests {
         );
         assert_eq!(
             snapshot.head.wal_floor,
-            Some(wal_segment.clone()),
-            "wal floor should track the lowest wal segment"
+            Some(wal_segment_a.clone()),
+            "table head should track the aggregate wal floor"
         );
 
         // Assert list version works
@@ -499,7 +528,15 @@ mod tests {
         assert_eq!(listed_versions[0], latest_version);
 
         // Now Simulate a compaction where it delete some sst files
-        let new_wal_segment = WalSegmentRef::new(128, file_ids.generate(), 11, 42);
+        let new_wal_segments = vec![
+            WalSegmentRef::new(128, file_ids.generate(), 11, 42),
+            WalSegmentRef::new(129, file_ids.generate(), 7, 12),
+        ];
+        let expected_new_floor = new_wal_segments
+            .iter()
+            .min_by(|lhs, rhs| WalSegmentRef::cmp(lhs, rhs))
+            .expect("non-empty wal segments")
+            .clone();
         let removal_edits = vec![
             VersionEdit::RemoveSsts {
                 level: 0,
@@ -509,8 +546,8 @@ mod tests {
                 level: 1,
                 entries: vec![sst_level1.clone()],
             },
-            VersionEdit::SetWalSegment {
-                segment: new_wal_segment.clone(),
+            VersionEdit::SetWalSegments {
+                segments: new_wal_segments.clone(),
             },
             VersionEdit::SetTombstoneWatermark { watermark: 111 },
         ];
@@ -557,8 +594,8 @@ mod tests {
         assert_eq!(persisted_level1.mvcc_path(), &mvcc1);
         assert_eq!(
             updated_version.wal_floor(),
-            Some(&new_wal_segment),
-            "wal floor should update to the latest segment when provided"
+            Some(&expected_new_floor),
+            "wal floor should match the minimum of the new segment set"
         );
         assert_eq!(
             updated_version.tombstone_watermark(),
@@ -567,13 +604,23 @@ mod tests {
         );
         assert_eq!(
             snapshot_after.head.wal_floor,
-            Some(new_wal_segment.clone()),
-            "table head should reflect the newest wal segment"
+            Some(wal_segment_a.clone()),
+            "table head should retain the global floor across retained versions"
         );
         assert_eq!(
             snapshot_after.head.last_manifest_txn,
             Some(Timestamp::new(2)),
             "head should point at the newest manifest txn after removal"
+        );
+
+        let persisted_floor = manifest
+            .wal_floor(table_id)
+            .await
+            .expect("wal_floor call should succeed")
+            .expect("wal floor should exist after commits");
+        assert_eq!(
+            persisted_floor, wal_segment_a,
+            "persisted WAL floor should match the global minimum"
         );
 
         let listed_versions_after = manifest
@@ -594,6 +641,16 @@ mod tests {
             listed_versions_after[1].commit_timestamp(),
             Timestamp::new(1),
             "oldest version should follow"
+        );
+        assert_eq!(
+            listed_versions_after[0].wal_floor(),
+            Some(&expected_new_floor),
+            "newest version should expose its own wal floor"
+        );
+        assert_eq!(
+            listed_versions_after[1].wal_floor(),
+            Some(&wal_segment_a),
+            "older version should keep its wal floor"
         );
 
         let limited_versions = manifest

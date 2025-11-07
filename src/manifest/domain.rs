@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashSet},
     time::Duration,
 };
@@ -258,7 +259,10 @@ pub(crate) struct VersionState {
     pub(super) commit_timestamp: Timestamp,
     /// SST entries materialised for this version, grouped by compaction level.
     pub(super) ssts: Vec<Vec<SstEntry>>,
-    /// Floor WAL fragment referenced by this version.
+    /// WAL segments referenced by this version.
+    #[serde(default)]
+    pub(super) wal_segments: Vec<WalSegmentRef>,
+    /// Floor WAL fragment referenced by this version (derived from `wal_segments`).
     pub(super) wal_floor: Option<WalSegmentRef>,
     /// Upper bound for tombstones included in this version.
     pub(super) tombstone_watermark: Option<u64>,
@@ -270,6 +274,7 @@ impl VersionState {
             table_id,
             commit_timestamp: Timestamp::new(0),
             ssts: Vec::new(),
+            wal_segments: Vec::new(),
             wal_floor: None,
             tombstone_watermark: None,
         }
@@ -280,9 +285,7 @@ impl VersionState {
             match edit {
                 VersionEdit::AddSsts { level, entries } => self.add_ssts(*level, entries)?,
                 VersionEdit::RemoveSsts { level, sst_ids } => self.remove_ssts(*level, sst_ids)?,
-                VersionEdit::SetWalSegment { segment } => {
-                    self.wal_floor = Some(segment.clone());
-                }
+                VersionEdit::SetWalSegments { segments } => self.set_wal_segments(segments),
                 VersionEdit::SetTombstoneWatermark { watermark } => {
                     self.tombstone_watermark = Some(*watermark);
                 }
@@ -293,6 +296,7 @@ impl VersionState {
             bucket.sort_by_key(|entry| entry.sst_id.raw());
         }
         self.trim_trailing_empty_levels();
+        self.normalise_wal_segments();
 
         Ok(())
     }
@@ -353,6 +357,11 @@ impl VersionState {
     }
 
     #[cfg(test)]
+    pub(crate) fn wal_segments(&self) -> &[WalSegmentRef] {
+        &self.wal_segments
+    }
+
+    #[cfg(test)]
     pub(crate) fn wal_floor(&self) -> Option<&WalSegmentRef> {
         self.wal_floor.as_ref()
     }
@@ -368,6 +377,20 @@ impl VersionState {
 
     pub(crate) fn set_commit_timestamp(&mut self, ts: Timestamp) {
         self.commit_timestamp = ts;
+    }
+
+    fn set_wal_segments(&mut self, segments: &[WalSegmentRef]) {
+        self.wal_segments = segments.to_vec();
+    }
+
+    fn normalise_wal_segments(&mut self) {
+        if self.wal_segments.is_empty() {
+            // Preserve the previously persisted floor when no WAL lineage change was supplied.
+            return;
+        }
+
+        self.wal_segments.sort_by(WalSegmentRef::cmp);
+        self.wal_floor = self.wal_segments.first().cloned();
     }
 }
 
@@ -452,6 +475,14 @@ impl WalSegmentRef {
             first_frame,
             last_frame,
         }
+    }
+
+    pub(crate) fn cmp(lhs: &Self, rhs: &Self) -> Ordering {
+        lhs.seq
+            .cmp(&rhs.seq)
+            .then_with(|| lhs.first_frame.cmp(&rhs.first_frame))
+            .then_with(|| lhs.last_frame.cmp(&rhs.last_frame))
+            .then_with(|| lhs.file_id.cmp(&rhs.file_id))
     }
 
     pub(crate) fn seq(&self) -> u64 {

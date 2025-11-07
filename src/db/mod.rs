@@ -456,14 +456,7 @@ where
                 }];
 
                 if let Some(refs) = wal_refs {
-                    // For now just comput the floor WAL to be the latest one as we have
-                    // successfully persist them in parquet table writer
-                    let wal_floor = refs
-                        .iter()
-                        .max_by_key(|segment| segment.seq())
-                        .cloned()
-                        .unwrap();
-                    edits.push(VersionEdit::SetWalSegment { segment: wal_floor });
+                    edits.push(VersionEdit::SetWalSegments { segments: refs });
                 }
                 self.manifest
                     .apply_version_edits(self.manifest_table, &edits)

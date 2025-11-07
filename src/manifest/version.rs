@@ -19,10 +19,10 @@ pub(crate) enum VersionEdit {
         /// Identifiers of SSTs that must be removed.
         sst_ids: Vec<SsTableId>,
     },
-    /// Replace the WAL segments referenced by the version.
-    SetWalSegment {
+    /// Replace the WAL segments referenced by the version with the provided set.
+    SetWalSegments {
         /// Complete set of WAL fragments backing the version.
-        segment: WalSegmentRef,
+        segments: Vec<WalSegmentRef>,
     },
     /// Update the tombstone watermark.
     SetTombstoneWatermark {
