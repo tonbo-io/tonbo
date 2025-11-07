@@ -1,0 +1,15 @@
+[package]
+name = "predicate"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+roaring = "0.10"
+serde = { version = "1", features = ["derive"], optional = true }
