@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use super::{WalError, WalResult};
-use crate::mvcc::Timestamp;
+use crate::{id::FileId, mvcc::Timestamp};
 
 const STATE_FILE_NAME: &str = "state.json";
 type WalStateLoadFuture<'a> = BoxFuture<'a, WalResult<Option<(Vec<u8>, String)>>>;
@@ -27,6 +27,10 @@ pub struct WalState {
     pub last_frame_seq: Option<u64>,
     /// Highest commit timestamp made durable.
     pub last_commit_ts: Option<u64>,
+    /// Metadata for all sealed segments that still exist on disk.
+    pub sealed_segments: Vec<WalSegmentBounds>,
+    /// Metadata for the currently active segment (if it already contains frames).
+    pub active_segment: Option<WalSegmentBounds>,
 }
 
 impl WalState {
@@ -52,6 +56,46 @@ impl WalState {
     #[inline]
     pub fn set_segment_seq(&mut self, seq: u64) {
         self.last_segment_seq = Some(seq);
+    }
+
+    /// Replace the sealed segment list with `segments`.
+    pub fn replace_sealed_segments(&mut self, segments: Vec<WalSegmentBounds>) {
+        self.sealed_segments = segments;
+    }
+
+    /// Insert or update metadata for a sealed segment.
+    pub fn upsert_sealed_segment(&mut self, segment: WalSegmentBounds) {
+        self.sealed_segments
+            .retain(|existing| existing.seq != segment.seq);
+        self.sealed_segments.push(segment);
+    }
+
+    /// Retain only those sealed segments that satisfy `predicate`.
+    pub fn retain_sealed_segments<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&WalSegmentBounds) -> bool,
+    {
+        self.sealed_segments.retain(|segment| predicate(segment));
+    }
+
+    /// Return metadata for all sealed segments.
+    pub fn sealed_segments(&self) -> &[WalSegmentBounds] {
+        &self.sealed_segments
+    }
+
+    /// Update metadata for the active segment.
+    pub fn set_active_segment(&mut self, bounds: WalSegmentBounds) {
+        self.active_segment = Some(bounds);
+    }
+
+    /// Clear the active segment metadata.
+    pub fn clear_active_segment(&mut self) {
+        self.active_segment = None;
+    }
+
+    /// Access the active segment metadata.
+    pub fn active_segment(&self) -> Option<&WalSegmentBounds> {
+        self.active_segment.as_ref()
     }
 }
 
@@ -108,6 +152,16 @@ impl WalStateHandle {
         &mut self.state
     }
 
+    /// Return the sealed segment metadata snapshot.
+    pub fn sealed_segments(&self) -> &[WalSegmentBounds] {
+        self.state.sealed_segments()
+    }
+
+    /// Return the active segment metadata snapshot, if any.
+    pub fn active_segment(&self) -> Option<&WalSegmentBounds> {
+        self.state.active_segment()
+    }
+
     /// Persist the in-memory state back to `state.json` using CAS semantics.
     pub async fn persist(&mut self) -> WalResult<()> {
         let payload = serde_json::to_vec(&self.state)
@@ -118,6 +172,36 @@ impl WalStateHandle {
             .await?;
         self.tag = Some(new_tag);
         Ok(())
+    }
+}
+
+/// Inclusive frame bounds tracked for each WAL segment on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalSegmentBounds {
+    /// Sequence embedded in the WAL filename.
+    pub seq: u64,
+    /// Deterministic file identifier derived from `seq`.
+    pub file_id: FileId,
+    /// First frame sequence stored in the segment.
+    pub first_frame: u64,
+    /// Last frame sequence stored in the segment.
+    pub last_frame: u64,
+}
+
+impl WalSegmentBounds {
+    /// Construct a new set of bounds for the provided segment sequence.
+    pub fn new(seq: u64, file_id: FileId, first_frame: u64, last_frame: u64) -> Self {
+        Self {
+            seq,
+            file_id,
+            first_frame,
+            last_frame,
+        }
+    }
+
+    /// Extend the tracked frame range to include `last_frame`.
+    pub fn extend_to(&mut self, last_frame: u64) {
+        self.last_frame = last_frame;
     }
 }
 

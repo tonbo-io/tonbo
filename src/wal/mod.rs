@@ -28,9 +28,11 @@ use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
 };
+use ulid::Ulid;
 
 use crate::{
     db::Mode,
+    id::FileId,
     inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
     mvcc::Timestamp,
     wal::metrics::WalMetrics,
@@ -43,6 +45,7 @@ pub mod replay;
 pub mod state;
 pub mod storage;
 pub mod writer;
+pub use state::WalSegmentBounds;
 // Writer logic will live here once the async queue is implemented.
 
 /// Sync policy controlling how frequently the WAL forces durability.
@@ -210,6 +213,24 @@ pub struct WalAck {
     pub bytes_flushed: usize,
     /// Time elapsed between enqueue and durability.
     pub elapsed: Duration,
+}
+
+/// Snapshot describing WAL segment metadata without touching the filesystem.
+#[derive(Debug, Clone)]
+pub struct WalSnapshot {
+    /// Completed segments ordered from oldest to newest.
+    pub sealed_segments: Vec<WalSegmentBounds>,
+    /// Active segment metadata when the current file already contains frames.
+    pub active_segment: Option<WalSegmentBounds>,
+}
+
+impl WalSnapshot {
+    /// Iterate over all segments (sealed + active when present) in order.
+    pub fn iter(&self) -> impl Iterator<Item = &WalSegmentBounds> {
+        self.sealed_segments
+            .iter()
+            .chain(self.active_segment.iter())
+    }
 }
 
 /// Dynamic ingest payload handed to WAL commands.
@@ -591,6 +612,21 @@ where
             .map_err(|_| WalError::Storage("wal writer task closed".into()))?
     }
 
+    /// Fetch a snapshot describing the WAL segments tracked by the writer.
+    pub async fn snapshot(&self) -> WalResult<WalSnapshot> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let mut sender = self.inner.clone_sender();
+        let msg = writer::WriterMsg::Snapshot { ack_tx };
+
+        if let Err(_err) = sender.send(msg).await {
+            return Err(WalError::Storage("wal writer task closed".into()));
+        }
+
+        ack_rx
+            .await
+            .map_err(|_| WalError::Storage("wal writer task closed".into()))?
+    }
+
     /// Shut down the writer task and wait for completion.
     pub fn shutdown(self) -> WalResult<()> {
         self.inner.close_channel();
@@ -668,6 +704,12 @@ where
         self.enqueue_command(WalCommand::TxnAbort { provisional_id }, provisional_id)
             .await
     }
+}
+
+pub(crate) fn wal_segment_file_id(seq: u64) -> FileId {
+    let mut bytes = [0u8; 16];
+    bytes[8..16].copy_from_slice(&seq.to_be_bytes());
+    Ulid::from_bytes(bytes)
 }
 
 /// Ticket returned after a successful submission.

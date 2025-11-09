@@ -2,14 +2,12 @@
 
 use std::sync::Arc;
 
-use ulid::Ulid;
-
 use crate::{
-    id::FileId,
     manifest::WalSegmentRef,
     wal::{
         WalConfig, WalError,
         storage::{SegmentDescriptor, SegmentFrameBounds, WalStorage},
+        wal_segment_file_id,
     },
 };
 
@@ -56,14 +54,8 @@ fn wal_segment_ref_from_descriptor(
     descriptor: &SegmentDescriptor,
     bounds: SegmentFrameBounds,
 ) -> WalSegmentRef {
-    let file_id = deterministic_file_id(descriptor.seq);
+    let file_id = wal_segment_file_id(descriptor.seq);
     WalSegmentRef::new(descriptor.seq, file_id, bounds.first_seq, bounds.last_seq)
-}
-
-fn deterministic_file_id(seq: u64) -> FileId {
-    let mut bytes = [0u8; 16];
-    bytes[8..16].copy_from_slice(&seq.to_be_bytes());
-    Ulid::from_bytes(bytes)
 }
 
 #[cfg(test)]

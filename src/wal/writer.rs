@@ -1,7 +1,7 @@
 //! Asynchronous WAL writer task and queue plumbing.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     error::Error,
     io,
     pin::Pin,
@@ -29,11 +29,12 @@ use futures::{
 use crate::{
     mvcc::Timestamp,
     wal::{
-        WalAck, WalCommand, WalConfig, WalError, WalResult, WalSyncPolicy,
+        WalAck, WalCommand, WalConfig, WalError, WalResult, WalSnapshot, WalSyncPolicy,
         frame::{self, Frame, encode_command},
         metrics::WalMetrics,
-        state::WalStateHandle,
-        storage::{SegmentDescriptor, WalSegment, WalStorage},
+        state::{WalSegmentBounds, WalStateHandle},
+        storage::{SegmentDescriptor, TailMetadata, WalSegment, WalStorage},
+        wal_segment_file_id,
     },
 };
 
@@ -63,6 +64,11 @@ pub(crate) enum WriterMsg {
     Rotate {
         /// Sender to notify once the rotation completes (or fails).
         ack_tx: oneshot::Sender<WalResult<()>>,
+    },
+    /// Return a snapshot describing WAL metadata without touching storage.
+    Snapshot {
+        /// Sender to deliver the snapshot to.
+        ack_tx: oneshot::Sender<WalResult<WalSnapshot>>,
     },
 }
 
@@ -239,6 +245,10 @@ where
                                 }
                             }
                         }
+                        Some(WriterMsg::Snapshot { ack_tx }) => {
+                            let snapshot = ctx.snapshot();
+                            let _ = ack_tx.send(Ok(snapshot));
+                        }
                         None => {
                             break;
                         }
@@ -290,6 +300,10 @@ where
                         return Err(err);
                     }
                 },
+                Some(WriterMsg::Snapshot { ack_tx }) => {
+                    let snapshot = ctx.snapshot();
+                    let _ = ack_tx.send(Ok(snapshot));
+                }
                 None => break,
             }
         }
@@ -328,6 +342,7 @@ where
     next_frame_seq: u64,
     next_segment_seq: u64,
     completed_segments: VecDeque<SegmentMeta>,
+    active_segment: Option<WalSegmentBounds>,
     state: Option<WalStateHandle>,
     state_dirty: bool,
 }
@@ -345,33 +360,29 @@ where
         segment_seq: u64,
     ) -> WalResult<Self> {
         let fs_tag = storage.fs().file_system();
-
-        let mut completed_segments = VecDeque::new();
         let tail = storage.tail_metadata().await?;
 
         let mut next_frame_seq = frame::INITIAL_FRAME_SEQ;
-        let (segment_seq, mut segment_bytes, mut next_segment_seq) = if let Some(tail) = tail {
-            for descriptor in tail.completed.into_iter() {
-                completed_segments.push_back(SegmentMeta::from_descriptor(descriptor));
-            }
-            if let Some(last_seq) = tail.last_frame_seq {
-                next_frame_seq = last_seq.saturating_add(1);
-            }
-            (
-                tail.active.seq,
-                tail.active.bytes,
-                tail.active.seq.saturating_add(1),
-            )
-        } else {
-            (segment_seq, 0usize, segment_seq.saturating_add(1))
-        };
+        let (segment_seq, mut segment_bytes, mut next_segment_seq) =
+            if let Some(ref tail_meta) = tail {
+                if let Some(last_seq) = tail_meta.last_frame_seq {
+                    next_frame_seq = last_seq.saturating_add(1);
+                }
+                (
+                    tail_meta.active.seq,
+                    tail_meta.active.bytes,
+                    tail_meta.active.seq.saturating_add(1),
+                )
+            } else {
+                (segment_seq, 0usize, segment_seq.saturating_add(1))
+            };
 
         let mut segment = storage.open_segment(segment_seq).await?;
         if segment_bytes == 0 {
             segment_bytes = self_initial_size(fs_tag, segment.file_mut()).await?;
         }
 
-        let state = if let Some(store) = cfg.state_store.as_ref() {
+        let mut state = if let Some(store) = cfg.state_store.as_ref() {
             Some(WalStateHandle::load(Arc::clone(store), storage.root()).await?)
         } else {
             None
@@ -384,6 +395,15 @@ where
             if let Some(seg_seq) = handle.state().last_segment_seq {
                 next_segment_seq = next_segment_seq.max(seg_seq.saturating_add(1));
             }
+        }
+
+        let (completed_segments, active_segment, mut state_dirty) =
+            Self::rehydrate_segment_metadata(&storage, &tail, state.as_ref()).await?;
+
+        if let Some(handle) = state.as_mut()
+            && Self::align_state_with_segments(handle, &completed_segments, active_segment.as_ref())
+        {
+            state_dirty = true;
         }
 
         let mut ctx = Self {
@@ -406,8 +426,9 @@ where
             next_frame_seq,
             next_segment_seq,
             completed_segments,
+            active_segment,
             state,
-            state_dirty: false,
+            state_dirty,
         };
         if ctx.segment_bytes > 0
             && let Some(max_age) = ctx.cfg.segment_max_age
@@ -496,6 +517,7 @@ where
         let len = buf.len();
         let (result, _buf) = self.segment.file_mut().write_all(buf).await;
         result.map_err(|err| backend_err("write wal frame", err))?;
+        self.touch_active_segment(seq);
         Ok(len)
     }
 
@@ -615,11 +637,19 @@ where
             self.rotation_deadline = Some(deadline);
         }
 
-        self.completed_segments.push_back(SegmentMeta {
+        let descriptor = SegmentDescriptor {
+            seq: sealed_seq,
             path: old_path,
             bytes: old_bytes,
-        });
-        self.record_sealed_segment(sealed_seq);
+        };
+        let bounds = if let Some(bounds) = self.active_segment.take() {
+            bounds
+        } else {
+            Self::load_bounds_from_storage(&self.storage, &descriptor).await?
+        };
+        self.completed_segments
+            .push_back(SegmentMeta::new(descriptor, bounds.clone()));
+        self.record_sealed_segment(bounds);
         self.enforce_retention_limit().await?;
 
         Ok(RotationOutcome {
@@ -639,6 +669,17 @@ where
         let outcome = self.rotate_active_segment().await?;
         self.persist_state_if_dirty().await?;
         Ok(outcome)
+    }
+
+    fn snapshot(&self) -> WalSnapshot {
+        WalSnapshot {
+            sealed_segments: self
+                .completed_segments
+                .iter()
+                .map(|meta| meta.bounds.clone())
+                .collect(),
+            active_segment: self.active_segment.clone(),
+        }
     }
 
     async fn sync_data(&mut self) -> WalResult<()> {
@@ -675,6 +716,18 @@ where
         guard.record_sync();
     }
 
+    fn touch_active_segment(&mut self, seq: u64) {
+        let bounds = self.active_segment.get_or_insert_with(|| {
+            let file_id = wal_segment_file_id(self.segment_seq);
+            WalSegmentBounds::new(self.segment_seq, file_id, seq, seq)
+        });
+        bounds.extend_to(seq);
+        if let Some(handle) = self.state.as_mut() {
+            handle.state_mut().set_active_segment(bounds.clone());
+            self.state_dirty = true;
+        }
+    }
+
     async fn update_queue_depth_metric(&self) {
         let depth = self.queue_depth.load(Ordering::SeqCst);
         let mut guard = self.metrics.write().await;
@@ -682,15 +735,53 @@ where
     }
 
     fn total_retained_bytes(&self) -> usize {
-        let completed: usize = self.completed_segments.iter().map(|meta| meta.bytes).sum();
+        let completed: usize = self
+            .completed_segments
+            .iter()
+            .map(|meta| meta.bytes())
+            .sum();
         completed.saturating_add(self.segment_bytes)
+    }
+
+    fn remove_sealed_segment_metadata(&mut self, seq: u64) {
+        if let Some(handle) = self.state.as_mut() {
+            let existed = handle
+                .state()
+                .sealed_segments()
+                .iter()
+                .any(|segment| segment.seq == seq);
+            if existed {
+                handle
+                    .state_mut()
+                    .retain_sealed_segments(|segment| segment.seq != seq);
+                self.state_dirty = true;
+            }
+        }
+    }
+
+    async fn load_bounds_from_storage(
+        storage: &WalStorage,
+        descriptor: &SegmentDescriptor,
+    ) -> WalResult<WalSegmentBounds> {
+        let Some(bounds) = storage.segment_frame_bounds(&descriptor.path).await? else {
+            return Err(WalError::Corrupt(
+                "wal segment contained no frames despite non-zero length",
+            ));
+        };
+        Ok(WalSegmentBounds::new(
+            descriptor.seq,
+            wal_segment_file_id(descriptor.seq),
+            bounds.first_seq,
+            bounds.last_seq,
+        ))
     }
 
     async fn enforce_retention_limit(&mut self) -> WalResult<()> {
         if let Some(limit) = self.cfg.retention_bytes {
             while self.total_retained_bytes() > limit {
                 if let Some(evicted) = self.completed_segments.pop_front() {
-                    self.storage.remove_segment(&evicted.path).await?;
+                    self.remove_sealed_segment_metadata(evicted.seq());
+                    self.storage.remove_segment(evicted.path()).await?;
                 } else {
                     break;
                 }
@@ -722,9 +813,11 @@ where
         }
     }
 
-    fn record_sealed_segment(&mut self, seq: u64) {
+    fn record_sealed_segment(&mut self, bounds: WalSegmentBounds) {
         if let Some(handle) = self.state.as_mut() {
-            handle.state_mut().set_segment_seq(seq);
+            handle.state_mut().set_segment_seq(bounds.seq);
+            handle.state_mut().upsert_sealed_segment(bounds);
+            handle.state_mut().clear_active_segment();
             self.state_dirty = true;
         }
     }
@@ -773,6 +866,77 @@ where
                 self.scheduled_deadline = None;
             }
         }
+    }
+
+    async fn rehydrate_segment_metadata(
+        storage: &WalStorage,
+        tail: &Option<TailMetadata>,
+        state: Option<&WalStateHandle>,
+    ) -> WalResult<(VecDeque<SegmentMeta>, Option<WalSegmentBounds>, bool)> {
+        let mut completed = VecDeque::new();
+        let mut active = None;
+        let mut state_dirty = false;
+
+        let mut sealed_lookup: HashMap<u64, WalSegmentBounds> = state
+            .map(|handle| {
+                handle
+                    .sealed_segments()
+                    .iter()
+                    .cloned()
+                    .map(|segment| (segment.seq, segment))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if let Some(tail_meta) = tail {
+            for descriptor in tail_meta.completed.iter().cloned() {
+                if descriptor.bytes == 0 {
+                    continue;
+                }
+                let bounds = match sealed_lookup.remove(&descriptor.seq) {
+                    Some(bounds) => bounds,
+                    None => {
+                        state_dirty = true;
+                        Self::load_bounds_from_storage(storage, &descriptor).await?
+                    }
+                };
+                completed.push_back(SegmentMeta::new(descriptor, bounds));
+            }
+
+            if tail_meta.active.bytes > 0 {
+                active = Some(Self::load_bounds_from_storage(storage, &tail_meta.active).await?);
+                state_dirty = true;
+            }
+        }
+
+        Ok((completed, active, state_dirty))
+    }
+
+    fn align_state_with_segments(
+        state: &mut WalStateHandle,
+        completed: &VecDeque<SegmentMeta>,
+        active: Option<&WalSegmentBounds>,
+    ) -> bool {
+        let desired: Vec<_> = completed.iter().map(|meta| meta.bounds.clone()).collect();
+        let mut dirty = false;
+        if state.state().sealed_segments() != desired {
+            state.state_mut().replace_sealed_segments(desired);
+            dirty = true;
+        }
+        let aligns = match (state.active_segment(), active) {
+            (Some(existing), Some(next)) => *existing == *next,
+            (None, None) => true,
+            _ => false,
+        };
+        if !aligns {
+            if let Some(bounds) = active.cloned() {
+                state.state_mut().set_active_segment(bounds);
+            } else {
+                state.state_mut().clear_active_segment();
+            }
+            dirty = true;
+        }
+        dirty
     }
 
     fn earliest_deadline(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -936,16 +1100,25 @@ struct TimerTickOutcome {
 
 #[derive(Clone, Debug)]
 struct SegmentMeta {
-    path: fusio::path::Path,
-    bytes: usize,
+    descriptor: SegmentDescriptor,
+    bounds: WalSegmentBounds,
 }
 
 impl SegmentMeta {
-    fn from_descriptor(descriptor: SegmentDescriptor) -> Self {
-        Self {
-            path: descriptor.path,
-            bytes: descriptor.bytes,
-        }
+    fn new(descriptor: SegmentDescriptor, bounds: WalSegmentBounds) -> Self {
+        Self { descriptor, bounds }
+    }
+
+    fn path(&self) -> &fusio::path::Path {
+        &self.descriptor.path
+    }
+
+    fn bytes(&self) -> usize {
+        self.descriptor.bytes
+    }
+
+    fn seq(&self) -> u64 {
+        self.descriptor.seq
     }
 }
 
@@ -1133,6 +1306,7 @@ mod tests {
             })
             .expect("spawn ack");
 
+        pool.run_until_stalled();
         sender.close_channel();
         pool.run();
 
@@ -1152,6 +1326,240 @@ mod tests {
         assert_eq!(state.last_frame_seq, Some(frame::INITIAL_FRAME_SEQ + 1));
         assert_eq!(state.last_commit_ts, Some(123));
         assert!(state.last_segment_seq.is_none());
+        assert!(state.sealed_segments.is_empty());
+        let active = state
+            .active_segment
+            .as_ref()
+            .expect("active segment metadata present");
+        assert_eq!(active.seq, 0);
+        assert_eq!(active.first_frame, frame::INITIAL_FRAME_SEQ);
+        assert_eq!(active.last_frame, frame::INITIAL_FRAME_SEQ + 1);
+    }
+
+    #[test]
+    fn state_tracks_sealed_segment_metadata() {
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_writer: Arc<dyn DynFs> = backend.clone();
+        let fs_cas: Arc<dyn FsCas> = backend.clone();
+        let root = Path::parse("wal-state-sealed").expect("path");
+        let storage = WalStorage::new(Arc::clone(&fs_writer), root.clone());
+
+        let mut cfg = WalConfig::default();
+        cfg.queue_size = 2;
+        cfg.sync = WalSyncPolicy::Always;
+        cfg.segment_backend = fs_writer;
+        let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
+        cfg.state_store = Some(Arc::clone(&state_store));
+
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        let provisional_id = 9;
+        let (append_ack_rx, commit_ack_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            provisional_id,
+            provisional_id + 1,
+            sample_commands(&sample_batch(), 77, provisional_id),
+        );
+
+        spawner
+            .spawn_local(async move {
+                let _ = append_ack_rx.await.expect("append ack");
+            })
+            .expect("spawn append ack");
+
+        let rotate_ack: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let rotate_clone = Rc::clone(&rotate_ack);
+        spawner
+            .spawn_local(async move {
+                let ack = commit_ack_rx.await.expect("commit ack oneshot");
+                ack.expect("commit ack ok");
+            })
+            .expect("spawn commit ack");
+
+        pool.run_until_stalled();
+        let (rotate_tx, rotate_rx) = oneshot::channel();
+        sender
+            .try_send(WriterMsg::Rotate { ack_tx: rotate_tx })
+            .expect("send rotate");
+        spawner
+            .spawn_local(async move {
+                let ack = rotate_rx.await.expect("rotate ack");
+                *rotate_clone.borrow_mut() = Some(ack);
+            })
+            .expect("spawn rotate ack");
+
+        pool.run_until_stalled();
+        sender.close_channel();
+        pool.run();
+
+        assert!(rotate_ack.borrow().clone().expect("rotate result").is_ok());
+
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+
+        let state_handle = futures::executor::block_on(WalStateHandle::load(state_store, &root))
+            .expect("load state");
+        let state = state_handle.state().clone();
+        assert!(state.active_segment.is_none());
+        assert_eq!(state.sealed_segments.len(), 1);
+        let sealed = &state.sealed_segments[0];
+        assert_eq!(sealed.seq, 0);
+        assert_eq!(sealed.first_frame, frame::INITIAL_FRAME_SEQ);
+        assert_eq!(sealed.last_frame, frame::INITIAL_FRAME_SEQ + 1);
+    }
+
+    #[test]
+    fn snapshot_reports_sealed_and_active_segments() {
+        let (storage, cfg) = in_memory_env(4, WalSyncPolicy::Always, "wal-snapshot");
+
+        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+
+        let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_writer = Arc::clone(&queue_depth);
+
+        let result_cell: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let result_cell_clone = Rc::clone(&result_cell);
+
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+        spawner
+            .spawn_local(async move {
+                let result = run_writer_loop::<BlockingExecutor>(
+                    Arc::new(BlockingExecutor::default()),
+                    storage,
+                    cfg,
+                    Arc::clone(&metrics),
+                    receiver,
+                    queue_depth_writer,
+                    0,
+                    frame::INITIAL_FRAME_SEQ,
+                )
+                .await;
+                *result_cell_clone.borrow_mut() = Some(result);
+            })
+            .expect("spawn writer");
+
+        // Write first batch and rotate so it becomes sealed.
+        let first_batch = sample_batch();
+        let (append_ack_rx, commit_ack_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            100,
+            101,
+            sample_commands(&first_batch, 200, 100),
+        );
+
+        spawner
+            .spawn_local(async move {
+                let _ = append_ack_rx.await.expect("append ack");
+            })
+            .expect("await append");
+
+        let rotate_done: Rc<RefCell<Option<WalResult<()>>>> = Rc::new(RefCell::new(None));
+        let rotate_clone = Rc::clone(&rotate_done);
+        spawner
+            .spawn_local(async move {
+                let ack = commit_ack_rx.await.expect("commit ack");
+                ack.expect("commit ok");
+            })
+            .expect("await commit");
+
+        pool.run_until_stalled();
+        let (rotate_tx, rotate_rx) = oneshot::channel();
+        sender
+            .try_send(WriterMsg::Rotate { ack_tx: rotate_tx })
+            .expect("send rotate");
+        spawner
+            .spawn_local(async move {
+                let ack = rotate_rx.await.expect("rotate ack");
+                *rotate_clone.borrow_mut() = Some(ack);
+            })
+            .expect("spawn rotate ack");
+
+        // Append a second batch so the active segment has metadata.
+        let (append2_ack_rx, commit2_ack_rx) = queue_autocommit(
+            &mut sender,
+            &queue_depth,
+            200,
+            201,
+            sample_commands(&first_batch, 300, 200),
+        );
+
+        spawner
+            .spawn_local(async move {
+                let _ = append2_ack_rx.await.expect("append2 ack");
+            })
+            .expect("await append2");
+
+        let snapshot_cell: Rc<RefCell<Option<WalSnapshot>>> = Rc::new(RefCell::new(None));
+        let snapshot_clone = Rc::clone(&snapshot_cell);
+        spawner
+            .spawn_local(async move {
+                let ack = commit2_ack_rx.await.expect("commit2 ack");
+                ack.expect("commit2 ok");
+            })
+            .expect("await commit2");
+
+        pool.run_until_stalled();
+        let (snap_tx, snap_rx) = oneshot::channel();
+        sender
+            .try_send(WriterMsg::Snapshot { ack_tx: snap_tx })
+            .expect("send snapshot");
+        spawner
+            .spawn_local(async move {
+                let snapshot = snap_rx.await.expect("snapshot ack").expect("snapshot ok");
+                *snapshot_clone.borrow_mut() = Some(snapshot);
+            })
+            .expect("spawn snapshot wait");
+
+        sender.close_channel();
+        pool.run();
+
+        assert!(rotate_done.borrow().clone().expect("rotate result").is_ok());
+        let writer_result = result_cell.borrow().clone().expect("writer result");
+        assert!(writer_result.is_ok());
+
+        let snapshot = snapshot_cell.borrow().clone().expect("snapshot captured");
+        assert_eq!(snapshot.sealed_segments.len(), 1);
+        let sealed = &snapshot.sealed_segments[0];
+        assert_eq!(sealed.seq, 0);
+        assert_eq!(sealed.first_frame, frame::INITIAL_FRAME_SEQ);
+        assert_eq!(sealed.last_frame, frame::INITIAL_FRAME_SEQ + 1);
+        let active = snapshot
+            .active_segment
+            .as_ref()
+            .expect("active segment present");
+        assert_eq!(active.seq, 1);
+        assert_eq!(active.first_frame, frame::INITIAL_FRAME_SEQ + 2);
+        assert_eq!(active.last_frame, frame::INITIAL_FRAME_SEQ + 3);
     }
 
     #[test]

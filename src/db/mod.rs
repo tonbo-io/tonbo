@@ -782,7 +782,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ingest_waits_for_wal_durable_ack() {
-        use crate::wal::{WalAck, WalHandle, frame, writer};
+        use crate::wal::{WalAck, WalHandle, WalSnapshot, frame, writer};
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -846,6 +846,13 @@ mod tests {
                     },
                     writer::WriterMsg::Rotate { ack_tx } => {
                         let _ = ack_tx.send(Ok(()));
+                    }
+                    writer::WriterMsg::Snapshot { ack_tx } => {
+                        let snapshot = WalSnapshot {
+                            sealed_segments: Vec::new(),
+                            active_segment: None,
+                        };
+                        let _ = ack_tx.send(Ok(snapshot));
                     }
                 }
             }
