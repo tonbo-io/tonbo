@@ -36,7 +36,16 @@ root/
       ...<id>.mvcc.parquet    // MVCC sidecar (commit_ts + tombstone)
     staging/                  // scratch for builds/compactions
   manifest/
-    ...                       // managed by fusio-manifest
+    catalog/                  // fusio-manifest catalog namespace
+      head.json
+      segments/
+      checkpoints/
+      leases/
+    version/                  // fusio-manifest version/GC namespace
+      head.json
+      segments/
+      checkpoints/
+      leases/
   mutable/
     spill/                    // optional spill files/checkpoints (future)
 ```
@@ -56,7 +65,10 @@ All paths are created through `fusio` APIs; the layout makes no assumptions abou
 
 ### Manifest directory (`root.join("manifest")`)
 
-- Reserved exclusively for the `fusio-manifest` subsystem. Tonbo ensures the directory exists but treats its contents as opaque; file naming, versioning, and durability semantics are defined by `fusio-manifest`. When the manifest layer is wired in, Tonbo components will call into that crate for catalog reads/writes instead of manipulating files directly.
+- Reserved exclusively for the `fusio-manifest` subsystem. Tonbo now creates two independent prefixes under this directory:
+  - `manifest/catalog/...` stores the catalog manifest (logical table metadata, schema fingerprints, retention knobs) with its own `head.json`, `segments/`, `checkpoints/`, and `leases/` directories.
+  - `manifest/version/...` stores the version manifest (table heads, committed versions, WAL floors, future GC plans) with the same sub-structure.
+- The dual-prefix layout lets us replicate or compact catalog metadata without touching high-churn version edits (and vice versa) while keeping every manifest path opaque to Tonbo code outside the manifest module.
 
 ### Mutable spill directory (`root.join("mutable")`)
 

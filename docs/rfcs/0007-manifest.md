@@ -11,6 +11,8 @@ Tonbo’s current `dev` branch accepts Arrow `RecordBatch` ingest, persists batc
 
 This RFC introduces a Tonbo-specific manifest module built on the `fusio-manifest` crate under the same workspace (`/Users/xing/Idea/fusio/fusio-manifest`). The module will capture Tonbo’s table metadata, SST versions, and WAL segment lifecycles using fusio-manifest’s serializable key–value transactions, snapshots, and GC APIs. By grounding the manifest on fusio-manifest we align Tonbo’s durability story with the Arrow-first engine and unlock downstream read-path, compaction, and MVCC work.
 
+The implementation now splits responsibilities across **two fusio-manifest instances** rooted under `root/manifest`: a catalog manifest that owns logical table metadata and a version manifest that owns table heads, committed versions, and WAL retention floors. Each instance has its own codec and directory prefix so catalog replication/evolution never interferes with high-churn version edits.
+
 ## Goals
 
 1. Provide an authoritative manifest per table recording active SSTs, WAL retention cutoffs, schema/versioning information, and aggregated stats.
@@ -35,30 +37,36 @@ This RFC introduces a Tonbo-specific manifest module built on the `fusio-manifes
 
 ### Key Space
 
-Manifest keys must satisfy fusio-manifest’s `Serialize + PartialOrd + Eq + Hash` requirements. We define:
+Each manifest instance defines its own ordered key space (all keys still satisfy fusio-manifest’s `Serialize + PartialOrd + Eq + Hash` traits):
 
 ```
-ManifestKey =
+CatalogManifestKey =
   CatalogRoot |
-  TableMeta { table_id } |
+  TableMeta { table_id }
+
+VersionManifestKey =
   TableHead { table_id } |
   TableVersion { table_id, manifest_ts } |
-  WalFloor { table_id } |
-  GcPlan { table_id }
+  WalFloor { table_id }
+
+GcPlanKey = Table { table_id }   // reserved for GC plans in a future iteration
 ```
 
-Keys encode as compact tuples (e.g., `("table", id, "head")`) to keep segment payloads small.
+Catalog keys are never mixed into the version manifest’s segments, which keeps hot version edits compact while allowing the catalog to evolve independently.
 
 ### Values
 
-Values are serde-serializable structs stored as the manifest’s record payloads:
+Values remain serde-serializable structs but are split the same way:
 
-- `CatalogState`: known tables and allocator state.
-- `TableMeta`: table name, schema fingerprint, PK layout, retention settings.
-- `TableHead`: schema version, latest `wal_floor`, `last_manifest_txn` (monotonic commit timestamp).
-- `VersionState`: version metadata keyed by commit timestamp—lists of `SstEntry { id, level, descriptor }`, referenced `WalSegmentRef { seq, file_id, first_frame, last_frame }`, tombstone watermark, aggregated stats.
+- **Catalog manifest values**
+  - `CatalogState`: known tables plus allocator state.
+  - `TableMeta`: table name, schema fingerprint, PK layout, retention settings, schema version.
+- **Version manifest values**
+  - `TableHead`: schema version, latest `wal_floor`, `last_manifest_txn` (monotonic commit timestamp).
+  - `VersionState`: version metadata keyed by commit timestamp—lists of `SstEntry { id, level, descriptor }`, referenced `WalSegmentRef { seq, file_id, first_frame, last_frame }`, tombstone watermark, aggregated stats.
+  - `WalFloor`: serialized `WalSegmentRef` capturing the lowest WAL fragment retained for a table.
 
-Each version commit stores a full `VersionState` under `TableVersion { table_id, manifest_ts }`, where `manifest_ts` is the timestamp returned by `apply_version_edits`. The manifest’s append-only segments serve as the edit log; no separate delta key is required at MVP.
+Each version commit stores a full `VersionState` under `TableVersion { table_id, manifest_ts }`, where `manifest_ts` is the timestamp returned by `apply_version_edits`. Catalog entries never appear in that log, but both manifests benefit from fusio-manifest’s append-only segments and checkpoint/lease machinery.
 
 `SstEntry` embeds an `SsTableDescriptor` capturing fields required by every compaction strategy:
 
@@ -70,13 +78,31 @@ Each version commit stores a full `VersionState` under `TableVersion { table_id,
 
 Additional strategy-specific metadata can ride in an extensible `extra` map, but these core fields must be present so leveled/tiered compaction and read-path pruning can reason about the file without inspecting Parquet contents.
 
+### Catalog Registration and Table Definitions
+
+The catalog manifest mints `TableId`s and guarantees schema compatibility. Registration happens through a `TableDefinition` payload containing:
+
+- `name`: logical table identifier. The DB builder defaults to `tonbo-default` but exposes `.table_name(...)` so callers can supply custom names.
+- `schema_fingerprint`: SHA-256 of the canonicalized Arrow schema (field ordering preserved, map/object keys sorted). Each `Mode` implements the new `CatalogDescribe` trait to compute this deterministically from its config.
+- `primary_key_columns`: ordered list of key column names derived from the mode’s `KeyProjection::key_indices`.
+- `retention`: optional overrides for version-count/TTL retention knobs.
+- `schema_version`: explicit monotonic counter for schema evolution.
+
+`TonboManifest::register_table` now orchestrates catalog + version bootstrap:
+
+1. Ensure the catalog root exists (`init_catalog`).
+2. Look up an existing table by name. If schema fingerprint, key layout, version number, or retention differ, return `ManifestError::CatalogConflict`; otherwise reuse the prior `TableId`.
+3. Persist/return `TableMeta` and create the matching `TableHead` entry inside the version manifest so writers can immediately publish versions.
+
+This split lets us replicate catalog metadata (e.g., to serve discovery APIs) at a slower cadence than high-frequency version commits while still keeping schema checks manifest-backed.
+
 ### Sessions and Workflow
 
 - **Write path:** `TonboManifest::apply_version_edits` opens a fusio `WriteSession`, loads `TableHead`, assembles `VersionState` from the SST flush (including WAL segment refs), stages:
   - `put(TableVersion {...}, new_version)`
   - `put(TableHead {...}, updated_head_with_wal_floor)`
   and commits. CAS success defines global order.
-- **Read path:** `snapshot_latest` opens a `ReadSession`, fetches `TableHead`, reads the `VersionState` stored at `last_manifest_txn`, and returns a snapshot struct containing both the fusio snapshot token and the commit timestamp.
+- **Read path:** `snapshot_latest` opens a `ReadSession`, fetches `TableHead`, reads the `VersionState` stored at `last_manifest_txn`, and pairs the result with `TableMeta` fetched from the catalog manifest so callers receive both physical (versions) and logical (schema/name) metadata in a single `TableSnapshot`.
 - **Recovery:** On open, call `manifest.recover_orphans()` (fusio-manifest handles adopting contiguous segments). Load `CatalogState` and each `TableHead` to rebuild table descriptors; replay WAL only above the manifest’s `wal_floor`.
 - **GC:** `TonboManifest::compute_gc_plan` wraps fusio-manifest’s compactor GC APIs; plans delete SST objects once versions expire and advance `WalFloor` so WAL segments < floor can be truncated.
 
@@ -85,12 +111,18 @@ Additional strategy-specific metadata can ride in an extensible `extra` map, but
 The manifest module exposes:
 
 ```rust
-pub struct TonboManifest { inner: fusio_manifest::Manifest<ManifestKey, ManifestValue, ...> }
+pub struct TonboManifest {
+    version: Manifest<VersionCodec, ...>,
+    catalog: Manifest<CatalogCodec, ...>,
+}
 
 impl TonboManifest {
-    pub async fn open(stores: Stores, ctx: Arc<ManifestContext<..., ...>>) -> Result<Self>;
+    pub async fn open(version: Manifest<VersionCodec, ...>, catalog: Manifest<CatalogCodec, ...>) -> Result<Self>;
+    pub async fn init_catalog(&self) -> Result<()>;
+    pub async fn register_table(&self, file_ids: &FileIdGenerator, definition: &TableDefinition) -> Result<TableMeta>;
+    pub async fn table_meta(&self, table: TableId) -> Result<TableMeta>;
     pub async fn apply_version_edits(&self, table: TableId, edits: &[VersionEdit]) -> Result<Timestamp>;
-    pub async fn snapshot_latest(&self, table: TableId) -> Result<CatalogSnapshot>;
+    pub async fn snapshot_latest(&self, table: TableId) -> Result<TableSnapshot>;
     pub async fn list_versions(&self, table: TableId, limit: usize) -> Result<Vec<VersionState>>;
     pub async fn recover_orphans(&self) -> Result<usize>;
     pub fn compactor(&self) -> TonboCompactor;
@@ -101,7 +133,14 @@ impl TonboManifest {
 
 ### Storage Layout
 
-Manifest data follows RFC 0004 (`docs/rfcs/0004-storage-layout.md`): `root/manifest/HEAD.json`, `root/manifest/segments/seg-<seq>.json`, checkpoints, and GC plan docs. fusio-manifest already provides stores compatible with Fusio `DynFs`.
+Manifest data follows RFC 0004 (`docs/rfcs/0004-storage-layout.md`) with two prefixes:
+
+```
+root/manifest/catalog/{head.json, segments/, checkpoints/, leases/}
+root/manifest/version/{head.json, segments/, checkpoints/, leases/}
+```
+
+Both directories are created through `fusio::fs::Fs::create_dir_all` and passed into separate fusio-manifest store sets. This makes it trivial to replicate or checkpoint catalog metadata without touching the heavier version log, and vice versa.
 
 ## Initial Integration Step
 
