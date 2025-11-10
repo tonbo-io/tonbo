@@ -2,13 +2,14 @@
 
 use std::{convert::TryFrom, io::Cursor, mem::size_of, sync::Arc};
 
-use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
 #[cfg(test)]
 use crate::wal::DynBatchPayload;
 use crate::{
+    inmem::immutable::memtable::MVCC_COMMIT_COL,
     mvcc::Timestamp,
     wal::{WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns},
 };
@@ -39,20 +40,45 @@ const fn frame_header_size() -> usize {
         + size_of::<u32>() // payload crc32c
 }
 
-/// Payload prefix size for `TxnAppend` frames: provisional id + mode + reserved bytes.
+/// Payload prefix size for `TxnAppend` frames: provisional id + mode + row_mode + reserved bytes.
 ///
-/// We reserve 7 bytes following the mode so future metadata (e.g. schema hashes,
-/// compression hints) can slot in without reshaping the layout or bumping the
-/// frame version.
-const TXN_APPEND_PREFIX_SIZE: usize = 8 + 1 + 7;
-/// Number of reserved bytes after the mode byte in a `TxnAppend` payload.
-const TXN_APPEND_RESERVED_BYTES: usize = 7;
+/// We reserve 6 bytes following the `row_mode` so future metadata (e.g. schema hashes,
+/// compression hints) can slot in without reshaping the layout or bumping the frame version.
+const TXN_APPEND_PREFIX_SIZE: usize = 8 + 1 + 1 + 6;
+/// Number of reserved bytes after the `row_mode` byte in a `TxnAppend` payload.
+const TXN_APPEND_RESERVED_BYTES: usize = 6;
 /// Discriminant for dynamic-mode appends written in the `TxnAppend` payload.
 const APPEND_MODE_DYN: u8 = 0;
 /// Discriminant reserved for typed-mode appends.
 const APPEND_MODE_TYPED: u8 = 1;
 /// Payload size for `TxnCommit` frames (provisional id + commit timestamp).
 const TXN_COMMIT_PAYLOAD_SIZE: usize = 8 + 8;
+
+/// Logical payload type encoded inside a `TxnAppend` frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DynRowMode {
+    /// Full row payload carrying `_commit_ts` + `_tombstone`.
+    RowPayload = 0,
+    /// Key-only delete payload carrying key columns + `_commit_ts`.
+    KeyDelete = 1,
+}
+
+impl DynRowMode {
+    fn as_u8(self) -> u8 {
+        match self {
+            DynRowMode::RowPayload => 0,
+            DynRowMode::KeyDelete => 1,
+        }
+    }
+
+    fn from_u8(value: u8) -> Result<Self, WalError> {
+        match value {
+            0 => Ok(DynRowMode::RowPayload),
+            1 => Ok(DynRowMode::KeyDelete),
+            _ => Err(WalError::Corrupt("unknown txn append row mode")),
+        }
+    }
+}
 
 /// Encoded frame payload paired with its discriminant.
 #[derive(Debug, Clone)]
@@ -279,12 +305,18 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
         WalCommand::TxnAppend {
             provisional_id,
             payload,
-        } => encode_txn_append(
-            provisional_id,
-            &payload.batch,
-            &payload.commit_ts_column,
-            &payload.tombstone_column,
-        ),
+        } => match payload {
+            crate::wal::DynBatchPayload::Row {
+                batch,
+                commit_ts_column,
+                tombstone_column,
+            } => {
+                encode_txn_append_row(provisional_id, &batch, &commit_ts_column, &tombstone_column)
+            }
+            crate::wal::DynBatchPayload::Delete { batch } => {
+                encode_txn_append_delete(provisional_id, &batch)
+            }
+        },
         WalCommand::TxnCommit {
             provisional_id,
             commit_ts,
@@ -298,14 +330,19 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
         }
     }
 }
-fn encode_txn_append(
+fn encode_txn_append_row(
     provisional_id: u64,
     batch: &RecordBatch,
     commit_ts_column: &ArrayRef,
     tombstones: &ArrayRef,
 ) -> WalResult<Vec<Frame>> {
     let wal_batch = append_mvcc_columns(batch, commit_ts_column, tombstones)?;
-    let append = encode_txn_append_batch(provisional_id, wal_batch)?;
+    let append = encode_txn_append_batch(provisional_id, DynRowMode::RowPayload, wal_batch)?;
+    Ok(vec![Frame::new(FrameType::TxnAppend, append)])
+}
+
+fn encode_txn_append_delete(provisional_id: u64, batch: &RecordBatch) -> WalResult<Vec<Frame>> {
+    let append = encode_txn_append_batch(provisional_id, DynRowMode::KeyDelete, batch.clone())?;
     Ok(vec![Frame::new(FrameType::TxnAppend, append)])
 }
 
@@ -325,7 +362,8 @@ pub fn encode_autocommit_frames(
     let commit_array: ArrayRef =
         Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
     let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones)) as ArrayRef;
-    let append_frames = encode_txn_append(provisional_id, &batch, &commit_array, &tombstone_array)?;
+    let append_frames =
+        encode_txn_append_row(provisional_id, &batch, &commit_array, &tombstone_array)?;
     let mut frames = append_frames;
     let commit_frame = Frame::new(
         FrameType::TxnCommit,
@@ -335,10 +373,15 @@ pub fn encode_autocommit_frames(
     Ok(frames)
 }
 
-fn encode_txn_append_batch(provisional_id: u64, batch: RecordBatch) -> WalResult<Vec<u8>> {
+fn encode_txn_append_batch(
+    provisional_id: u64,
+    row_mode: DynRowMode,
+    batch: RecordBatch,
+) -> WalResult<Vec<u8>> {
     let mut payload = Vec::with_capacity(TXN_APPEND_PREFIX_SIZE);
     payload.extend_from_slice(&provisional_id.to_le_bytes());
     payload.push(APPEND_MODE_DYN);
+    payload.push(row_mode.as_u8());
     payload.extend_from_slice(&[0u8; TXN_APPEND_RESERVED_BYTES]);
 
     // Encode the RecordBatch using Arrow IPC streaming so the payload is
@@ -401,16 +444,21 @@ fn decode_txn_append(payload: &[u8]) -> WalResult<WalEvent> {
     id_bytes.copy_from_slice(&payload[0..8]);
     let provisional_id = u64::from_le_bytes(id_bytes);
     let mode = payload[8];
+    let row_mode = DynRowMode::from_u8(payload[9])?;
     let payload_bytes = &payload[TXN_APPEND_PREFIX_SIZE..];
 
     match mode {
-        APPEND_MODE_DYN => decode_dyn_append(provisional_id, payload_bytes),
+        APPEND_MODE_DYN => decode_dyn_append(provisional_id, row_mode, payload_bytes),
         APPEND_MODE_TYPED => Err(WalError::Unimplemented("typed wal payload decoding")),
         _ => Err(WalError::Corrupt("unknown txn append mode")),
     }
 }
 
-fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
+fn decode_dyn_append(
+    provisional_id: u64,
+    row_mode: DynRowMode,
+    bytes: &[u8],
+) -> WalResult<WalEvent> {
     if bytes.is_empty() {
         return Err(WalError::Codec(
             "txn append payload missing record batch".to_string(),
@@ -429,19 +477,35 @@ fn decode_dyn_append(provisional_id: u64, bytes: &[u8]) -> WalResult<WalEvent> {
         ));
     }
 
-    let (stripped, commit_ts_hint, commit_ts_column, tombstones) = split_mvcc_columns(batch)?;
+    match row_mode {
+        DynRowMode::RowPayload => {
+            let (stripped, commit_ts_hint, commit_ts_column, tombstones) =
+                split_mvcc_columns(batch)?;
 
-    let payload = DynAppendEvent {
-        batch: stripped,
-        commit_ts_hint,
-        commit_ts_column,
-        tombstones,
-    };
+            let payload = DynAppendEvent {
+                batch: stripped,
+                commit_ts_hint,
+                commit_ts_column,
+                tombstones,
+            };
 
-    Ok(WalEvent::DynAppend {
-        provisional_id,
-        payload,
-    })
+            Ok(WalEvent::DynAppend {
+                provisional_id,
+                payload,
+            })
+        }
+        DynRowMode::KeyDelete => {
+            let commit_ts_hint = extract_delete_commit_hint(&batch)?;
+            let payload = DynDeleteEvent {
+                batch,
+                commit_ts_hint,
+            };
+            Ok(WalEvent::DynDelete {
+                provisional_id,
+                payload,
+            })
+        }
+    }
 }
 
 fn decode_txn_commit(payload: &[u8]) -> WalResult<WalEvent> {
@@ -484,6 +548,38 @@ where
     WalError::Codec(err.to_string())
 }
 
+fn extract_delete_commit_hint(batch: &RecordBatch) -> WalResult<Option<Timestamp>> {
+    let schema = batch.schema();
+    let commit_idx = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == MVCC_COMMIT_COL)
+        .ok_or_else(|| WalError::Codec("delete payload missing _commit_ts column".to_string()))?;
+    let commit_array = batch
+        .column(commit_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| WalError::Codec("delete payload _commit_ts column not u64".to_string()))?;
+    if commit_array.null_count() > 0 {
+        return Err(WalError::Codec(
+            "delete payload contained null commit_ts".to_string(),
+        ));
+    }
+    if commit_array.is_empty() {
+        return Ok(None);
+    }
+    let first = commit_array.value(0);
+    if commit_array
+        .iter()
+        .any(|value| value.map(|v| v != first).unwrap_or(true))
+    {
+        return Err(WalError::Codec(
+            "delete payload commit_ts column contained varying values".to_string(),
+        ));
+    }
+    Ok(Some(Timestamp::from(first)))
+}
+
 /// Dynamic append payload surfaced during WAL replay.
 #[derive(Debug)]
 pub struct DynAppendEvent {
@@ -504,6 +600,15 @@ impl DynAppendEvent {
     }
 }
 
+/// Key-only delete payload surfaced during WAL replay.
+#[derive(Debug)]
+pub struct DynDeleteEvent {
+    /// Delete batch encoded with key columns + `_commit_ts`.
+    pub batch: RecordBatch,
+    /// Commit timestamp derived from the payload (if available).
+    pub commit_ts_hint: Option<Timestamp>,
+}
+
 /// High-level events produced by the frame decoder during recovery.
 #[derive(Debug)]
 pub enum WalEvent {
@@ -518,6 +623,13 @@ pub enum WalEvent {
         provisional_id: u64,
         /// Decoded append payload.
         payload: DynAppendEvent,
+    },
+    /// Append key-only deletes to the open transaction.
+    DynDelete {
+        /// Provisional identifier.
+        provisional_id: u64,
+        /// Decoded delete payload.
+        payload: DynDeleteEvent,
     },
     /// Commit the transaction at the supplied timestamp.
     TxnCommit {
@@ -764,7 +876,7 @@ mod tests {
         let tombstone_array = Arc::new(BooleanArray::from(vec![false; base.num_rows()]));
         let commit_ref: ArrayRef = Arc::clone(&commit_array) as ArrayRef;
         let tombstone_ref: ArrayRef = Arc::clone(&tombstone_array) as ArrayRef;
-        let payload = DynBatchPayload {
+        let payload = DynBatchPayload::Row {
             batch: base,
             commit_ts_column: commit_ref,
             tombstone_column: tombstone_ref,
@@ -779,6 +891,41 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(Arc::strong_count(&commit_array), 1);
         assert_eq!(Arc::strong_count(&tombstone_array), 1);
+    }
+
+    #[test]
+    fn encode_and_decode_delete_payload() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let keys = Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef;
+        let commits = Arc::new(UInt64Array::from(vec![55_u64, 55_u64])) as ArrayRef;
+        let delete_batch = RecordBatch::try_new(schema, vec![keys, commits]).expect("delete batch");
+        let payload = DynBatchPayload::Delete {
+            batch: delete_batch.clone(),
+        };
+        let frames = encode_command(WalCommand::TxnAppend {
+            provisional_id: 11,
+            payload,
+        })
+        .expect("encode succeeds");
+        assert_eq!(frames.len(), 1);
+        match decode_frame(frames[0].frame_type(), frames[0].payload()).expect("decode") {
+            WalEvent::DynDelete {
+                provisional_id,
+                payload,
+            } => {
+                assert_eq!(provisional_id, 11);
+                assert_eq!(payload.commit_ts_hint, Some(Timestamp::new(55)));
+                assert_eq!(payload.batch.num_rows(), delete_batch.num_rows());
+                assert_eq!(
+                    payload.batch.schema().as_ref(),
+                    delete_batch.schema().as_ref()
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

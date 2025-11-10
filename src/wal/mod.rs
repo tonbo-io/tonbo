@@ -235,19 +235,31 @@ impl WalSnapshot {
 
 /// Dynamic ingest payload handed to WAL commands.
 #[derive(Debug, Clone)]
-pub struct DynBatchPayload {
-    /// Record batch supplied by the caller (without MVCC columns).
-    pub batch: RecordBatch,
-    /// Arrow column containing the `_commit_ts` values for the batch.
-    pub commit_ts_column: ArrayRef,
-    /// Arrow column containing the `_tombstone` bitmap for the batch.
-    pub tombstone_column: ArrayRef,
+pub enum DynBatchPayload {
+    /// Full row payload with `_commit_ts` + `_tombstone` columns.
+    Row {
+        /// Record batch supplied by the caller (without MVCC columns).
+        batch: RecordBatch,
+        /// Arrow column containing the `_commit_ts` values for the batch.
+        commit_ts_column: ArrayRef,
+        /// Arrow column containing the `_tombstone` bitmap for the batch.
+        tombstone_column: ArrayRef,
+    },
+    /// Key-only delete payload encoded with the delete schema.
+    Delete {
+        /// Record batch carrying key columns + `_commit_ts`.
+        batch: RecordBatch,
+    },
 }
 
 impl DynBatchPayload {
     /// Number of rows carried by the batch.
     pub fn num_rows(&self) -> usize {
-        self.batch.num_rows()
+        match self {
+            DynBatchPayload::Row { batch, .. } | DynBatchPayload::Delete { batch } => {
+                batch.num_rows()
+            }
+        }
     }
 }
 
@@ -671,16 +683,22 @@ where
         let commit_values =
             Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
         let tombstone_values = Arc::new(BooleanArray::from(tombstones.to_vec())) as ArrayRef;
-        let payload = DynBatchPayload {
+        let payload = DynBatchPayload::Row {
             batch: batch.clone(),
             commit_ts_column: Arc::clone(&commit_values),
             tombstone_column: Arc::clone(&tombstone_values),
         };
-        let command = WalCommand::TxnAppend {
-            provisional_id,
-            payload,
-        };
-        self.enqueue_command(command, provisional_id).await
+        self.txn_append_payload(provisional_id, payload).await
+    }
+
+    /// Log a key-only delete frame.
+    pub async fn txn_append_delete(
+        &self,
+        provisional_id: u64,
+        batch: RecordBatch,
+    ) -> WalResult<WalTicket<E>> {
+        let payload = DynBatchPayload::Delete { batch };
+        self.txn_append_payload(provisional_id, payload).await
     }
 
     /// Log a transaction commit marker.
@@ -703,6 +721,18 @@ where
     pub async fn txn_abort(&self, provisional_id: u64) -> WalResult<WalTicket<E>> {
         self.enqueue_command(WalCommand::TxnAbort { provisional_id }, provisional_id)
             .await
+    }
+
+    async fn txn_append_payload(
+        &self,
+        provisional_id: u64,
+        payload: DynBatchPayload,
+    ) -> WalResult<WalTicket<E>> {
+        let command = WalCommand::TxnAppend {
+            provisional_id,
+            payload,
+        };
+        self.enqueue_command(command, provisional_id).await
     }
 }
 

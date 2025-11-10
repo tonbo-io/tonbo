@@ -1,5 +1,5 @@
 use arrow_array::RecordBatch;
-use arrow_schema::{ArrowError, DataType, Fields, SchemaRef};
+use arrow_schema::{ArrowError, DataType, Fields, Schema, SchemaRef};
 use typed_arrow_dyn::{DynProjection, DynSchema, DynViewError};
 
 use super::{KeyProjection, errors::KeyExtractError};
@@ -27,6 +27,7 @@ pub fn projection_for_columns(
 /// Runtime projection that delegates to typed-arrow-dyn and converts into Tonbo key views.
 struct DynKeyProjection {
     schema: SchemaRef,
+    key_schema: SchemaRef,
     dyn_schema: DynSchema,
     projection: DynProjection,
     columns: Vec<usize>,
@@ -45,11 +46,18 @@ impl DynKeyProjection {
 
         let projection =
             DynProjection::from_indices(schema.as_ref(), columns.clone()).map_err(map_view_err)?;
+        let key_fields = columns
+            .iter()
+            .map(|&idx| schema.field(idx).clone())
+            .collect::<Vec<_>>();
+        let key_schema = std::sync::Arc::new(Schema::new(key_fields));
+
         Ok(Self {
             dyn_schema: DynSchema::from_ref(schema.clone()),
             schema,
-            projection,
             columns,
+            key_schema,
+            projection,
         })
     }
 
@@ -67,6 +75,14 @@ impl DynKeyProjection {
 impl KeyProjection for DynKeyProjection {
     fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError> {
         self.ensure_batch_schema(schema)
+    }
+
+    fn key_schema(&self) -> SchemaRef {
+        self.key_schema.clone()
+    }
+
+    fn key_indices(&self) -> &[usize] {
+        &self.columns
     }
 
     fn project_view(
@@ -87,12 +103,7 @@ impl KeyProjection for DynKeyProjection {
         }
         Ok(out)
     }
-
-    fn key_indices(&self) -> Vec<usize> {
-        self.columns.clone()
-    }
 }
-
 fn ensure_supported_type(data_type: &DataType, col: usize) -> Result<(), KeyExtractError> {
     match data_type {
         DataType::Boolean

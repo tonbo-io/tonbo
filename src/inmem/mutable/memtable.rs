@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array, new_null_array};
 use arrow_schema::SchemaRef;
 use arrow_select::concat::concat_batches;
 
@@ -12,10 +12,11 @@ use super::{MutableLayout, MutableMemTableMetrics};
 use crate::{
     extractor::KeyProjection,
     inmem::{
-        immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
+        immutable::memtable::{ImmutableMemTable, MVCC_COMMIT_COL, bundle_mvcc_sidecar},
         policy::{MemStats, StatsProvider},
     },
     key::{KeyOwned, KeyRow, KeyTsViewRaw},
+    mutation::DynMutation,
     mvcc::Timestamp,
     scan::{KeyRange, RangeSet},
 };
@@ -23,36 +24,59 @@ use crate::{
 struct BatchAttachment {
     storage: RecordBatch,
     commit_ts: UInt64Array,
-    tombstones: BooleanArray,
 }
 
 impl BatchAttachment {
-    fn new(storage: RecordBatch, commit_ts: UInt64Array, tombstones: BooleanArray) -> Self {
-        Self {
-            storage,
-            commit_ts,
-            tombstones,
-        }
+    fn new(storage: RecordBatch, commit_ts: UInt64Array) -> Self {
+        Self { storage, commit_ts }
     }
 
     fn storage(&self) -> &RecordBatch {
         &self.storage
     }
 
-    fn tombstone(&self, row: usize) -> bool {
-        self.tombstones.value(row)
-    }
-
     fn commit_ts(&self, row: usize) -> Timestamp {
         Timestamp::new(self.commit_ts.value(row))
     }
 
+    #[allow(dead_code)]
     fn into_storage(self) -> RecordBatch {
         self.storage
     }
 }
 
-#[derive(Clone, Debug)]
+struct DeleteAttachment {
+    keys: RecordBatch,
+    commit_ts: UInt64Array,
+}
+
+impl DeleteAttachment {
+    fn new(keys: RecordBatch, commit_ts: UInt64Array) -> Self {
+        Self { keys, commit_ts }
+    }
+
+    fn keys(&self) -> &RecordBatch {
+        &self.keys
+    }
+
+    fn commit_ts(&self, row: usize) -> Timestamp {
+        Timestamp::new(self.commit_ts.value(row))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeleteRowLoc {
+    batch_idx: usize,
+    row_idx: usize,
+}
+
+impl DeleteRowLoc {
+    fn new(batch_idx: usize, row_idx: usize) -> Self {
+        Self { batch_idx, row_idx }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BatchRowLoc {
     batch_idx: usize,
     row_idx: usize,
@@ -70,9 +94,11 @@ impl BatchRowLoc {
 /// - Maintains per-key version chains ordered by commit timestamp.
 pub struct DynMem {
     /// MVCC index keyed by `(key, commit_ts)` (timestamp descending per key).
-    index: BTreeMap<KeyTsViewRaw, BatchRowLoc>,
+    index: BTreeMap<KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
     /// Attached batches held until compaction.
     batches_attached: Vec<BatchAttachment>,
+    /// Key-only delete batches tracked separately from value payloads.
+    delete_batches: Vec<DeleteAttachment>,
     metrics: MutableMemTableMetrics,
 }
 
@@ -82,6 +108,7 @@ impl DynMem {
         Self {
             index: BTreeMap::new(),
             batches_attached: Vec::new(),
+            delete_batches: Vec::new(),
             metrics: MutableMemTableMetrics {
                 entry_overhead: 32,
                 ..Default::default()
@@ -143,7 +170,12 @@ impl DynMem {
         let batch_id = self.batches_attached.len();
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
         let key_rows = extractor.project_view(&batch, &row_indices)?;
+        debug_assert_eq!(tombstone_column.null_count(), 0);
         for (row_idx, key_row) in key_rows.into_iter().enumerate() {
+            debug_assert!(
+                !tombstone_column.value(row_idx),
+                "row payload tombstones are no longer supported"
+            );
             let key_size = key_row.heap_size();
             let has_existing = self
                 .index
@@ -162,15 +194,99 @@ impl DynMem {
             }
 
             let commit_ts = Timestamp::new(commit_ts_column.value(row_idx));
-            let version_loc = BatchRowLoc::new(batch_id, row_idx);
             let composite = KeyTsViewRaw::new(key_row, commit_ts);
-            self.index.insert(composite, version_loc);
+            self.index.insert(
+                composite,
+                DynMutation::Upsert(BatchRowLoc::new(batch_id, row_idx)),
+            );
         }
-        self.batches_attached.push(BatchAttachment::new(
-            batch,
-            commit_ts_column,
-            tombstone_column,
-        ));
+        self.batches_attached
+            .push(BatchAttachment::new(batch, commit_ts_column));
+        Ok(())
+    }
+
+    /// Insert a batch of key-only deletes encoded with the delete schema.
+    pub(crate) fn insert_delete_batch(
+        &mut self,
+        delete_projection: &dyn KeyProjection,
+        batch: RecordBatch,
+    ) -> Result<(), crate::extractor::KeyExtractError> {
+        delete_projection.validate_schema(&batch.schema())?;
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        let commit_idx = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.name() == MVCC_COMMIT_COL)
+            .ok_or_else(|| crate::extractor::KeyExtractError::NoSuchField {
+                name: MVCC_COMMIT_COL.to_string(),
+            })?;
+        let commit_array = batch
+            .column(commit_idx)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or_else(|| {
+                crate::extractor::KeyExtractError::Arrow(arrow_schema::ArrowError::ComputeError(
+                    format!("{MVCC_COMMIT_COL} column not UInt64"),
+                ))
+            })?
+            .clone();
+        if commit_array.len() != batch.num_rows() {
+            return Err(crate::extractor::KeyExtractError::Arrow(
+                arrow_schema::ArrowError::ComputeError(
+                    "commit_ts column length mismatch delete batch".to_string(),
+                ),
+            ));
+        }
+        if commit_array.null_count() > 0 {
+            return Err(crate::extractor::KeyExtractError::Arrow(
+                arrow_schema::ArrowError::ComputeError(
+                    "commit_ts column contained null".to_string(),
+                ),
+            ));
+        }
+
+        let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+        let key_rows = delete_projection.project_view(&batch, &row_indices)?;
+        let key_schema = delete_projection.key_schema();
+        let key_columns = (0..batch.num_columns())
+            .filter(|idx| *idx != commit_idx)
+            .map(|idx| batch.column(idx).clone())
+            .collect();
+        let key_batch = RecordBatch::try_new(key_schema, key_columns)
+            .map_err(crate::extractor::KeyExtractError::Arrow)?;
+        let attachment = DeleteAttachment::new(key_batch, commit_array.clone());
+        let batch_idx = self.delete_batches.len();
+        self.delete_batches.push(attachment);
+
+        for (row_idx, key_row) in key_rows.into_iter().enumerate() {
+            let key_size = key_row.heap_size();
+            let has_existing = self
+                .index
+                .range(
+                    KeyTsViewRaw::new(key_row.clone(), Timestamp::MAX)
+                        ..=KeyTsViewRaw::new(key_row.clone(), Timestamp::MIN),
+                )
+                .next()
+                .is_some();
+            self.metrics.inserts += 1;
+            if has_existing {
+                self.metrics.replaces += 1;
+            } else {
+                self.metrics.entries += 1;
+                self.metrics.approx_key_bytes += key_size;
+            }
+
+            let commit_ts = Timestamp::new(commit_array.value(row_idx));
+            let composite = KeyTsViewRaw::new(key_row, commit_ts);
+            self.index.insert(
+                composite,
+                DynMutation::Delete(DeleteRowLoc::new(batch_idx, row_idx)),
+            );
+        }
         Ok(())
     }
 
@@ -179,15 +295,15 @@ impl DynMem {
         let key_row =
             KeyRow::from_owned(key).expect("test keys should only contain supported components");
         let mut out = Vec::new();
-        for (composite, loc) in self.index.range(
+        for (composite, mutation) in self.index.range(
             KeyTsViewRaw::new(key_row.clone(), Timestamp::MAX)
                 ..=KeyTsViewRaw::new(key_row.clone(), Timestamp::MIN),
         ) {
             if composite.key() != &key_row {
                 break;
             }
-            let attachment = &self.batches_attached[loc.batch_idx];
-            out.push((composite.timestamp(), attachment.tombstone(loc.row_idx)));
+            let tombstone = matches!(mutation, DynMutation::Delete(_));
+            out.push((composite.timestamp(), tombstone));
         }
         if out.is_empty() {
             None
@@ -222,7 +338,7 @@ impl DynMem {
     ///
     /// This keeps the borrowed key views sound by dropping the pinned owners at
     /// the same time the batches are released.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn into_attached_batches(self) -> Vec<RecordBatch> {
         self.batches_attached
             .into_iter()
@@ -239,34 +355,64 @@ impl DynMem {
             return Ok(None);
         }
 
+        let key_lookup = build_key_position_lookup(schema.fields().len(), extractor.key_indices());
         let mut slices = Vec::new();
         let mut commit_ts = Vec::new();
         let mut tombstone = Vec::new();
 
+        enum EntryKind {
+            Upsert(BatchRowLoc),
+            Delete(DeleteRowLoc),
+        }
+
         let index = std::mem::take(&mut self.index);
-        let mut entries: Vec<(KeyOwned, Timestamp, BatchRowLoc)> = index
+        let mut entries: Vec<(KeyOwned, Timestamp, EntryKind)> = index
             .into_iter()
-            .map(|(view, loc)| (view.key().to_owned(), view.timestamp(), loc))
+            .map(|(view, mutation)| {
+                let key_owned = view.key().to_owned();
+                let ts = view.timestamp();
+                let kind = match mutation {
+                    DynMutation::Upsert(loc) => EntryKind::Upsert(loc),
+                    DynMutation::Delete(loc) => EntryKind::Delete(loc),
+                };
+                (key_owned, ts, kind)
+            })
             .collect();
         entries.sort_by(
-            |(key_a, ts_a, _), (key_b, ts_b, _)| match key_a.cmp(key_b) {
+            |(key_a, ts_a, ..), (key_b, ts_b, ..)| match key_a.cmp(key_b) {
                 std::cmp::Ordering::Equal => ts_b.cmp(ts_a),
                 other => other,
             },
         );
 
-        for (_key, commit, version) in entries.into_iter() {
-            let attachment = &self.batches_attached[version.batch_idx];
-            let batch = attachment.storage();
-            let row_batch = batch.slice(version.row_idx, 1);
-            slices.push(row_batch);
-            let attachment_commit = attachment.commit_ts(version.row_idx);
-            debug_assert_eq!(attachment_commit, commit);
-            commit_ts.push(attachment_commit);
-            tombstone.push(attachment.tombstone(version.row_idx));
+        for (_key, commit, kind) in entries.into_iter() {
+            match kind {
+                EntryKind::Upsert(loc) => {
+                    let attachment = &self.batches_attached[loc.batch_idx];
+                    let batch = attachment.storage();
+                    let row_batch = batch.slice(loc.row_idx, 1);
+                    slices.push(row_batch);
+                    let attachment_commit = attachment.commit_ts(loc.row_idx);
+                    debug_assert_eq!(attachment_commit, commit);
+                    commit_ts.push(attachment_commit);
+                    tombstone.push(false);
+                }
+                EntryKind::Delete(loc) => {
+                    let attachment = &self.delete_batches[loc.batch_idx];
+                    let row_batch =
+                        synthesize_delete_row(schema, &key_lookup, attachment, loc.row_idx)
+                            .map_err(crate::extractor::KeyExtractError::Arrow)?;
+                    slices.push(row_batch);
+                    let attachment_commit = attachment.commit_ts(loc.row_idx);
+                    debug_assert_eq!(attachment_commit, commit);
+                    commit_ts.push(attachment_commit);
+                    tombstone.push(true);
+                }
+            }
         }
 
         self.batches_attached.clear();
+        self.delete_batches.clear();
         self.metrics = MutableMemTableMetrics {
             entry_overhead: self.metrics.entry_overhead,
             ..Default::default()
@@ -309,7 +455,7 @@ impl StatsProvider for DynMem {
             approx_key_bytes: self.metrics.approx_key_bytes,
             entry_overhead: self.metrics.entry_overhead,
             typed_open_rows: None,
-            dyn_batches: Some(self.batches_attached.len()),
+            dyn_batches: Some(self.batches_attached.len() + self.delete_batches.len()),
             dyn_approx_batch_bytes: None,
             since_last_seal,
         }
@@ -323,12 +469,12 @@ struct ConvertedRanges {
 }
 
 pub(crate) struct DynRowScan<'t> {
-    index: &'t BTreeMap<KeyTsViewRaw, BatchRowLoc>,
+    index: &'t BTreeMap<KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
     batches: &'t [BatchAttachment],
     _owned_ranges: RangeSet<KeyOwned>,
     composite_ranges: RangeSet<KeyTsViewRaw>,
     range_idx: usize,
-    cursor: Option<BTreeRange<'t, KeyTsViewRaw, BatchRowLoc>>,
+    cursor: Option<BTreeRange<'t, KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>>,
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
     emitted_for_key: bool,
@@ -336,7 +482,7 @@ pub(crate) struct DynRowScan<'t> {
 
 impl<'t> DynRowScan<'t> {
     fn new(
-        index: &'t BTreeMap<KeyTsViewRaw, BatchRowLoc>,
+        index: &'t BTreeMap<KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
         batches: &'t [BatchAttachment],
         converted: ConvertedRanges,
         read_ts: Timestamp,
@@ -371,7 +517,7 @@ impl<'t> Iterator for DynRowScan<'t> {
                 self.emitted_for_key = false;
             }
             if let Some(cur) = &mut self.cursor {
-                for (composite, loc) in cur.by_ref() {
+                for (composite, mutation) in cur.by_ref() {
                     let key_raw = composite.key();
                     if self
                         .current_key
@@ -391,11 +537,14 @@ impl<'t> Iterator for DynRowScan<'t> {
                         continue;
                     }
 
-                    let attachment = &self.batches[loc.batch_idx];
-                    if attachment.tombstone(loc.row_idx) {
+                    if matches!(mutation, DynMutation::Delete(_)) {
                         continue;
                     }
-
+                    let loc = match mutation {
+                        DynMutation::Upsert(loc) => *loc,
+                        DynMutation::Delete(_) => unreachable!(),
+                    };
+                    let attachment = &self.batches[loc.batch_idx];
                     let batch = attachment.storage();
                     let row = crate::extractor::row_from_batch(batch, loc.row_idx).unwrap();
                     self.emitted_for_key = true;
@@ -442,13 +591,42 @@ fn convert_upper_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
     }
 }
 
+fn build_key_position_lookup(width: usize, key_indices: &[usize]) -> Vec<Option<usize>> {
+    let mut lookup = vec![None; width];
+    for (pos, &idx) in key_indices.iter().enumerate() {
+        if idx < width {
+            lookup[idx] = Some(pos);
+        }
+    }
+    lookup
+}
+
+fn synthesize_delete_row(
+    schema: &SchemaRef,
+    key_lookup: &[Option<usize>],
+    attachment: &DeleteAttachment,
+    row_idx: usize,
+) -> Result<RecordBatch, arrow_schema::ArrowError> {
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    for (col_idx, field) in schema.fields().iter().enumerate() {
+        if let Some(Some(key_pos)) = key_lookup.get(col_idx).copied() {
+            columns.push(attachment.keys().column(key_pos).slice(row_idx, 1));
+        } else {
+            columns.push(new_null_array(field.data_type(), 1));
+        }
+    }
+    RecordBatch::try_new(schema.clone(), columns)
+}
+
 #[cfg(test)]
 mod tests {
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use typed_arrow_dyn::DynCell;
 
     use super::*;
-    use crate::{inmem::policy::StatsProvider, test_util::build_batch};
+    use crate::{
+        extractor::projection_for_columns, inmem::policy::StatsProvider, test_util::build_batch,
+    };
 
     #[test]
     fn dyn_stats_and_scan() {
@@ -677,7 +855,7 @@ mod tests {
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
-        let insert = |layout: &mut DynMem, val: i32, ts: u64, tomb: bool| {
+        let insert = |layout: &mut DynMem, val: i32, ts: u64| {
             let batch: RecordBatch = build_batch(
                 schema.clone(),
                 vec![vec![
@@ -691,16 +869,28 @@ mod tests {
                     extractor.as_ref(),
                     batch,
                     UInt64Array::from(vec![ts]),
-                    BooleanArray::from(vec![tomb]),
+                    BooleanArray::from(vec![false]),
                 )
                 .expect("insert");
         };
 
-        // NOTE: tombstoned versions retain their original key/value payloads. They are filtered
-        // at read time via the `tombstone` flag rather than by zeroing the row.
-        insert(&mut layout, 1, 10, false);
-        insert(&mut layout, 2, 20, true);
-        insert(&mut layout, 3, 30, false);
+        insert(&mut layout, 1, 10);
+        insert(&mut layout, 3, 30);
+
+        let delete_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
+        let delete_batch = build_batch(
+            delete_schema,
+            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::U64(20))]],
+        )
+        .expect("delete batch");
+        layout
+            .insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .expect("delete");
 
         let segment = layout
             .seal_into_immutable(&schema, extractor.as_ref())
@@ -753,7 +943,7 @@ mod tests {
                 extractor.as_ref(),
                 batch2,
                 UInt64Array::from(vec![20]),
-                BooleanArray::from(vec![true]),
+                BooleanArray::from(vec![false]),
             )
             .expect("insert batch2");
 
@@ -762,6 +952,89 @@ mod tests {
             .expect("version chain");
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0], (Timestamp::new(10), false));
-        assert_eq!(chain[1], (Timestamp::new(20), true));
+        assert_eq!(chain[1], (Timestamp::new(20), false));
+    }
+
+    #[test]
+    fn insert_delete_batch_tracks_key_only_tombstones() {
+        let mut layout = DynMem::new();
+        let table_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, true),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(table_schema.clone(), 0).expect("extractor");
+        let key_schema = extractor.key_schema();
+
+        let mut delete_fields = key_schema
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect::<Vec<Field>>();
+        delete_fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false));
+        let delete_schema = std::sync::Arc::new(Schema::new(delete_fields));
+        let delete_projection = projection_for_columns(
+            delete_schema.clone(),
+            (0..delete_schema.fields().len() - 1).collect(),
+        )
+        .expect("delete projection");
+
+        let rows = vec![
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::U64(10))],
+            vec![Some(DynCell::Str("b".into())), Some(DynCell::U64(20))],
+            vec![Some(DynCell::Str("a".into())), Some(DynCell::U64(30))],
+        ];
+        let delete_batch = build_batch(delete_schema, rows).expect("delete batch");
+
+        layout
+            .insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .expect("insert delete batch");
+
+        let versions_a = layout
+            .inspect_versions(&KeyOwned::from("a"))
+            .expect("key a chain");
+        assert_eq!(
+            versions_a,
+            vec![(Timestamp::new(10), true), (Timestamp::new(30), true)]
+        );
+        let versions_b = layout
+            .inspect_versions(&KeyOwned::from("b"))
+            .expect("key b chain");
+        assert_eq!(versions_b, vec![(Timestamp::new(20), true)]);
+
+        let stats = layout.build_stats(None);
+        assert_eq!(stats.dyn_batches, Some(1));
+        assert_eq!(stats.entries, 2);
+    }
+
+    #[test]
+    fn delete_placeholder_handles_timestamp_columns() {
+        let mut layout = DynMem::new();
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+
+        let delete_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
+
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::U64(42))]];
+        let delete_batch = build_batch(delete_schema, rows).expect("delete batch");
+
+        layout
+            .insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .expect("insert delete batch");
+
+        let segment = layout
+            .seal_into_immutable(&schema, extractor.as_ref())
+            .expect("seal succeeds")
+            .expect("segment");
+        assert_eq!(segment.len(), 1);
     }
 }

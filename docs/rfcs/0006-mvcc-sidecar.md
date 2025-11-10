@@ -7,21 +7,21 @@
 
 ## Summary
 
-- Preserve user-defined Arrow schemas during ingestion, WAL persistence, and SST flushes by moving commit timestamps and tombstone markers into a dedicated MVCC sidecar.
-- Introduce explicit sidecar objects (Arrow/Parquet) that travel with each immutable segment and SST, referenced by the manifest.
-- Refactor ingestion, WAL encoding, and read path to operate on `(RecordBatch, MvccColumns)` pairs while keeping MVCC semantics (latest-wins, snapshot visibility) unchanged.
+- Keep `_commit_ts` alongside row payloads (as they already travel in `MvccColumns`) but move delete intent tracking into a dedicated, key-only sidecar so we never fabricate placeholder rows.
+- Introduce explicit delete sidecar objects (Arrow/Parquet) that travel with each immutable segment and SST, referenced by the manifest.
+- Refactor ingestion, WAL encoding, and read path to operate on `(RecordBatch, MvccColumns)` for upserts plus `DeleteBatch` sidecars for tombstones, preserving MVCC semantics (latest-wins, snapshot visibility).
 
 ## Motivation
 
 - Current implementation appends `_commit_ts`/`_tombstone` columns into user batches (`attach_mvcc_columns`), forcing schemas to allow nulls and leaking system metadata into user-visible Parquet.
-- Tombstoned rows are materialized as all-null payloads, violating non-nullable schema expectations and complicating downstream integration.
+- Tombstoned rows are materialized as all-null payloads (or, after the mutable refactor, synthesized only during sealing) solely to satisfy the existing immutable/SST layout.
 - `docs/overview.md` describes immutable snapshots as Arrow-native reflections of user data; aligning with that contract reduces friction for external tooling and keeps MVCC metadata implementation-specific.
 - Separating MVCC state opens the door to richer metadata (per-row audit info, CDC) without further schema churn.
 
 ## Goals
 
-- Immutable segments and SST files expose exactly the user schema; MVCC data is carried alongside but never inside the batch.
-- WAL payloads remain stream-friendly and replayable without schema mutation.
+- Immutable segments and SST files expose exactly the user schema; delete metadata is carried alongside in a key-only sidecar, while `_commit_ts` stays in `MvccColumns` for upserts.
+- WAL payloads stay Arrow-native and replayable without schema mutation beyond the existing `_commit_ts` columns.
 - Compaction, recovery, and GC continue to operate over append-only objects via Fusio.
 - Minimal runtime overhead for scans and range lookups relative to the current implementation.
 
@@ -42,33 +42,32 @@
 
 ### 1. Immutable representation
 
-- Replace `attach_mvcc_columns` with `bundle_mvcc_sidecar(batch, commit_ts, tombstone)` returning the original `RecordBatch` plus `MvccColumns`.
-- Ensure `ImmutableMemTable` stores the original batch and MVCC vectors without modifying the schema; maintain index and iterators as today.
+- Keep `bundle_mvcc_sidecar(batch, commit_ts, tombstone)` for upserts so `_commit_ts` continues to travel outside the user schema, but stop duplicating tombstones in the row batch. The data batch stays untouched and MVCC vectors carry timestamps only.
+- Track delete intents as dedicated `DeleteBatch { keys: RecordBatch (primary-key schema), commit_ts: UInt64Array }` values. `ImmutableMemTable` stores both the upsert `(RecordBatch, MvccColumns)` pair and a list of delete batches.
 
-### 2. MVCC sidecar format
+### 2. Delete sidecar format
 
-- Define `MvccSidecar` schema: `_commit_ts: UInt64 (non-null)`, `_tombstone: Boolean (non-null)`.
-- In memory, continue using `MvccColumns` (`Vec<Timestamp>`, `Vec<bool>`).
-- Persist sidecar columns as a single-row-group Arrow/Parquet file aligned 1:1 with the data batch.
+- Define `DeleteSidecar` schema: `<primary-key columns>, _commit_ts: UInt64 (non-null)`.
+- Persist deletes as Arrow/Parquet artifacts, one per immutable segment (and later per SST), aligned 1:1 with the segment. Upsert MVCC columns continue to mirror the existing `_commit_ts` sidecar.
 
 ### 3. WAL changes
 
-- Keep the helpers as WAL-local utilities: `append_mvcc_columns` widens batches for encoding; `split_mvcc_columns` strips MVCC columns immediately after decoding.
-- `Wal::append` accepts the user `RecordBatch`, a tombstone slice, and the commit timestamp; it materializes Arrow arrays internally so MVCC metadata stays hidden from callers.
-- Frame encoding continues to emit a single Arrow IPC stream with `_commit_ts` and `_tombstone` appended; decode recovers `(RecordBatch, Option<Timestamp>, ArrayRef, ArrayRef)` and drops the widened schema before handing the payload to replay.
-- WAL tests and recovery specs assert bitmap-length validation occurs prior to encoding and that MVCC columns never escape the WAL boundary.
+- WAL row payloads stay as they are today: `RowPayload` batches still carry `_commit_ts` in their MVCC columns; delete batches use the new `KeyDelete` row mode (already implemented) and never fabricate value columns.
+- Replay produces `(RecordBatch, MvccColumns)` for upserts and `DeleteBatch` for tombstones, matching the in-memory layout.
 
 ### 4. Flush & manifest
 
-- `ParquetTableWriter::stage_immutable` writes two objects per segment:
+- `ParquetTableWriter::stage_immutable` writes two (eventually three) artifacts per segment:
   - `…/segment.data.parquet` (user schema),
-  - `…/segment.mvcc.parquet` (sidecar).
-- Extend `SsTableDescriptor` and manifest entries with:
-  - `data_uri`,
-  - `mvcc_uri`,
-  - ~~MVCC stats (rows, tombstone count, min/max commit_ts).~~ no longer required as recorded in SstableStats already.
-- Fusio uploads both objects before committing the manifest edit.
-- Persist data and mvcc path in manifest using SstEntry.
+  - `…/segment.mvcc.parquet` (unchanged `_commit_ts` sidecar for upserts),
+  - `…/segment.delete.parquet` (new key-only delete sidecar).
+- Extend `SsTableDescriptor` and manifest entries with a `delete_uri` alongside the existing `data_uri`/`mvcc_uri`.
+- Fusio uploads all artifacts before committing the manifest edit; GC treats them atomically.
+
+### 5. Read path & compaction
+
+- Load both the MVCC sidecar (timestamps) and the delete sidecar when materializing immutables/SSTs. Range scans consult the delete sidecar to suppress tombstoned versions without ever seeing placeholder rows.
+- Compaction merges delete sidecars the same way it merges data files, applying the latest-wins rule based on `_commit_ts`.
 
 ### 5. Read path & compaction
 
@@ -78,8 +77,8 @@
 
 ### 6. Recovery & GC
 
-- WAL replay already yields `(RecordBatch, Vec<bool>)`; apply logic remains identical.
-- Manifest-driven GC marks both `data_uri` and `mvcc_uri` for retention/removal atomically.
+- WAL replay already yields `(RecordBatch, Vec<bool>)` and `DeleteBatch`; apply logic remains identical to the mutable implementation.
+- Manifest-driven GC marks `data_uri`, `mvcc_uri`, and `delete_uri` for retention/removal atomically.
 
 ### 7. API & observability
 
@@ -126,12 +125,12 @@ Sidecar Parquet uses `SNAPPY` compression by default (configurable alongside dat
 
 ## Implementation plan
 
-1. Refactor in-memory and WAL code paths to operate on `(RecordBatch, MvccColumns)` without modifying batches.
-2. Introduce sidecar writer/reader utilities and update SST builder + manifest descriptors.
-3. Adjust recovery, compaction, and range scans to load sidecars.
-4. Update docs (overview, storage layout RFC) and unit/integration tests.
-5. Ship a migrator for legacy SSTs and gate enablement behind a feature flag.
-6. Flip the feature flag once compatibility tests pass, then clean up legacy helpers.
+1. (Done) Refactor mutable/WAL code paths to keep deletes key-only while leaving `_commit_ts` handling unchanged.
+2. Introduce delete sidecar writer/reader utilities and update `SsTableBuilder` + manifest descriptors with `delete_uri`.
+3. Teach `ImmutableMemTable`/SST readers to load delete sidecars and merge them with upsert batches during scans.
+4. Update docs (overview, storage layout RFC) and unit/integration tests to reflect the tombstone sidecar.
+5. Ship a migrator that rewrites existing SSTs by extracting tombstones from their data batches into delete sidecars.
+6. Flip the feature flag once compatibility tests pass, then remove the legacy placeholder-row shim.
 
 ## Testing strategy
 

@@ -1208,7 +1208,7 @@ mod tests {
             Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()])) as ArrayRef;
         let tombstone_array: ArrayRef =
             Arc::new(BooleanArray::from(vec![false; batch.num_rows()])) as ArrayRef;
-        let payload = DynBatchPayload {
+        let payload = DynBatchPayload::Row {
             batch: batch.clone(),
             commit_ts_column: commit_array,
             tombstone_column: tombstone_array,

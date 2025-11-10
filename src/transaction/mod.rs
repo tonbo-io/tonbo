@@ -14,6 +14,7 @@ use typed_arrow_dyn::DynCell;
 use crate::{
     key::KeyOwned,
     manifest::{ManifestError, TableHead, TableSnapshot, VersionState, WalSegmentRef},
+    mutation::DynMutation,
     mvcc::{ReadView, Timestamp},
 };
 
@@ -74,34 +75,13 @@ impl Snapshot {
     }
 }
 
-/// Mutation staged within an in-flight transaction.
-#[allow(dead_code)]
-pub(crate) enum DynMutation {
-    /// Insert or update payload at commit.
-    Upsert {
-        /// Dynamic cell values staged for commit (schema-aligned vector).
-        row: Vec<Option<DynCell>>,
-    },
-    /// Logical delete recorded at commit.
-    Delete,
-}
-
 /// In-memory staging buffer tracking mutations by primary key.
 #[allow(dead_code)]
 pub(crate) struct StagedMutations {
     /// Snapshot timestamp guarding conflict detection for this transaction.
     snapshot_ts: Timestamp,
     /// Per-key mutation map preserving deterministic commit ordering.
-    entries: BTreeMap<KeyOwned, DynMutation>,
-}
-
-impl fmt::Debug for DynMutation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DynMutation::Upsert { .. } => f.write_str("DynMutation::Upsert"),
-            DynMutation::Delete => f.write_str("DynMutation::Delete"),
-        }
-    }
+    entries: BTreeMap<KeyOwned, DynMutation<Vec<Option<DynCell>>>>,
 }
 
 impl fmt::Debug for StagedMutations {
@@ -135,16 +115,18 @@ impl StagedMutations {
 
     /// Stage an upsert mutation for `key`, replacing any prior staged value.
     pub(crate) fn upsert(&mut self, key: KeyOwned, row: Vec<Option<DynCell>>) {
-        self.entries.insert(key, DynMutation::Upsert { row });
+        self.entries.insert(key, DynMutation::Upsert(row));
     }
 
     /// Stage a delete mutation for `key`, overwriting any previous staged value.
     pub(crate) fn delete(&mut self, key: KeyOwned) {
-        self.entries.insert(key, DynMutation::Delete);
+        self.entries.insert(key, DynMutation::Delete(()));
     }
 
     /// Iterate over staged entries in key order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&KeyOwned, &DynMutation)> {
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&KeyOwned, &DynMutation<Vec<Option<DynCell>>>)> {
         self.entries.iter()
     }
 }

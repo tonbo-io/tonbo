@@ -6,8 +6,9 @@
 
 use std::{collections::HashMap, hash::Hash, sync::Arc, time::Instant};
 
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
+use arrow_select::take::take;
 use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
 use lockable::LockableHashMap;
@@ -21,7 +22,7 @@ use crate::{
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
     inmem::{
-        immutable::Immutable,
+        immutable::{Immutable, memtable::MVCC_COMMIT_COL},
         mutable::MutableLayout,
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
@@ -44,8 +45,21 @@ use crate::{
     },
 };
 
-type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, ArrayRef, Option<Timestamp>)>>;
+type PendingWalBatches = HashMap<u64, Vec<PendingWalPayload>>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
+
+enum PendingWalPayload {
+    Upsert {
+        batch: RecordBatch,
+        commit_ts_column: ArrayRef,
+        tombstones: ArrayRef,
+        commit_ts_hint: Option<Timestamp>,
+    },
+    Delete {
+        batch: RecordBatch,
+        commit_ts_hint: Option<Timestamp>,
+    },
+}
 
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
@@ -118,26 +132,70 @@ where
                         commit_ts_column,
                         tombstones,
                     } = payload;
-                    pending.entry(provisional_id).or_default().push((
-                        batch,
-                        commit_ts_column,
-                        tombstones,
-                        commit_ts_hint,
-                    ));
+                    pending
+                        .entry(provisional_id)
+                        .or_default()
+                        .push(PendingWalPayload::Upsert {
+                            batch,
+                            commit_ts_column,
+                            tombstones,
+                            commit_ts_hint,
+                        });
+                }
+                WalEvent::DynDelete {
+                    provisional_id,
+                    payload,
+                } => {
+                    pending
+                        .entry(provisional_id)
+                        .or_default()
+                        .push(PendingWalPayload::Delete {
+                            batch: payload.batch,
+                            commit_ts_hint: payload.commit_ts_hint,
+                        });
                 }
                 WalEvent::TxnCommit {
                     provisional_id,
                     commit_ts,
                 } => {
                     if let Some(batches) = pending.remove(&provisional_id) {
-                        for (batch, commit_column, tombstones, hinted_ts) in batches {
-                            if let Some(hint) = hinted_ts {
-                                debug_assert_eq!(
-                                    hint, commit_ts,
-                                    "commit timestamp derived from append payload diverged"
-                                );
+                        for entry in batches {
+                            match entry {
+                                PendingWalPayload::Upsert {
+                                    batch,
+                                    commit_ts_column,
+                                    tombstones,
+                                    commit_ts_hint,
+                                } => {
+                                    if let Some(hint) = commit_ts_hint {
+                                        debug_assert_eq!(
+                                            hint, commit_ts,
+                                            "commit timestamp derived from append payload diverged"
+                                        );
+                                    }
+                                    apply_dyn_wal_batch(
+                                        self,
+                                        batch,
+                                        commit_ts_column,
+                                        tombstones,
+                                        commit_ts,
+                                    )?;
+                                    self.maybe_seal_after_insert()?;
+                                }
+                                PendingWalPayload::Delete {
+                                    batch,
+                                    commit_ts_hint,
+                                } => {
+                                    if let Some(hint) = commit_ts_hint {
+                                        debug_assert_eq!(
+                                            hint, commit_ts,
+                                            "commit timestamp derived from delete payload diverged"
+                                        );
+                                    }
+                                    apply_dyn_delete_wal_batch(self, batch, commit_ts)?;
+                                    self.maybe_seal_after_insert()?;
+                                }
                             }
-                            apply_dyn_wal_batch(self, batch, commit_column, tombstones, commit_ts)?;
                         }
                         last_commit_ts = Some(match last_commit_ts {
                             Some(prev) => prev.max(commit_ts),
@@ -519,21 +577,65 @@ where
     validate_record_batch_schema(db, &batch)?;
     validate_vec_tombstone_bitmap(&batch, &tombstones)?;
 
-    let commit_ts = db.next_commit_ts();
-
-    let commit_array: ArrayRef =
-        Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
-    let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones.clone())) as ArrayRef;
-
-    if let Some(handle) = db.wal_handle().cloned() {
-        let ticket = handle
-            .append(&batch, &tombstones, commit_ts)
-            .await
-            .map_err(KeyExtractError::from)?;
-        ticket.durable().await.map_err(KeyExtractError::from)?;
+    if batch.num_rows() == 0 {
+        return Ok(());
     }
 
-    apply_dyn_wal_batch(db, batch, commit_array, tombstone_array, commit_ts)
+    let commit_ts = db.next_commit_ts();
+
+    let (mut upsert_batch, mut delete_batch) =
+        partition_batch_for_mutations(&db.mode, batch, &tombstones, commit_ts)?;
+
+    if upsert_batch.is_none() && delete_batch.is_none() {
+        return Ok(());
+    }
+
+    if let Some(handle) = db.wal_handle().cloned() {
+        let provisional_id = handle.next_provisional_id();
+        let mut append_tickets = Vec::new();
+        if let Some(ref batch) = upsert_batch {
+            let tombstone_mask = vec![false; batch.num_rows()];
+            let ticket = handle
+                .txn_append(provisional_id, batch, &tombstone_mask, commit_ts)
+                .await
+                .map_err(KeyExtractError::from)?;
+            append_tickets.push(ticket);
+        }
+        if let Some(ref batch) = delete_batch {
+            let ticket = handle
+                .txn_append_delete(provisional_id, batch.clone())
+                .await
+                .map_err(KeyExtractError::from)?;
+            append_tickets.push(ticket);
+        }
+        for ticket in append_tickets {
+            ticket.durable().await.map_err(KeyExtractError::from)?;
+        }
+        let commit_ticket = handle
+            .txn_commit(provisional_id, commit_ts)
+            .await
+            .map_err(KeyExtractError::from)?;
+        commit_ticket
+            .durable()
+            .await
+            .map_err(KeyExtractError::from)?;
+    }
+
+    let mut mutated = false;
+    if let Some(batch) = upsert_batch.take() {
+        mutated = true;
+        db.mem
+            .insert_batch(db.mode.extractor.as_ref(), batch, commit_ts)?;
+    }
+    if let Some(batch) = delete_batch.take() {
+        mutated = true;
+        db.mem
+            .insert_delete_batch(db.mode.delete_projection.as_ref(), batch)?;
+    }
+    if mutated {
+        db.maybe_seal_after_insert()?;
+    }
+    Ok(())
 }
 
 async fn insert_dyn_wal_batches<E>(
@@ -593,7 +695,21 @@ where
         commit_array,
         tombstone_array,
     )?;
-    db.maybe_seal_after_insert()?;
+    Ok(())
+}
+
+fn apply_dyn_delete_wal_batch<E>(
+    db: &mut DB<DynMode, E>,
+    batch: RecordBatch,
+    commit_ts: Timestamp,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    validate_delete_batch_schema(db, &batch)?;
+    validate_delete_commit_ts(&batch, commit_ts)?;
+    db.mem
+        .insert_delete_batch(db.mode.delete_projection.as_ref(), batch)?;
     Ok(())
 }
 
@@ -643,10 +759,130 @@ fn validate_vec_tombstone_bitmap(
     }
     Ok(())
 }
+
+fn validate_delete_batch_schema<E>(
+    db: &DB<DynMode, E>,
+    batch: &RecordBatch,
+) -> Result<(), KeyExtractError>
+where
+    E: Executor + Timer,
+{
+    if db.mode.delete_schema.as_ref() != batch.schema().as_ref() {
+        return Err(KeyExtractError::SchemaMismatch {
+            expected: db.mode.delete_schema.clone(),
+            actual: batch.schema(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_delete_commit_ts(
+    batch: &RecordBatch,
+    commit_ts: Timestamp,
+) -> Result<(), KeyExtractError> {
+    let schema = batch.schema();
+    let commit_idx = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == MVCC_COMMIT_COL)
+        .ok_or_else(|| {
+            KeyExtractError::from(WalError::Codec("_commit_ts column missing".into()))
+        })?;
+    let commit_array = batch
+        .column(commit_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            KeyExtractError::from(WalError::Codec("_commit_ts column not u64".into()))
+        })?;
+    if commit_array.null_count() > 0 {
+        return Err(KeyExtractError::from(WalError::Codec(
+            "delete payload commit_ts column contained null".into(),
+        )));
+    }
+    if commit_array
+        .iter()
+        .any(|value| value.map(|v| v != commit_ts.get()).unwrap_or(true))
+    {
+        return Err(KeyExtractError::from(WalError::Codec(
+            "delete payload commit_ts column mismatch commit timestamp".into(),
+        )));
+    }
+    Ok(())
+}
+
+fn partition_batch_for_mutations(
+    mode: &DynMode,
+    batch: RecordBatch,
+    tombstones: &[bool],
+    commit_ts: Timestamp,
+) -> Result<(Option<RecordBatch>, Option<RecordBatch>), KeyExtractError> {
+    if batch.num_rows() == 0 {
+        return Ok((None, None));
+    }
+    let mut upsert_indices = Vec::new();
+    let mut delete_indices = Vec::new();
+    for (idx, tombstone) in tombstones.iter().enumerate() {
+        if *tombstone {
+            delete_indices.push(idx as u32);
+        } else {
+            upsert_indices.push(idx as u32);
+        }
+    }
+    let delete_batch = if delete_indices.is_empty() {
+        None
+    } else {
+        Some(build_delete_batch(
+            mode,
+            &batch,
+            &delete_indices,
+            commit_ts,
+        )?)
+    };
+    let upsert_batch = if delete_indices.is_empty() {
+        Some(batch)
+    } else if upsert_indices.is_empty() {
+        None
+    } else {
+        Some(take_full_batch(&batch, &upsert_indices).map_err(KeyExtractError::Arrow)?)
+    };
+    Ok((upsert_batch, delete_batch))
+}
+
+fn build_delete_batch(
+    mode: &DynMode,
+    batch: &RecordBatch,
+    delete_indices: &[u32],
+    commit_ts: Timestamp,
+) -> Result<RecordBatch, KeyExtractError> {
+    let idx_array = UInt32Array::from(delete_indices.to_vec());
+    let mut columns = Vec::with_capacity(mode.extractor.key_indices().len() + 1);
+    for &col_idx in mode.extractor.key_indices() {
+        let column = batch.column(col_idx);
+        let taken = take(column.as_ref(), &idx_array, None).map_err(KeyExtractError::Arrow)?;
+        columns.push(taken);
+    }
+    let commit_values: ArrayRef = Arc::new(UInt64Array::from(vec![
+        commit_ts.get();
+        delete_indices.len()
+    ]));
+    columns.push(commit_values);
+    RecordBatch::try_new(mode.delete_schema.clone(), columns).map_err(KeyExtractError::Arrow)
+}
+
+fn take_full_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, ArrowError> {
+    let idx_array = UInt32Array::from(indices.to_vec());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for column in batch.columns() {
+        columns.push(take(column.as_ref(), &idx_array, None)?);
+    }
+    RecordBatch::try_new(batch.schema(), columns)
+}
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use arrow_array::{RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
@@ -665,8 +901,8 @@ mod tests {
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
-            WalCommand,
-            frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+            DynBatchPayload, WalCommand,
+            frame::{INITIAL_FRAME_SEQ, encode_command},
         },
     };
 
@@ -1189,14 +1425,37 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let batch = build_batch(
-            schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]],
+        let delete_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_batch = RecordBatch::try_new(
+            delete_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["k"])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![42])) as ArrayRef,
+            ],
         )
-        .expect("batch");
+        .expect("delete batch");
 
-        let frames = encode_autocommit_frames(batch.clone(), vec![true], 7, Timestamp::new(42))
-            .expect("encode");
+        let mut frames = Vec::new();
+        frames.extend(
+            encode_command(WalCommand::TxnAppend {
+                provisional_id: 7,
+                payload: DynBatchPayload::Delete {
+                    batch: delete_batch.clone(),
+                },
+            })
+            .expect("encode delete"),
+        );
+        frames.extend(
+            encode_command(WalCommand::TxnCommit {
+                provisional_id: 7,
+                commit_ts: Timestamp::new(42),
+            })
+            .expect("encode commit"),
+        );
+
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
         for frame in frames {

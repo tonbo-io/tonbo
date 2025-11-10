@@ -6,15 +6,18 @@
 use std::hash::Hash;
 
 use arrow_array::RecordBatch;
-use arrow_schema::SchemaRef;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use fusio::executor::{Executor, Timer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
     db::DB,
-    extractor::{KeyExtractError, KeyProjection},
-    inmem::mutable::{DynMem, MutableLayout},
+    extractor::{KeyExtractError, KeyProjection, projection_for_columns},
+    inmem::{
+        immutable::memtable::MVCC_COMMIT_COL,
+        mutable::{DynMem, MutableLayout},
+    },
     key::KeyOwned,
     manifest::TableDefinition,
     mvcc::Timestamp,
@@ -74,7 +77,9 @@ pub trait CatalogDescribe: Mode {
 /// Dynamic runtime-schema mode backed by Arrow `RecordBatch` values.
 pub struct DynMode {
     pub(crate) schema: SchemaRef,
+    pub(crate) delete_schema: SchemaRef,
     pub(crate) extractor: Box<dyn KeyProjection>,
+    pub(crate) delete_projection: Box<dyn KeyProjection>,
 }
 
 /// Configuration bundle for constructing a `DynMode`.
@@ -107,7 +112,21 @@ impl Mode for DynMode {
         let DynModeConfig { schema, extractor } = config;
         // schema already validated in DynModeConfig::new, but double-check for defensive callers.
         extractor.validate_schema(&schema)?;
-        Ok((Self { schema, extractor }, DynMem::new()))
+        let key_schema = extractor.key_schema();
+        let delete_schema = build_delete_schema(&key_schema);
+        let key_columns = key_schema.fields().len();
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), (0..key_columns).collect())?;
+
+        Ok((
+            Self {
+                schema,
+                delete_schema,
+                extractor,
+                delete_projection,
+            },
+            DynMem::new(),
+        ))
     }
 
     fn insert<'a, E>(
@@ -158,13 +177,23 @@ impl Mode for DynMode {
     }
 }
 
+fn build_delete_schema(key_schema: &SchemaRef) -> SchemaRef {
+    let mut fields = key_schema
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<Field>>();
+    fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false));
+    std::sync::Arc::new(Schema::new(fields))
+}
+
 impl CatalogDescribe for DynMode {
     fn table_definition(config: &Self::Config, table_name: &str) -> TableDefinition {
         let key_columns = config
             .extractor
             .key_indices()
-            .into_iter()
-            .map(|idx| config.schema.field(idx).name().clone())
+            .iter()
+            .map(|idx| config.schema.field(*idx).name().clone())
             .collect();
         TableDefinition {
             name: table_name.to_string(),

@@ -20,13 +20,16 @@ pub trait KeyProjection {
     /// Ensure the projection is compatible with `schema`.
     fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError>;
 
+    /// Schema describing just the key columns (no MVCC sidecars).
+    fn key_schema(&self) -> SchemaRef;
+
+    /// Column indices (in schema order) that form the key projection.
+    fn key_indices(&self) -> &[usize];
+
     /// Project borrowed key views for the requested `rows` (in order) from `batch`.
     fn project_view(
         &self,
         batch: &RecordBatch,
         rows: &[usize],
     ) -> Result<Vec<KeyRow>, KeyExtractError>;
-
-    /// Return the zero-based column indices participating in the projection.
-    fn key_indices(&self) -> Vec<usize>;
 }
