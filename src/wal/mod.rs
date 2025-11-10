@@ -831,8 +831,12 @@ where
 {
     fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
         let storage = storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
+        let wal_state_handle = block_on(storage.load_state_handle(cfg.state_store.as_ref()))?;
+        let wal_state_hint = wal_state_handle
+            .as_ref()
+            .and_then(|handle| handle.state().last_segment_seq);
 
-        let tail_metadata = block_on(storage.tail_metadata())?;
+        let tail_metadata = block_on(storage.tail_metadata_with_hint(wal_state_hint))?;
         let next_payload_seq = tail_metadata
             .as_ref()
             .and_then(|meta| meta.last_provisional_id)

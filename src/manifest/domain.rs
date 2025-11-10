@@ -400,7 +400,8 @@ impl VersionState {
 
     fn normalise_wal_segments(&mut self) {
         if self.wal_segments.is_empty() {
-            // Preserve the previously persisted floor when no WAL lineage change was supplied.
+            // No WAL fragments were supplied, so clear the cached floor.
+            self.wal_floor = None;
             return;
         }
 

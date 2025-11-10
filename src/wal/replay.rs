@@ -50,7 +50,13 @@ impl Replayer {
             }
         }
 
-        let segments = self.storage.list_segments().await?;
+        let state_hint = self
+            .storage
+            .load_state_handle(self.cfg.state_store.as_ref())
+            .await?
+            .and_then(|handle| handle.state().last_segment_seq);
+
+        let segments = self.storage.list_segments_with_hint(state_hint).await?;
         if segments.is_empty() {
             return Ok(Vec::new());
         }

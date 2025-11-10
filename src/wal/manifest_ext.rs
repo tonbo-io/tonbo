@@ -16,7 +16,12 @@ pub(crate) async fn collect_wal_segment_refs(
     cfg: &WalConfig,
 ) -> Result<Vec<WalSegmentRef>, WalError> {
     let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
-    let Some(tail) = storage.tail_metadata().await? else {
+    let wal_state_hint = storage
+        .load_state_handle(cfg.state_store.as_ref())
+        .await?
+        .and_then(|handle| handle.state().last_segment_seq);
+
+    let Some(tail) = storage.tail_metadata_with_hint(wal_state_hint).await? else {
         return Ok(Vec::new());
     };
 

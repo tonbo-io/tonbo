@@ -418,14 +418,16 @@ where
         }
         let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
             match manifest_ext::collect_wal_segment_refs(cfg).await {
-                Ok(refs) if !refs.is_empty() => {
-                    let ids: Vec<FileId> = refs.iter().map(|ref_| *ref_.file_id()).collect();
-                    builder.set_wal_ids(Some(ids.clone()));
-                    (Some(ids), Some(refs))
-                }
-                Ok(_) => {
-                    builder.set_wal_ids(None);
-                    (None, None)
+                Ok(refs) => {
+                    let wal_ids = if refs.is_empty() {
+                        builder.set_wal_ids(None);
+                        None
+                    } else {
+                        let ids: Vec<FileId> = refs.iter().map(|ref_| *ref_.file_id()).collect();
+                        builder.set_wal_ids(Some(ids.clone()));
+                        Some(ids)
+                    };
+                    (wal_ids, Some(refs))
                 }
                 Err(_err) => {
                     return Err(SsTableError::Manifest(ManifestError::Invariant(

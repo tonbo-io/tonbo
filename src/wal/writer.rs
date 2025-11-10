@@ -360,7 +360,16 @@ where
         segment_seq: u64,
     ) -> WalResult<Self> {
         let fs_tag = storage.fs().file_system();
-        let tail = storage.tail_metadata().await?;
+
+        let mut state = storage.load_state_handle(cfg.state_store.as_ref()).await?;
+
+        let tail = storage
+            .tail_metadata_with_hint(
+                state
+                    .as_ref()
+                    .and_then(|handle| handle.state().last_segment_seq),
+            )
+            .await?;
 
         let mut next_frame_seq = frame::INITIAL_FRAME_SEQ;
         let (segment_seq, mut segment_bytes, mut next_segment_seq) =
@@ -381,12 +390,6 @@ where
         if segment_bytes == 0 {
             segment_bytes = self_initial_size(fs_tag, segment.file_mut()).await?;
         }
-
-        let mut state = if let Some(store) = cfg.state_store.as_ref() {
-            Some(WalStateHandle::load(Arc::clone(store), storage.root()).await?)
-        } else {
-            None
-        };
 
         if let Some(handle) = state.as_ref() {
             if let Some(seq) = handle.state().last_frame_seq {

@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, sync::Arc};
+use std::sync::Arc;
 
 use fusio_manifest::{
     BlockingExecutor, CheckpointStore, HeadStore, LeaseStore, SegmentIo,
@@ -187,7 +187,7 @@ where
         // Update table version and commit timestamp
         let next_txn = state.commit_timestamp().next();
         state.set_commit_timestamp(next_txn);
-        let wal_floor = reduce_wal_floor(head.wal_floor.clone(), state.cloned_wal_floor());
+        let wal_floor = state.cloned_wal_floor();
 
         session.put(
             VersionKey::TableVersion {
@@ -204,11 +204,10 @@ where
         session.put(head_key, VersionValue::TableHead(head));
 
         // Update WAL floor
-        if let Some(floor) = wal_floor {
-            session.put(
-                VersionKey::WalFloor { table_id: table },
-                VersionValue::WalFloor(floor),
-            )
+        let wal_key = VersionKey::WalFloor { table_id: table };
+        match wal_floor {
+            Some(floor) => session.put(wal_key, VersionValue::WalFloor(floor)),
+            None => session.delete(wal_key),
         }
 
         session.commit().await?;
@@ -430,24 +429,6 @@ where
         let meta = TableMeta::try_from(value)?;
         session.end().await?;
         Ok(meta)
-    }
-}
-
-fn reduce_wal_floor(
-    current: Option<WalSegmentRef>,
-    candidate: Option<WalSegmentRef>,
-) -> Option<WalSegmentRef> {
-    match (current, candidate) {
-        (Some(existing), Some(candidate)) => {
-            if WalSegmentRef::cmp(&candidate, &existing) == Ordering::Less {
-                Some(candidate)
-            } else {
-                Some(existing)
-            }
-        }
-        (None, Some(candidate)) => Some(candidate),
-        (Some(existing), None) => Some(existing),
-        (None, None) => None,
     }
 }
 
@@ -754,8 +735,8 @@ mod tests {
         );
         assert_eq!(
             snapshot_after.head.wal_floor,
-            Some(wal_segment_a.clone()),
-            "table head should retain the global floor across retained versions"
+            Some(expected_new_floor.clone()),
+            "table head should adopt the latest wal floor once older segments are retired"
         );
         assert_eq!(
             snapshot_after.head.last_manifest_txn,
@@ -769,8 +750,9 @@ mod tests {
             .expect("wal_floor call should succeed")
             .expect("wal floor should exist after commits");
         assert_eq!(
-            persisted_floor, wal_segment_a,
-            "persisted WAL floor should match the global minimum"
+            persisted_floor, expected_new_floor,
+            "persisted WAL floor should advance once the manifest no longer references older \
+             segments"
         );
 
         let listed_versions_after = manifest
@@ -809,6 +791,63 @@ mod tests {
             .expect("list_versions should allow limiting");
         assert_eq!(limited_versions.len(), 1);
         assert_eq!(limited_versions[0].commit_timestamp(), Timestamp::new(2));
+    }
+
+    #[tokio::test]
+    async fn wal_floor_clears_once_no_segments_remain() {
+        let file_ids = FileIdGenerator::default();
+        let (manifest, table_id) =
+            init_in_memory_manifest_raw(1, &file_ids).expect("manifest should initialize");
+
+        let wal_segment = WalSegmentRef::new(9, file_ids.generate(), 0, 4);
+        manifest
+            .apply_version_edits(
+                table_id,
+                &[VersionEdit::SetWalSegments {
+                    segments: vec![wal_segment.clone()],
+                }],
+            )
+            .await
+            .expect("initial wal segments should apply");
+
+        let persisted_floor = manifest
+            .wal_floor(table_id)
+            .await
+            .expect("wal floor fetch should succeed")
+            .expect("wal floor should exist after first commit");
+        assert_eq!(
+            persisted_floor, wal_segment,
+            "first commit should persist the provided wal floor"
+        );
+
+        manifest
+            .apply_version_edits(
+                table_id,
+                &[VersionEdit::SetWalSegments {
+                    segments: Vec::new(),
+                }],
+            )
+            .await
+            .expect("clearing wal segments should succeed");
+
+        let snapshot = manifest
+            .snapshot_latest(table_id)
+            .await
+            .expect("snapshot after clearing should succeed");
+        assert!(
+            snapshot.head.wal_floor.is_none(),
+            "table head should clear the wal floor when no fragments remain"
+        );
+
+        let cleared_floor = manifest
+            .wal_floor(table_id)
+            .await
+            .expect("wal floor fetch should succeed after clearing");
+        assert!(
+            cleared_floor.is_none(),
+            "persisted wal floor should be deleted when the manifest no longer references any wal \
+             segments"
+        );
     }
 
     #[tokio::test]

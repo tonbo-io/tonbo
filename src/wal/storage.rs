@@ -14,6 +14,7 @@ use futures::StreamExt;
 use crate::wal::{
     WalError, WalResult,
     frame::{FRAME_HEADER_SIZE, FrameHeader},
+    state::{WalStateHandle, WalStateStore},
 };
 
 /// Shared storage facade for WAL segments backed by fusio.
@@ -103,6 +104,14 @@ impl WalStorage {
 
     /// Enumerate existing WAL segments along with their sizes.
     pub async fn list_segments(&self) -> WalResult<Vec<SegmentDescriptor>> {
+        self.list_segments_with_hint(None).await
+    }
+
+    /// Enumerate WAL segments while optionally hinting at the highest expected sequence.
+    pub async fn list_segments_with_hint(
+        &self,
+        wal_state_hint: Option<u64>,
+    ) -> WalResult<Vec<SegmentDescriptor>> {
         let mut entries = Vec::new();
         let mut stream = match self.fs.list(&self.root).await {
             Ok(stream) => stream,
@@ -131,36 +140,13 @@ impl WalStorage {
             }
         }
 
-        if entries.is_empty() && matches!(self.fs.file_system(), FileSystemTag::S3) {
-            let root_prefix = Path::default();
-            let mut fallback_stream = self.fs.list(&root_prefix).await.map_err(|err| {
-                WalError::Storage(format!(
-                    "failed fallback listing for wal dir {}: {}",
-                    self.root.as_ref(),
-                    err
-                ))
-            })?;
-
-            while let Some(meta_result) = fallback_stream.next().await {
-                let meta = meta_result.map_err(|err| {
-                    WalError::Storage(format!(
-                        "failed to read wal metadata under {} during fallback: {}",
-                        self.root.as_ref(),
-                        err
-                    ))
-                })?;
-
-                if !meta.path.prefix_matches(&self.root) {
-                    continue;
-                }
-
-                if let Some(descriptor) = self.describe_segment(meta.path).await? {
-                    entries.push(descriptor);
-                }
-            }
+        if self.should_attempt_fallback(wal_state_hint, &entries) {
+            let mut fallback = self.list_segments_from_root().await?;
+            entries.append(&mut fallback);
         }
 
         entries.sort_by_key(|entry| entry.seq);
+        entries.dedup_by(|lhs, rhs| lhs.seq == rhs.seq && lhs.path == rhs.path);
         Ok(entries)
     }
 
@@ -191,10 +177,72 @@ impl WalStorage {
         decode_frame_bounds(&data)
     }
 
-    /// Inspect the on-disk WAL tail, returning metadata about the active segment and frame
-    /// sequence.
-    pub async fn tail_metadata(&self) -> WalResult<Option<TailMetadata>> {
-        let mut segments = self.list_segments().await?;
+    fn should_attempt_fallback(
+        &self,
+        wal_state_hint: Option<u64>,
+        entries: &[SegmentDescriptor],
+    ) -> bool {
+        if !matches!(self.fs.file_system(), FileSystemTag::S3) {
+            return false;
+        }
+        let Some(expected) = wal_state_hint else {
+            return false;
+        };
+        !entries.iter().any(|entry| entry.seq == expected)
+    }
+
+    /// Load the persisted WAL state handle, if a store has been configured.
+    pub async fn load_state_handle(
+        &self,
+        store: Option<&Arc<dyn WalStateStore>>,
+    ) -> WalResult<Option<WalStateHandle>> {
+        if let Some(store) = store {
+            Ok(Some(
+                WalStateHandle::load(Arc::clone(store), self.root()).await?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn list_segments_from_root(&self) -> WalResult<Vec<SegmentDescriptor>> {
+        let mut entries = Vec::new();
+        let root_prefix = Path::default();
+        let mut fallback_stream = self.fs.list(&root_prefix).await.map_err(|err| {
+            WalError::Storage(format!(
+                "failed fallback listing for wal dir {}: {}",
+                self.root.as_ref(),
+                err
+            ))
+        })?;
+
+        while let Some(meta_result) = fallback_stream.next().await {
+            let meta = meta_result.map_err(|err| {
+                WalError::Storage(format!(
+                    "failed to read wal metadata under {} during fallback: {}",
+                    self.root.as_ref(),
+                    err
+                ))
+            })?;
+
+            if !meta.path.prefix_matches(&self.root) {
+                continue;
+            }
+
+            if let Some(descriptor) = self.describe_segment(meta.path).await? {
+                entries.push(descriptor);
+            }
+        }
+
+        Ok(entries)
+    }
+
+    /// Inspect the WAL tail while hinting at the highest expected sealed segment.
+    pub async fn tail_metadata_with_hint(
+        &self,
+        wal_state_hint: Option<u64>,
+    ) -> WalResult<Option<TailMetadata>> {
+        let mut segments = self.list_segments_with_hint(wal_state_hint).await?;
         if segments.is_empty() {
             return Ok(None);
         }
@@ -509,12 +557,211 @@ fn backend_err(action: &str, err: FusioError) -> WalError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        io,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
 
-    use fusio::{Read, Write, impls::mem::fs::InMemoryFs, path::Path};
-    use futures::executor::block_on;
+    use fusio::{
+        DynFs, Read, Write,
+        dynamic::{MaybeSendFuture, MaybeSendStream},
+        error::Error as FusioError,
+        fs::FileMeta,
+        impls::mem::fs::InMemoryFs,
+        path::Path,
+    };
+    use futures::{executor::block_on, stream};
 
     use super::*;
+
+    #[derive(Clone)]
+    struct S3ProbeFs {
+        inner: Arc<dyn DynFs>,
+        root_prefix: Path,
+        suppress_prefix_listing: Arc<AtomicBool>,
+        deny_root_listing: Arc<AtomicBool>,
+        root_list_calls: Arc<AtomicUsize>,
+    }
+
+    impl S3ProbeFs {
+        fn new(inner: Arc<dyn DynFs>, root_prefix: Path) -> Self {
+            Self {
+                inner,
+                root_prefix,
+                suppress_prefix_listing: Arc::new(AtomicBool::new(false)),
+                deny_root_listing: Arc::new(AtomicBool::new(false)),
+                root_list_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl DynFs for S3ProbeFs {
+        fn file_system(&self) -> FileSystemTag {
+            FileSystemTag::S3
+        }
+
+        fn open_options<'s, 'path: 's>(
+            &'s self,
+            path: &'path Path,
+            options: OpenOptions,
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<Box<dyn DynFile>, FusioError>> + 's>>
+        {
+            self.inner.open_options(path, options)
+        }
+
+        fn create_dir_all<'s, 'path: 's>(
+            &'s self,
+            path: &'path Path,
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list<'s, 'path: 's>(
+            &'s self,
+            path: &'path Path,
+        ) -> Pin<
+            Box<
+                dyn MaybeSendFuture<
+                        Output = Result<
+                            Pin<Box<dyn MaybeSendStream<Item = Result<FileMeta, FusioError>> + 's>>,
+                            FusioError,
+                        >,
+                    > + 's,
+            >,
+        > {
+            if path == &self.root_prefix && self.suppress_prefix_listing.load(Ordering::SeqCst) {
+                return Box::pin(async {
+                    Ok(Box::pin(stream::empty())
+                        as Pin<
+                            Box<dyn MaybeSendStream<Item = Result<FileMeta, FusioError>>>,
+                        >)
+                });
+            }
+
+            if path == &Path::default() {
+                self.root_list_calls.fetch_add(1, Ordering::SeqCst);
+                if self.deny_root_listing.load(Ordering::SeqCst) {
+                    return Box::pin(async move {
+                        Err(FusioError::Io(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "root listing denied",
+                        )))
+                    });
+                }
+            }
+
+            self.inner.list(path)
+        }
+
+        fn remove<'s, 'path: 's>(
+            &'s self,
+            path: &'path Path,
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+            self.inner.remove(path)
+        }
+
+        fn copy<'s, 'path: 's>(
+            &'s self,
+            from: &'path Path,
+            to: &'path Path,
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+            self.inner.copy(from, to)
+        }
+
+        fn link<'s, 'path: 's>(
+            &'s self,
+            from: &'path Path,
+            to: &'path Path,
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), FusioError>> + 's>> {
+            self.inner.link(from, to)
+        }
+    }
+
+    #[test]
+    fn list_segments_only_falls_back_with_hint() {
+        block_on(async {
+            let base = Arc::new(InMemoryFs::new());
+            let base_dyn: Arc<dyn DynFs> = base.clone();
+            let root = Path::parse("wal-s3").expect("root path");
+            let instrumented = Arc::new(S3ProbeFs::new(base_dyn, root.clone()));
+            let fs_dyn: Arc<dyn DynFs> = instrumented.clone();
+            let storage = WalStorage::new(fs_dyn, root.clone());
+
+            storage
+                .ensure_dir(storage.root())
+                .await
+                .expect("ensure dir");
+            let mut segment = storage.open_segment(7).await.expect("open segment");
+            let (write_res, buf) = segment.file_mut().write_all(vec![1u8; 4]).await;
+            write_res.expect("write wal");
+            drop(buf);
+            segment.file_mut().flush().await.expect("flush");
+
+            instrumented
+                .suppress_prefix_listing
+                .store(true, Ordering::SeqCst);
+
+            let empty = storage
+                .list_segments_with_hint(None)
+                .await
+                .expect("listing without hint should succeed");
+            assert!(empty.is_empty(), "prefix listing is suppressed");
+            assert_eq!(
+                instrumented.root_list_calls.load(Ordering::SeqCst),
+                0,
+                "fallback should not run without a hint",
+            );
+
+            let discovered = storage
+                .list_segments_with_hint(Some(7))
+                .await
+                .expect("listing with hint should succeed");
+            assert_eq!(discovered.len(), 1);
+            assert_eq!(discovered[0].seq, 7);
+            assert_eq!(
+                instrumented.root_list_calls.load(Ordering::SeqCst),
+                1,
+                "fallback should run exactly once when hint is present",
+            );
+        });
+    }
+
+    #[test]
+    fn list_segments_surfaces_fallback_errors() {
+        block_on(async {
+            let base = Arc::new(InMemoryFs::new());
+            let base_dyn: Arc<dyn DynFs> = base.clone();
+            let root = Path::parse("wal-s3-deny").expect("root path");
+            let instrumented = Arc::new(S3ProbeFs::new(base_dyn, root.clone()));
+            instrumented
+                .suppress_prefix_listing
+                .store(true, Ordering::SeqCst);
+            instrumented.deny_root_listing.store(true, Ordering::SeqCst);
+            let storage = WalStorage::new(instrumented.clone() as Arc<dyn DynFs>, root);
+
+            let err = storage
+                .list_segments_with_hint(Some(3))
+                .await
+                .expect_err("fallback failures should surface");
+            if let WalError::Storage(msg) = err {
+                assert!(
+                    msg.contains("failed fallback listing"),
+                    "unexpected storage error message: {msg}"
+                );
+            } else {
+                panic!("expected WalError::Storage, got {err:?}");
+            }
+            assert_eq!(
+                instrumented.root_list_calls.load(Ordering::SeqCst),
+                1,
+                "fallback listing should still be attempted",
+            );
+        });
+    }
 
     #[test]
     fn ensure_dir_is_idempotent() {
@@ -688,7 +935,10 @@ mod tests {
             segment.file_mut().flush().await.expect("flush");
             drop(segment);
 
-            let tail = storage.tail_metadata().await.expect("tail metadata");
+            let tail = storage
+                .tail_metadata_with_hint(None)
+                .await
+                .expect("tail metadata");
             let tail = tail.expect("existing tail");
             assert_eq!(tail.active.seq, 5);
             assert!(tail.completed.is_empty());
