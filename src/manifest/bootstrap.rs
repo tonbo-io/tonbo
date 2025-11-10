@@ -3,23 +3,24 @@ use std::sync::Arc;
 use fusio::{
     fs::{Fs, FsCas},
     mem::fs::InMemoryFs,
-    path::Path,
+    path::{Path, PathPart},
 };
 use fusio_manifest::{
     BackoffPolicy, BlockingExecutor, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl,
-    ManifestContext, SegmentStoreImpl, types::Error as FusioManifestError,
+    ManifestContext, SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
 };
 use futures::{executor::block_on, future::BoxFuture};
 
 use super::{
-    codec::VersionCodec,
-    domain::{TableHead, TableId, VersionState, WalSegmentRef},
-    driver::{Manifest, ManifestError, ManifestResult, Stores, TableSnapshot},
+    codec::{CatalogCodec, ManifestCodec, VersionCodec},
+    domain::{TableDefinition, TableHead, TableId, TableMeta, VersionState, WalSegmentRef},
+    driver::{Manifest, ManifestError, ManifestResult, Stores, VersionSnapshot},
     version::VersionEdit,
 };
 use crate::{id::FileIdGenerator, mvcc::Timestamp};
 
 /// In-memory manifest type wired against `fusio`'s memory FS for dev/test flows.
+#[cfg(test)]
 pub(crate) type InMemoryManifest = Manifest<
     VersionCodec,
     HeadStoreImpl<InMemoryFs>,
@@ -28,8 +29,39 @@ pub(crate) type InMemoryManifest = Manifest<
     LeaseStoreImpl<InMemoryFs, BlockingExecutor>,
 >;
 
-/// Trait object abstraction over manifest backends.
-pub(crate) trait ManifestRuntime: Send + Sync {
+/// In-memory catalog manifest type used for catalog-specific tests.
+#[cfg(test)]
+pub(crate) type InMemoryCatalogManifest = Manifest<
+    CatalogCodec,
+    HeadStoreImpl<InMemoryFs>,
+    SegmentStoreImpl<InMemoryFs>,
+    CheckpointStoreImpl<InMemoryFs>,
+    LeaseStoreImpl<InMemoryFs, BlockingExecutor>,
+>;
+
+/// Snapshot combining catalog metadata with the latest version state.
+#[derive(Debug, Clone)]
+pub(crate) struct TableSnapshot {
+    pub manifest_snapshot: Snapshot,
+    pub head: TableHead,
+    pub latest_version: Option<VersionState>,
+    #[allow(dead_code)]
+    pub table_meta: TableMeta,
+}
+
+impl TableSnapshot {
+    fn from_parts(version: VersionSnapshot, table_meta: TableMeta) -> Self {
+        Self {
+            manifest_snapshot: version.manifest_snapshot,
+            head: version.head,
+            latest_version: version.latest_version,
+            table_meta,
+        }
+    }
+}
+
+/// Trait object abstraction over version manifest backends.
+pub(crate) trait VersionRuntime: Send + Sync {
     fn init_table_head<'a>(
         &'a self,
         table_id: TableId,
@@ -45,7 +77,7 @@ pub(crate) trait ManifestRuntime: Send + Sync {
     fn snapshot_latest<'a>(
         &'a self,
         table: TableId,
-    ) -> BoxFuture<'a, ManifestResult<TableSnapshot>>;
+    ) -> BoxFuture<'a, ManifestResult<VersionSnapshot>>;
 
     #[allow(dead_code)]
     fn list_versions<'a>(
@@ -63,15 +95,29 @@ pub(crate) trait ManifestRuntime: Send + Sync {
     ) -> BoxFuture<'a, ManifestResult<Option<WalSegmentRef>>>;
 }
 
+/// Trait object abstraction over catalog manifest backends.
+pub(crate) trait CatalogRuntime: Send + Sync {
+    fn init_catalog_root<'a>(&'a self) -> BoxFuture<'a, ManifestResult<()>>;
+
+    fn register_table<'a>(
+        &'a self,
+        file_ids: &'a FileIdGenerator,
+        definition: &'a TableDefinition,
+    ) -> BoxFuture<'a, ManifestResult<TableMeta>>;
+
+    fn table_meta<'a>(&'a self, table: TableId) -> BoxFuture<'a, ManifestResult<TableMeta>>;
+}
+
 /// Primary manifest handle exposed to the rest of the crate.
 #[derive(Clone)]
 pub(crate) struct TonboManifest {
-    inner: Arc<dyn ManifestRuntime>,
+    version: Arc<dyn VersionRuntime>,
+    catalog: Arc<dyn CatalogRuntime>,
 }
 
 impl TonboManifest {
-    fn new(runtime: Arc<dyn ManifestRuntime>) -> Self {
-        Self { inner: runtime }
+    fn new(version: Arc<dyn VersionRuntime>, catalog: Arc<dyn CatalogRuntime>) -> Self {
+        Self { version, catalog }
     }
 
     pub(crate) async fn apply_version_edits(
@@ -79,11 +125,13 @@ impl TonboManifest {
         table: TableId,
         edits: &[VersionEdit],
     ) -> ManifestResult<Timestamp> {
-        self.inner.apply_version_edits(table, edits).await
+        self.version.apply_version_edits(table, edits).await
     }
 
     pub(crate) async fn snapshot_latest(&self, table: TableId) -> ManifestResult<TableSnapshot> {
-        self.inner.snapshot_latest(table).await
+        let version_snapshot = self.version.snapshot_latest(table).await?;
+        let table_meta = self.catalog.table_meta(table).await?;
+        Ok(TableSnapshot::from_parts(version_snapshot, table_meta))
     }
 
     #[allow(dead_code)]
@@ -92,27 +140,55 @@ impl TonboManifest {
         table: TableId,
         limit: usize,
     ) -> ManifestResult<Vec<VersionState>> {
-        self.inner.list_versions(table, limit).await
+        self.version.list_versions(table, limit).await
     }
 
     #[allow(dead_code)]
     pub(crate) async fn recover_orphans(&self) -> ManifestResult<usize> {
-        self.inner.recover_orphans().await
+        self.version.recover_orphans().await
     }
 
     pub(crate) async fn wal_floor(&self, table: TableId) -> ManifestResult<Option<WalSegmentRef>> {
-        self.inner.wal_floor(table).await
+        self.version.wal_floor(table).await
     }
 
     async fn init_table_head(&self, table_id: TableId, head: TableHead) -> ManifestResult<()> {
-        self.inner.init_table_head(table_id, head).await
+        self.version.init_table_head(table_id, head).await
+    }
+
+    pub(crate) async fn init_catalog(&self) -> ManifestResult<()> {
+        self.catalog.init_catalog_root().await
+    }
+
+    pub(crate) async fn register_table(
+        &self,
+        file_ids: &FileIdGenerator,
+        definition: &TableDefinition,
+    ) -> ManifestResult<TableMeta> {
+        let meta = self.catalog.register_table(file_ids, definition).await?;
+        self.init_table_head(
+            meta.table_id,
+            TableHead {
+                table_id: meta.table_id,
+                schema_version: meta.schema_version,
+                wal_floor: None,
+                last_manifest_txn: None,
+            },
+        )
+        .await?;
+        Ok(meta)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn table_meta(&self, table: TableId) -> ManifestResult<TableMeta> {
+        self.catalog.table_meta(table).await
     }
 }
 
 /// Adapter allowing concrete `Manifest` instances to be used behind the trait object.
 pub(crate) struct ManifestHandle<M>(M);
 
-impl<HS, SS, CS, LS> ManifestRuntime for ManifestHandle<Manifest<VersionCodec, HS, SS, CS, LS>>
+impl<HS, SS, CS, LS> VersionRuntime for ManifestHandle<Manifest<VersionCodec, HS, SS, CS, LS>>
 where
     HS: fusio_manifest::HeadStore + Send + Sync + Clone + 'static,
     SS: fusio_manifest::SegmentIo + Send + Sync + Clone + 'static,
@@ -138,7 +214,7 @@ where
     fn snapshot_latest<'a>(
         &'a self,
         table: TableId,
-    ) -> BoxFuture<'a, ManifestResult<TableSnapshot>> {
+    ) -> BoxFuture<'a, ManifestResult<VersionSnapshot>> {
         Box::pin(async move { self.0.snapshot_latest(table).await })
     }
 
@@ -162,42 +238,51 @@ where
     }
 }
 
-fn wrap_manifest<M>(manifest: M) -> TonboManifest
+/// Adapter allowing catalog manifests to participate in the trait object abstraction.
+pub(crate) struct CatalogHandle<M>(M);
+
+impl<HS, SS, CS, LS> CatalogRuntime for CatalogHandle<Manifest<CatalogCodec, HS, SS, CS, LS>>
 where
-    ManifestHandle<M>: ManifestRuntime,
-    M: Send + Sync + 'static,
+    HS: fusio_manifest::HeadStore + Send + Sync + Clone + 'static,
+    SS: fusio_manifest::SegmentIo + Send + Sync + Clone + 'static,
+    CS: fusio_manifest::CheckpointStore + Send + Sync + Clone + 'static,
+    LS: fusio_manifest::LeaseStore + Send + Sync + Clone + 'static,
 {
-    TonboManifest::new(Arc::new(ManifestHandle(manifest)))
+    fn init_catalog_root<'a>(&'a self) -> BoxFuture<'a, ManifestResult<()>> {
+        Box::pin(async move { self.0.init_catalog_root().await })
+    }
+
+    fn register_table<'a>(
+        &'a self,
+        file_ids: &'a FileIdGenerator,
+        definition: &'a TableDefinition,
+    ) -> BoxFuture<'a, ManifestResult<TableMeta>> {
+        Box::pin(async move { self.0.register_table(file_ids, definition).await })
+    }
+
+    fn table_meta<'a>(&'a self, table: TableId) -> BoxFuture<'a, ManifestResult<TableMeta>> {
+        Box::pin(async move { self.0.table_meta(table).await })
+    }
 }
 
-fn bootstrap_manifest<M>(
-    manifest: M,
-    schema_version: u32,
-    file_ids: &FileIdGenerator,
-) -> ManifestResult<(TonboManifest, TableId)>
+fn wrap_version_manifest<M>(manifest: M) -> Arc<dyn VersionRuntime>
 where
-    ManifestHandle<M>: ManifestRuntime,
+    ManifestHandle<M>: VersionRuntime,
     M: Send + Sync + 'static,
 {
-    let table_id = TableId::new(file_ids);
-    let tonbo = wrap_manifest(manifest);
-    block_on(async {
-        tonbo
-            .init_table_head(
-                table_id,
-                TableHead {
-                    table_id,
-                    schema_version,
-                    wal_floor: None,
-                    last_manifest_txn: None,
-                },
-            )
-            .await
-    })?;
-    Ok((tonbo, table_id))
+    Arc::new(ManifestHandle(manifest))
+}
+
+fn wrap_catalog_manifest<M>(manifest: M) -> Arc<dyn CatalogRuntime>
+where
+    CatalogHandle<M>: CatalogRuntime,
+    M: Send + Sync + 'static,
+{
+    Arc::new(CatalogHandle(manifest))
 }
 
 /// Raw helper used by tests needing direct access to the concrete manifest.
+#[cfg(test)]
 pub(crate) fn init_in_memory_manifest_raw(
     schema_version: u32,
     file_ids: &FileIdGenerator,
@@ -227,21 +312,13 @@ pub(crate) fn init_in_memory_manifest_raw(
 }
 
 /// Construct an in-memory manifest and wrap it in the dynamic handle.
-pub(crate) fn init_in_memory_manifest(
-    schema_version: u32,
-    file_ids: &FileIdGenerator,
-) -> ManifestResult<(TonboManifest, TableId)> {
-    let (manifest, table_id) = init_in_memory_manifest_raw(schema_version, file_ids)?;
-    Ok((wrap_manifest(manifest), table_id))
+pub(crate) fn init_in_memory_manifest() -> ManifestResult<TonboManifest> {
+    let root = Path::default();
+    init_fs_manifest(InMemoryFs::new(), &root)
 }
 
 /// Construct a manifest rooted under `root/manifest` using the provided filesystem backend.
-pub(crate) fn init_fs_manifest<FS>(
-    fs: FS,
-    root: &Path,
-    schema_version: u32,
-    file_ids: &FileIdGenerator,
-) -> ManifestResult<(TonboManifest, TableId)>
+pub(crate) fn init_fs_manifest<FS>(fs: FS, root: &Path) -> ManifestResult<TonboManifest>
 where
     FS: Fs + FsCas + Clone + Send + Sync + 'static,
     HeadStoreImpl<FS>: fusio_manifest::HeadStore,
@@ -249,37 +326,88 @@ where
     CheckpointStoreImpl<FS>: fusio_manifest::CheckpointStore,
     LeaseStoreImpl<FS, BlockingExecutor>: fusio_manifest::LeaseStore,
 {
-    let base = root.as_ref();
-    let manifest_prefix = if base.is_empty() {
-        "manifest".to_string()
-    } else {
-        format!("{base}/manifest")
-    };
-    ensure_dir::<FS>(&manifest_prefix)?;
-    ensure_dir::<FS>(&format!("{manifest_prefix}/segments"))?;
-    ensure_dir::<FS>(&format!("{manifest_prefix}/checkpoints"))?;
-    ensure_dir::<FS>(&format!("{manifest_prefix}/leases"))?;
+    let manifest_root = append_segment(root, "manifest");
+    let version_root = append_segment(&manifest_root, "version");
+    let catalog_root = append_segment(&manifest_root, "catalog");
 
-    let head_key = format!("{manifest_prefix}/head.json");
-    let segments_prefix = format!("{manifest_prefix}/segments");
-    let checkpoint_prefix = manifest_prefix.clone();
-    let lease_prefix = manifest_prefix.clone();
+    ensure_manifest_dirs::<FS>(&version_root)?;
+    ensure_manifest_dirs::<FS>(&catalog_root)?;
 
-    let head = HeadStoreImpl::new(fs.clone(), head_key);
-    let segment = SegmentStoreImpl::new(fs.clone(), segments_prefix);
-    let checkpoint = CheckpointStoreImpl::new(fs.clone(), checkpoint_prefix.clone());
-    let lease = LeaseStoreImpl::new(fs, lease_prefix, BackoffPolicy::default(), BlockingExecutor);
-    let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
-    let manifest = Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx);
-    bootstrap_manifest(manifest, schema_version, file_ids)
+    let version_manifest = open_manifest_instance::<FS, VersionCodec>(fs.clone(), &version_root);
+    let catalog_manifest = open_manifest_instance::<FS, CatalogCodec>(fs, &catalog_root);
+    let tonbo = TonboManifest::new(
+        wrap_version_manifest(version_manifest),
+        wrap_catalog_manifest(catalog_manifest),
+    );
+    block_on(async { tonbo.init_catalog().await })?;
+    Ok(tonbo)
 }
 
-fn ensure_dir<FS>(path: &str) -> ManifestResult<()>
+fn ensure_dir_path<FS>(path: &Path) -> ManifestResult<()>
 where
     FS: Fs,
 {
-    let parsed = Path::from(path);
-    block_on(async { FS::create_dir_all(&parsed).await })
+    block_on(async { FS::create_dir_all(path).await })
         .map_err(|err| ManifestError::Backend(FusioManifestError::Io(err)))?;
     Ok(())
+}
+
+fn ensure_manifest_dirs<FS>(base: &Path) -> ManifestResult<()>
+where
+    FS: Fs,
+{
+    ensure_dir_path::<FS>(base)?;
+    ensure_dir_path::<FS>(&base.child(PathPart::parse("segments").expect("segments part")))?;
+    ensure_dir_path::<FS>(&base.child(PathPart::parse("checkpoints").expect("checkpoints part")))?;
+    ensure_dir_path::<FS>(&base.child(PathPart::parse("leases").expect("leases part")))?;
+    Ok(())
+}
+
+#[allow(clippy::type_complexity)]
+fn open_manifest_instance<FS, C>(
+    fs: FS,
+    prefix: &Path,
+) -> Manifest<
+    C,
+    HeadStoreImpl<FS>,
+    SegmentStoreImpl<FS>,
+    CheckpointStoreImpl<FS>,
+    LeaseStoreImpl<FS, BlockingExecutor>,
+>
+where
+    C: ManifestCodec,
+    FS: Fs + FsCas + Clone + Send + Sync + 'static,
+    HeadStoreImpl<FS>: fusio_manifest::HeadStore,
+    SegmentStoreImpl<FS>: fusio_manifest::SegmentIo,
+    CheckpointStoreImpl<FS>: fusio_manifest::CheckpointStore,
+    LeaseStoreImpl<FS, BlockingExecutor>: fusio_manifest::LeaseStore,
+{
+    let head = HeadStoreImpl::new(
+        fs.clone(),
+        prefix.child(PathPart::parse("head.json").expect("head")),
+    );
+    let segment = SegmentStoreImpl::new(
+        fs.clone(),
+        prefix.child(PathPart::parse("segments").expect("segments")),
+    );
+    let checkpoint = CheckpointStoreImpl::new(
+        fs.clone(),
+        prefix.child(PathPart::parse("checkpoints").expect("checkpoints")),
+    );
+    let lease = LeaseStoreImpl::new(
+        fs,
+        prefix.child(PathPart::parse("leases").expect("leases")),
+        BackoffPolicy::default(),
+        BlockingExecutor,
+    );
+    let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
+    Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx)
+}
+
+fn append_segment(base: &Path, segment: &str) -> Path {
+    if base.as_ref().is_empty() {
+        Path::parse(segment).expect("segment path")
+    } else {
+        base.child(PathPart::parse(segment).expect("segment part"))
+    }
 }

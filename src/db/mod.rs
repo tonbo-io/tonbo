@@ -7,7 +7,7 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc, time::Instant};
 
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
-use arrow_schema::SchemaRef;
+use arrow_schema::{ArrowError, SchemaRef};
 use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
 use lockable::LockableHashMap;
@@ -30,6 +30,7 @@ use crate::{
         ManifestError, SstEntry, TableId, TonboManifest, VersionEdit, WalSegmentRef,
         init_in_memory_manifest,
     },
+    mode::CatalogDescribe,
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     scan::RangeSet,
@@ -45,6 +46,10 @@ use crate::{
 
 type PendingWalBatches = HashMap<u64, Vec<(RecordBatch, ArrayRef, ArrayRef, Option<Timestamp>)>>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
+
+fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
+    KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
+}
 
 /// A DB parametrized by a mode `M` that defines key, payload and insert interface.
 pub struct DB<M, E>
@@ -209,7 +214,7 @@ where
     /// Begin constructing a DB in mode `M` through the fluent builder API.
     pub fn builder(config: M::Config) -> DbBuilder<M>
     where
-        M: Sized,
+        M: Sized + CatalogDescribe,
     {
         DbBuilder::new(config)
     }
@@ -247,12 +252,16 @@ where
     /// Construct a new DB in mode `M` using its configuration.
     pub fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError>
     where
-        M: Sized,
+        M: Sized + CatalogDescribe,
     {
+        let table_definition = M::table_definition(&config, builder::DEFAULT_TABLE_NAME);
         let (mode, mem) = M::build(config)?;
         let file_ids = FileIdGenerator::default();
-        let (manifest, manifest_table) =
-            init_in_memory_manifest(0, &file_ids).expect("manifest initialization");
+        let manifest = init_in_memory_manifest().map_err(manifest_error_as_key_extract)?;
+        let table_meta =
+            block_on(async { manifest.register_table(&file_ids, &table_definition).await })
+                .map_err(manifest_error_as_key_extract)?;
+        let manifest_table = table_meta.table_id;
         Ok(Self::from_components(
             mode,
             mem,
@@ -271,7 +280,7 @@ where
         wal_cfg: WalConfig,
     ) -> Result<Self, KeyExtractError>
     where
-        M: Sized,
+        M: Sized + CatalogDescribe,
     {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)

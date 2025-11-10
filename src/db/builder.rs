@@ -8,13 +8,15 @@ use fusio::{
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
+use futures::executor::block_on;
 use thiserror::Error;
 
 use super::{DB, Mode};
 use crate::{
     extractor::KeyExtractError,
     id::FileIdGenerator,
-    manifest::{ManifestError, TableId, TonboManifest, init_fs_manifest},
+    manifest::{ManifestError, TonboManifest, init_fs_manifest},
+    mode::CatalogDescribe,
     wal::{
         WalConfig,
         state::{FsWalStateStore, WalStateStore},
@@ -22,6 +24,8 @@ use crate::{
 };
 
 type WalTuningHook = dyn FnMut(&mut WalConfig) + Send + 'static;
+
+pub(crate) const DEFAULT_TABLE_NAME: &str = "tonbo-default";
 
 /// Builder-style configuration surface for constructing a [`DB`] instance.
 ///
@@ -32,22 +36,24 @@ type WalTuningHook = dyn FnMut(&mut WalConfig) + Send + 'static;
 /// steps.
 pub struct DbBuilder<M>
 where
-    M: Mode,
+    M: CatalogDescribe,
 {
     mode_config: M::Config,
     storage: Option<StorageBackendSpec>,
     wal_tuning: Option<Box<WalTuningHook>>,
+    table_name: Option<String>,
 }
 
 impl<M> DbBuilder<M>
 where
-    M: Mode,
+    M: CatalogDescribe,
 {
     pub(super) fn new(mode_config: M::Config) -> Self {
         Self {
             mode_config,
             storage: None,
             wal_tuning: None,
+            table_name: None,
         }
     }
 
@@ -90,6 +96,13 @@ where
         self
     }
 
+    /// Override the logical table name stored in the catalog manifest.
+    #[must_use]
+    pub fn table_name(mut self, name: impl Into<String>) -> Self {
+        self.table_name = Some(name.into());
+        self
+    }
+
     fn set_storage(&mut self, spec: StorageBackendSpec) {
         if self.storage.is_some() {
             panic!("storage backend already selected");
@@ -120,9 +133,18 @@ where
         let layout = StorageLayout::new(storage_spec)?;
         let manifest_init = ManifestBootstrap::new(&layout);
         let file_ids = FileIdGenerator::default();
+        let table_name = self
+            .table_name
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TABLE_NAME.to_string());
+        let table_definition = M::table_definition(&self.mode_config, &table_name);
 
         let (mode, mem) = M::build(self.mode_config).map_err(DbBuildError::Mode)?;
-        let (manifest, manifest_table) = manifest_init.init_manifest(&file_ids)?;
+        let manifest = manifest_init.init_manifest()?;
+        let table_meta =
+            block_on(async { manifest.register_table(&file_ids, &table_definition).await })
+                .map_err(DbBuildError::Manifest)?;
+        let manifest_table = table_meta.table_id;
 
         let mut wal_cfg = WalConfig::default();
         layout.apply_wal_defaults(&mut wal_cfg)?;
@@ -571,23 +593,18 @@ impl<'a> ManifestBootstrap<'a> {
         Self { layout }
     }
 
-    fn init_manifest(
-        &self,
-        file_ids: &FileIdGenerator,
-    ) -> Result<(TonboManifest, TableId), DbBuildError> {
+    fn init_manifest(&self) -> Result<TonboManifest, DbBuildError> {
         let backend = self.layout.backend();
         match backend.kind() {
             StorageBackendKind::InMemory { fs } => {
-                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root(), 0, file_ids)
+                init_fs_manifest(Arc::as_ref(fs).clone(), backend.root())
                     .map_err(DbBuildError::Manifest)
             }
             StorageBackendKind::Disk { fs } => {
-                init_fs_manifest(*Arc::as_ref(fs), backend.root(), 0, file_ids)
-                    .map_err(DbBuildError::Manifest)
+                init_fs_manifest(*Arc::as_ref(fs), backend.root()).map_err(DbBuildError::Manifest)
             }
             StorageBackendKind::ObjectStore(ObjectStoreBackend::S3 { fs }) => {
-                init_fs_manifest(fs.clone(), backend.root(), 0, file_ids)
-                    .map_err(DbBuildError::Manifest)
+                init_fs_manifest(fs.clone(), backend.root()).map_err(DbBuildError::Manifest)
             }
         }
     }

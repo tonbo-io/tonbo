@@ -29,6 +29,7 @@ struct DynKeyProjection {
     schema: SchemaRef,
     dyn_schema: DynSchema,
     projection: DynProjection,
+    columns: Vec<usize>,
 }
 
 impl DynKeyProjection {
@@ -48,6 +49,7 @@ impl DynKeyProjection {
             dyn_schema: DynSchema::from_ref(schema.clone()),
             schema,
             projection,
+            columns,
         })
     }
 
@@ -84,6 +86,10 @@ impl KeyProjection for DynKeyProjection {
             out.push(key);
         }
         Ok(out)
+    }
+
+    fn key_indices(&self) -> Vec<usize> {
+        self.columns.clone()
     }
 }
 

@@ -1,5 +1,6 @@
 use std::{
     fs,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,13 +22,22 @@ use tonbo::{
 };
 use typed_arrow_dyn::DynCell;
 
+fn workspace_temp_dir(prefix: &str) -> PathBuf {
+    let base = std::env::current_dir().expect("cwd");
+    let dir = base.join("target").join("tmp").join(format!(
+        "{prefix}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create workspace temp dir");
+    dir
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let root_dir = std::env::temp_dir().join(format!(
-        "tonbo-wal-e2e-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&root_dir)?;
+    let root_dir = workspace_temp_dir("tonbo-wal-e2e");
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -36,16 +46,12 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
     let executor = Arc::new(TokioExecutor::default());
-    let root_str = root_dir.to_string_lossy().into_owned();
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .on_disk(root_str.clone())
-        .build_with_executor(Arc::clone(&executor))
-        .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
 
-    let wal_cfg = db
-        .wal_config()
-        .cloned()
-        .expect("builder should set wal config");
+    let wal_dir = root_dir.join("wal");
+    fs::create_dir_all(&wal_dir)?;
+    let mut wal_cfg = WalConfig::default();
+    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
     let recovery_cfg = wal_cfg.clone();
 
     db.enable_wal(wal_cfg)?;
@@ -96,11 +102,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = std::env::temp_dir().join(format!(
-        "tonbo-wal-composite-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&wal_dir)?;
+    let wal_dir = workspace_temp_dir("tonbo-wal-composite");
 
     let metadata: std::collections::HashMap<_, _> = std::iter::once((
         "tonbo.keys".to_string(),
@@ -181,11 +183,7 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = std::env::temp_dir().join(format!(
-        "tonbo-wal-truncated-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&wal_dir)?;
+    let wal_dir = workspace_temp_dir("tonbo-wal-truncated");
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -279,11 +277,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = std::env::temp_dir().join(format!(
-        "tonbo-wal-tolerate-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&wal_dir)?;
+    let wal_dir = workspace_temp_dir("tonbo-wal-tolerate");
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -378,11 +372,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = std::env::temp_dir().join(format!(
-        "tonbo-wal-rewrite-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&wal_dir)?;
+    let wal_dir = workspace_temp_dir("tonbo-wal-rewrite");
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -513,11 +503,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = std::env::temp_dir().join(format!(
-        "tonbo-wal-rotate-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&wal_dir)?;
+    let wal_dir = workspace_temp_dir("tonbo-wal-rotate");
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -637,11 +623,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = std::env::temp_dir().join(format!(
-        "tonbo-wal-seq-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&wal_dir)?;
+    let wal_dir = workspace_temp_dir("tonbo-wal-seq");
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),

@@ -13,7 +13,7 @@ s3-smoke = []
 arrow-array = "56.2.0"
 arrow-buffer = "56.2.0"
 arrow-ipc = "56.1.0"
-arrow-schema = "56.2.0"
+arrow-schema = { version = "56.2.0", features = ["serde"] }
 arrow-select = "56.2.0"
 crc32c = "0.6"
 fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [
@@ -36,6 +36,7 @@ predicate = { path = "predicate" }
 thiserror = "2.0.17"
 typed-arrow-dyn = { version = "0.0.3", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
+sha2 = "0.10"
 
 
 [dev-dependencies]

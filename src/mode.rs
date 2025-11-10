@@ -8,12 +8,15 @@ use std::hash::Hash;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     db::DB,
     extractor::{KeyExtractError, KeyProjection},
     inmem::mutable::{DynMem, MutableLayout},
     key::KeyOwned,
+    manifest::TableDefinition,
     mvcc::Timestamp,
     wal::frame::WalEvent,
 };
@@ -60,6 +63,12 @@ pub trait Mode {
     where
         Self: Sized,
         E: Executor + Timer;
+}
+
+/// Modes capable of describing their catalog metadata for bootstrap.
+pub trait CatalogDescribe: Mode {
+    /// Derive the table definition for the provided config and logical table name.
+    fn table_definition(config: &Self::Config, table_name: &str) -> TableDefinition;
 }
 
 /// Dynamic runtime-schema mode backed by Arrow `RecordBatch` values.
@@ -146,5 +155,50 @@ impl Mode for DynMode {
         E: Executor + Timer,
     {
         db.replay_wal_events(events)
+    }
+}
+
+impl CatalogDescribe for DynMode {
+    fn table_definition(config: &Self::Config, table_name: &str) -> TableDefinition {
+        let key_columns = config
+            .extractor
+            .key_indices()
+            .into_iter()
+            .map(|idx| config.schema.field(idx).name().clone())
+            .collect();
+        TableDefinition {
+            name: table_name.to_string(),
+            schema_fingerprint: fingerprint_schema(&config.schema),
+            primary_key_columns: key_columns,
+            retention: None,
+            schema_version: 0,
+        }
+    }
+}
+
+fn fingerprint_schema(schema: &SchemaRef) -> String {
+    let mut hasher = Sha256::new();
+    let value =
+        serde_json::to_value(schema.as_ref()).expect("arrow schema serialization should not fail");
+    let canonical = canonicalize_json(value);
+    let bytes =
+        serde_json::to_vec(&canonical).expect("canonical schema serialization should not fail");
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let sorted = entries
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_json(value)))
+                .collect();
+            Value::Object(sorted)
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_json).collect()),
+        other => other,
     }
 }

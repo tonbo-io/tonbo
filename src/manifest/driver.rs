@@ -13,10 +13,13 @@ use thiserror::Error;
 
 use super::{
     VersionEdit,
-    codec::{ManifestCodec, VersionCodec},
-    domain::{TableHead, TableId, VersionKey, VersionState, VersionValue, WalSegmentRef},
+    codec::{CatalogCodec, ManifestCodec, VersionCodec},
+    domain::{
+        CatalogKey, CatalogState, CatalogValue, TableCatalogEntry, TableDefinition, TableHead,
+        TableId, TableMeta, VersionKey, VersionState, VersionValue, WalSegmentRef,
+    },
 };
-use crate::mvcc::Timestamp;
+use crate::{id::FileIdGenerator, mvcc::Timestamp};
 
 /// Error type surfaced by Tonbo's manifest layer.
 #[derive(Debug, Error)]
@@ -27,15 +30,18 @@ pub enum ManifestError {
     /// Tonbo-specific invariant violation detected while manipulating manifest records.
     #[error("invariant violation: {0}")]
     Invariant(&'static str),
+    /// Catalog metadata did not match expectations.
+    #[error("catalog conflict: {0}")]
+    CatalogConflict(String),
 }
 
 /// Convenience result alias for manifest operations.
 pub(crate) type ManifestResult<T> = Result<T, ManifestError>;
 
-/// Result of loading the latest state for a table.
+/// Result of loading the latest state for a table tracked by the version manifest.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct TableSnapshot {
+pub(crate) struct VersionSnapshot {
     /// Underlying fusio snapshot guarding read leases.
     pub manifest_snapshot: Snapshot,
     /// Current table head.
@@ -210,7 +216,7 @@ where
     }
 
     #[allow(dead_code)]
-    pub(crate) async fn snapshot_latest(&self, table: TableId) -> ManifestResult<TableSnapshot> {
+    pub(crate) async fn snapshot_latest(&self, table: TableId) -> ManifestResult<VersionSnapshot> {
         let session = self.inner.session_read().await?;
         let manifest_snapshot = session.snapshot().clone();
 
@@ -244,7 +250,7 @@ where
         };
 
         session.end().await?;
-        Ok(TableSnapshot {
+        Ok(VersionSnapshot {
             manifest_snapshot,
             head,
             latest_version,
@@ -257,10 +263,12 @@ where
         head: TableHead,
     ) -> ManifestResult<()> {
         let mut session = self.inner.session_write().await?;
-        session.put(
-            VersionKey::TableHead { table_id },
-            VersionValue::TableHead(head),
-        );
+        let key = VersionKey::TableHead { table_id };
+        if session.get(&key).await?.is_some() {
+            session.end().await?;
+            return Ok(());
+        }
+        session.put(key, VersionValue::TableHead(head));
         session.commit().await?;
         Ok(())
     }
@@ -335,6 +343,96 @@ where
     }
 }
 
+impl<HS, SS, CS, LS> Manifest<CatalogCodec, HS, SS, CS, LS>
+where
+    HS: HeadStore + Send + Sync + 'static,
+    SS: SegmentIo + Send + Sync + 'static,
+    CS: CheckpointStore + Send + Sync + 'static,
+    LS: LeaseStore + Send + Sync + 'static,
+{
+    pub(crate) async fn init_catalog_root(&self) -> ManifestResult<()> {
+        let mut session = self.inner.session_write().await?;
+        let key = CatalogKey::Root;
+        if session.get(&key).await?.is_some() {
+            session.end().await?;
+            return Ok(());
+        }
+        session.put(key, CatalogValue::Catalog(CatalogState::default()));
+        session.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn register_table(
+        &self,
+        file_ids: &FileIdGenerator,
+        definition: &TableDefinition,
+    ) -> ManifestResult<TableMeta> {
+        let mut session = self.inner.session_write().await?;
+        let root_key = CatalogKey::Root;
+        let mut catalog = match session.get(&root_key).await? {
+            Some(value) => {
+                <CatalogCodec as ManifestCodec>::validate_key_value(&root_key, &value)?;
+                CatalogState::try_from(value)?
+            }
+            None => CatalogState::default(),
+        };
+
+        if let Some(table_id) = find_table_by_name(&catalog, &definition.name) {
+            let meta_key = CatalogKey::TableMeta { table_id };
+            let value = session
+                .get(&meta_key)
+                .await?
+                .ok_or(ManifestError::Invariant(
+                    "catalog entry missing corresponding table metadata",
+                ))?;
+            <CatalogCodec as ManifestCodec>::validate_key_value(&meta_key, &value)?;
+            let meta = TableMeta::try_from(value)?;
+            let compat = ensure_table_compat(&meta, definition);
+            session.end().await?;
+            compat?;
+            return Ok(meta);
+        }
+
+        let table_id = TableId::new(file_ids);
+        let meta = TableMeta {
+            table_id,
+            name: definition.name.clone(),
+            schema_fingerprint: definition.schema_fingerprint.clone(),
+            primary_key_columns: definition.primary_key_columns.clone(),
+            retention: definition.retention.clone(),
+            schema_version: definition.schema_version,
+        };
+
+        catalog.tables.insert(
+            table_id,
+            TableCatalogEntry {
+                logical_table_name: definition.name.clone(),
+            },
+        );
+        catalog.next_table_ordinal = catalog.next_table_ordinal.saturating_add(1);
+
+        session.put(root_key, CatalogValue::Catalog(catalog));
+        session.put(
+            CatalogKey::TableMeta { table_id },
+            CatalogValue::TableMeta(meta.clone()),
+        );
+        session.commit().await?;
+        Ok(meta)
+    }
+
+    pub(crate) async fn table_meta(&self, table: TableId) -> ManifestResult<TableMeta> {
+        let session = self.inner.session_read().await?;
+        let key = CatalogKey::TableMeta { table_id: table };
+        let value = session.get(&key).await?.ok_or(ManifestError::Invariant(
+            "catalog metadata missing for table_id",
+        ))?;
+        <CatalogCodec as ManifestCodec>::validate_key_value(&key, &value)?;
+        let meta = TableMeta::try_from(value)?;
+        session.end().await?;
+        Ok(meta)
+    }
+}
+
 fn reduce_wal_floor(
     current: Option<WalSegmentRef>,
     candidate: Option<WalSegmentRef>,
@@ -368,6 +466,41 @@ where
     }
 }
 
+fn find_table_by_name(state: &CatalogState, name: &str) -> Option<TableId> {
+    state
+        .tables
+        .iter()
+        .find_map(|(id, entry)| (entry.logical_table_name == name).then_some(*id))
+}
+
+fn ensure_table_compat(meta: &TableMeta, definition: &TableDefinition) -> ManifestResult<()> {
+    if meta.schema_fingerprint != definition.schema_fingerprint {
+        return Err(ManifestError::CatalogConflict(format!(
+            "table `{}` schema fingerprint mismatch (existing={}, requested={})",
+            definition.name, meta.schema_fingerprint, definition.schema_fingerprint
+        )));
+    }
+    if meta.primary_key_columns != definition.primary_key_columns {
+        return Err(ManifestError::CatalogConflict(format!(
+            "table `{}` primary key columns mismatch (existing={:?}, requested={:?})",
+            definition.name, meta.primary_key_columns, definition.primary_key_columns
+        )));
+    }
+    if meta.schema_version != definition.schema_version {
+        return Err(ManifestError::CatalogConflict(format!(
+            "table `{}` schema version mismatch (existing={}, requested={})",
+            definition.name, meta.schema_version, definition.schema_version
+        )));
+    }
+    if meta.retention != definition.retention {
+        return Err(ManifestError::CatalogConflict(format!(
+            "table `{}` retention policy mismatch",
+            definition.name
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -378,7 +511,13 @@ mod tests {
         ManifestContext, SegmentStoreImpl,
     };
 
-    use super::{super::domain::SstEntry, *};
+    use super::{
+        super::{
+            bootstrap::InMemoryCatalogManifest,
+            domain::{SstEntry, TableDefinition},
+        },
+        *,
+    };
     use crate::{
         id::FileIdGenerator,
         manifest::{bootstrap::init_in_memory_manifest_raw, domain::TableId},
@@ -394,6 +533,17 @@ mod tests {
         let checkpoint = CheckpointStoreImpl::new(fs.clone(), "");
         let timer = BlockingExecutor;
         let lease = LeaseStoreImpl::new(fs, "", BackoffPolicy::default(), timer);
+        let context = Arc::new(ManifestContext::new(BlockingExecutor));
+        Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
+    }
+
+    fn bare_catalog_manifest() -> InMemoryCatalogManifest {
+        let fs = InMemoryFs::new();
+        let head = HeadStoreImpl::new(fs.clone(), "catalog/head.json");
+        let segment = SegmentStoreImpl::new(fs.clone(), "catalog/segments");
+        let checkpoint = CheckpointStoreImpl::new(fs.clone(), "catalog/checkpoints");
+        let timer = BlockingExecutor;
+        let lease = LeaseStoreImpl::new(fs, "catalog/leases", BackoffPolicy::default(), timer);
         let context = Arc::new(ManifestContext::new(BlockingExecutor));
         Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
     }
@@ -659,6 +809,62 @@ mod tests {
             .expect("list_versions should allow limiting");
         assert_eq!(limited_versions.len(), 1);
         assert_eq!(limited_versions[0].commit_timestamp(), Timestamp::new(2));
+    }
+
+    #[tokio::test]
+    async fn catalog_registers_and_validates_tables() {
+        let file_ids = FileIdGenerator::default();
+        let catalog = bare_catalog_manifest();
+        catalog
+            .init_catalog_root()
+            .await
+            .expect("init catalog root");
+
+        let definition = TableDefinition {
+            name: "test-table".into(),
+            schema_fingerprint: "fingerprint-a".into(),
+            primary_key_columns: vec!["pk".into()],
+            retention: None,
+            schema_version: 1,
+        };
+
+        let meta = catalog
+            .register_table(&file_ids, &definition)
+            .await
+            .expect("register table");
+        assert_eq!(meta.name, definition.name);
+        assert_eq!(meta.schema_fingerprint, definition.schema_fingerprint);
+
+        // Re-register with identical metadata should reuse the table id.
+        let meta_again = catalog
+            .register_table(&file_ids, &definition)
+            .await
+            .expect("register duplicate");
+        assert_eq!(meta.table_id, meta_again.table_id);
+
+        let fetched = catalog
+            .table_meta(meta.table_id)
+            .await
+            .expect("load table meta");
+        assert_eq!(fetched, meta);
+
+        // Mismatched schema fingerprint should surface a catalog conflict.
+        let mut incompatible = definition.clone();
+        incompatible.schema_fingerprint = "fingerprint-b".into();
+        let err = catalog
+            .register_table(&file_ids, &incompatible)
+            .await
+            .expect_err("register incompatible schema");
+        assert!(matches!(err, ManifestError::CatalogConflict(_)));
+
+        // Different primary key layout should also fail.
+        let mut wrong_keys = definition.clone();
+        wrong_keys.primary_key_columns = vec!["other".into()];
+        let err = catalog
+            .register_table(&file_ids, &wrong_keys)
+            .await
+            .expect_err("register mismatched keys");
+        assert!(matches!(err, ManifestError::CatalogConflict(_)));
     }
 
     #[tokio::test]

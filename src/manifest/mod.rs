@@ -13,7 +13,11 @@ mod domain;
 mod driver;
 mod version;
 
-pub(crate) use bootstrap::{TonboManifest, init_fs_manifest, init_in_memory_manifest};
-pub(crate) use domain::{SstEntry, TableHead, TableId, VersionState, WalSegmentRef};
-pub(crate) use driver::{ManifestError, ManifestResult, TableSnapshot};
+pub(crate) use bootstrap::{
+    TableSnapshot, TonboManifest, init_fs_manifest, init_in_memory_manifest,
+};
+pub(crate) use domain::{
+    SstEntry, TableDefinition, TableHead, TableId, VersionState, WalSegmentRef,
+};
+pub(crate) use driver::{ManifestError, ManifestResult};
 pub(crate) use version::VersionEdit;

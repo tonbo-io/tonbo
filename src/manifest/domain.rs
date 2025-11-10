@@ -218,10 +218,25 @@ pub(crate) struct TableMeta {
     pub schema_version: u32,
 }
 
+/// Input payload used when registering a table in the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDefinition {
+    /// Human-readable name of the table.
+    pub name: String,
+    /// Schema fingerprint used for compatibility validation.
+    pub schema_fingerprint: String,
+    /// Columns participating in the primary key.
+    pub primary_key_columns: Vec<String>,
+    /// Optional retention policy overrides.
+    pub retention: Option<TableRetionConfig>,
+    /// Monotonic schema version number.
+    pub schema_version: u32,
+}
+
 /// Retention policy knobs for a table.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TableRetionConfig {
+pub struct TableRetionConfig {
     /// Maximum number of committed versions to retain.
     pub max_versions: u64,
     /// Maximum age to retain versions and their WAL segments.

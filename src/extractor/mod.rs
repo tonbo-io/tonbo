@@ -26,4 +26,7 @@ pub trait KeyProjection {
         batch: &RecordBatch,
         rows: &[usize],
     ) -> Result<Vec<KeyRow>, KeyExtractError>;
+
+    /// Return the zero-based column indices participating in the projection.
+    fn key_indices(&self) -> Vec<usize>;
 }
