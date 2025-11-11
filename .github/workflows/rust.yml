@@ -46,4 +46,4 @@ jobs:
           args: --workspace -- -D warnings
 
       - name: Run cargo test
-        run: cargo test --verbose
+        run: cargo test --verbose --workspace

@@ -34,15 +34,15 @@ impl PredicateBuilder {
         Self::new(BuilderCombine::Leaf)
     }
 
-    /// Creates a builder that emits a conjunction of all clauses.
+    /// Creates a builder that emits an `AND` of all clauses.
     #[must_use]
-    pub fn conjunction() -> Self {
+    pub fn and() -> Self {
         Self::new(BuilderCombine::Conjunction)
     }
 
-    /// Creates a builder that emits a disjunction of all clauses.
+    /// Creates a builder that emits an `OR` of all clauses.
     #[must_use]
-    pub fn disjunction() -> Self {
+    pub fn or() -> Self {
         Self::new(BuilderCombine::Disjunction)
     }
 
@@ -225,7 +225,7 @@ impl PredicateBuilder {
 
     /// Adds a nested conjunction built by the supplied closure.
     #[must_use]
-    pub fn and_branch<F>(self, build: F) -> Self
+    pub fn and_group<F>(self, build: F) -> Self
     where
         F: FnOnce(PredicateBuilder) -> PredicateBuilder,
     {
@@ -234,7 +234,7 @@ impl PredicateBuilder {
 
     /// Adds a nested disjunction built by the supplied closure.
     #[must_use]
-    pub fn or_branch<F>(self, build: F) -> Self
+    pub fn or_group<F>(self, build: F) -> Self
     where
         F: FnOnce(PredicateBuilder) -> PredicateBuilder,
     {
@@ -243,11 +243,11 @@ impl PredicateBuilder {
 
     /// Adds a negated predicate built by the supplied closure.
     #[must_use]
-    pub fn not_branch<F>(mut self, build: F) -> Self
+    pub fn not_group<F>(mut self, build: F) -> Self
     where
         F: FnOnce(PredicateBuilder) -> PredicateBuilder,
     {
-        let predicate = build(PredicateBuilder::leaf()).build();
+        let predicate = build(PredicateBuilder::and()).build();
         let negated = Predicate::from_kind(PredicateNode::Inner(PredicateInner::Not(Box::new(
             predicate,
         ))))
@@ -313,13 +313,13 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "PredicateBuilder requires at least one clause")]
-    fn conjunction_builder_requires_clause() {
-        let _ = PredicateBuilder::conjunction().build();
+    fn and_builder_requires_clause() {
+        let _ = PredicateBuilder::and().build();
     }
 
     #[test]
     #[should_panic(expected = "PredicateBuilder requires at least one clause")]
-    fn disjunction_builder_requires_clause() {
-        let _ = PredicateBuilder::disjunction().build();
+    fn or_builder_requires_clause() {
+        let _ = PredicateBuilder::or().build();
     }
 }

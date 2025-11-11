@@ -229,7 +229,7 @@ fn overlaps_or_adjacent<K: Ord>(end: &Bound<K>, start: &Bound<K>) -> bool {
         (B::Included(x), B::Included(y)) => x >= y,
         (B::Included(x), B::Excluded(y)) => x >= y,
         (B::Excluded(x), B::Included(y)) => x >= y,
-        (B::Excluded(x), B::Excluded(y)) => x >= y,
+        (B::Excluded(x), B::Excluded(y)) => x > y,
     }
 }
 

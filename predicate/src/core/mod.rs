@@ -7,13 +7,10 @@ mod row_set;
 use std::{fmt, sync::Arc};
 
 pub use builder::PredicateBuilder;
-pub use row_set::{BitmapRowSet, RowId, RowIdIter, RowSet};
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
+pub use row_set::{BitmapRowSet, DynRowSet, RowId, RowIdIter, RowSet};
 
 /// Literal values accepted by predicate operands.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ScalarValue {
     /// Represents SQL/Arrow `NULL`.
     Null,
@@ -41,7 +38,6 @@ impl ScalarValue {
 
 /// Reference identifying a column used inside predicates.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ColumnRef {
     /// Optional ordinal of the column within the projected schema.
     pub index: Option<usize>,
@@ -65,7 +61,6 @@ impl ColumnRef {
 
 /// Operand used by predicate comparisons and function calls.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Operand {
     /// Reference to a column.
     Column(ColumnRef),
@@ -87,7 +82,6 @@ impl From<ScalarValue> for Operand {
 
 /// Comparison operator used by binary predicates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ComparisonOp {
     /// Equals (`=`).
     Equal,
@@ -129,6 +123,19 @@ impl ComparisonOp {
             ComparisonOp::GreaterThanOrEqual => ComparisonOp::LessThanOrEqual,
         }
     }
+
+    /// Returns the logical negation of this operator.
+    #[must_use]
+    pub fn negated(self) -> Self {
+        match self {
+            ComparisonOp::Equal => ComparisonOp::NotEqual,
+            ComparisonOp::NotEqual => ComparisonOp::Equal,
+            ComparisonOp::LessThan => ComparisonOp::GreaterThanOrEqual,
+            ComparisonOp::LessThanOrEqual => ComparisonOp::GreaterThan,
+            ComparisonOp::GreaterThan => ComparisonOp::LessThanOrEqual,
+            ComparisonOp::GreaterThanOrEqual => ComparisonOp::LessThan,
+        }
+    }
 }
 
 impl fmt::Display for ComparisonOp {
@@ -139,7 +146,6 @@ impl fmt::Display for ComparisonOp {
 
 /// Logical predicate shared across adapters and Tonbo's core.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Predicate {
     kind: PredicateNode,
 }
@@ -234,8 +240,54 @@ impl Predicate {
         }
     }
 
+    /// Returns the logical negation of this predicate.
+    #[must_use]
+    pub fn negate(self) -> Self {
+        let negated = match self.kind {
+            PredicateNode::Leaf(leaf) => Predicate::negate_leaf(leaf),
+            PredicateNode::Inner(PredicateInner::Not(inner)) => *inner,
+            PredicateNode::Inner(PredicateInner::And(children)) => {
+                let negated_children: Vec<_> =
+                    children.into_iter().map(Predicate::negate).collect();
+                Predicate::make_or(negated_children)
+            }
+            PredicateNode::Inner(PredicateInner::Or(children)) => {
+                let negated_children: Vec<_> =
+                    children.into_iter().map(Predicate::negate).collect();
+                Predicate::make_and(negated_children)
+            }
+        };
+        negated.simplify()
+    }
+
+    /// Builds a conjunction from the supplied predicates, if any are provided.
+    #[must_use]
+    pub fn conjunction(predicates: Vec<Predicate>) -> Option<Predicate> {
+        match predicates.len() {
+            0 => None,
+            1 => predicates.into_iter().next(),
+            _ => Some(Predicate::make_and(predicates).simplify()),
+        }
+    }
+
+    /// Builds a disjunction from the supplied predicates, if any.
+    #[must_use]
+    pub fn disjunction(predicates: Vec<Predicate>) -> Option<Predicate> {
+        match predicates.len() {
+            0 => None,
+            1 => predicates.into_iter().next(),
+            _ => Some(Predicate::make_or(predicates).simplify()),
+        }
+    }
+
+    /// Builds a predicate directly from a leaf node.
+    #[must_use]
+    pub fn from_leaf(leaf: PredicateLeaf) -> Self {
+        Self::from_kind(PredicateNode::Leaf(leaf))
+    }
+
     /// Accepts a visitor that walks the predicate tree bottom-up.
-    pub fn accept<V>(&self, visitor: &mut V) -> Result<V::RowSetImpl, V::Error>
+    pub fn accept<V>(&self, visitor: &mut V) -> Result<VisitOutcome<V::Value>, V::Error>
     where
         V: PredicateVisitor + ?Sized,
     {
@@ -249,11 +301,34 @@ impl Predicate {
     fn into_kind(self) -> PredicateNode {
         self.kind
     }
+
+    fn negate_leaf(leaf: PredicateLeaf) -> Predicate {
+        let negated = match leaf {
+            PredicateLeaf::Compare { left, op, right } => PredicateLeaf::Compare {
+                left,
+                op: op.negated(),
+                right,
+            },
+            PredicateLeaf::InList {
+                expr,
+                list,
+                negated,
+            } => PredicateLeaf::InList {
+                expr,
+                list,
+                negated: !negated,
+            },
+            PredicateLeaf::IsNull { expr, negated } => PredicateLeaf::IsNull {
+                expr,
+                negated: !negated,
+            },
+        };
+        Predicate::from_kind(PredicateNode::Leaf(negated))
+    }
 }
 
 /// Categorises a predicate node as leaf or branch.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PredicateNode {
     /// Leaf predicates without child expressions.
     Leaf(PredicateLeaf),
@@ -263,7 +338,6 @@ pub enum PredicateNode {
 
 /// Leaf predicates encode terminal expressions with no child nodes.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PredicateLeaf {
     /// Binary comparison.
     Compare {
@@ -294,7 +368,6 @@ pub enum PredicateLeaf {
 
 /// Branch predicates contain one or more child predicates.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PredicateInner {
     /// Logical negation.
     Not(Box<Predicate>),
@@ -304,64 +377,94 @@ pub enum PredicateInner {
     Or(Vec<Predicate>),
 }
 
-/// Visitor that walks predicate trees and produces row sets.
+/// Result produced while evaluating parts of a predicate tree.
+#[derive(Clone, Debug, Default)]
+pub struct VisitOutcome<T> {
+    /// Computed value for the evaluated portion, when available.
+    pub value: Option<T>,
+    /// Residual predicate that still needs evaluation elsewhere.
+    pub residual: Option<Predicate>,
+}
+
+impl<T> VisitOutcome<T> {
+    /// Outcome containing only a computed value.
+    pub fn value(value: T) -> Self {
+        Self {
+            value: Some(value),
+            residual: None,
+        }
+    }
+
+    /// Outcome containing only a residual predicate.
+    pub fn residual(residual: Predicate) -> Self {
+        Self {
+            value: None,
+            residual: Some(residual),
+        }
+    }
+
+    /// Outcome without value or residual.
+    pub fn empty() -> Self {
+        Self {
+            value: None,
+            residual: None,
+        }
+    }
+}
+
+/// Visitor that walks predicate trees and emits custom results plus residual predicates.
 pub trait PredicateVisitor {
     /// Error type used when evaluation fails.
     type Error;
-    /// Concrete row-set type produced while walking the predicate.
-    type RowSetImpl: RowSet;
+    /// Concrete value type produced while walking the predicate.
+    type Value;
 
-    /// Returns the set of all candidate rows used to evaluate negations.
-    fn universe(&self) -> Self::RowSetImpl;
-
-    /// Evaluates a leaf predicate and returns its row-set result.
-    fn visit_leaf(&mut self, leaf: &PredicateLeaf) -> Result<Self::RowSetImpl, Self::Error>;
+    /// Evaluates a leaf predicate and returns its result.
+    fn visit_leaf(
+        &mut self,
+        leaf: &PredicateLeaf,
+    ) -> Result<VisitOutcome<Self::Value>, Self::Error>;
 
     /// Combines the result of a negated child predicate.
-    fn combine_not(&mut self, child: Self::RowSetImpl) -> Result<Self::RowSetImpl, Self::Error> {
-        Ok(self.universe().difference(&child))
-    }
+    fn combine_not(
+        &mut self,
+        original: &Predicate,
+        child: VisitOutcome<Self::Value>,
+    ) -> Result<VisitOutcome<Self::Value>, Self::Error>;
 
     /// Combines an `AND` clause from the supplied child results.
     fn combine_and(
         &mut self,
-        children: Vec<Self::RowSetImpl>,
-    ) -> Result<Self::RowSetImpl, Self::Error> {
-        debug_assert!(!children.is_empty(), "AND clauses are validated");
-        let mut iter = children.into_iter();
-        let mut acc = iter.next().expect("non-empty AND");
-        for child in iter {
-            acc = acc.intersect(&child);
-        }
-        Ok(acc)
-    }
+        original: &Predicate,
+        children: Vec<VisitOutcome<Self::Value>>,
+    ) -> Result<VisitOutcome<Self::Value>, Self::Error>;
 
     /// Combines an `OR` clause from the supplied child results.
     fn combine_or(
         &mut self,
-        children: Vec<Self::RowSetImpl>,
-    ) -> Result<Self::RowSetImpl, Self::Error> {
-        debug_assert!(!children.is_empty(), "OR clauses are validated");
-        let mut iter = children.into_iter();
-        let mut acc = iter.next().expect("non-empty OR");
-        for child in iter {
-            acc = acc.union(&child);
-        }
-        Ok(acc)
-    }
+        original: &Predicate,
+        children: Vec<VisitOutcome<Self::Value>>,
+    ) -> Result<VisitOutcome<Self::Value>, Self::Error>;
 
     /// Visits the supplied predicate by walking the expression tree.
-    fn visit_predicate(&mut self, predicate: &Predicate) -> Result<Self::RowSetImpl, Self::Error> {
-        self.visit_node(predicate.kind())
+    fn visit_predicate(
+        &mut self,
+        predicate: &Predicate,
+    ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+        self.visit_node(predicate.kind(), predicate)
     }
 
     /// Internal helper that evaluates a predicate node recursively.
-    fn visit_node(&mut self, node: &PredicateNode) -> Result<Self::RowSetImpl, Self::Error> {
+    fn visit_node(
+        &mut self,
+        node: &PredicateNode,
+        original: &Predicate,
+    ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
         match node {
             PredicateNode::Leaf(leaf) => self.visit_leaf(leaf),
             PredicateNode::Inner(PredicateInner::Not(inner)) => {
                 let child = self.visit_predicate(inner)?;
-                self.combine_not(child)
+                self.combine_not(original, child)
             }
             PredicateNode::Inner(PredicateInner::And(clauses)) => {
                 debug_assert!(
@@ -372,7 +475,7 @@ pub trait PredicateVisitor {
                 for clause in clauses {
                     children.push(self.visit_predicate(clause)?);
                 }
-                self.combine_and(children)
+                self.combine_and(original, children)
             }
             PredicateNode::Inner(PredicateInner::Or(clauses)) => {
                 debug_assert!(
@@ -383,7 +486,7 @@ pub trait PredicateVisitor {
                 for clause in clauses {
                     children.push(self.visit_predicate(clause)?);
                 }
-                self.combine_or(children)
+                self.combine_or(original, children)
             }
         }
     }
@@ -426,18 +529,18 @@ mod tests {
     }
 
     fn sample_predicate() -> Predicate {
-        PredicateBuilder::conjunction()
+        PredicateBuilder::and()
             .compare(
                 ColumnRef::new("a", None),
                 ComparisonOp::GreaterThan,
                 ScalarValue::Int64(1),
             )
-            .or_branch(|builder| {
+            .or_group(|builder| {
                 builder
                     .equals(ColumnRef::new("b", None), ScalarValue::Int64(2))
                     .equals(ColumnRef::new("b", None), ScalarValue::Int64(3))
             })
-            .not_branch(|builder| builder.is_null(ColumnRef::new("a", None)))
+            .not_group(|builder| builder.is_null(ColumnRef::new("a", None)))
             .build()
     }
 
@@ -451,6 +554,30 @@ mod tests {
 
     fn collect_row_ids(rowset: &BitmapRowSet) -> Vec<RowId> {
         rowset.iter().collect()
+    }
+
+    fn combine_row_sets<F, R>(
+        children: Vec<VisitOutcome<BitmapRowSet>>,
+        reducer: F,
+        residual_builder: R,
+    ) -> VisitOutcome<BitmapRowSet>
+    where
+        F: Fn(BitmapRowSet, BitmapRowSet) -> BitmapRowSet,
+        R: Fn(Vec<Predicate>) -> Option<Predicate>,
+    {
+        let mut residuals = Vec::new();
+        let mut values = Vec::new();
+        for child in children {
+            if let Some(value) = child.value {
+                values.push(value);
+            }
+            if let Some(residual) = child.residual {
+                residuals.push(residual);
+            }
+        }
+        let residual = residual_builder(residuals);
+        let value = values.into_iter().reduce(reducer);
+        VisitOutcome { value, residual }
     }
 
     struct ComparisonVisitor {
@@ -554,15 +681,20 @@ mod tests {
         }
     }
 
-    impl PredicateVisitor for ComparisonVisitor {
-        type Error = ();
-        type RowSetImpl = BitmapRowSet;
-
-        fn universe(&self) -> Self::RowSetImpl {
+    impl ComparisonVisitor {
+        fn universe(&self) -> BitmapRowSet {
             universe_from_rows(&self.rows)
         }
+    }
 
-        fn visit_leaf(&mut self, leaf: &PredicateLeaf) -> Result<Self::RowSetImpl, Self::Error> {
+    impl PredicateVisitor for ComparisonVisitor {
+        type Error = ();
+        type Value = BitmapRowSet;
+
+        fn visit_leaf(
+            &mut self,
+            leaf: &PredicateLeaf,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
             let row_set = match leaf {
                 PredicateLeaf::Compare { left, op, right } => {
                     self.evaluate_compare(left, *op, right)
@@ -574,7 +706,52 @@ mod tests {
                 } => self.evaluate_in_list(expr, list, *negated),
                 PredicateLeaf::IsNull { expr, negated } => self.evaluate_is_null(expr, *negated),
             };
-            Ok(row_set)
+            Ok(VisitOutcome::value(row_set))
+        }
+
+        fn combine_not(
+            &mut self,
+            _original: &Predicate,
+            child: VisitOutcome<Self::Value>,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+            if let Some(residual) = child.residual {
+                Ok(VisitOutcome::residual(residual.negate()))
+            } else if let Some(value) = child.value {
+                let complement = self.universe().difference(&value);
+                Ok(VisitOutcome::value(complement))
+            } else {
+                Ok(VisitOutcome::empty())
+            }
+        }
+
+        fn combine_and(
+            &mut self,
+            _original: &Predicate,
+            children: Vec<VisitOutcome<Self::Value>>,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+            Ok(combine_row_sets(
+                children,
+                |mut acc, value| {
+                    acc = acc.intersect(&value);
+                    acc
+                },
+                Predicate::conjunction,
+            ))
+        }
+
+        fn combine_or(
+            &mut self,
+            _original: &Predicate,
+            children: Vec<VisitOutcome<Self::Value>>,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+            Ok(combine_row_sets(
+                children,
+                |mut acc, value| {
+                    acc = acc.union(&value);
+                    acc
+                },
+                Predicate::disjunction,
+            ))
         }
     }
 
@@ -590,14 +767,58 @@ mod tests {
 
     impl PredicateVisitor for AllRowsVisitor {
         type Error = ();
-        type RowSetImpl = BitmapRowSet;
+        type Value = BitmapRowSet;
 
-        fn universe(&self) -> Self::RowSetImpl {
-            self.all_rows.clone()
+        fn visit_leaf(
+            &mut self,
+            _leaf: &PredicateLeaf,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+            Ok(VisitOutcome::value(self.all_rows.clone()))
         }
 
-        fn visit_leaf(&mut self, _leaf: &PredicateLeaf) -> Result<Self::RowSetImpl, Self::Error> {
-            Ok(self.universe())
+        fn combine_not(
+            &mut self,
+            _original: &Predicate,
+            child: VisitOutcome<Self::Value>,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+            if let Some(residual) = child.residual {
+                Ok(VisitOutcome::residual(residual.negate()))
+            } else if let Some(value) = child.value {
+                let complement = self.all_rows.difference(&value);
+                Ok(VisitOutcome::value(complement))
+            } else {
+                Ok(VisitOutcome::empty())
+            }
+        }
+
+        fn combine_and(
+            &mut self,
+            _original: &Predicate,
+            children: Vec<VisitOutcome<Self::Value>>,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+            Ok(combine_row_sets(
+                children,
+                |mut acc, value| {
+                    acc = acc.intersect(&value);
+                    acc
+                },
+                Predicate::conjunction,
+            ))
+        }
+
+        fn combine_or(
+            &mut self,
+            _original: &Predicate,
+            children: Vec<VisitOutcome<Self::Value>>,
+        ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
+            Ok(combine_row_sets(
+                children,
+                |mut acc, value| {
+                    acc = acc.union(&value);
+                    acc
+                },
+                Predicate::disjunction,
+            ))
         }
     }
 
@@ -607,15 +828,23 @@ mod tests {
         let rows = sample_rows();
 
         let mut comparison = ComparisonVisitor::new(rows.clone());
-        let comparison_result = predicate
+        let comparison_outcome = predicate
             .accept(&mut comparison)
             .expect("comparison visitor succeeds");
+        assert!(comparison_outcome.residual.is_none());
+        let comparison_result = comparison_outcome
+            .value
+            .expect("comparison visitor yields row set");
         assert_eq!(collect_row_ids(&comparison_result), vec![0, 3]);
 
         let mut all_rows = AllRowsVisitor::new(universe_from_rows(&rows));
-        let all_rows_result = predicate
+        let all_rows_outcome = predicate
             .accept(&mut all_rows)
             .expect("all rows visitor succeeds");
+        assert!(all_rows_outcome.residual.is_none());
+        let all_rows_result = all_rows_outcome
+            .value
+            .expect("all rows visitor yields row set");
         assert!(all_rows_result.is_empty());
     }
 }

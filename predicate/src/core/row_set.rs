@@ -10,8 +10,11 @@ pub type RowId = u32;
 /// Borrowed iterator that yields [`RowId`] values.
 pub type RowIdIter<'a> = Box<dyn Iterator<Item = RowId> + Send + 'a>;
 
+/// Dynamic dispatched [`RowSet`] implementation.
+pub type DynRowSet = Box<dyn RowSet>;
+
 /// Abstract set of row identifiers that supports basic set algebra.
-pub trait RowSet: Clone + Send + Sync {
+pub trait RowSet: Send + Sync {
     /// Returns the number of rows tracked by the set.
     fn len(&self) -> usize;
 
@@ -27,13 +30,19 @@ pub trait RowSet: Clone + Send + Sync {
     fn iter(&self) -> RowIdIter<'_>;
 
     /// Returns the intersection between this set and `other`.
-    fn intersect(&self, other: &Self) -> Self;
+    fn intersect(&self, other: &Self) -> Self
+    where
+        Self: Sized;
 
     /// Returns the union between this set and `other`.
-    fn union(&self, other: &Self) -> Self;
+    fn union(&self, other: &Self) -> Self
+    where
+        Self: Sized;
 
     /// Returns the relative complement (`self \ other`).
-    fn difference(&self, other: &Self) -> Self;
+    fn difference(&self, other: &Self) -> Self
+    where
+        Self: Sized;
 }
 
 /// [`RowSet`] implementation backed by a roaring bitmap.

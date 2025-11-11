@@ -688,7 +688,7 @@ impl<M: Mode> SsTableReader<M> {
         &self,
         _ranges: &RangeSet<M::Key>,
         _ts: Timestamp,
-        _predicate: Option<&Predicate<M::Key>>,
+        _predicate: Option<&Predicate>,
     ) -> Result<SsTableScanPlan<M>, SsTableError> {
         let _ = self;
         Err(SsTableError::Unimplemented)

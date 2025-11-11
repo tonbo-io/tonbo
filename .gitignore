@@ -3,8 +3,6 @@ Cargo.lock
 .serena
 
 /.idea
-db_path
-guide/book
 
 # python
 __pycache__

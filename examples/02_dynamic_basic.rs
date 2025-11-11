@@ -8,7 +8,7 @@ use tonbo::{
     db::{DB, DynMode},
     key::KeyOwned,
     mode::DynModeConfig,
-    query::{Expr, Predicate},
+    query::{ColumnRef, Predicate, PredicateBuilder, ScalarValue},
     scan::{KeyRange, RangeSet},
 };
 use typed_arrow::{
@@ -85,10 +85,12 @@ fn main() {
     println!("dynamic scan rows (carol): {:?}", out);
 
     // Query expression: id == "dave"
-    let expr = Expr::Pred(Predicate::Eq {
-        value: KeyOwned::from("dave"),
-    });
-    let rs = tonbo::query::extract_key_ranges(&expr);
+    let key_col = ColumnRef::new("id", Some(0));
+    let expr: Predicate = PredicateBuilder::leaf()
+        .equals(key_col.clone(), ScalarValue::Utf8("dave".into()))
+        .build();
+    let (rs, residual) = tonbo::query::extract_key_ranges::<KeyOwned>(&expr, &[key_col]);
+    assert!(residual.is_none());
     let out_q: Vec<(String, i32)> = db
         .scan_mutable_rows(&rs)
         .map(|r| match (&r[0], &r[1]) {
