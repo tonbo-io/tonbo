@@ -53,7 +53,6 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let mut wal_cfg = WalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
     let recovery_cfg = wal_cfg.clone();
-
     db.enable_wal(wal_cfg)?;
 
     let batch = RecordBatch::try_new(

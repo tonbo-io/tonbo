@@ -173,6 +173,43 @@ It begins when a user issues a write operation and ends once the data is durably
 
 Tonbo’s WAL ensures durability before data enters the in-memory structures. Writes are first appended into a buffered sequence of log entries and grouped into **immutable segments** (objects) suited for storage on S3-like backends. Each segment is uploaded via Fusio’s async I/O layer and atomically published using conditional PUT/CAS, ensuring correct global ordering even in serverless, multi-writer environments. A lightweight WAL manifest tracks segment sequence numbers, offsets, and visibility state, enabling reliable crash recovery: upon startup, Tonbo replays segments into the MemTable before proceeding to flush/compaction. This design simulates a continuous append-only log over object storage—bridging the durability of a traditional WAL with the scalability of S3.
 
+##### Configuring the WAL via `DbBuilder`
+
+By default, durable builders create a `WalConfig` using layout-derived defaults (directory, filesystem bindings, state store). Most deployments don’t need additional tuning:
+
+```rust,no_run
+use tonbo::{db::{DB, DbBuildError, DynMode}, mode::DynModeConfig};
+
+fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
+    let db = DB::<DynMode, _>::builder(config)
+        .on_disk("/srv/tonbo".to_string())
+        .build()?;
+    Ok(())
+}
+```
+
+When low-level tweaks are required (e.g., forcing synchronous fsyncs for benchmarking), call `DbBuilder::wal_config` with a [`db::WalConfig`] struct or the convenience setters:
+
+```rust,no_run
+use std::time::Duration;
+use tonbo::{
+    db::{DB, DbBuildError, DynMode, WalConfig},
+    mode::DynModeConfig,
+    wal::WalSyncPolicy,
+};
+
+fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
+    let overrides = WalConfig::default()
+        .sync_policy(WalSyncPolicy::Always)
+        .flush_interval(Duration::from_millis(1));
+    let db = DB::<DynMode, _>::builder(config)
+        .on_disk("/srv/tonbo".to_string())
+        .wal_config(overrides)
+        .build()?;
+    Ok(())
+}
+```
+
 ### Compaction Path
 
 Tonbo’s compaction path runs fully asynchronously, transforming short-lived in-memory segments into durable, query-optimized SSTables stored on object storage.

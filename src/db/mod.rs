@@ -15,7 +15,9 @@ use lockable::LockableHashMap;
 
 mod builder;
 
-pub use builder::{DbBuildError, DbBuilder, ObjectStoreBuilder};
+pub use builder::{
+    AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig,
+};
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
@@ -37,7 +39,7 @@ use crate::{
     scan::RangeSet,
     transaction::{Snapshot as TxSnapshot, SnapshotError},
     wal::{
-        WalConfig, WalError, WalHandle,
+        WalConfig as RuntimeWalConfig, WalError, WalHandle,
         frame::{DynAppendEvent, WalEvent},
         manifest_ext,
         replay::Replayer,
@@ -84,7 +86,7 @@ where
     // Optional WAL handle when durability is enabled.
     wal: Option<WalHandle<E>>,
     /// Pending WAL configuration captured before the writer is installed.
-    wal_config: Option<WalConfig>,
+    wal_config: Option<RuntimeWalConfig>,
     /// Monotonic commit timestamp assigned to ingests (autocommit path for now).
     commit_clock: CommitClock,
     /// Manifest handle used by the dev branch manifest integration (in-memory for now).
@@ -283,7 +285,7 @@ where
         mem: M::Mutable,
         manifest: TonboManifest,
         manifest_table: TableId,
-        wal_config: Option<WalConfig>,
+        wal_config: Option<RuntimeWalConfig>,
         file_ids: FileIdGenerator,
         executor: Arc<E>,
     ) -> Self
@@ -335,7 +337,59 @@ where
     pub async fn recover_with_wal(
         config: M::Config,
         executor: Arc<E>,
-        wal_cfg: WalConfig,
+        wal_cfg: RuntimeWalConfig,
+    ) -> Result<Self, KeyExtractError>
+    where
+        M: Sized + CatalogDescribe,
+    {
+        let table_definition = M::table_definition(&config, builder::DEFAULT_TABLE_NAME);
+        let manifest = init_in_memory_manifest().map_err(manifest_error_as_key_extract)?;
+        let file_ids = FileIdGenerator::default();
+        let table_meta = manifest
+            .register_table(&file_ids, &table_definition)
+            .await
+            .map_err(manifest_error_as_key_extract)?;
+        let manifest_table = table_meta.table_id;
+        Self::recover_with_wal_with_manifest(
+            config,
+            executor,
+            wal_cfg,
+            manifest,
+            manifest_table,
+            file_ids,
+        )
+        .await
+    }
+
+    pub(crate) async fn recover_with_wal_with_manifest(
+        config: M::Config,
+        executor: Arc<E>,
+        wal_cfg: RuntimeWalConfig,
+        manifest: TonboManifest,
+        manifest_table: TableId,
+        file_ids: FileIdGenerator,
+    ) -> Result<Self, KeyExtractError>
+    where
+        M: Sized + CatalogDescribe,
+    {
+        Self::recover_with_wal_inner(
+            config,
+            executor,
+            wal_cfg,
+            manifest,
+            manifest_table,
+            file_ids,
+        )
+        .await
+    }
+
+    async fn recover_with_wal_inner(
+        config: M::Config,
+        executor: Arc<E>,
+        wal_cfg: RuntimeWalConfig,
+        manifest: TonboManifest,
+        manifest_table: TableId,
+        file_ids: FileIdGenerator,
     ) -> Result<Self, KeyExtractError>
     where
         M: Sized + CatalogDescribe,
@@ -348,7 +402,16 @@ where
         } else {
             None
         };
-        let mut db = Self::new(config, executor)?;
+        let (mode, mem) = M::build(config)?;
+        let mut db = Self::from_components(
+            mode,
+            mem,
+            manifest,
+            manifest_table,
+            Some(wal_cfg.clone()),
+            file_ids,
+            executor,
+        );
         db.set_wal_config(Some(wal_cfg.clone()));
 
         let replayer = Replayer::new(wal_cfg);
@@ -393,19 +456,24 @@ where
     }
 
     /// Attach WAL configuration prior to enabling durability.
-    pub fn with_wal_config(mut self, cfg: WalConfig) -> Self {
+    pub fn with_wal_config(mut self, cfg: RuntimeWalConfig) -> Self {
         self.wal_config = Some(cfg);
         self
     }
 
     /// Access the configured WAL settings, if any.
-    pub fn wal_config(&self) -> Option<&WalConfig> {
+    pub fn wal_config(&self) -> Option<&RuntimeWalConfig> {
         self.wal_config.as_ref()
     }
 
     /// Access the executor powering async subsystems.
     pub(crate) fn executor(&self) -> &Arc<E> {
         &self.executor
+    }
+
+    #[cfg(test)]
+    pub(crate) fn manifest_table_id(&self) -> TableId {
+        self.manifest_table
     }
 
     /// Open a read-only snapshot pinned to the current manifest head.
@@ -443,7 +511,7 @@ where
     }
 
     /// Replace the stored WAL configuration.
-    pub(crate) fn set_wal_config(&mut self, cfg: Option<WalConfig>) {
+    pub(crate) fn set_wal_config(&mut self, cfg: Option<RuntimeWalConfig>) {
         self.wal_config = cfg;
     }
 
@@ -882,13 +950,15 @@ fn take_full_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, 
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use arrow_array::{RecordBatch, StringArray, UInt64Array};
+    use arrow_array::{Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
         dynamic::DynFs,
         executor::{BlockingExecutor, tokio::TokioExecutor},
-        path::Path,
+        fs::FsCas,
+        mem::fs::InMemoryFs,
+        path::{Path, PathPart},
     };
     use futures::{StreamExt, channel::mpsc, executor::block_on};
     use tokio::sync::{Mutex, oneshot};
@@ -897,12 +967,14 @@ mod tests {
     use super::*;
     use crate::{
         inmem::policy::BatchesThreshold,
+        manifest::init_fs_manifest,
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
-            DynBatchPayload, WalCommand,
+            DynBatchPayload, WalCommand, WalExt,
             frame::{INITIAL_FRAME_SEQ, encode_command},
+            state::FsWalStateStore,
         },
     };
 
@@ -1025,6 +1097,94 @@ mod tests {
         assert_eq!(db.num_immutable_segments(), 0);
         block_on(db.ingest(batch)).expect("insert batch");
         assert_eq!(db.num_immutable_segments(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        let build_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+        let executor = Arc::new(TokioExecutor::default());
+
+        let fs = InMemoryFs::new();
+        let manifest_root = Path::parse("durable-test").expect("path");
+        let wal_dir = manifest_root.child(PathPart::parse("wal").expect("wal dir component"));
+
+        let mut wal_cfg = RuntimeWalConfig::default();
+        wal_cfg.dir = wal_dir;
+        let dyn_fs: Arc<dyn DynFs> = Arc::new(fs.clone());
+        wal_cfg.segment_backend = dyn_fs;
+        let cas_backend: Arc<dyn FsCas> = Arc::new(fs.clone());
+        wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(cas_backend)));
+
+        let manifest = init_fs_manifest(fs.clone(), &manifest_root).expect("init manifest");
+        let file_ids = FileIdGenerator::default();
+        let table_definition =
+            DynMode::table_definition(&build_config, builder::DEFAULT_TABLE_NAME);
+        let manifest_table =
+            block_on(async { manifest.register_table(&file_ids, &table_definition).await })
+                .expect("register table")
+                .table_id;
+
+        let (mode, mem) = DynMode::build(build_config)?;
+        let mut db = DB::from_components(
+            mode,
+            mem,
+            manifest,
+            manifest_table,
+            Some(wal_cfg.clone()),
+            file_ids,
+            Arc::clone(&executor),
+        );
+        db.enable_wal(wal_cfg.clone()).expect("enable wal");
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["user-1"])) as _,
+                Arc::new(Int32Array::from(vec![7])) as _,
+            ],
+        )?;
+        db.ingest(batch).await.expect("ingest");
+        drop(db);
+
+        let manifest = init_fs_manifest(fs.clone(), &manifest_root).expect("reopen manifest");
+        let recover_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+        let mut recovered = DB::recover_with_wal_with_manifest(
+            recover_config,
+            Arc::clone(&executor),
+            wal_cfg.clone(),
+            manifest,
+            manifest_table,
+            FileIdGenerator::default(),
+        )
+        .await
+        .expect("recover");
+        recovered.enable_wal(wal_cfg).expect("re-enable wal");
+
+        assert_eq!(recovered.manifest_table_id(), manifest_table);
+
+        let ranges = RangeSet::<KeyOwned>::all();
+        let rows: Vec<(String, i32)> = recovered
+            .scan_mutable_rows(&ranges)
+            .map(|row| {
+                let mut cells = row.into_iter();
+                let id = match cells.next().expect("id cell") {
+                    Some(DynCell::Str(value)) => value,
+                    other => panic!("unexpected id cell {other:?}"),
+                };
+                let value = match cells.next().expect("value cell") {
+                    Some(DynCell::I32(v)) => v,
+                    other => panic!("unexpected value cell {other:?}"),
+                };
+                (id, value)
+            })
+            .collect();
+        assert_eq!(rows, vec![("user-1".into(), 7)]);
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1466,7 +1626,7 @@ mod tests {
 
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let mut cfg = WalConfig::default();
+        let mut cfg = RuntimeWalConfig::default();
         cfg.dir = fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");

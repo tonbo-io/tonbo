@@ -12,7 +12,7 @@ use arrow_array::{Array, BooleanArray, Int32Array, RecordBatch, StringArray, UIn
 use arrow_schema::{DataType, Field, Schema};
 use fusio::executor::tokio::TokioExecutor;
 use tonbo::{
-    db::{DB, DynMode},
+    db::{AwsCreds, DB, DynMode, ObjectSpec, S3Spec},
     mode::DynModeConfig,
     wal::{WalConfig, WalExt, WalSyncPolicy, frame::WalEvent, replay::Replayer},
 };
@@ -70,24 +70,20 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
             .as_millis()
     );
 
+    let credentials = match session_token.clone() {
+        Some(token) => AwsCreds::with_session_token(access, secret, token),
+        None => AwsCreds::new(access, secret),
+    };
+
+    let mut s3 = S3Spec::new(bucket.clone(), label.clone(), credentials);
+    s3.endpoint = Some(endpoint);
+    s3.region = Some(region);
+    s3.sign_payload = Some(true);
+
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(config)
-        .on_object_store(|os| {
-            os.provider("s3")
-                .endpoint(endpoint)
-                .bucket(bucket)
-                .root(label)
-                .region(region)
-                .access_key(access)
-                .secret_key(secret)
-                .sign_payload(true);
-            if let Some(token) = session_token.as_deref() {
-                os.session_token(token.to_string());
-            }
-        })
-        .configure_wal(|cfg| {
-            cfg.sync = WalSyncPolicy::Always;
-            cfg.retention_bytes = Some(1 << 20);
-        })
+        .object_store(ObjectSpec::s3(s3))
+        .wal_sync_policy(WalSyncPolicy::Always)
+        .wal_retention_bytes(Some(1 << 20))
         .build()
         .map_err(|err| format!("failed to build S3-backed DB: {err}"))?;
 
@@ -95,7 +91,6 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .wal_config()
         .cloned()
         .ok_or("builder should seed wal config")?;
-    db.enable_wal(wal_cfg.clone())?;
 
     let batch = RecordBatch::try_new(
         schema,

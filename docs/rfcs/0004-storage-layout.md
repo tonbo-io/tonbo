@@ -80,7 +80,7 @@ When a caller constructs a DB with `DB::new_dyn_with_root(schema, extractor, exe
 
 1. Build a `DbPaths` helper that resolves the four subdirectories using `root.join("wal")`, `root.join("sst")`, etc.
 2. Call `WalStorage::ensure_dir(&paths.wal)` to create the WAL directory and associated state file if missing.
-3. If any WAL segments exist (`WalStorage::list_segments` TBD), build a `DynModeConfig` and invoke `DB::recover_with_wal(config, executor, cfg.clone()).await` before enabling live ingest. The recovery routine updates `commit_clock` from either the state file or replayed events.
+3. If any WAL segments exist (`WalStorage::list_segments` TBD), reopen the manifest under `root/manifest` via `init_fs_manifest`, register (or look up) the logical table to obtain its `TableId`, and invoke the manifest-aware recovery helper (`DB::recover_with_wal` delegates to `recover_with_wal_with_manifest`). This ensures catalog metadata already persisted under the root is reused rather than silently replaced. The recovery routine updates `commit_clock` from either the state file or replayed events.
 4. Ensure `sst/`, `manifest/`, and `mutable/` directories exist (no-op today).
 
 The same flow applies to typed modes once they return; only the ingest adapter changes.

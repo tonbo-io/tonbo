@@ -1,7 +1,7 @@
 #![allow(clippy::missing_panics_doc)]
 
 use std::{
-    fmt,
+    fmt, fs,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -122,21 +122,13 @@ async fn bench_wal_append(cfg: &Config, schema: Arc<Schema>) -> (Duration, usize
 async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, TokioExecutor> {
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let label = format!("wal-bench-{}", Ulid::new());
-    let mut sync_opt = Some(sync);
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(config)
-        .in_memory(label)
-        .configure_wal(move |cfg| {
-            if let Some(policy) = sync_opt.take() {
-                cfg.sync = policy;
-            }
-        })
+    let root = std::env::temp_dir().join(&label);
+    fs::create_dir_all(&root).expect("wal bench dir");
+    let db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(config)
+        .on_disk(root.to_string_lossy().into_owned())
+        .wal_sync_policy(sync)
         .build()
         .expect("db");
-    let cfg = db
-        .wal_config()
-        .cloned()
-        .expect("builder provides wal config");
-    db.enable_wal(cfg).expect("enable wal");
     db
 }
 
