@@ -150,6 +150,23 @@ impl WalStorage {
         Ok(entries)
     }
 
+    /// Remove all WAL segments whose sequence is strictly below `floor_seq`.
+    pub async fn prune_below(&self, floor_seq: u64) -> WalResult<usize> {
+        if floor_seq == 0 {
+            return Ok(0);
+        }
+        let mut removed = 0usize;
+        let segments = self.list_segments_with_hint(None).await?;
+        for descriptor in segments {
+            if descriptor.seq >= floor_seq {
+                continue;
+            }
+            self.remove_segment(&descriptor.path).await?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     /// Decode the frame bounds for the specified WAL segment.
     ///
     /// Returns `Ok(None)` if the segment contains no frames. Callers should treat a `None` result
@@ -566,6 +583,7 @@ mod tests {
         },
     };
 
+    use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use fusio::{
         DynFs, Read, Write,
         dynamic::{MaybeSendFuture, MaybeSendStream},
@@ -577,6 +595,7 @@ mod tests {
     use futures::{executor::block_on, stream};
 
     use super::*;
+    use crate::schema::SchemaBuilder;
 
     #[derive(Clone)]
     struct S3ProbeFs {
@@ -892,7 +911,6 @@ mod tests {
     #[test]
     fn tail_metadata_reports_last_frame_sequence() {
         use arrow_array::{Int32Array, RecordBatch, StringArray};
-        use arrow_schema::{DataType, Field, Schema};
 
         block_on(async {
             let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
@@ -901,10 +919,7 @@ mod tests {
 
             storage.ensure_dir(&root).await.expect("ensure dir");
 
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, false),
-                Field::new("value", DataType::Int32, false),
-            ]));
+            let schema = wal_test_schema();
             let batch = RecordBatch::try_new(
                 schema,
                 vec![
@@ -948,5 +963,44 @@ mod tests {
             );
             assert_eq!(tail.last_provisional_id, Some(7));
         });
+    }
+
+    #[test]
+    fn prune_below_removes_segments_under_floor() {
+        block_on(async {
+            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+            let root = Path::parse("wal-prune").expect("root path");
+            let storage = WalStorage::new(fs, root.clone());
+            storage
+                .ensure_dir(storage.root())
+                .await
+                .expect("ensure dir");
+
+            for seq in 1..=3 {
+                let mut segment = storage.open_segment(seq).await.expect("open segment");
+                let (res, _buf) = segment.file_mut().write_all(vec![seq as u8]).await;
+                res.expect("write bytes");
+                segment.file_mut().flush().await.expect("flush");
+            }
+
+            let removed = storage.prune_below(3).await.expect("prune");
+            assert_eq!(removed, 2, "segments below floor should be removed");
+
+            let remaining = storage.list_segments().await.expect("list segments");
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].seq, 3);
+        });
+    }
+
+    fn wal_test_schema() -> SchemaRef {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder should succeed")
+            .schema
     }
 }

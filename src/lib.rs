@@ -17,7 +17,10 @@ pub(crate) mod mutation;
 pub mod schema;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
-pub use crate::db::DB;
+pub use crate::{
+    db::DB,
+    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
+};
 
 #[cfg(test)]
 mod test_util;

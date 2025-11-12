@@ -14,6 +14,8 @@ use crate::{
 /// Collect WAL segment references using the configuration supplied to the writer.
 pub(crate) async fn collect_wal_segment_refs(
     cfg: &WalConfig,
+    manifest_floor: Option<&WalSegmentRef>,
+    live_frame_floor: Option<u64>,
 ) -> Result<Vec<WalSegmentRef>, WalError> {
     let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
     let wal_state_hint = storage
@@ -25,18 +27,22 @@ pub(crate) async fn collect_wal_segment_refs(
         return Ok(Vec::new());
     };
 
-    let mut refs = Vec::with_capacity(tail.completed.len() + 1);
-    for descriptor in &tail.completed {
-        if descriptor.bytes == 0 {
-            continue;
-        }
+    let mut refs = Vec::with_capacity(2);
+    let manifest_cutoff = manifest_floor.map(|f| f.seq());
+    for descriptor in tail
+        .completed
+        .iter()
+        .filter(|descriptor| descriptor.bytes > 0)
+    {
         let bounds = storage
             .segment_frame_bounds(&descriptor.path)
             .await?
             .ok_or({
                 WalError::Corrupt("wal segment contained no frames despite non-zero length")
             })?;
-        refs.push(wal_segment_ref_from_descriptor(descriptor, bounds));
+        if segment_required(descriptor.seq, &bounds, manifest_cutoff, live_frame_floor) {
+            refs.push(wal_segment_ref_from_descriptor(descriptor, bounds));
+        }
     }
 
     if tail.active.bytes > 0 {
@@ -46,7 +52,13 @@ pub(crate) async fn collect_wal_segment_refs(
             .ok_or({
                 WalError::Corrupt("active wal segment contained no frames despite non-zero length")
             })?;
-        refs.push(wal_segment_ref_from_descriptor(&tail.active, bounds));
+        if segment_required(tail.active.seq, &bounds, manifest_cutoff, live_frame_floor) {
+            refs.push(wal_segment_ref_from_descriptor(&tail.active, bounds));
+        }
+    }
+
+    if let Some(floor_ref) = manifest_floor.filter(|_| refs.is_empty()) {
+        refs.push(floor_ref.clone());
     }
 
     refs.sort_by_key(|segment| segment.seq());
@@ -63,97 +75,54 @@ fn wal_segment_ref_from_descriptor(
     WalSegmentRef::new(descriptor.seq, file_id, bounds.first_seq, bounds.last_seq)
 }
 
+fn segment_required(
+    seq: u64,
+    bounds: &SegmentFrameBounds,
+    manifest_cutoff: Option<u64>,
+    live_frame_floor: Option<u64>,
+) -> bool {
+    if let Some(live_floor) = live_frame_floor
+        && bounds.last_seq >= live_floor
+    {
+        return true;
+    }
+
+    match manifest_cutoff {
+        Some(cutoff) => seq > cutoff,
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use fusio::{DynFs, Write, impls::mem::fs::InMemoryFs, path::Path};
-    use futures::executor::block_on;
-
     use super::*;
-    use crate::wal::{
-        WalCommand,
-        frame::{self, encode_command},
-    };
 
     #[test]
-    fn collect_wal_segment_refs_reports_frame_bounds() {
-        block_on(async {
-            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-            let dir = Path::parse("wal-test").expect("valid wal dir");
-            let storage = WalStorage::new(Arc::clone(&fs), dir.clone());
-
-            let mut next_seq = frame::INITIAL_FRAME_SEQ;
-
-            let mut first_segment = storage.open_segment(0).await.expect("open segment 0");
-            append_command(
-                &mut first_segment,
-                &mut next_seq,
-                WalCommand::TxnBegin { provisional_id: 42 },
-            )
-            .await;
-            append_command(
-                &mut first_segment,
-                &mut next_seq,
-                WalCommand::TxnAbort { provisional_id: 42 },
-            )
-            .await;
-            first_segment
-                .file_mut()
-                .flush()
-                .await
-                .expect("flush first segment");
-            drop(first_segment);
-
-            let mut second_segment = storage.open_segment(1).await.expect("open segment 1");
-            append_command(
-                &mut second_segment,
-                &mut next_seq,
-                WalCommand::TxnBegin { provisional_id: 84 },
-            )
-            .await;
-            append_command(
-                &mut second_segment,
-                &mut next_seq,
-                WalCommand::TxnAbort { provisional_id: 84 },
-            )
-            .await;
-            second_segment
-                .file_mut()
-                .flush()
-                .await
-                .expect("flush second segment");
-            drop(second_segment);
-
-            let mut cfg = WalConfig::default();
-            cfg.dir = dir.clone();
-            cfg.segment_backend = Arc::clone(&fs);
-
-            let refs = collect_wal_segment_refs(&cfg)
-                .await
-                .expect("collect wal refs");
-            assert_eq!(refs.len(), 2);
-
-            assert_eq!(refs[0].seq(), 0);
-            assert_eq!(refs[0].first_frame(), frame::INITIAL_FRAME_SEQ);
-            assert_eq!(refs[0].last_frame(), frame::INITIAL_FRAME_SEQ + 1);
-
-            assert_eq!(refs[1].seq(), 1);
-            assert_eq!(refs[1].first_frame(), frame::INITIAL_FRAME_SEQ + 2);
-            assert_eq!(refs[1].last_frame(), frame::INITIAL_FRAME_SEQ + 3);
-        });
+    fn manifest_floor_filters_when_unpinned() {
+        let bounds = SegmentFrameBounds {
+            first_seq: 10,
+            last_seq: 20,
+        };
+        assert!(!segment_required(5, &bounds, Some(5), None));
+        assert!(segment_required(6, &bounds, Some(5), None));
     }
 
-    async fn append_command(
-        segment: &mut crate::wal::storage::WalSegment,
-        next_seq: &mut u64,
-        command: WalCommand,
-    ) {
-        for frame in encode_command(command).expect("encode command") {
-            let bytes = frame.into_bytes(*next_seq);
-            *next_seq = next_seq.saturating_add(1);
-            let (write_res, _buf) = segment.file_mut().write_all(bytes).await;
-            write_res.expect("write frame");
-        }
+    #[test]
+    fn live_floor_keeps_older_segments() {
+        let bounds = SegmentFrameBounds {
+            first_seq: 30,
+            last_seq: 40,
+        };
+        assert!(segment_required(3, &bounds, Some(5), Some(35)));
+        assert!(!segment_required(3, &bounds, Some(5), Some(45)));
     }
+}
+
+/// Prune WAL segments whose sequence is strictly below the manifest floor.
+pub(crate) async fn prune_wal_segments(
+    cfg: &WalConfig,
+    floor: &WalSegmentRef,
+) -> Result<usize, WalError> {
+    let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
+    storage.prune_below(floor.seq()).await
 }

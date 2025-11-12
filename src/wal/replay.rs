@@ -6,10 +6,13 @@ use fusio::Read;
 #[cfg(test)]
 use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
 
-use crate::wal::{
-    WalConfig, WalError, WalResult,
-    frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
-    storage::WalStorage,
+use crate::{
+    manifest::WalSegmentRef,
+    wal::{
+        WalConfig, WalError, WalResult,
+        frame::{FRAME_HEADER_SIZE, FrameHeader, WalEvent, decode_frame},
+        storage::WalStorage,
+    },
 };
 
 /// Scans WAL segments on disk and yields decoded events.
@@ -29,6 +32,14 @@ impl Replayer {
 
     /// Iterate through WAL segments and produce events.
     pub async fn scan(&self) -> WalResult<Vec<WalEvent>> {
+        self.scan_with_floor(None).await
+    }
+
+    /// Iterate through WAL segments while honoring the provided manifest floor.
+    pub(crate) async fn scan_with_floor(
+        &self,
+        floor: Option<&WalSegmentRef>,
+    ) -> WalResult<Vec<WalEvent>> {
         use crate::wal::WalRecoveryMode;
 
         match self.cfg.recovery {
@@ -61,8 +72,22 @@ impl Replayer {
             return Ok(Vec::new());
         }
 
+        let floor_seq = floor.map(|f| f.seq());
+        let floor_first_frame = floor.map(|f| f.first_frame());
+
         let mut events = Vec::new();
         for segment in segments {
+            if let Some(seq) = floor_seq
+                && segment.seq < seq
+            {
+                continue;
+            }
+
+            let segment_floor_first_frame = match floor_seq {
+                Some(seq) if segment.seq == seq => floor_first_frame,
+                _ => None,
+            };
+
             let path = segment.path;
             let path_display = path.to_string();
             let mut file = self
@@ -108,6 +133,13 @@ impl Replayer {
                     return Ok(events);
                 }
                 let payload = &data[payload_start..payload_end];
+                if let Some(floor_frame) = segment_floor_first_frame
+                    && header.seq < floor_frame
+                {
+                    offset = payload_end;
+                    continue;
+                }
+
                 match decode_frame(header.frame_type, payload) {
                     Ok(event) => events.push(event),
                     Err(err) => return Err(err),
@@ -130,7 +162,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::{BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use fusio::{
         Write,
         impls::{disk::TokioFs, mem::fs::InMemoryFs},
@@ -139,12 +171,15 @@ mod tests {
 
     use super::*;
     use crate::{
+        manifest::WalSegmentRef,
         mvcc::Timestamp,
+        schema::SchemaBuilder,
         wal::{
             WalRecoveryMode,
             frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
             state::FsWalStateStore,
             storage::WalStorage,
+            wal_segment_file_id,
         },
     };
 
@@ -156,10 +191,7 @@ mod tests {
         let wal_root = FusioPath::parse("wal-test").expect("wal path");
         let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("v", DataType::Int32, false),
-        ]));
+        let schema = default_test_schema();
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -238,6 +270,58 @@ mod tests {
     }
 
     #[test]
+    fn replayer_skips_events_below_floor() {
+        futures::executor::block_on(async {
+            let backend = Arc::new(InMemoryFs::new());
+            let fs_dyn: Arc<dyn DynFs> = backend.clone();
+            let wal_root = FusioPath::parse("wal-floor").expect("wal path");
+            let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
+
+            let mut next_seq = INITIAL_FRAME_SEQ;
+            let batch_a = sample_batch_with_label("a", 1);
+            write_autocommit_segment(&storage, 0, batch_a, 10, Timestamp::new(100), &mut next_seq)
+                .await;
+
+            let batch_b = sample_batch_with_label("b", 2);
+            let (floor_first_seq, floor_last_seq) = write_autocommit_segment(
+                &storage,
+                1,
+                batch_b,
+                11,
+                Timestamp::new(200),
+                &mut next_seq,
+            )
+            .await;
+
+            let mut cfg = WalConfig::default();
+            cfg.dir = wal_root;
+            cfg.segment_backend = fs_dyn;
+            cfg.state_store = None;
+
+            let replayer = Replayer::new(cfg);
+            let floor =
+                WalSegmentRef::new(1, wal_segment_file_id(1), floor_first_seq, floor_last_seq);
+
+            let events = replayer.scan_with_floor(Some(&floor)).await.expect("scan");
+            assert_eq!(events.len(), 2, "only second segment survives the floor");
+
+            match events[0] {
+                WalEvent::DynAppend { provisional_id, .. } => {
+                    assert_eq!(provisional_id, 11);
+                }
+                ref other => panic!("unexpected first event: {other:?}"),
+            }
+
+            match events[1] {
+                WalEvent::TxnCommit { provisional_id, .. } => {
+                    assert_eq!(provisional_id, 11);
+                }
+                ref other => panic!("unexpected second event: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
     fn replayer_stops_after_truncated_tail() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_dyn: Arc<dyn DynFs> = backend.clone();
@@ -253,10 +337,7 @@ mod tests {
                 .expect("ensure dir");
         });
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("v", DataType::Int32, false),
-        ]));
+        let schema = default_test_schema();
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -335,10 +416,7 @@ mod tests {
             .await
             .expect("ensure dir");
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("v", DataType::Int32, false),
-        ]));
+        let schema = default_test_schema();
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -384,6 +462,69 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replayer_skips_events_below_floor_on_disk() {
+        let dir = tempdir().expect("tempdir");
+        let wal_dir = dir.path().join("wal-floor-disk");
+
+        let backend = Arc::new(TokioFs);
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let wal_root = FusioPath::from_filesystem_path(&wal_dir).expect("wal path");
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
+
+        storage
+            .ensure_dir(storage.root())
+            .await
+            .expect("ensure dir");
+
+        let mut next_seq = INITIAL_FRAME_SEQ;
+        let batch_a = sample_batch_with_label("disk-a", 7);
+        write_autocommit_segment(
+            &storage,
+            10,
+            batch_a,
+            21,
+            Timestamp::new(300),
+            &mut next_seq,
+        )
+        .await;
+
+        let batch_b = sample_batch_with_label("disk-b", 8);
+        let (floor_first_seq, floor_last_seq) = write_autocommit_segment(
+            &storage,
+            11,
+            batch_b,
+            22,
+            Timestamp::new(400),
+            &mut next_seq,
+        )
+        .await;
+
+        let mut cfg = WalConfig::default();
+        cfg.dir = wal_root;
+        cfg.segment_backend = fs_dyn;
+        cfg.state_store = None;
+
+        let replayer = Replayer::new(cfg);
+        let floor =
+            WalSegmentRef::new(11, wal_segment_file_id(11), floor_first_seq, floor_last_seq);
+
+        let events = replayer
+            .scan_with_floor(Some(&floor))
+            .await
+            .expect("scan succeeds");
+
+        assert_eq!(events.len(), 2);
+        match events[0] {
+            WalEvent::DynAppend { provisional_id, .. } => assert_eq!(provisional_id, 22),
+            ref other => panic!("unexpected first event: {other:?}"),
+        }
+        match events[1] {
+            WalEvent::TxnCommit { provisional_id, .. } => assert_eq!(provisional_id, 22),
+            ref other => panic!("unexpected second event: {other:?}"),
+        }
+    }
+
     #[test]
     fn replayer_rejects_unimplemented_recovery_mode() {
         let backend = Arc::new(InMemoryFs::new());
@@ -403,5 +544,56 @@ mod tests {
             err,
             WalError::Unimplemented("wal recovery mode AbsoluteConsistency is not implemented")
         ));
+    }
+
+    fn sample_batch_with_label(label: &str, value: i32) -> RecordBatch {
+        let schema = default_test_schema();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![label])) as _,
+                Arc::new(Int32Array::from(vec![value])) as _,
+            ],
+        )
+        .expect("batch")
+    }
+
+    async fn write_autocommit_segment(
+        storage: &WalStorage,
+        segment_seq: u64,
+        batch: RecordBatch,
+        provisional_id: u64,
+        commit_ts: Timestamp,
+        next_seq: &mut u64,
+    ) -> (u64, u64) {
+        let tombstones = vec![false; batch.num_rows()];
+        let frames =
+            encode_autocommit_frames(batch, tombstones, provisional_id, commit_ts).expect("encode");
+        let first_seq = *next_seq;
+        let mut segment = storage
+            .open_segment(segment_seq)
+            .await
+            .expect("open segment");
+        for frame in frames {
+            let bytes = frame.into_bytes(*next_seq);
+            *next_seq = next_seq.saturating_add(1);
+            let (res, _buf) = segment.file_mut().write_all(bytes).await;
+            res.expect("write frame");
+        }
+        segment.file_mut().flush().await.expect("flush segment");
+        let last_seq = next_seq.saturating_sub(1);
+        (first_seq, last_seq)
+    }
+
+    fn default_test_schema() -> SchemaRef {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder should succeed")
+            .schema
     }
 }

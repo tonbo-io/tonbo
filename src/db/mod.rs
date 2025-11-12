@@ -12,7 +12,6 @@ use arrow_select::take::take;
 use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
 use lockable::LockableHashMap;
-
 mod builder;
 
 pub use builder::{
@@ -40,7 +39,7 @@ use crate::{
     transaction::{Snapshot as TxSnapshot, SnapshotError},
     wal::{
         WalConfig as RuntimeWalConfig, WalError, WalHandle,
-        frame::{DynAppendEvent, WalEvent},
+        frame::{DynAppendEvent, INITIAL_FRAME_SEQ, WalEvent},
         manifest_ext,
         replay::Replayer,
         state::WalStateHandle,
@@ -63,6 +62,53 @@ enum PendingWalPayload {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalFrameRange {
+    first: u64,
+    last: u64,
+}
+
+impl WalFrameRange {
+    fn new(seq: u64) -> Self {
+        Self {
+            first: seq,
+            last: seq,
+        }
+    }
+
+    fn include_seq(&mut self, seq: u64) {
+        if seq < self.first {
+            self.first = seq;
+        }
+        if seq > self.last {
+            self.last = seq;
+        }
+    }
+
+    fn extend(&mut self, other: &WalFrameRange) {
+        self.include_seq(other.first);
+        self.include_seq(other.last);
+    }
+}
+
+#[derive(Default)]
+struct WalRangeAccumulator {
+    range: Option<WalFrameRange>,
+}
+
+impl WalRangeAccumulator {
+    fn observe(&mut self, seq: u64) {
+        match self.range.as_mut() {
+            Some(range) => range.include_seq(seq),
+            None => self.range = Some(WalFrameRange::new(seq)),
+        }
+    }
+
+    fn into_range(self) -> Option<WalFrameRange> {
+        self.range
+    }
+}
+
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
@@ -78,6 +124,8 @@ where
     mem: M::Mutable,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
     immutables: Vec<Immutable<M>>,
+    /// WAL frame bounds covering each immutable segment (aligned with `immutables`).
+    immutable_wal_ranges: Vec<Option<WalFrameRange>>,
     // Sealing policy and last seal timestamp
     policy: Box<dyn SealPolicy + Send + Sync>,
     last_seal_at: Option<Instant>,
@@ -92,6 +140,8 @@ where
     /// Manifest handle used by the dev branch manifest integration (in-memory for now).
     manifest: TonboManifest,
     manifest_table: TableId,
+    /// WAL frame bounds covering the current mutable memtable, if any.
+    mutable_wal_range: Option<WalFrameRange>,
     /// File identifier allocator scoped to this DB instance.
     #[allow(dead_code)]
     file_ids: FileIdGenerator,
@@ -239,7 +289,8 @@ where
                 .mem
                 .seal_into_immutable(&self.mode.schema, self.mode.extractor.as_ref())?
             {
-                self.add_immutable(seg);
+                let wal_range = self.mutable_wal_range.take();
+                self.add_immutable(seg, wal_range);
             }
             self.last_seal_at = Some(Instant::now());
         }
@@ -279,6 +330,23 @@ where
         DbBuilder::new(config)
     }
 
+    /// Remove WAL segments whose sequence is older than the manifest floor.
+    pub async fn prune_wal_segments_below_floor(&self) {
+        let Some(cfg) = self.wal_config.as_ref() else {
+            return;
+        };
+        let Ok(Some(floor)) = self.manifest.wal_floor(self.manifest_table).await else {
+            return;
+        };
+        if let Err(err) = manifest_ext::prune_wal_segments(cfg, &floor).await {
+            eprintln!(
+                "failed to prune wal segments below manifest floor {}: {}",
+                floor.seq(),
+                err
+            );
+        }
+    }
+
     /// Construct a database from pre-initialised components.
     fn from_components(
         mode: M,
@@ -296,6 +364,7 @@ where
             mode,
             mem,
             immutables: Vec::new(),
+            immutable_wal_ranges: Vec::new(),
             policy: crate::inmem::policy::default_policy(),
             last_seal_at: None,
             executor,
@@ -304,6 +373,7 @@ where
             commit_clock: CommitClock::default(),
             manifest,
             manifest_table,
+            mutable_wal_range: None,
             file_ids,
             _key_locks: Arc::new(LockableHashMap::new()),
         }
@@ -414,12 +484,25 @@ where
         );
         db.set_wal_config(Some(wal_cfg.clone()));
 
+        let wal_floor = db.manifest_wal_floor();
         let replayer = Replayer::new(wal_cfg);
-        let events = replayer.scan().await.map_err(KeyExtractError::from)?;
-
-        let _wal_floor = db.manifest_wal_floor();
-        // TODO: filter WAL events newer than `_wal_floor` once manifest persistence wires real
-        // references.
+        let events = replayer
+            .scan_with_floor(wal_floor.as_ref())
+            .await
+            .map_err(KeyExtractError::from)?;
+        if events.is_empty() {
+            db.mutable_wal_range = None;
+        } else if let Some(ref floor_ref) = wal_floor {
+            db.mutable_wal_range = Some(WalFrameRange {
+                first: floor_ref.first_frame(),
+                last: floor_ref.last_frame(),
+            });
+        } else {
+            db.mutable_wal_range = Some(WalFrameRange {
+                first: INITIAL_FRAME_SEQ,
+                last: INITIAL_FRAME_SEQ,
+            });
+        }
 
         let last_commit_ts = M::replay_wal(&mut db, events)?;
         let effective_commit = last_commit_ts.or(state_commit_hint);
@@ -521,6 +604,27 @@ where
             .flatten()
     }
 
+    /// Sequence number of the WAL floor currently recorded in the manifest.
+    pub fn wal_floor_seq(&self) -> Option<u64> {
+        self.manifest_wal_floor().map(|ref_| ref_.seq())
+    }
+
+    fn wal_live_frame_floor(&self) -> Option<u64> {
+        let mutable_floor = self.mutable_wal_range.as_ref().map(|range| range.first);
+        let immutable_floor = self
+            .immutable_wal_ranges
+            .iter()
+            .filter_map(|range| range.as_ref().map(|r| r.first))
+            .min();
+
+        match (mutable_floor, immutable_floor) {
+            (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+            (Some(lhs), None) => Some(lhs),
+            (None, Some(rhs)) => Some(rhs),
+            (None, None) => None,
+        }
+    }
+
     /// Number of immutable segments attached to this DB (oldest..newest).
     pub fn num_immutable_segments(&self) -> usize {
         self.immutables.len()
@@ -542,8 +646,12 @@ where
         for seg in &self.immutables {
             builder.add_immutable(seg)?;
         }
+        let existing_floor = self.manifest_wal_floor();
+        let live_floor = self.wal_live_frame_floor();
         let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
-            match manifest_ext::collect_wal_segment_refs(cfg).await {
+            match manifest_ext::collect_wal_segment_refs(cfg, existing_floor.as_ref(), live_floor)
+                .await
+            {
                 Ok(refs) => {
                     let wal_ids = if refs.is_empty() {
                         builder.set_wal_ids(None);
@@ -599,8 +707,11 @@ where
                     .apply_version_edits(self.manifest_table, &edits)
                     .await?;
 
+                self.prune_wal_segments_below_floor().await;
+
                 // Cleanup immutable memtable
                 self.immutables.clear();
+                self.immutable_wal_ranges.clear();
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -618,8 +729,16 @@ where
     E: Executor + Timer,
 {
     #[allow(dead_code)]
-    pub(crate) fn add_immutable(&mut self, seg: Immutable<M>) {
+    fn add_immutable(&mut self, seg: Immutable<M>, wal_range: Option<WalFrameRange>) {
         self.immutables.push(seg);
+        self.immutable_wal_ranges.push(wal_range);
+    }
+
+    fn record_mutable_wal_range(&mut self, range: WalFrameRange) {
+        match self.mutable_wal_range.as_mut() {
+            Some(existing) => existing.extend(&range),
+            None => self.mutable_wal_range = Some(range),
+        }
     }
 
     /// Set or replace the sealing policy used by this DB.
@@ -658,6 +777,7 @@ where
         return Ok(());
     }
 
+    let mut wal_range: Option<WalFrameRange> = None;
     if let Some(handle) = db.wal_handle().cloned() {
         let provisional_id = handle.next_provisional_id();
         let mut append_tickets = Vec::new();
@@ -676,17 +796,21 @@ where
                 .map_err(KeyExtractError::from)?;
             append_tickets.push(ticket);
         }
+        let mut tracker = WalRangeAccumulator::default();
         for ticket in append_tickets {
-            ticket.durable().await.map_err(KeyExtractError::from)?;
+            let ack = ticket.durable().await.map_err(KeyExtractError::from)?;
+            tracker.observe(ack.seq);
         }
         let commit_ticket = handle
             .txn_commit(provisional_id, commit_ts)
             .await
             .map_err(KeyExtractError::from)?;
-        commit_ticket
+        let commit_ack = commit_ticket
             .durable()
             .await
             .map_err(KeyExtractError::from)?;
+        tracker.observe(commit_ack.seq);
+        wal_range = tracker.into_range();
     }
 
     let mut mutated = false;
@@ -701,6 +825,9 @@ where
             .insert_delete_batch(db.mode.delete_projection.as_ref(), batch)?;
     }
     if mutated {
+        if let Some(range) = wal_range {
+            db.record_mutable_wal_range(range);
+        }
         db.maybe_seal_after_insert()?;
     }
     Ok(())
@@ -948,7 +1075,12 @@ fn take_full_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, 
 }
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::Arc,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use arrow_array::{Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
@@ -972,7 +1104,7 @@ mod tests {
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
-            DynBatchPayload, WalCommand, WalExt,
+            DynBatchPayload, WalCommand, WalExt, WalSyncPolicy,
             frame::{INITIAL_FRAME_SEQ, encode_command},
             state::FsWalStateStore,
         },
@@ -1454,6 +1586,116 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_root = workspace_temp_dir("wal-gc-smoke");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+        let executor = Arc::new(TokioExecutor::default());
+        let namespace = temp_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("wal-gc-smoke");
+        let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+            .in_memory(namespace.to_string())
+            .build_with_executor(Arc::clone(&executor))?;
+
+        let wal_local_fs = Arc::new(LocalFs {});
+        let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
+        let wal_cas: Arc<dyn FsCas> = wal_local_fs.clone();
+
+        let wal_dir = temp_root.join("wal");
+        fs::create_dir_all(&wal_dir)?;
+        let wal_path = Path::from_filesystem_path(&wal_dir)?;
+
+        let mut wal_cfg = RuntimeWalConfig::default();
+        wal_cfg.dir = wal_path;
+        wal_cfg.segment_backend = wal_dyn_fs;
+        wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
+        // Force extremely small segments so each batch append rotates the WAL; this
+        // guarantees multiple sealed segments exist between the two flushes and
+        // exercises the GC path we care about.
+        wal_cfg.segment_max_bytes = 1;
+        wal_cfg.flush_interval = Duration::from_millis(1);
+        wal_cfg.sync = WalSyncPolicy::Disabled;
+
+        db.enable_wal(wal_cfg.clone())?;
+        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+
+        let sst_dir = temp_root.join("sst");
+        fs::create_dir_all(&sst_dir)?;
+        let sst_root = Path::from_filesystem_path(&sst_dir)?;
+        let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
+
+        // First ingest/flush establishes the initial WAL floor.
+        for idx in 0..4 {
+            let rows = vec![vec![
+                Some(DynCell::Str(format!("user-{idx}").into())),
+                Some(DynCell::I32(idx as i32)),
+            ]];
+            let batch = build_batch(schema.clone(), rows)?;
+            db.ingest(batch).await?;
+        }
+        assert!(
+            db.num_immutable_segments() >= 1,
+            "expected first seal to produce immutables"
+        );
+        let descriptor_a = SsTableDescriptor::new(SsTableId::new(99), 0);
+        db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_a)
+            .await?;
+        let floor_after_first = db
+            .manifest_wal_floor()
+            .map(|ref_| ref_.seq())
+            .expect("manifest floor after first flush");
+        let first_prune_view = wal_segment_paths(&wal_dir);
+        assert!(
+            first_prune_view.len() >= 2,
+            "expected multiple WAL segments present after first flush"
+        );
+
+        // Second ingest/flush should advance the floor and delete older segments.
+        for idx in 4..8 {
+            let rows = vec![vec![
+                Some(DynCell::Str(format!("user-{idx}").into())),
+                Some(DynCell::I32(idx as i32)),
+            ]];
+            let batch = build_batch(schema.clone(), rows)?;
+            db.ingest(batch).await?;
+        }
+        assert!(
+            db.num_immutable_segments() >= 1,
+            "expected second seal to produce immutables"
+        );
+        let descriptor_b = SsTableDescriptor::new(SsTableId::new(100), 0);
+        db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_b)
+            .await?;
+        let floor_after_second = db
+            .manifest_wal_floor()
+            .map(|ref_| ref_.seq())
+            .expect("manifest floor after second flush");
+        assert!(
+            floor_after_second > floor_after_first,
+            "floor should advance after second flush"
+        );
+        let after = wal_segment_paths(&wal_dir);
+        let removed: Vec<_> = first_prune_view
+            .iter()
+            .filter(|path| !after.contains(path))
+            .collect();
+        assert!(
+            !removed.is_empty(),
+            "second flush should prune at least one WAL segment"
+        );
+
+        db.disable_wal()?;
+        fs::remove_dir_all(&temp_root)?;
+        Ok(())
+    }
+
     #[test]
     fn dynamic_composite_from_field_ordinals_and_scan() {
         use std::collections::HashMap;
@@ -1671,5 +1913,36 @@ mod tests {
         );
 
         fs::remove_dir_all(&wal_dir).expect("cleanup");
+    }
+
+    fn workspace_temp_dir(prefix: &str) -> PathBuf {
+        let base = std::env::current_dir().expect("cwd");
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = base
+            .join("target")
+            .join("tmp")
+            .join(format!("{prefix}-{unique}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn wal_segment_paths(dir: &std::path::Path) -> Vec<PathBuf> {
+        if !dir.exists() {
+            return Vec::new();
+        }
+        let mut files = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("tonwal") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        files
     }
 }

@@ -515,6 +515,7 @@ impl WalSegmentRef {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn last_frame(&self) -> u64 {
         self.last_frame
     }
