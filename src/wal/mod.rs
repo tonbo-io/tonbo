@@ -207,8 +207,10 @@ pub enum WalError {
 /// Acks emitted once a WAL submission satisfies the configured durability policy.
 #[derive(Debug, Clone)]
 pub struct WalAck {
-    /// Sequence number of the durable frame.
-    pub seq: u64,
+    /// Sequence number of the first frame written for the command.
+    pub first_seq: u64,
+    /// Sequence number of the final frame written for the command.
+    pub last_seq: u64,
     /// Bytes flushed while satisfying the policy.
     pub bytes_flushed: usize,
     /// Time elapsed between enqueue and durability.

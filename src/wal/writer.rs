@@ -462,6 +462,7 @@ where
         }
 
         let mut bytes_written = 0usize;
+        let first_frame_seq = self.next_frame_seq;
         for frame in frames.drain(..) {
             let frame_bytes = self.write_frame(frame).await?;
             bytes_written = bytes_written.saturating_add(frame_bytes);
@@ -496,7 +497,8 @@ where
         self.persist_state_if_dirty().await?;
 
         let ack = WalAck {
-            seq: durable_seq,
+            first_seq: first_frame_seq,
+            last_seq: durable_seq,
             bytes_flushed: bytes_written,
             elapsed: enqueued_at.elapsed(),
         };
@@ -1318,7 +1320,7 @@ mod tests {
             .clone()
             .expect("ack result")
             .expect("ack ok");
-        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
@@ -1627,7 +1629,7 @@ mod tests {
             .clone()
             .expect("ack result")
             .expect("ack ok");
-        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
@@ -1696,7 +1698,7 @@ mod tests {
             .clone()
             .expect("ack1 result")
             .expect("ack1 ok");
-        assert_eq!(ack1.seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(ack1.last_seq, frame::INITIAL_FRAME_SEQ + 1);
         assert_eq!(queue_depth.load(Ordering::SeqCst), 0);
 
         let (append_rx2, commit_rx2) = queue_autocommit(
@@ -1726,7 +1728,7 @@ mod tests {
             .clone()
             .expect("ack2 result")
             .expect("ack2 ok");
-        assert_eq!(ack2.seq, frame::INITIAL_FRAME_SEQ + 3);
+        assert_eq!(ack2.last_seq, frame::INITIAL_FRAME_SEQ + 3);
 
         let metrics_guard = futures::executor::block_on(metrics_reader.read());
         assert_eq!(metrics_guard.queue_depth, 0);
@@ -1801,7 +1803,7 @@ mod tests {
             .clone()
             .expect("ack result")
             .expect("ack ok");
-        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
@@ -1872,7 +1874,7 @@ mod tests {
             .clone()
             .expect("ack result")
             .expect("ack ok");
-        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
         let metrics_guard = futures::executor::block_on(metrics_reader.read());
         assert_eq!(metrics_guard.queue_depth, 0);
@@ -1974,7 +1976,7 @@ mod tests {
             .clone()
             .expect("ack result")
             .expect("ack ok");
-        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
         let rotate_result = rotate_cell
             .borrow()
@@ -2083,7 +2085,7 @@ mod tests {
             .clone()
             .expect("ack result")
             .expect("ack ok");
-        assert_eq!(ack.seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
@@ -2185,7 +2187,7 @@ mod tests {
             .clone()
             .expect("ack2 result")
             .expect("ack2 ok");
-        assert!(ack2.seq > ack1.seq);
+        assert!(ack2.last_seq > ack1.last_seq);
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());

@@ -69,13 +69,6 @@ struct WalFrameRange {
 }
 
 impl WalFrameRange {
-    fn new(seq: u64) -> Self {
-        Self {
-            first: seq,
-            last: seq,
-        }
-    }
-
     fn include_seq(&mut self, seq: u64) {
         if seq < self.first {
             self.first = seq;
@@ -97,10 +90,14 @@ struct WalRangeAccumulator {
 }
 
 impl WalRangeAccumulator {
-    fn observe(&mut self, seq: u64) {
+    fn observe_range(&mut self, first: u64, last: u64) {
+        debug_assert!(first <= last, "wal frame range inverted");
         match self.range.as_mut() {
-            Some(range) => range.include_seq(seq),
-            None => self.range = Some(WalFrameRange::new(seq)),
+            Some(range) => {
+                range.include_seq(first);
+                range.include_seq(last);
+            }
+            None => self.range = Some(WalFrameRange { first, last }),
         }
     }
 
@@ -799,7 +796,7 @@ where
         let mut tracker = WalRangeAccumulator::default();
         for ticket in append_tickets {
             let ack = ticket.durable().await.map_err(KeyExtractError::from)?;
-            tracker.observe(ack.seq);
+            tracker.observe_range(ack.first_seq, ack.last_seq);
         }
         let commit_ticket = handle
             .txn_commit(provisional_id, commit_ts)
@@ -809,7 +806,7 @@ where
             .durable()
             .await
             .map_err(KeyExtractError::from)?;
-        tracker.observe(commit_ack.seq);
+        tracker.observe_range(commit_ack.first_seq, commit_ack.last_seq);
         wal_range = tracker.into_range();
     }
 
@@ -1279,7 +1276,9 @@ mod tests {
                 Arc::new(Int32Array::from(vec![7])) as _,
             ],
         )?;
-        db.ingest(batch).await.expect("ingest");
+        db.ingest_with_tombstones(batch, vec![false])
+            .await
+            .expect("ingest");
         drop(db);
 
         let manifest = init_fs_manifest(fs.clone(), &manifest_root).expect("reopen manifest");
@@ -1348,7 +1347,8 @@ mod tests {
                     } => match command {
                         WalCommand::TxnAppend { .. } => {
                             let ack = WalAck {
-                                seq: frame::INITIAL_FRAME_SEQ,
+                                first_seq: frame::INITIAL_FRAME_SEQ,
+                                last_seq: frame::INITIAL_FRAME_SEQ,
                                 bytes_flushed: 0,
                                 elapsed: Duration::from_millis(0),
                             };
@@ -1364,7 +1364,8 @@ mod tests {
                                 let _ = rx.await;
                             }
                             let ack = WalAck {
-                                seq: frame::INITIAL_FRAME_SEQ + 1,
+                                first_seq: frame::INITIAL_FRAME_SEQ + 1,
+                                last_seq: frame::INITIAL_FRAME_SEQ + 1,
                                 bytes_flushed: 0,
                                 elapsed: Duration::from_millis(0),
                             };
@@ -1376,7 +1377,8 @@ mod tests {
                         }
                         _ => {
                             let ack = WalAck {
-                                seq: frame::INITIAL_FRAME_SEQ,
+                                first_seq: frame::INITIAL_FRAME_SEQ,
+                                last_seq: frame::INITIAL_FRAME_SEQ,
                                 bytes_flushed: 0,
                                 elapsed: Duration::from_millis(0),
                             };
@@ -1425,6 +1427,99 @@ mod tests {
             })
             .collect();
         assert_eq!(rows, vec!["k".to_string()]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wal_live_frame_floor_tracks_multi_frame_append() {
+        use crate::wal::{WalAck, WalHandle, WalSnapshot, frame, writer};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+        let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+
+        let executor = Arc::new(TokioExecutor::default());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let queue_depth = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let join = executor.spawn(async move {
+            let mut next_seq = frame::INITIAL_FRAME_SEQ;
+            while let Some(msg) = receiver.next().await {
+                match msg {
+                    writer::WriterMsg::Enqueue {
+                        command, ack_tx, ..
+                    } => {
+                        let (first_seq, last_seq, advance) = match command {
+                            WalCommand::TxnAppend { .. } => {
+                                (next_seq, next_seq.saturating_add(1), 2)
+                            }
+                            WalCommand::TxnCommit { .. } => (next_seq, next_seq, 1),
+                            _ => (next_seq, next_seq, 1),
+                        };
+                        next_seq = next_seq.saturating_add(advance);
+                        let ack = WalAck {
+                            first_seq,
+                            last_seq,
+                            bytes_flushed: 0,
+                            elapsed: Duration::from_millis(0),
+                        };
+                        let _ = ack_tx.send(Ok(ack));
+                    }
+                    writer::WriterMsg::Rotate { ack_tx } => {
+                        let _ = ack_tx.send(Ok(()));
+                    }
+                    writer::WriterMsg::Snapshot { ack_tx } => {
+                        let snapshot = WalSnapshot {
+                            sealed_segments: Vec::new(),
+                            active_segment: None,
+                        };
+                        let _ = ack_tx.send(Ok(snapshot));
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+
+        let mut db: DB<DynMode, TokioExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+        let handle =
+            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        db.set_wal_handle(Some(handle));
+        assert!(db.wal_handle().is_some(), "wal handle should be installed");
+
+        db.ingest_with_tombstones(batch, vec![false])
+            .await
+            .expect("ingest");
+
+        let observed_range = db
+            .mutable_wal_range
+            .or_else(|| db.immutable_wal_ranges.first().copied().flatten())
+            .expect("wal range populated after ingest");
+        assert_eq!(observed_range.first, frame::INITIAL_FRAME_SEQ);
+        assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
+        assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
+
+        if db.mutable_wal_range.is_some() {
+            let sealed = db
+                .mem
+                .seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
+                .expect("seal mutable")
+                .expect("mutable contained rows");
+            let wal_range = db.mutable_wal_range.take();
+            db.add_immutable(sealed, wal_range);
+        }
+
+        assert!(db.mutable_wal_range.is_none());
+        assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
+
+        db.immutables.clear();
+        db.immutable_wal_ranges.clear();
+        assert_eq!(db.wal_live_frame_floor(), None);
     }
 
     #[test]
