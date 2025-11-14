@@ -774,6 +774,15 @@ where
         }
     }
 
+    pub(crate) fn observe_mutable_wal_span(&mut self, first_seq: u64, last_seq: u64) {
+        let (first, last) = if first_seq <= last_seq {
+            (first_seq, last_seq)
+        } else {
+            (last_seq, first_seq)
+        };
+        self.record_mutable_wal_range(WalFrameRange { first, last });
+    }
+
     /// Set or replace the sealing policy used by this DB.
     pub fn set_seal_policy(&mut self, policy: Box<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
@@ -1125,7 +1134,11 @@ mod tests {
         mem::fs::InMemoryFs,
         path::{Path, PathPart},
     };
-    use futures::{StreamExt, channel::mpsc, executor::block_on};
+    use futures::{
+        StreamExt,
+        channel::{mpsc, oneshot as futures_oneshot},
+        executor::block_on,
+    };
     use tokio::sync::{Mutex, oneshot};
     use typed_arrow_dyn::DynCell;
 
@@ -1137,7 +1150,7 @@ mod tests {
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
         wal::{
-            DynBatchPayload, WalCommand, WalExt, WalSyncPolicy,
+            DynBatchPayload, WalCommand, WalExt, WalResult, WalSyncPolicy,
             frame::{INITIAL_FRAME_SEQ, encode_command},
             state::FsWalStateStore,
         },
@@ -1568,6 +1581,213 @@ mod tests {
         assert_eq!(db.wal_live_frame_floor(), None);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn wal_live_frame_floor_tracks_multi_frame_append_via_insert() {
+        use crate::wal::{WalAck, WalHandle, WalSnapshot, frame, writer};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+        let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+
+        let executor = Arc::new(TokioExecutor::default());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let queue_depth = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let join = executor.spawn(async move {
+            let mut next_seq = frame::INITIAL_FRAME_SEQ;
+            while let Some(msg) = receiver.next().await {
+                match msg {
+                    writer::WriterMsg::Enqueue {
+                        command, ack_tx, ..
+                    } => {
+                        let (first_seq, last_seq, advance) = match command {
+                            WalCommand::TxnAppend { .. } => {
+                                (next_seq, next_seq.saturating_add(1), 2)
+                            }
+                            WalCommand::TxnCommit { .. } => (next_seq, next_seq, 1),
+                            _ => (next_seq, next_seq, 1),
+                        };
+                        next_seq = next_seq.saturating_add(advance);
+                        let ack = WalAck {
+                            first_seq,
+                            last_seq,
+                            bytes_flushed: 0,
+                            elapsed: Duration::from_millis(0),
+                        };
+                        let _ = ack_tx.send(Ok(ack));
+                    }
+                    writer::WriterMsg::Rotate { ack_tx } => {
+                        let _ = ack_tx.send(Ok(()));
+                    }
+                    writer::WriterMsg::Snapshot { ack_tx } => {
+                        let snapshot = WalSnapshot {
+                            sealed_segments: Vec::new(),
+                            active_segment: None,
+                        };
+                        let _ = ack_tx.send(Ok(snapshot));
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+
+        let mut db: DB<DynMode, TokioExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+        let handle =
+            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        db.set_wal_handle(Some(handle));
+        assert!(db.wal_handle().is_some(), "wal handle should be installed");
+
+        db.ingest(batch.clone()).await.expect("ingest");
+
+        let observed_range = db
+            .mutable_wal_range
+            .or_else(|| db.immutable_wal_ranges.first().copied().flatten())
+            .expect("wal range populated after ingest");
+        assert_eq!(observed_range.first, frame::INITIAL_FRAME_SEQ);
+        assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
+        assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
+
+        if db.mutable_wal_range.is_some() {
+            let sealed = db
+                .mem
+                .seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
+                .expect("seal mutable")
+                .expect("mutable contained rows");
+            let wal_range = db.mutable_wal_range.take();
+            db.add_immutable(sealed, wal_range);
+        }
+
+        assert!(db.mutable_wal_range.is_none());
+        assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
+
+        db.immutables.clear();
+        db.immutable_wal_ranges.clear();
+        assert_eq!(db.wal_live_frame_floor(), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dyn_insert_enqueues_commit_before_append_ack() {
+        use tokio::time;
+
+        use crate::wal::{WalAck, WalHandle, WalSnapshot, frame, writer};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+        let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+
+        let executor = Arc::new(TokioExecutor::default());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let queue_depth = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let (append_seen_tx, append_seen_rx) = oneshot::channel();
+        let (commit_seen_tx, commit_seen_rx) = oneshot::channel();
+        let (release_append_ack_tx, release_append_ack_rx) = oneshot::channel();
+        let (release_commit_ack_tx, release_commit_ack_rx) = oneshot::channel();
+
+        let join = executor.spawn(async move {
+            let mut next_seq = frame::INITIAL_FRAME_SEQ;
+            let mut pending_append_ack: Option<futures_oneshot::Sender<WalResult<WalAck>>> = None;
+            let mut release_append_ack_rx = Some(release_append_ack_rx);
+            let mut release_commit_ack_rx = Some(release_commit_ack_rx);
+            let mut append_seen_tx = Some(append_seen_tx);
+            let mut commit_seen_tx = Some(commit_seen_tx);
+            while let Some(msg) = receiver.next().await {
+                match msg {
+                    writer::WriterMsg::Enqueue {
+                        command, ack_tx, ..
+                    } => match command {
+                        WalCommand::TxnAppend { .. } => {
+                            pending_append_ack = Some(ack_tx);
+                            if let Some(tx) = append_seen_tx.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                        WalCommand::TxnCommit { .. } => {
+                            if let Some(tx) = commit_seen_tx.take() {
+                                let _ = tx.send(());
+                            }
+                            if let Some(rx) = release_append_ack_rx.take() {
+                                let _ = rx.await;
+                            }
+                            if let Some(append_ack_tx) = pending_append_ack.take() {
+                                let ack = WalAck {
+                                    first_seq: next_seq,
+                                    last_seq: next_seq,
+                                    bytes_flushed: 0,
+                                    elapsed: Duration::from_millis(0),
+                                };
+                                let _ = append_ack_tx.send(Ok(ack));
+                                next_seq = next_seq.saturating_add(1);
+                            }
+                            if let Some(rx) = release_commit_ack_rx.take() {
+                                let _ = rx.await;
+                            }
+                            let ack = WalAck {
+                                first_seq: next_seq,
+                                last_seq: next_seq,
+                                bytes_flushed: 0,
+                                elapsed: Duration::from_millis(0),
+                            };
+                            let _ = ack_tx.send(Ok(ack));
+                            next_seq = next_seq.saturating_add(1);
+                        }
+                        _ => {}
+                    },
+                    writer::WriterMsg::Rotate { ack_tx } => {
+                        let _ = ack_tx.send(Ok(()));
+                    }
+                    writer::WriterMsg::Snapshot { ack_tx } => {
+                        let snapshot = WalSnapshot {
+                            sealed_segments: Vec::new(),
+                            active_segment: None,
+                        };
+                        let _ = ack_tx.send(Ok(snapshot));
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+
+        let mut db: DB<DynMode, TokioExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+        let handle =
+            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        db.set_wal_handle(Some(handle));
+
+        let mut ingest_future = Box::pin(db.ingest(batch));
+        tokio::select! {
+            _ = append_seen_rx => {}
+            res = &mut ingest_future => panic!("ingest finished early: {:?}", res),
+        }
+        tokio::select! {
+            res = commit_seen_rx => {
+                res.expect("commit notification");
+            }
+            _ = time::sleep(Duration::from_millis(50)) => {
+                panic!("commit not enqueued before append ack release");
+            }
+            res = &mut ingest_future => panic!("ingest finished before commit ack gating: {:?}", res),
+        }
+
+        release_append_ack_tx.send(()).expect("release append ack");
+        release_commit_ack_tx.send(()).expect("release commit ack");
+
+        ingest_future.await.expect("ingest complete");
+    }
     #[test]
     fn dynamic_new_from_metadata_field_marker() {
         use std::collections::HashMap;
