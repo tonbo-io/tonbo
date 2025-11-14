@@ -61,6 +61,9 @@ Pre-submit routine (every source adjustment):
 - Default to the as most conservative as possible visibility (`pub(super)`, `pub(crate)`, etc.); only use `pub` when cross-crate access is required.
 - Keep modules small and cohesive; avoid single-letter identifiers except indices.
 - No backward-compatibility constraints; prioritize clean code.
+- As a data infrastructure project, exhaust every effort to use compile-time dispatch and aggressively control memory, file, and network access patterns to maximize database compute/storage efficiency; prefer static dispatch, preallocation, and explicit IO planning over ad-hoc dynamic code paths.
+- All filesystem and network calls must be async so we can pipeline IO and avoid blocking executors.
+- In runtime paths, favor returning structured errors over panicking; reserve panics for truly unrecoverable invariants and keep best-effort operations on the happy path.
 
 ## Testing Guidelines
 
