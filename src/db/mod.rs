@@ -10,17 +10,20 @@ use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt6
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
 use fusio::executor::{Executor, Timer};
-use futures::executor::block_on;
+use futures::{Stream, executor::block_on, stream};
 use lockable::LockableHashMap;
 use typed_arrow_dyn::DynRow;
 mod builder;
+mod error;
 
 pub use builder::{
     AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig,
 };
+use predicate::Predicate;
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
+    db::error::DBError,
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
     inmem::{
@@ -36,6 +39,7 @@ use crate::{
     mode::CatalogDescribe,
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
+    query::scan::ScanPlan,
     scan::RangeSet,
     transaction::{Snapshot as TxSnapshot, SnapshotError},
     wal::{
@@ -287,6 +291,27 @@ where
             Ok((_, row)) => Ok(row.into_owned()?),
             Err(err) => Err(err.into()),
         }))
+    }
+
+    /// Plan a scan over entire DB with MVCC visibility at `read_ts`.
+    /// This will prune memtables, sst rows using metadata
+    pub async fn plan_scan<'a>(
+        &'a self,
+        _predicate: &Predicate,
+        _projection: Option<Vec<usize>>,
+        _limit: Option<usize>,
+        _read_ts: Timestamp,
+    ) -> Result<ScanPlan<'a>, DBError> {
+        unimplemented!()
+    }
+
+    /// Execute the scan plan with MVCC visibility
+    pub async fn execute_scan<'a>(
+        &'a self,
+        _plan: ScanPlan<'a>,
+    ) -> Result<impl Stream<Item = RecordBatch> + 'a, DBError> {
+        // TODO: implement
+        Ok(stream::empty())
     }
 
     pub(crate) fn maybe_seal_after_insert(&mut self) -> Result<(), KeyExtractError> {
