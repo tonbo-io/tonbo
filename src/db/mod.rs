@@ -1793,7 +1793,10 @@ mod tests {
             Ok(())
         });
 
-        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
@@ -1806,24 +1809,24 @@ mod tests {
         db.ingest(batch.clone()).await.expect("ingest");
 
         let observed_range = db
-            .mutable_wal_range
+            .mutable_wal_range_snapshot()
             .or_else(|| db.immutable_wal_ranges.first().copied().flatten())
             .expect("wal range populated after ingest");
         assert_eq!(observed_range.first, frame::INITIAL_FRAME_SEQ);
         assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
-        if db.mutable_wal_range.is_some() {
+        if db.mutable_wal_range_snapshot().is_some() {
             let sealed = db
                 .mem
                 .seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
                 .expect("seal mutable")
                 .expect("mutable contained rows");
-            let wal_range = db.mutable_wal_range.take();
+            let wal_range = db.take_mutable_wal_range();
             db.add_immutable(sealed, wal_range);
         }
 
-        assert!(db.mutable_wal_range.is_none());
+        assert!(db.mutable_wal_range_snapshot().is_none());
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
         db.immutables.clear();
@@ -1918,7 +1921,10 @@ mod tests {
             Ok(())
         });
 
-        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
