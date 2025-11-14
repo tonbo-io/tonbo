@@ -375,8 +375,31 @@ Tonbo’s MVCC is built for serverless, object-storage–native operation: all d
   - **atomic batch** apply with a single manifest CAS,
   - optional **idempotency key** to make retries safe across cold starts.
 - **Commit modes** (tunable):
-  - `strict`: ack after WAL **and** manifest CAS,
-  - `fast`: ack after WAL; manifest publish may piggyback.
+  - `strict`: wait for the WAL writer to report durability before acknowledging the client (manifest edits are not in the transactional path yet but will piggyback here later).
+  - `fast`: return once WAL frames are queued; durability is asynchronous, so a crash before fsync can drop acknowledged commits.
+
+Public API (dynamic mode today):
+
+```rust,no_run
+use std::sync::Arc;
+use fusio::executor::BlockingExecutor;
+use tonbo::{CommitAckMode, DB, DynModeConfig, Transaction};
+use tonbo::extractor;
+use tonbo::key::KeyOwned;
+
+let schema = Arc::new(build_arrow_schema()); // application-defined helper
+let key_projection = extractor::projection_for_field(schema.clone(), 0)?;
+let config = DynModeConfig::new(schema.clone(), key_projection)?
+    .with_commit_ack_mode(CommitAckMode::Fast); // optional: trade durability for latency
+let executor = Arc::new(BlockingExecutor);
+let db = DB::new(config, executor)?;
+
+let mut tx: Transaction = db.begin_transaction()?;
+let incoming_batch = build_record_batch(); // supply your Arrow RecordBatch
+tx.upsert_batch(&incoming_batch)?;
+tx.delete(KeyOwned::from("row_to_remove"))?;
+tx.commit(&mut db).await?;
+```
 
 ### Compaction Interaction
 

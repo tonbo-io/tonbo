@@ -17,9 +17,12 @@ pub(crate) mod mutation;
 pub mod schema;
 
 // Re-export the unified DB so users can do `tonbo::DB`.
-pub use crate::{
-    db::DB,
-    inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy},
+pub use crate::db::DB;
+// Re-export in-memory sealing policy helpers for embedders that tweak durability.
+pub use crate::inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy};
+// Re-export the transaction builder and related errors/options for ergonomic imports.
+pub use crate::transaction::{
+    CommitAckMode, Transaction, TransactionCommitError, TransactionError,
 };
 
 #[cfg(test)]

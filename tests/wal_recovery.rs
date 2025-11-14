@@ -15,8 +15,8 @@ use tonbo::{
     mvcc::Timestamp,
     scan::RangeSet,
     wal::{
-        WalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
-        frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames},
+        WalCommand, WalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
+        frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames, encode_command},
         storage::WalStorage,
     },
 };
@@ -507,6 +507,113 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     assert!(rows_after.contains(&("rewrite".into(), 2)));
 
     drop(recovered_again);
+    fs::remove_dir_all(&wal_dir)?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::error::Error>> {
+    let wal_dir = workspace_temp_dir("tonbo-wal-abort");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+
+    let executor = Arc::new(TokioExecutor::default());
+
+    let mut wal_cfg = WalConfig::default();
+    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
+
+    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
+    storage.ensure_dir(storage.root()).await?;
+    let mut segment = storage.open_segment(1).await?;
+
+    let committed_batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["live"])) as _,
+            Arc::new(Int32Array::from(vec![1])) as _,
+        ],
+    )?;
+    let committed_frames = encode_autocommit_frames(
+        committed_batch.clone(),
+        vec![false],
+        41,
+        Timestamp::new(100),
+    )?;
+
+    let aborted_batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["aborted"])) as _,
+            Arc::new(Int32Array::from(vec![999])) as _,
+        ],
+    )?;
+    let mut aborted_frames =
+        encode_autocommit_frames(aborted_batch.clone(), vec![false], 55, Timestamp::new(150))?;
+    let aborted_append = aborted_frames.remove(0);
+    drop(aborted_frames);
+
+    let aborted_begin = encode_command(WalCommand::TxnBegin { provisional_id: 55 })?;
+    let aborted_abort = encode_command(WalCommand::TxnAbort { provisional_id: 55 })?;
+
+    let mut seq = INITIAL_FRAME_SEQ;
+    for frame in committed_frames {
+        let bytes = frame.into_bytes(seq);
+        let (write_res, _) = segment.file_mut().write_all(bytes).await;
+        write_res?;
+        seq += 1;
+    }
+
+    for frame in aborted_begin {
+        let bytes = frame.into_bytes(seq);
+        let (write_res, _) = segment.file_mut().write_all(bytes).await;
+        write_res?;
+        seq += 1;
+    }
+
+    let bytes = aborted_append.into_bytes(seq);
+    let (write_res, _) = segment.file_mut().write_all(bytes).await;
+    write_res?;
+    seq += 1;
+
+    for frame in aborted_abort {
+        let bytes = frame.into_bytes(seq);
+        let (write_res, _) = segment.file_mut().write_all(bytes).await;
+        write_res?;
+        seq += 1;
+    }
+
+    segment.file_mut().flush().await?;
+    drop(segment);
+
+    let recovered: DB<DynMode, TokioExecutor> =
+        DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
+
+    let ranges = RangeSet::<KeyOwned>::all();
+    let rows: Vec<(String, i32)> = recovered
+        .scan_mutable_rows(&ranges, None)
+        .expect("scan rows")
+        .map(|row| {
+            let row = row.expect("row projection");
+            let mut cells = row.0.into_iter();
+            let id = match cells.next().expect("id cell") {
+                Some(DynCell::Str(value)) => value,
+                other => panic!("unexpected id cell {other:?}"),
+            };
+            let value = match cells.next().expect("value cell") {
+                Some(DynCell::I32(v)) => v,
+                other => panic!("unexpected value cell {other:?}"),
+            };
+            (id, value)
+        })
+        .collect();
+    assert_eq!(rows, vec![("live".into(), 1)]);
+
+    drop(recovered);
     fs::remove_dir_all(&wal_dir)?;
 
     Ok(())

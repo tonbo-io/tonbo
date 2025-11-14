@@ -198,7 +198,7 @@ mod tests {
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
     use futures::StreamExt;
-    use typed_arrow_dyn::DynCell;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
@@ -214,10 +214,10 @@ mod tests {
         ]));
         let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
         let mut mem = DynMem::new(schema.clone());
-        let rows = vec![vec![
+        let rows = vec![DynRow(vec![
             Some(DynCell::Str("k0".into())),
             Some(DynCell::I64(42)),
-        ]];
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         mem.insert_batch(extractor.as_ref(), batch, Timestamp::new(1))
             .expect("insert");

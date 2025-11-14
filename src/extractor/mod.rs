@@ -11,12 +11,14 @@ mod extractors;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 pub(crate) use errors::KeyExtractError;
-pub(crate) use extractors::{map_view_err, projection_for_columns, projection_for_field};
+pub(crate) use extractors::{
+    map_view_err, projection_for_columns, projection_for_field, row_from_batch,
+};
 
 use crate::key::KeyRow;
 
 /// Schema-validated projection that can materialise logical keys from record batches.
-pub trait KeyProjection {
+pub trait KeyProjection: Send + Sync {
     /// Ensure the projection is compatible with `schema`.
     fn validate_schema(&self, schema: &SchemaRef) -> Result<(), KeyExtractError>;
 

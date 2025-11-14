@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use arrow_array::{Int32Array, RecordBatch, StringArray};
@@ -13,15 +13,16 @@ use fusio::{
     executor::tokio::TokioExecutor,
     path::{Path as FusioPath, path_to_local},
 };
+use tokio::time::sleep;
 use tonbo::{
-    BatchesThreshold, DB, NeverSeal,
+    BatchesThreshold, CommitAckMode, DB, NeverSeal,
     key::KeyOwned,
     mode::{DynMode, DynModeConfig},
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     scan::RangeSet,
     wal::{WalConfig, WalExt, WalSyncPolicy},
 };
-use typed_arrow_dyn::DynCell;
+use typed_arrow_dyn::{DynCell, DynRow};
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -205,5 +206,90 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
 
     db.disable_wal()?;
     fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("txn-wal-floor-strict");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    let executor = Arc::new(TokioExecutor::default());
+    let config = DynModeConfig::from_key_name(schema.clone(), "id")?
+        .with_commit_ack_mode(CommitAckMode::Strict);
+
+    let wal_dir = temp_root.join("wal");
+    fs::create_dir_all(&wal_dir)?;
+    let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
+    let mut wal_cfg = WalConfig::default();
+    wal_cfg.dir = wal_path;
+    wal_cfg.segment_max_bytes = 256;
+    wal_cfg.flush_interval = Duration::from_millis(1);
+    wal_cfg.sync = WalSyncPolicy::Always;
+
+    let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor))?;
+    db.enable_wal(wal_cfg.clone())?;
+    assert!(db.wal_floor_seq().is_none());
+
+    let mut tx = db.begin_transaction()?;
+    tx.upsert(DynRow(vec![
+        Some(DynCell::Str("strict".into())),
+        Some(DynCell::I32(1)),
+    ]))?;
+    tx.commit(&mut db).await?;
+
+    let floor = db
+        .wal_floor_seq()
+        .expect("transaction commit should publish wal floor");
+    db.prune_wal_segments_below_floor().await;
+
+    let wal_dir_local = path_to_local(&db.wal_config().expect("wal").dir)?;
+    let pinned = wal_file_for_seq(&wal_dir_local, floor);
+    assert!(pinned.exists(), "floor segment must remain on disk");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("txn-wal-floor-fast");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    let executor = Arc::new(TokioExecutor::default());
+    let config = DynModeConfig::from_key_name(schema.clone(), "id")?
+        .with_commit_ack_mode(CommitAckMode::Fast);
+
+    let wal_dir = temp_root.join("wal");
+    fs::create_dir_all(&wal_dir)?;
+    let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
+    let mut wal_cfg = WalConfig::default();
+    wal_cfg.dir = wal_path;
+    wal_cfg.segment_max_bytes = 256;
+    wal_cfg.flush_interval = Duration::from_millis(1);
+    wal_cfg.sync = WalSyncPolicy::Disabled;
+
+    let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor))?;
+    db.enable_wal(wal_cfg.clone())?;
+
+    let mut tx = db.begin_transaction()?;
+    tx.upsert(DynRow(vec![
+        Some(DynCell::Str("fast".into())),
+        Some(DynCell::I32(7)),
+    ]))?;
+    tx.commit(&mut db).await?;
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(5);
+    while db.wal_floor_seq().is_none() {
+        if start.elapsed() > timeout {
+            panic!("wal floor never published for fast commit");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    db.prune_wal_segments_below_floor().await;
     Ok(())
 }

@@ -128,7 +128,7 @@ mod tests {
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use futures::{StreamExt, executor::block_on};
-    use typed_arrow_dyn::DynCell;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
@@ -151,10 +151,10 @@ mod tests {
 
         let rows = (0..5)
             .map(|idx| {
-                vec![
+                DynRow(vec![
                     Some(DynCell::Str(format!("k{idx}").into())),
                     Some(DynCell::I64(idx as i64)),
-                ]
+                ])
             })
             .collect();
         let batch = build_batch(schema.clone(), rows).expect("batch");

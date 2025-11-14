@@ -417,6 +417,8 @@ pub(crate) struct SstEntry {
     data_path: Path,
     #[serde(with = "path_serde")]
     mvcc_path: Path,
+    #[serde(with = "path_serde_option")]
+    delete_path: Option<Path>,
     sst_id: SsTableId,
     stats: Option<SsTableStats>,
     wal_segments: Option<Vec<FileId>>,
@@ -435,10 +437,12 @@ impl SstEntry {
         wal_segments: Option<Vec<FileId>>,
         data_path: Path,
         mvcc_path: Path,
+        delete_path: Option<Path>,
     ) -> Self {
         Self {
             data_path,
             mvcc_path,
+            delete_path,
             sst_id,
             stats,
             wal_segments,
@@ -467,6 +471,12 @@ impl SstEntry {
     #[cfg(test)]
     pub(crate) fn mvcc_path(&self) -> &Path {
         &self.mvcc_path
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn delete_path(&self) -> Option<&Path> {
+        self.delete_path.as_ref()
     }
 }
 
@@ -549,5 +559,34 @@ mod path_serde {
     {
         let raw = String::deserialize(deserializer)?;
         Path::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+mod path_serde_option {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::*;
+
+    pub fn serialize<S>(value: &Option<Path>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(path) => serializer.serialize_some(path.as_ref()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Path>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        match raw {
+            Some(value) => Path::parse(value)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
     }
 }

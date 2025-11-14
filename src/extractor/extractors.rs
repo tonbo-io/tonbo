@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, DataType, Fields, Schema, SchemaRef};
-use typed_arrow_dyn::{DynProjection, DynSchema, DynViewError};
+use typed_arrow_dyn::{DynCell, DynProjection, DynRow, DynSchema, DynViewError};
 
 use super::{KeyProjection, errors::KeyExtractError};
-use crate::key::{KeyRow, KeyRowError};
+use crate::{
+    inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
+    key::{KeyRow, KeyRowError},
+};
 
 /// Build a boxed key projection for a single column.
 pub fn projection_for_field(
@@ -27,7 +32,7 @@ struct DynKeyProjection {
     key_schema: SchemaRef,
     dyn_schema: DynSchema,
     projection: DynProjection,
-    columns: Vec<usize>,
+    key_columns: Arc<[usize]>,
 }
 
 impl DynKeyProjection {
@@ -47,14 +52,14 @@ impl DynKeyProjection {
             .iter()
             .map(|&idx| schema.field(idx).clone())
             .collect::<Vec<_>>();
-        let key_schema = std::sync::Arc::new(Schema::new(key_fields));
-
+        let key_schema = Arc::new(Schema::new(key_fields));
+        let key_columns: Arc<[usize]> = columns.into();
         Ok(Self {
             dyn_schema: DynSchema::from_ref(schema.clone()),
             schema,
-            columns,
             key_schema,
             projection,
+            key_columns,
         })
     }
 
@@ -79,7 +84,7 @@ impl KeyProjection for DynKeyProjection {
     }
 
     fn key_indices(&self) -> &[usize] {
-        &self.columns
+        self.key_columns.as_ref()
     }
 
     fn project_view(
@@ -101,6 +106,7 @@ impl KeyProjection for DynKeyProjection {
         Ok(out)
     }
 }
+
 fn ensure_supported_type(data_type: &DataType, col: usize) -> Result<(), KeyExtractError> {
     match data_type {
         DataType::Boolean
@@ -168,6 +174,170 @@ pub(crate) fn map_view_err(err: DynViewError) -> KeyExtractError {
         ),
         DynViewError::Invalid { path, message, .. } => {
             KeyExtractError::Arrow(ArrowError::ComputeError(format!("{path}: {message}")))
+        }
+    }
+}
+
+/// Build a row of dynamic cells by reading a single row from a `RecordBatch`.
+pub(crate) fn row_from_batch(batch: &RecordBatch, row: usize) -> Result<DynRow, KeyExtractError> {
+    if row >= batch.num_rows() {
+        return Err(KeyExtractError::RowOutOfBounds(row, batch.num_rows()));
+    }
+    let schema = batch.schema();
+    let mut cells = Vec::with_capacity(batch.num_columns());
+    for (col_idx, arr) in batch.columns().iter().enumerate() {
+        let field = schema.field(col_idx);
+        if field.name() == MVCC_COMMIT_COL || field.name() == MVCC_TOMBSTONE_COL {
+            continue;
+        }
+        if arr.is_null(row) {
+            cells.push(None);
+            continue;
+        }
+        let dt = arr.data_type();
+        let cell = match dt {
+            DataType::Boolean => Some(DynCell::Bool(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::BooleanArray>()
+                    .unwrap()
+                    .value(row),
+            )),
+            DataType::Int32 => Some(DynCell::I32(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::Int32Array>()
+                    .unwrap()
+                    .value(row),
+            )),
+            DataType::Int64 => Some(DynCell::I64(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .unwrap()
+                    .value(row),
+            )),
+            DataType::UInt32 => Some(DynCell::U32(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::UInt32Array>()
+                    .unwrap()
+                    .value(row),
+            )),
+            DataType::UInt64 => Some(DynCell::U64(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::UInt64Array>()
+                    .unwrap()
+                    .value(row),
+            )),
+            DataType::Float32 => Some(DynCell::F32(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::Float32Array>()
+                    .unwrap()
+                    .value(row),
+            )),
+            DataType::Float64 => Some(DynCell::F64(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::Float64Array>()
+                    .unwrap()
+                    .value(row),
+            )),
+            DataType::Utf8 => Some(DynCell::Str(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .unwrap()
+                    .value(row)
+                    .to_owned(),
+            )),
+            DataType::Binary => Some(DynCell::Bin(
+                arr.as_any()
+                    .downcast_ref::<arrow_array::BinaryArray>()
+                    .unwrap()
+                    .value(row)
+                    .to_vec(),
+            )),
+            other => {
+                return Err(KeyExtractError::UnsupportedType {
+                    col: col_idx,
+                    data_type: other.clone(),
+                });
+            }
+        };
+        cells.push(cell);
+    }
+    Ok(DynRow(cells))
+}
+
+#[cfg(test)]
+mod tests {
+    use typed_arrow::schema::BuildRows;
+    use typed_arrow_dyn::DynCell;
+
+    use super::*;
+
+    #[derive(typed_arrow::Record, Clone)]
+    struct User {
+        id: String,
+        score: i32,
+    }
+
+    #[test]
+    fn extract_single_and_composite_keys() {
+        let mut builders = User::new_builders(3);
+        <User as BuildRows>::Builders::append_row(
+            &mut builders,
+            User {
+                id: "a".into(),
+                score: 1,
+            },
+        );
+        <User as BuildRows>::Builders::append_row(
+            &mut builders,
+            User {
+                id: "b".into(),
+                score: 2,
+            },
+        );
+        let batch = <User as BuildRows>::Builders::finish(builders).into_record_batch();
+        let schema = batch.schema();
+
+        let utf8 = projection_for_field(schema.clone(), 0).unwrap();
+        let i32k = projection_for_field(schema.clone(), 1).unwrap();
+
+        KeyProjection::validate_schema(&*utf8, &schema).unwrap();
+        KeyProjection::validate_schema(&*i32k, &schema).unwrap();
+
+        let first = utf8
+            .project_view(&batch, &[0])
+            .unwrap()
+            .remove(0)
+            .to_owned();
+        assert_eq!(first.as_utf8(), Some("a"));
+
+        let second = i32k
+            .project_view(&batch, &[1])
+            .unwrap()
+            .remove(0)
+            .to_owned();
+        let second_cell = second
+            .as_row()
+            .cells()
+            .first()
+            .and_then(|cell| cell.as_ref())
+            .expect("i32 key");
+        assert!(matches!(second_cell, DynCell::I32(2)));
+
+        let composite = projection_for_columns(schema.clone(), vec![0, 1]).unwrap();
+        let tuple = composite
+            .project_view(&batch, &[1])
+            .unwrap()
+            .remove(0)
+            .to_owned();
+        let parts = tuple.as_row().cells();
+        assert_eq!(parts.len(), 2);
+        match parts[0].as_ref().expect("utf8 component") {
+            DynCell::Str(value) => assert_eq!(value, "b"),
+            other => panic!("unexpected component: {other:?}"),
+        }
+        match parts[1].as_ref().expect("i32 component") {
+            DynCell::I32(value) => assert_eq!(*value, 2),
+            other => panic!("unexpected component: {other:?}"),
         }
     }
 }

@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, fmt, marker::PhantomData, ops::Bound};
+use std::{collections::BTreeMap, fmt, marker::PhantomData, ops::Bound, sync::Arc};
 
-use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{Schema, SchemaRef};
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
@@ -18,26 +18,113 @@ pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 #[derive(Debug)]
 pub(crate) struct ImmutableMemTable<S> {
     storage: S,
-    index: BTreeMap<KeyTsViewRaw, u32>,
+    index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry>,
     mvcc: MvccColumns,
+    deletes: DeleteSidecar,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ImmutableIndexEntry {
+    Row(u32),
+    Delete,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeleteSidecar {
+    keys: RecordBatch,
+    commit_ts: Vec<Timestamp>,
+}
+
+impl DeleteSidecar {
+    pub fn new(keys: RecordBatch, commit_ts: Vec<Timestamp>) -> Self {
+        debug_assert_eq!(keys.num_rows(), commit_ts.len());
+        Self { keys, commit_ts }
+    }
+
+    pub fn empty(schema: &SchemaRef) -> Self {
+        Self {
+            keys: RecordBatch::new_empty(schema.clone()),
+            commit_ts: Vec::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.commit_ts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.commit_ts.is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn commit_ts(&self, idx: usize) -> Timestamp {
+        self.commit_ts[idx]
+    }
+
+    #[allow(dead_code)]
+    pub fn key_batch(&self) -> &RecordBatch {
+        &self.keys
+    }
+
+    pub fn to_record_batch(&self) -> Result<RecordBatch, arrow_schema::ArrowError> {
+        use arrow_schema::{Field, Schema};
+
+        let mut columns: Vec<ArrayRef> = self.keys.columns().to_vec();
+        let commit_array = UInt64Array::from_iter_values(self.commit_ts.iter().map(|ts| ts.get()));
+        columns.push(Arc::new(commit_array) as ArrayRef);
+        let mut fields: Vec<Field> = self
+            .keys
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+        fields.push(Field::new(
+            MVCC_COMMIT_COL,
+            arrow_schema::DataType::UInt64,
+            false,
+        ));
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, columns)
+    }
 }
 
 impl<S> ImmutableMemTable<S> {
-    pub(crate) fn new(storage: S, index: BTreeMap<KeyTsViewRaw, u32>, mvcc: MvccColumns) -> Self {
+    pub(crate) fn new(
+        storage: S,
+        index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry>,
+        mvcc: MvccColumns,
+        deletes: DeleteSidecar,
+    ) -> Self {
         Self {
             storage,
             index,
             mvcc,
+            deletes,
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
-        self.mvcc.commit_ts.len()
+        self.index.len()
     }
 
     #[allow(unused)]
     pub(crate) fn storage(&self) -> &S {
         &self.storage
+    }
+
+    pub(crate) fn delete_sidecar(&self) -> &DeleteSidecar {
+        &self.deletes
+    }
+
+    /// Return `true` if a committed version newer than `snapshot_ts` exists for `key`.
+    pub(crate) fn has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
+        let upper = KeyTsViewRaw::from_owned(key, Timestamp::MAX);
+        let lower = KeyTsViewRaw::from_owned(key, Timestamp::MIN);
+        self.index
+            .range(upper..=lower)
+            .any(|(view, _)| view.timestamp() > snapshot_ts)
     }
 
     pub(crate) fn row_iter(&self) -> ImmutableRowIter<'_, S> {
@@ -92,14 +179,22 @@ pub(crate) fn segment_from_batch_with_extractor(
     let (batch, mvcc) =
         bundle_mvcc_sidecar(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
 
-    let mut index: BTreeMap<KeyTsViewRaw, u32> = BTreeMap::new();
+    let mut index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry> = BTreeMap::new();
     let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
     let key_rows = extractor.project_view(&batch, &row_indices)?;
     for (row, key_row) in key_rows.into_iter().enumerate() {
-        index.insert(KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]), row as u32);
+        index.insert(
+            KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]),
+            ImmutableIndexEntry::Row(row as u32),
+        );
     }
 
-    Ok(ImmutableMemTable::new(batch, index, mvcc))
+    Ok(ImmutableMemTable::new(
+        batch,
+        index,
+        mvcc,
+        DeleteSidecar::empty(&extractor.key_schema()),
+    ))
 }
 
 /// Build a dynamic immutable segment given a key column index.
@@ -163,7 +258,7 @@ pub(crate) struct ImmutableVisibleScan<'t, S> {
     table: &'t ImmutableMemTable<S>,
     converted: ConvertedRanges,
     range_idx: usize,
-    cursor: Option<std::collections::btree_map::Range<'t, KeyTsViewRaw, u32>>,
+    cursor: Option<std::collections::btree_map::Range<'t, KeyTsViewRaw, ImmutableIndexEntry>>,
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
     emitted_for_key: bool,
@@ -227,7 +322,7 @@ where
                 self.emitted_for_key = false;
             }
             if let Some(cur) = &mut self.cursor {
-                for (view, row) in cur.by_ref() {
+                for (view, entry) in cur.by_ref() {
                     let key_view = view.key();
                     if self
                         .current_key
@@ -243,23 +338,32 @@ where
                         self.emitted_for_key = false;
                     }
 
-                    let (commit_ts, tombstone) = self.table.mvcc_row(*row);
-                    if commit_ts > self.read_ts || tombstone {
+                    let entry_commit = view.timestamp();
+                    if entry_commit > self.read_ts {
                         continue;
                     }
-                    let batch = self.table.storage.as_record_batch();
-                    let row_idx = *row as usize;
-                    let row =
-                        match self
-                            .projection
-                            .project_row_raw(&self.dyn_schema, batch, row_idx)
-                        {
-                            Ok(row) => row,
-                            Err(err) => return Some(Err(err)),
-                        };
 
-                    self.emitted_for_key = true;
-                    return Some(Ok((view, row)));
+                    match entry {
+                        ImmutableIndexEntry::Delete => continue,
+                        ImmutableIndexEntry::Row(row_idx) => {
+                            let (commit_ts, tombstone) = self.table.mvcc_row(*row_idx);
+                            if commit_ts > self.read_ts || tombstone {
+                                continue;
+                            }
+                            let batch = self.table.storage.as_record_batch();
+                            let row_idx = *row_idx as usize;
+                            let row = match self.projection.project_row_raw(
+                                &self.dyn_schema,
+                                batch,
+                                row_idx,
+                            ) {
+                                Ok(row) => row,
+                                Err(err) => return Some(Err(err)),
+                            };
+                            self.emitted_for_key = true;
+                            return Some(Ok((view, row)));
+                        }
+                    }
                 }
                 self.cursor = None;
                 continue;
@@ -386,7 +490,6 @@ pub(crate) struct ImmutableRowIter<'t, S> {
 #[allow(dead_code)]
 pub(crate) struct ImmutableRowEntry {
     pub key: KeyOwned,
-    pub row: u32,
     pub commit_ts: Timestamp,
     pub tombstone: bool,
 }
@@ -396,14 +499,10 @@ impl<'t, S> ImmutableRowIter<'t, S> {
         let mut rows: Vec<ImmutableRowEntry> = table
             .index
             .iter()
-            .map(|(view, row)| {
-                let (_, tombstone) = table.mvcc_row(*row);
-                ImmutableRowEntry {
-                    key: view.key().to_owned(),
-                    row: *row,
-                    commit_ts: view.timestamp(),
-                    tombstone,
-                }
+            .map(|(view, entry)| ImmutableRowEntry {
+                key: view.key().to_owned(),
+                commit_ts: view.timestamp(),
+                tombstone: matches!(entry, ImmutableIndexEntry::Delete),
             })
             .collect();
         rows.sort_by(|a, b| match a.key.cmp(&b.key) {
@@ -444,7 +543,7 @@ impl MvccColumns {
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema};
-    use typed_arrow_dyn::DynCell;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::test_util::build_batch;
@@ -462,9 +561,9 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
-            vec![Some(DynCell::Str("c".into())), Some(DynCell::I32(2))],
-            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(3))],
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("c".into())), Some(DynCell::I32(2))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(3))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let seg = segment_from_batch_with_key_name(batch, "id").expect("seg");
@@ -492,10 +591,10 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(4))],
-            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))],
-            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))],
-            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))],
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(4))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut key_storage = Vec::new();
@@ -503,7 +602,7 @@ mod tests {
         let commits = [40u64, 30, 20, 10];
         for (row, ts) in commits.into_iter().enumerate() {
             let view = push_view(&mut key_storage, "k", Timestamp::new(ts));
-            composite.insert(view, row as u32);
+            composite.insert(view, ImmutableIndexEntry::Row(row as u32));
         }
         let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
@@ -516,7 +615,9 @@ mod tests {
             vec![false, false, false, false],
         )
         .expect("mvcc columns");
-        let seg = ImmutableMemTable::new(batch, composite, mvcc);
+        let delete_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let delete_sidecar = DeleteSidecar::empty(&delete_schema);
+        let seg = ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar);
 
         use std::ops::Bound as B;
         let ranges = RangeSet::from_ranges(vec![KeyRange::new(
@@ -563,27 +664,36 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))],
-            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))],
-            vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))],
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]),
+            DynRow(vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut key_storage = Vec::new();
         let mut composite = BTreeMap::new();
-        for (row, (ts, _)) in [(30u64, false), (20, true), (10, false)]
+        for (row, (ts, tombstone)) in [(30u64, false), (20, true), (10, false)]
             .into_iter()
             .enumerate()
         {
             let view = push_view(&mut key_storage, "k", Timestamp::new(ts));
-            composite.insert(view, row as u32);
+            let entry = if tombstone {
+                ImmutableIndexEntry::Delete
+            } else {
+                ImmutableIndexEntry::Row(row as u32)
+            };
+            composite.insert(view, entry);
         }
         let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
-            vec![false, true, false],
+            vec![false, false, false],
         )
         .expect("mvcc columns");
-        let seg = ImmutableMemTable::new(batch, composite, mvcc);
+        let delete_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let delete_rows = vec![DynRow(vec![Some(DynCell::Str("k".into()))])];
+        let delete_batch: RecordBatch = build_batch(delete_schema, delete_rows).expect("delete");
+        let delete_sidecar = DeleteSidecar::new(delete_batch, vec![Timestamp::new(20)]);
+        let seg = ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar);
         let schema = seg.storage().schema();
         assert!(
             !schema
@@ -622,19 +732,21 @@ mod tests {
             Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
             Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
         ]));
-        let rows = vec![vec![
+        let rows = vec![DynRow(vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::I32(1)),
             Some(DynCell::U64(10)),
             Some(DynCell::Bool(false)),
-        ]];
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut key_storage = Vec::new();
         let view = push_view(&mut key_storage, "k", Timestamp::new(10));
         let mut composite = BTreeMap::new();
-        composite.insert(view, 0);
+        composite.insert(view, ImmutableIndexEntry::Row(0));
         let mvcc = MvccColumns::new(vec![Timestamp::new(10)], vec![false]);
-        let seg = ImmutableMemTable::new(batch, composite, mvcc);
+        let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let delete_sidecar = DeleteSidecar::empty(&key_schema);
+        let seg = ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar);
 
         let ranges = RangeSet::<KeyOwned>::all();
         let mut scan = seg
@@ -656,38 +768,48 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let rows = vec![
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(10))],
-            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(8))],
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(9))],
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(10))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(8))]),
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(9))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let mut key_storage = Vec::new();
         let mut composite = BTreeMap::new();
         for (row, (key, ts)) in [("a", 30u64), ("b", 20), ("a", 10)].into_iter().enumerate() {
             let view = push_view(&mut key_storage, key, Timestamp::new(ts));
-            composite.insert(view, row as u32);
+            let entry = if key == "b" {
+                ImmutableIndexEntry::Delete
+            } else {
+                ImmutableIndexEntry::Row(row as u32)
+            };
+            composite.insert(view, entry);
         }
         let (batch, mvcc) = bundle_mvcc_sidecar(
             batch,
             vec![Timestamp::new(30), Timestamp::new(20), Timestamp::new(10)],
-            vec![false, true, false],
+            vec![false, false, false],
         )
         .expect("mvcc columns");
-        let seg = ImmutableMemTable::new(batch, composite, mvcc);
 
-        let got: Vec<(String, u32, u64, bool)> = seg
+        let delete_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let delete_rows = vec![DynRow(vec![Some(DynCell::Str("b".into()))])];
+        let delete_batch: RecordBatch = build_batch(delete_schema, delete_rows).expect("delete");
+        let delete_sidecar = DeleteSidecar::new(delete_batch, vec![Timestamp::new(20)]);
+        let seg = ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar);
+
+        let got: Vec<(String, u64, bool)> = seg
             .row_iter()
             .map(|entry| {
                 let key = entry.key.as_utf8().expect("utf8 key").to_string();
-                (key, entry.row, entry.commit_ts.get(), entry.tombstone)
+                (key, entry.commit_ts.get(), entry.tombstone)
             })
             .collect();
         assert_eq!(
             got,
             vec![
-                ("a".to_string(), 0, 30, false),
-                ("a".to_string(), 2, 10, false),
-                ("b".to_string(), 1, 20, true),
+                ("a".to_string(), 30, false),
+                ("a".to_string(), 10, false),
+                ("b".to_string(), 20, true),
             ]
         );
 

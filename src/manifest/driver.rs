@@ -43,11 +43,11 @@ pub(crate) type ManifestResult<T> = Result<T, ManifestError>;
 #[derive(Debug, Clone)]
 pub(crate) struct VersionSnapshot {
     /// Underlying fusio snapshot guarding read leases.
-    pub manifest_snapshot: Snapshot,
+    pub(crate) manifest_snapshot: Snapshot,
     /// Current table head.
-    pub head: TableHead,
+    pub(crate) head: TableHead,
     /// Most recent committed version for the table, if any.
-    pub latest_version: Option<VersionState>,
+    pub(crate) latest_version: Option<VersionState>,
 }
 
 /// Bundle of storage backends required by the manifest.
@@ -59,13 +59,13 @@ pub(crate) struct VersionSnapshot {
 #[derive(Debug)]
 pub(crate) struct Stores<HS, SS, CS, LS> {
     /// Store used for the manifest head CAS object.
-    pub head: HS,
+    pub(crate) head: HS,
     /// Store used for manifest segments.
-    pub segment: SS,
+    pub(crate) segment: SS,
     /// Store used for manifest checkpoints.
-    pub checkpoint: CS,
+    pub(crate) checkpoint: CS,
     /// Store used for snapshot leases.
-    pub lease: LS,
+    pub(crate) lease: LS,
 }
 
 impl<HS, SS, CS, LS> Stores<HS, SS, CS, LS> {
@@ -552,6 +552,7 @@ mod tests {
             Some(vec![wal_segment_b.file_id().clone()]),
             data0a.clone(),
             mvcc0a.clone(),
+            None,
         );
         let (data0b, mvcc0b) = test_paths(8);
         let sst_level0_b = SstEntry::new(
@@ -560,6 +561,7 @@ mod tests {
             Some(vec![file_ids.generate()]),
             data0b.clone(),
             mvcc0b.clone(),
+            None,
         );
         let (data1, mvcc1) = test_paths(21);
         let sst_level1 = SstEntry::new(
@@ -568,6 +570,7 @@ mod tests {
             Some(vec![file_ids.generate()]),
             data1.clone(),
             mvcc1.clone(),
+            None,
         );
 
         // Simulate flush of immutables
@@ -923,6 +926,7 @@ mod tests {
                         Some(vec![file_ids.generate()]),
                         failure_data_path.clone(),
                         failure_mvcc_path.clone(),
+                        None,
                     )],
                 }],
             )

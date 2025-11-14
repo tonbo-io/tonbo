@@ -29,7 +29,7 @@ use crate::{
     id::FileId,
     inmem::immutable::{
         Immutable,
-        memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
+        memtable::{DeleteSidecar, MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
     },
     key::KeyOwned,
     manifest::ManifestError,
@@ -210,6 +210,7 @@ pub struct SsTableDescriptor {
     wal_ids: Option<Vec<FileId>>,
     data_path: Option<Path>,
     mvcc_path: Option<Path>,
+    delete_path: Option<Path>,
 }
 
 impl SsTableDescriptor {
@@ -222,6 +223,7 @@ impl SsTableDescriptor {
             wal_ids: None,
             data_path: None,
             mvcc_path: None,
+            delete_path: None,
         }
     }
 
@@ -238,9 +240,15 @@ impl SsTableDescriptor {
     }
 
     /// Attach the storage paths for the data and MVCC sidecar files.
-    pub fn with_storage_paths(mut self, data_path: Path, mvcc_path: Path) -> Self {
+    pub fn with_storage_paths(
+        mut self,
+        data_path: Path,
+        mvcc_path: Path,
+        delete_path: Option<Path>,
+    ) -> Self {
         self.data_path = Some(data_path);
         self.mvcc_path = Some(mvcc_path);
+        self.delete_path = delete_path;
         self
     }
 
@@ -272,6 +280,11 @@ impl SsTableDescriptor {
     /// Relative path to the MVCC sidecar file.
     pub fn mvcc_path(&self) -> Option<&Path> {
         self.mvcc_path.as_ref()
+    }
+
+    /// Relative path to the delete sidecar file, when present.
+    pub fn delete_path(&self) -> Option<&Path> {
+        self.delete_path.as_ref()
     }
 }
 
@@ -409,6 +422,7 @@ impl SsTableStats {
 struct StagedSegment {
     data: RecordBatch,
     mvcc: MvccColumns,
+    deletes: DeleteSidecar,
 }
 
 pub(crate) struct ParquetTableWriter<M: Mode> {
@@ -439,8 +453,9 @@ where
     }
 
     pub(crate) fn stage_immutable(&mut self, segment: &Immutable<M>) -> Result<(), SsTableError> {
-        let rows = segment.len();
-        if rows == 0 {
+        let data_rows = segment.storage().num_rows();
+        let delete_rows = segment.delete_sidecar().len();
+        if data_rows == 0 && delete_rows == 0 {
             return Ok(());
         }
 
@@ -475,11 +490,12 @@ where
         }
 
         self.staged.segments += 1;
-        self.staged.rows += rows;
+        self.staged.rows += data_rows;
         self.staged.tombstones += segment_tombstones;
         let staged_segment = StagedSegment {
             data: segment.storage().clone(),
             mvcc: segment.mvcc_columns().clone(),
+            deletes: segment.delete_sidecar().clone(),
         };
         self.segments.push(staged_segment);
         Ok(())
@@ -494,7 +510,7 @@ where
         for segment in &self.segments {
             ctx.write_segment(segment).await?;
         }
-        let (data_path, mvcc_path, data_bytes) = ctx.finish().await?;
+        let (data_path, mvcc_path, delete_path, data_bytes) = ctx.finish().await?;
         let stats = SsTableStats::from_staged(
             self.staged,
             usize::try_from(data_bytes).unwrap_or(usize::MAX),
@@ -502,7 +518,7 @@ where
         Ok(SsTable::new(
             self.descriptor
                 .with_stats(stats)
-                .with_storage_paths(data_path, mvcc_path)
+                .with_storage_paths(data_path, mvcc_path, delete_path)
                 .with_wal_ids(self.wal_ids),
         ))
     }
@@ -528,8 +544,12 @@ struct WriteContext {
     fs: Arc<dyn DynFs>,
     data_path: Path,
     mvcc_path: Path,
+    delete_path: Path,
     data_writer: Option<AsyncArrowWriter<AsyncWriter>>,
     mvcc_writer: Option<AsyncArrowWriter<AsyncWriter>>,
+    delete_writer: Option<AsyncArrowWriter<AsyncWriter>>,
+    delete_written: bool,
+    compression: SsTableCompression,
 }
 impl WriteContext {
     async fn new(
@@ -552,6 +572,11 @@ impl WriteContext {
         let mvcc_part = PathPart::parse(&mvcc_file_name)
             .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
         let mvcc_path = dir_path.child(mvcc_part);
+
+        let delete_file_name = format!("{:020}.delete.parquet", descriptor.id().raw());
+        let delete_part = PathPart::parse(&delete_file_name)
+            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
+        let delete_path = dir_path.child(delete_part);
 
         let data_options = OpenOptions::default()
             .create(true)
@@ -582,6 +607,10 @@ impl WriteContext {
             mvcc_path,
             data_writer: Some(data_writer),
             mvcc_writer: Some(mvcc_writer),
+            delete_path,
+            delete_writer: None,
+            delete_written: false,
+            compression: config.compression(),
         })
     }
 
@@ -600,10 +629,40 @@ impl WriteContext {
         } else {
             return Err(SsTableError::WriterClosed);
         }
+        if !segment.deletes.is_empty() {
+            let delete_batch = segment
+                .deletes
+                .to_record_batch()
+                .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))?;
+            self.write_delete_batch(delete_batch).await?;
+        }
         Ok(())
     }
 
-    async fn finish(mut self) -> Result<(Path, Path, u64), SsTableError> {
+    async fn write_delete_batch(&mut self, batch: RecordBatch) -> Result<(), SsTableError> {
+        if self.delete_writer.is_none() {
+            let options = OpenOptions::default()
+                .create(true)
+                .write(true)
+                .truncate(true);
+            let file = self.fs.open_options(&self.delete_path, options).await?;
+            let writer = AsyncArrowWriter::try_new(
+                AsyncWriter::new(file),
+                batch.schema(),
+                Some(writer_properties(self.compression)),
+            )?;
+            self.delete_writer = Some(writer);
+        }
+        if let Some(writer) = self.delete_writer.as_mut() {
+            writer.write(&batch).await?;
+            self.delete_written = true;
+            Ok(())
+        } else {
+            Err(SsTableError::WriterClosed)
+        }
+    }
+
+    async fn finish(mut self) -> Result<(Path, Path, Option<Path>, u64), SsTableError> {
         if let Some(writer) = self.data_writer.take() {
             writer.close().await?;
         }
@@ -613,20 +672,32 @@ impl WriteContext {
 
         let data_path = self.data_path.clone();
         let mvcc_path = self.mvcc_path.clone();
+        if let Some(writer) = self.delete_writer.take() {
+            writer.close().await?;
+        }
+
         let data_file = self
             .fs
             .open_options(&data_path, OpenOptions::default().read(true))
             .await?;
         let data_bytes = data_file.size().await?;
 
-        Ok((data_path, mvcc_path, data_bytes))
+        let delete_path = if self.delete_written {
+            Some(self.delete_path.clone())
+        } else {
+            None
+        };
+
+        Ok((data_path, mvcc_path, delete_path, data_bytes))
     }
 }
 
 impl Drop for WriteContext {
     fn drop(&mut self) {
         debug_assert!(
-            self.data_writer.is_none() && self.mvcc_writer.is_none(),
+            self.data_writer.is_none()
+                && self.mvcc_writer.is_none()
+                && self.delete_writer.is_none(),
             "WriteContext dropped without closing writers"
         );
     }
@@ -730,11 +801,11 @@ mod tests {
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
-    use typed_arrow_dyn::DynCell;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        inmem::immutable::memtable::{ImmutableMemTable, bundle_mvcc_sidecar},
+        inmem::immutable::memtable::{ImmutableIndexEntry, ImmutableMemTable, bundle_mvcc_sidecar},
         key::KeyTsViewRaw,
         mvcc::Timestamp,
         test_util::build_batch,
@@ -760,14 +831,44 @@ mod tests {
             Field::new("id", DataType::Utf8, true),
             Field::new("v", DataType::Int32, true),
         ]));
-        let dyn_rows: Vec<Vec<Option<DynCell>>> = rows
+        let mut data_rows = Vec::new();
+        let mut data_commits = Vec::new();
+        let mut delete_rows = Vec::new();
+        let mut delete_commits = Vec::new();
+        for ((key, value), (commit, tombstone)) in rows
             .into_iter()
-            .map(|(k, v)| vec![Some(DynCell::Str(k.into())), Some(DynCell::I32(v))])
-            .collect();
-        let batch = build_batch(schema.clone(), dyn_rows).expect("record batch");
-        let commit_ts: Vec<Timestamp> = commits.iter().copied().map(Timestamp::new).collect();
+            .zip(commits.into_iter().zip(tombstones.into_iter()))
+        {
+            let ts = Timestamp::new(commit);
+            if tombstone {
+                delete_rows.push(DynRow(vec![Some(DynCell::Str(key.into()))]));
+                delete_commits.push(ts);
+            } else {
+                data_rows.push(DynRow(vec![
+                    Some(DynCell::Str(key.into())),
+                    Some(DynCell::I32(value)),
+                ]));
+                data_commits.push(ts);
+            }
+        }
+
+        let batch = if data_rows.is_empty() {
+            RecordBatch::new_empty(schema.clone())
+        } else {
+            build_batch(schema.clone(), data_rows).expect("record batch")
+        };
+        let tombstone_flags = vec![false; batch.num_rows()];
         let (batch, mvcc) =
-            bundle_mvcc_sidecar(batch, commit_ts, tombstones).expect("mvcc columns");
+            bundle_mvcc_sidecar(batch, data_commits.clone(), tombstone_flags).expect("mvcc");
+
+        let delete_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let delete_batch = if delete_rows.is_empty() {
+            RecordBatch::new_empty(delete_schema.clone())
+        } else {
+            build_batch(delete_schema.clone(), delete_rows).expect("delete batch")
+        };
+        let delete_sidecar = DeleteSidecar::new(delete_batch, delete_commits);
+
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let mut composite = BTreeMap::new();
@@ -776,9 +877,30 @@ mod tests {
             .project_view(&batch, &row_indices)
             .expect("project view");
         for (row, key_row) in key_rows.into_iter().enumerate() {
-            composite.insert(KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]), row as u32);
+            composite.insert(
+                KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]),
+                ImmutableIndexEntry::Row(row as u32),
+            );
         }
-        ImmutableMemTable::new(batch, composite, mvcc)
+
+        if !delete_sidecar.is_empty() {
+            let delete_schema = delete_sidecar.key_batch().schema().clone();
+            let indices: Vec<usize> = (0..delete_schema.fields().len()).collect();
+            let projection =
+                crate::extractor::projection_for_columns(delete_schema.clone(), indices)
+                    .expect("identity projection");
+            let delete_row_indices: Vec<usize> =
+                (0..delete_sidecar.key_batch().num_rows()).collect();
+            let delete_key_rows = projection
+                .project_view(delete_sidecar.key_batch(), &delete_row_indices)
+                .expect("delete keys");
+            for (row, key_row) in delete_key_rows.into_iter().enumerate() {
+                let ts = delete_sidecar.commit_ts(row);
+                composite.insert(KeyTsViewRaw::new(key_row, ts), ImmutableIndexEntry::Delete);
+            }
+        }
+
+        ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar)
     }
 
     fn tokio_block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -816,7 +938,7 @@ mod tests {
 
         let plan = writer.plan();
         assert_eq!(plan.segments, 2);
-        assert_eq!(plan.rows, 5);
+        assert_eq!(plan.rows, 4);
         assert_eq!(plan.tombstones, 1);
         assert_eq!(plan.min_commit_ts, Some(Timestamp::new(10)));
         assert_eq!(plan.max_commit_ts, Some(Timestamp::new(35)));
@@ -892,6 +1014,32 @@ mod tests {
             assert!(data_path.as_ref().ends_with(".parquet"));
             assert!(mvcc_path.as_ref().ends_with(".mvcc.parquet"));
             assert_ne!(data_path.as_ref(), mvcc_path.as_ref());
+            assert!(descriptor.delete_path().is_none());
+        });
+    }
+
+    #[test]
+    fn finish_records_delete_sidecar_when_tombstones_exist() {
+        tokio_block_on(async {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, true),
+                Field::new("v", DataType::Int32, true),
+            ]));
+            let descriptor = SsTableDescriptor::new(SsTableId::new(22), 0);
+            let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+                ParquetTableWriter::new(test_config(schema.clone()), descriptor);
+
+            let segment = sample_segment(
+                vec![("z".into(), 1), ("tomb".into(), 0)],
+                vec![100, 200],
+                vec![false, true],
+            );
+            writer.stage_immutable(&segment).expect("stage segment");
+
+            let table = writer.finish().await.expect("finish table");
+            let descriptor = table.descriptor();
+            let delete_path = descriptor.delete_path().expect("delete sidecar present");
+            assert!(delete_path.as_ref().ends_with(".delete.parquet"));
         });
     }
 }

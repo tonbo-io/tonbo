@@ -4,7 +4,12 @@
 //! trait-driven structure remains so that compile-time typed dispatch can be
 //! reintroduced without reshaping the API.
 
-use std::{collections::HashMap, hash::Hash, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
@@ -41,7 +46,7 @@ use crate::{
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     query::scan::ScanPlan,
     scan::RangeSet,
-    transaction::{Snapshot as TxSnapshot, SnapshotError},
+    transaction::{Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionError},
     wal::{
         WalConfig as RuntimeWalConfig, WalError, WalHandle,
         frame::{DynAppendEvent, INITIAL_FRAME_SEQ, WalEvent},
@@ -51,7 +56,7 @@ use crate::{
     },
 };
 
-type PendingWalBatches = HashMap<u64, Vec<PendingWalPayload>>;
+type PendingWalTxns = HashMap<u64, PendingWalTxn>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
 enum PendingWalPayload {
@@ -67,10 +72,28 @@ enum PendingWalPayload {
     },
 }
 
+#[derive(Default)]
+struct PendingWalTxn {
+    payloads: Vec<PendingWalPayload>,
+}
+
+impl PendingWalTxn {
+    fn push(&mut self, payload: PendingWalPayload) {
+        self.payloads.push(payload);
+    }
+
+    fn into_payloads(self) -> Vec<PendingWalPayload> {
+        self.payloads
+    }
+
+    fn is_empty(&self) -> bool {
+        self.payloads.is_empty()
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WalFrameRange {
-    first: u64,
-    last: u64,
+pub(crate) struct WalFrameRange {
+    pub(crate) first: u64,
+    pub(crate) last: u64,
 }
 
 impl WalFrameRange {
@@ -83,7 +106,7 @@ impl WalFrameRange {
         }
     }
 
-    fn extend(&mut self, other: &WalFrameRange) {
+    pub(crate) fn extend(&mut self, other: &WalFrameRange) {
         self.include_seq(other.first);
         self.include_seq(other.last);
     }
@@ -109,6 +132,15 @@ impl WalRangeAccumulator {
     fn into_range(self) -> Option<WalFrameRange> {
         self.range
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct TxnWalPublishContext {
+    pub(crate) manifest: TonboManifest,
+    pub(crate) manifest_table: TableId,
+    pub(crate) wal_config: Option<RuntimeWalConfig>,
+    pub(crate) mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
+    pub(crate) prev_live_floor: Option<u64>,
 }
 
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
@@ -143,7 +175,7 @@ where
     manifest: TonboManifest,
     manifest_table: TableId,
     /// WAL frame bounds covering the current mutable memtable, if any.
-    mutable_wal_range: Option<WalFrameRange>,
+    mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
     /// File identifier allocator scoped to this DB instance.
     #[allow(dead_code)]
     file_ids: FileIdGenerator,
@@ -157,6 +189,22 @@ where
 {
     pub(crate) fn schema(&self) -> &SchemaRef {
         &self.mode.schema
+    }
+
+    /// Begin a writable transaction that stages mutations against the current schema.
+    ///
+    /// Captures a manifest/MVCC snapshot so reads observe a stable view and returns a
+    /// [`Transaction`] handle that supports staging `DynRow` values, `RecordBatch`es,
+    /// and key-only deletes before calling [`Transaction::commit`].
+    pub fn begin_transaction(&self) -> Result<Transaction, TransactionError> {
+        let snapshot = self.begin_snapshot()?;
+        Ok(Transaction::new(
+            self.mode.schema.clone(),
+            self.mode.delete_schema.clone(),
+            Arc::clone(&self.mode.extractor),
+            snapshot,
+            self.mode.commit_ack_mode,
+        ))
     }
 
     pub(crate) fn insert_into_mutable(
@@ -173,9 +221,12 @@ where
         events: Vec<WalEvent>,
     ) -> Result<Option<Timestamp>, KeyExtractError> {
         let mut last_commit_ts: Option<Timestamp> = None;
-        let mut pending: PendingWalBatches = HashMap::new();
+        let mut pending: PendingWalTxns = HashMap::new();
         for event in events {
             match event {
+                WalEvent::TxnBegin { provisional_id } => {
+                    pending.entry(provisional_id).or_default();
+                }
                 WalEvent::DynAppend {
                     provisional_id,
                     payload,
@@ -212,8 +263,11 @@ where
                     provisional_id,
                     commit_ts,
                 } => {
-                    if let Some(batches) = pending.remove(&provisional_id) {
-                        for entry in batches {
+                    if let Some(txn) = pending.remove(&provisional_id) {
+                        if txn.is_empty() {
+                            continue;
+                        }
+                        for entry in txn.into_payloads() {
                             match entry {
                                 PendingWalPayload::Upsert {
                                     batch,
@@ -257,7 +311,10 @@ where
                         });
                     }
                 }
-                WalEvent::TxnBegin { .. } | WalEvent::TxnAbort { .. } | WalEvent::SealMarker => {
+                WalEvent::TxnAbort { provisional_id } => {
+                    pending.remove(&provisional_id);
+                }
+                WalEvent::SealMarker => {
                     // TODO: implement once transactional semantics are wired up.
                 }
             }
@@ -314,6 +371,59 @@ where
         Ok(stream::empty())
     }
 
+    pub(crate) fn scan_immutable_rows_at(
+        &self,
+        ranges: &RangeSet<KeyOwned>,
+        read_ts: Timestamp,
+    ) -> Result<Vec<(KeyOwned, DynRow)>, KeyExtractError> {
+        let mut rows = Vec::new();
+        for segment in &self.immutables {
+            let scan = segment.scan_visible(ranges, None, read_ts)?;
+            for result in scan {
+                let (key_view, row_raw) = result.map_err(KeyExtractError::from)?;
+                let row = row_raw.into_owned().map_err(|err| {
+                    KeyExtractError::Arrow(ArrowError::ComputeError(err.to_string()))
+                })?;
+                let (key_owned, _) = key_view.to_owned().into_parts();
+                rows.push((key_owned, row));
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Apply a WAL-durable batch directly into the mutable table.
+    pub(crate) fn apply_committed_batch(
+        &mut self,
+        batch: RecordBatch,
+        tombstones: Vec<bool>,
+        commit_ts: Timestamp,
+    ) -> Result<(), KeyExtractError> {
+        let commit_array: ArrayRef =
+            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()]));
+        let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones));
+        apply_dyn_wal_batch(self, batch, commit_array, tombstone_array, commit_ts)
+    }
+
+    /// Apply a WAL-durable key-only delete batch directly into the mutable table.
+    pub(crate) fn apply_committed_deletes(
+        &mut self,
+        batch: RecordBatch,
+    ) -> Result<(), KeyExtractError> {
+        self.mem
+            .insert_delete_batch(self.mode.delete_projection.as_ref(), batch)
+    }
+
+    /// Check whether a newer committed version exists for `key` relative to `snapshot_ts`.
+    pub(crate) fn mutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
+        self.mem.has_conflict(key, snapshot_ts)
+    }
+
+    pub(crate) fn immutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
+        self.immutables
+            .iter()
+            .any(|segment| segment.has_conflict(key, snapshot_ts))
+    }
+
     pub(crate) fn maybe_seal_after_insert(&mut self) -> Result<(), KeyExtractError> {
         let since = self.last_seal_at.map(|t| t.elapsed());
         let stats = self.mem.build_stats(since);
@@ -322,7 +432,7 @@ where
                 .mem
                 .seal_into_immutable(&self.mode.schema, self.mode.extractor.as_ref())?
             {
-                let wal_range = self.mutable_wal_range.take();
+                let wal_range = self.take_mutable_wal_range();
                 self.add_immutable(seg, wal_range);
             }
             self.last_seal_at = Some(Instant::now());
@@ -406,7 +516,7 @@ where
             commit_clock: CommitClock::default(),
             manifest,
             manifest_table,
-            mutable_wal_range: None,
+            mutable_wal_range: Arc::new(Mutex::new(None)),
             file_ids,
             _key_locks: Arc::new(LockableHashMap::new()),
         }
@@ -524,17 +634,17 @@ where
             .await
             .map_err(KeyExtractError::from)?;
         if events.is_empty() {
-            db.mutable_wal_range = None;
+            db.set_mutable_wal_range(None);
         } else if let Some(ref floor_ref) = wal_floor {
-            db.mutable_wal_range = Some(WalFrameRange {
+            db.set_mutable_wal_range(Some(WalFrameRange {
                 first: floor_ref.first_frame(),
                 last: floor_ref.last_frame(),
-            });
+            }));
         } else {
-            db.mutable_wal_range = Some(WalFrameRange {
+            db.set_mutable_wal_range(Some(WalFrameRange {
                 first: INITIAL_FRAME_SEQ,
                 last: INITIAL_FRAME_SEQ,
-            });
+            }));
         }
 
         let last_commit_ts = M::replay_wal(&mut db, events)?;
@@ -642,8 +752,8 @@ where
         self.manifest_wal_floor().map(|ref_| ref_.seq())
     }
 
-    fn wal_live_frame_floor(&self) -> Option<u64> {
-        let mutable_floor = self.mutable_wal_range.as_ref().map(|range| range.first);
+    pub(crate) fn wal_live_frame_floor(&self) -> Option<u64> {
+        let mutable_floor = self.mutable_wal_range_snapshot().map(|range| range.first);
         let immutable_floor = self
             .immutable_wal_ranges
             .iter()
@@ -720,6 +830,7 @@ where
                         "sst descriptor missing mvcc path",
                     ))
                 })?;
+                let delete_path = descriptor_ref.delete_path().cloned();
                 let stats = descriptor_ref.stats().cloned();
                 let sst_entry = SstEntry::new(
                     descriptor_ref.id().clone(),
@@ -727,6 +838,7 @@ where
                     wal_ids.clone(),
                     data_path,
                     mvcc_path,
+                    delete_path,
                 );
                 let mut edits = vec![VersionEdit::AddSsts {
                     level: descriptor_ref.level() as u32,
@@ -767,10 +879,45 @@ where
         self.immutable_wal_ranges.push(wal_range);
     }
 
-    fn record_mutable_wal_range(&mut self, range: WalFrameRange) {
-        match self.mutable_wal_range.as_mut() {
+    fn record_mutable_wal_range(&self, range: WalFrameRange) {
+        let mut guard = self
+            .mutable_wal_range
+            .lock()
+            .expect("mutable wal range lock poisoned");
+        match &mut *guard {
             Some(existing) => existing.extend(&range),
-            None => self.mutable_wal_range = Some(range),
+            None => *guard = Some(range),
+        }
+    }
+
+    fn take_mutable_wal_range(&self) -> Option<WalFrameRange> {
+        self.mutable_wal_range
+            .lock()
+            .expect("mutable wal range lock poisoned")
+            .take()
+    }
+
+    fn mutable_wal_range_snapshot(&self) -> Option<WalFrameRange> {
+        *self
+            .mutable_wal_range
+            .lock()
+            .expect("mutable wal range lock poisoned")
+    }
+
+    fn set_mutable_wal_range(&self, value: Option<WalFrameRange>) {
+        *self
+            .mutable_wal_range
+            .lock()
+            .expect("mutable wal range lock poisoned") = value;
+    }
+
+    pub(crate) fn txn_publish_context(&self, prev_live_floor: Option<u64>) -> TxnWalPublishContext {
+        TxnWalPublishContext {
+            manifest: self.manifest.clone(),
+            manifest_table: self.manifest_table,
+            wal_config: self.wal_config.clone(),
+            mutable_wal_range: Arc::clone(&self.mutable_wal_range),
+            prev_live_floor,
         }
     }
 
@@ -1140,7 +1287,7 @@ mod tests {
         executor::block_on,
     };
     use tokio::sync::{Mutex, oneshot};
-    use typed_arrow_dyn::DynCell;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
@@ -1162,7 +1309,10 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
@@ -1194,8 +1344,8 @@ mod tests {
             DB::new(config, Arc::clone(&executor)).expect("db");
 
         let rows = vec![
-            vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))],
-            vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))],
+            DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         let result = block_on(db.ingest_with_tombstones(batch, vec![false, true]));
@@ -1248,7 +1398,10 @@ mod tests {
         assert!(snapshot.head().last_manifest_txn.is_none());
         assert!(snapshot.latest_version().is_none());
 
-        let rows = vec![vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]];
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k1".into())),
+            Some(DynCell::I32(1)),
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         block_on(db.ingest_with_tombstones(batch, vec![false])).expect("ingest");
 
@@ -1267,8 +1420,8 @@ mod tests {
         ]));
         // Build one batch with two rows
         let rows = vec![
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
-            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
 
@@ -1455,7 +1608,10 @@ mod tests {
             Ok(())
         });
 
-        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
@@ -1541,7 +1697,10 @@ mod tests {
             Ok(())
         });
 
-        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
@@ -1556,24 +1715,24 @@ mod tests {
             .expect("ingest");
 
         let observed_range = db
-            .mutable_wal_range
+            .mutable_wal_range_snapshot()
             .or_else(|| db.immutable_wal_ranges.first().copied().flatten())
             .expect("wal range populated after ingest");
         assert_eq!(observed_range.first, frame::INITIAL_FRAME_SEQ);
         assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
-        if db.mutable_wal_range.is_some() {
+        if db.mutable_wal_range_snapshot().is_some() {
             let sealed = db
                 .mem
                 .seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
                 .expect("seal mutable")
                 .expect("mutable contained rows");
-            let wal_range = db.mutable_wal_range.take();
+            let wal_range = db.take_mutable_wal_range();
             db.add_immutable(sealed, wal_range);
         }
 
-        assert!(db.mutable_wal_range.is_none());
+        assert!(db.mutable_wal_range_snapshot().is_none());
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
         db.immutables.clear();
@@ -1803,8 +1962,8 @@ mod tests {
 
         // Build one batch and insert to ensure extractor wired
         let rows = vec![
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
-            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
@@ -1824,8 +1983,8 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("schema metadata key");
 
         let rows = vec![
-            vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))],
-            vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))],
+            DynRow(vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert via metadata");
@@ -1891,8 +2050,8 @@ mod tests {
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let rows = vec![
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
-            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -1994,10 +2153,10 @@ mod tests {
 
         // First ingest/flush establishes the initial WAL floor.
         for idx in 0..4 {
-            let rows = vec![vec![
+            let rows = vec![DynRow(vec![
                 Some(DynCell::Str(format!("user-{idx}").into())),
                 Some(DynCell::I32(idx as i32)),
-            ]];
+            ])];
             let batch = build_batch(schema.clone(), rows)?;
             db.ingest(batch).await?;
         }
@@ -2020,10 +2179,10 @@ mod tests {
 
         // Second ingest/flush should advance the floor and delete older segments.
         for idx in 4..8 {
-            let rows = vec![vec![
+            let rows = vec![DynRow(vec![
                 Some(DynCell::Str(format!("user-{idx}").into())),
                 Some(DynCell::I32(idx as i32)),
-            ]];
+            ])];
             let batch = build_batch(schema.clone(), rows)?;
             db.ingest(batch).await?;
         }
@@ -2074,21 +2233,21 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("composite field metadata");
 
         let rows = vec![
-            vec![
+            DynRow(vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(10)),
                 Some(DynCell::I32(1)),
-            ],
-            vec![
+            ]),
+            DynRow(vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(5)),
                 Some(DynCell::I32(2)),
-            ],
-            vec![
+            ]),
+            DynRow(vec![
                 Some(DynCell::Str("b".into())),
                 Some(DynCell::I64(1)),
                 Some(DynCell::I32(3)),
-            ],
+            ]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
@@ -2131,21 +2290,21 @@ mod tests {
             DB::new(config, Arc::new(BlockingExecutor)).expect("composite schema metadata");
 
         let rows = vec![
-            vec![
+            DynRow(vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(5)),
                 Some(DynCell::I32(1)),
-            ],
-            vec![
+            ]),
+            DynRow(vec![
                 Some(DynCell::Str("a".into())),
                 Some(DynCell::I64(10)),
                 Some(DynCell::I32(2)),
-            ],
-            vec![
+            ]),
+            DynRow(vec![
                 Some(DynCell::Str("b".into())),
                 Some(DynCell::I64(1)),
                 Some(DynCell::I32(3)),
-            ],
+            ]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         block_on(db.ingest(batch)).expect("insert batch");
@@ -2269,7 +2428,10 @@ mod tests {
         // New ingest should advance to > 42 (next clock tick).
         let new_batch = build_batch(
             schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(2)),
+            ])],
         )
         .expect("batch2");
         block_on(db.ingest(new_batch)).expect("ingest new");

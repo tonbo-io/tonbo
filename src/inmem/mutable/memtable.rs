@@ -7,16 +7,19 @@ use std::{
     vec,
 };
 
-use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array, new_null_array};
+use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
 use super::{MutableLayout, MutableMemTableMetrics};
 use crate::{
-    extractor::{KeyExtractError, KeyProjection, map_view_err},
+    extractor::{self, KeyExtractError, KeyProjection, map_view_err},
     inmem::{
-        immutable::memtable::{ImmutableMemTable, MVCC_COMMIT_COL, bundle_mvcc_sidecar},
+        immutable::memtable::{
+            DeleteSidecar, ImmutableIndexEntry, ImmutableMemTable, MVCC_COMMIT_COL,
+            bundle_mvcc_sidecar,
+        },
         policy::{MemStats, StatsProvider},
     },
     key::{KeyOwned, KeyRow, KeyTsViewRaw},
@@ -355,6 +358,17 @@ impl DynMem {
         ))
     }
 
+    /// Return `true` if there is any committed version for `key` newer than `snapshot_ts`.
+    pub(crate) fn has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
+        let upper = KeyTsViewRaw::from_owned(key, Timestamp::MAX);
+        let lower = KeyTsViewRaw::from_owned(key, Timestamp::MIN);
+        self.index
+            .range(upper..=lower)
+            .next()
+            .map(|(composite, _)| composite.timestamp() > snapshot_ts)
+            .unwrap_or(false)
+    }
+
     /// Approximate memory usage for keys stored in the mutable table.
     pub(crate) fn approx_bytes(&self) -> usize {
         self.metrics.approx_key_bytes + self.metrics.entries * self.metrics.entry_overhead
@@ -381,10 +395,11 @@ impl DynMem {
             return Ok(None);
         }
 
-        let key_lookup = build_key_position_lookup(schema.fields().len(), extractor.key_indices());
         let mut slices = Vec::new();
         let mut commit_ts = Vec::new();
         let mut tombstone = Vec::new();
+        let mut delete_slices = Vec::new();
+        let mut delete_commit_ts = Vec::new();
 
         enum EntryKind {
             Upsert(BatchRowLoc),
@@ -411,7 +426,7 @@ impl DynMem {
             },
         );
 
-        for (_key, commit, kind) in entries.into_iter() {
+        for (_key, commit, kind) in entries.iter() {
             match kind {
                 EntryKind::Upsert(loc) => {
                     let attachment = &self.batches_attached[loc.batch_idx];
@@ -419,20 +434,17 @@ impl DynMem {
                     let row_batch = batch.slice(loc.row_idx, 1);
                     slices.push(row_batch);
                     let attachment_commit = attachment.commit_ts(loc.row_idx);
-                    debug_assert_eq!(attachment_commit, commit);
+                    debug_assert_eq!(attachment_commit, *commit);
                     commit_ts.push(attachment_commit);
                     tombstone.push(false);
                 }
                 EntryKind::Delete(loc) => {
                     let attachment = &self.delete_batches[loc.batch_idx];
-                    let row_batch =
-                        synthesize_delete_row(schema, &key_lookup, attachment, loc.row_idx)
-                            .map_err(crate::extractor::KeyExtractError::Arrow)?;
-                    slices.push(row_batch);
+                    let row_batch = attachment.keys().slice(loc.row_idx, 1);
+                    delete_slices.push(row_batch);
                     let attachment_commit = attachment.commit_ts(loc.row_idx);
-                    debug_assert_eq!(attachment_commit, commit);
-                    commit_ts.push(attachment_commit);
-                    tombstone.push(true);
+                    debug_assert_eq!(attachment_commit, *commit);
+                    delete_commit_ts.push(attachment_commit);
                 }
             }
         }
@@ -444,17 +456,69 @@ impl DynMem {
             ..Default::default()
         };
 
-        let batch = concat_batches(schema, &slices)?;
+        let batch = if slices.is_empty() {
+            RecordBatch::new_empty(schema.clone())
+        } else if slices.len() == 1 {
+            slices.pop().unwrap()
+        } else {
+            concat_batches(schema, &slices)?
+        };
         let (batch, mvcc) = bundle_mvcc_sidecar(batch, commit_ts, tombstone)?;
-
-        let mut composite_index: BTreeMap<KeyTsViewRaw, u32> = BTreeMap::new();
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
-        let key_rows = extractor.project_view(&batch, &row_indices)?;
-        for (row, key_row) in key_rows.into_iter().enumerate() {
-            composite_index.insert(KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]), row as u32);
+        let upsert_key_rows = extractor.project_view(&batch, &row_indices)?;
+
+        let key_schema = extractor.key_schema();
+        let delete_batch = if delete_slices.is_empty() {
+            RecordBatch::new_empty(key_schema.clone())
+        } else if delete_slices.len() == 1 {
+            delete_slices.pop().unwrap()
+        } else {
+            concat_batches(&key_schema, &delete_slices)?
+        };
+        let delete_sidecar = DeleteSidecar::new(delete_batch, delete_commit_ts);
+        let delete_key_rows = if delete_sidecar.is_empty() {
+            Vec::new()
+        } else {
+            let identity_indices: Vec<usize> = (0..key_schema.fields().len()).collect();
+            let identity_projection =
+                extractor::projection_for_columns(key_schema.clone(), identity_indices)?;
+            let delete_row_indices: Vec<usize> =
+                (0..delete_sidecar.key_batch().num_rows()).collect();
+            identity_projection.project_view(delete_sidecar.key_batch(), &delete_row_indices)?
+        };
+
+        let mut composite_index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry> = BTreeMap::new();
+        let mut upsert_row = 0u32;
+        let mut delete_row = 0u32;
+        for (_key_owned, commit, kind) in entries.into_iter() {
+            match kind {
+                EntryKind::Upsert(_) => {
+                    let key_row = upsert_key_rows
+                        .get(upsert_row as usize)
+                        .expect("upsert key row")
+                        .clone();
+                    let key_view = KeyTsViewRaw::new(key_row, commit);
+                    composite_index.insert(key_view, ImmutableIndexEntry::Row(upsert_row));
+                    upsert_row += 1;
+                }
+                EntryKind::Delete(_) => {
+                    let key_row = delete_key_rows
+                        .get(delete_row as usize)
+                        .expect("delete key row")
+                        .clone();
+                    let key_view = KeyTsViewRaw::new(key_row, commit);
+                    composite_index.insert(key_view, ImmutableIndexEntry::Delete);
+                    delete_row += 1;
+                }
+            }
         }
 
-        Ok(Some(ImmutableMemTable::new(batch, composite_index, mvcc)))
+        Ok(Some(ImmutableMemTable::new(
+            batch,
+            composite_index,
+            mvcc,
+            delete_sidecar,
+        )))
     }
 }
 
@@ -659,33 +723,6 @@ fn convert_upper_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
     }
 }
 
-fn build_key_position_lookup(width: usize, key_indices: &[usize]) -> Vec<Option<usize>> {
-    let mut lookup = vec![None; width];
-    for (pos, &idx) in key_indices.iter().enumerate() {
-        if idx < width {
-            lookup[idx] = Some(pos);
-        }
-    }
-    lookup
-}
-
-fn synthesize_delete_row(
-    schema: &SchemaRef,
-    key_lookup: &[Option<usize>],
-    attachment: &DeleteAttachment,
-    row_idx: usize,
-) -> Result<RecordBatch, arrow_schema::ArrowError> {
-    let mut columns = Vec::with_capacity(schema.fields().len());
-    for (col_idx, field) in schema.fields().iter().enumerate() {
-        if let Some(Some(key_pos)) = key_lookup.get(col_idx).copied() {
-            columns.push(attachment.keys().column(key_pos).slice(row_idx, 1));
-        } else {
-            columns.push(new_null_array(field.data_type(), 1));
-        }
-    }
-    RecordBatch::try_new(schema.clone(), columns)
-}
-
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -705,9 +742,9 @@ mod tests {
         ]));
         let mut m = DynMem::new(schema.clone());
         let rows = vec![
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
-            vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(3))],
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(3))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let extractor =
@@ -749,6 +786,40 @@ mod tests {
     }
 
     #[test]
+    fn conflict_detection_checks_latest_commit_ts() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+        let mut mem = DynMem::new(schema.clone());
+
+        let rows_v1 = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
+        let batch_v1 = build_batch(schema.clone(), rows_v1).expect("batch v1");
+        mem.insert_batch(extractor.as_ref(), batch_v1, Timestamp::new(10))
+            .expect("insert v1");
+
+        let rows_v2 = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(2)),
+        ])];
+        let batch_v2 = build_batch(schema.clone(), rows_v2).expect("batch v2");
+        mem.insert_batch(extractor.as_ref(), batch_v2, Timestamp::new(20))
+            .expect("insert v2");
+
+        let key = KeyOwned::from("k");
+
+        assert!(mem.has_conflict(&key, Timestamp::new(15)));
+        assert!(!mem.has_conflict(&key, Timestamp::new(20)));
+        assert!(!mem.has_conflict(&key, Timestamp::new(25)));
+        assert!(!mem.has_conflict(&KeyOwned::from("other"), Timestamp::new(5)));
+    }
+
+    #[test]
     fn mvcc_scan_respects_read_ts() {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -759,19 +830,28 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
         // First commit at ts=10
-        let rows_v1 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]];
+        let rows_v1 = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
         let batch_v1: RecordBatch = build_batch(schema.clone(), rows_v1).expect("batch v1");
         m.insert_batch(extractor.as_ref(), batch_v1, Timestamp::new(10))
             .expect("insert v1");
 
         // Second commit overwrites key at ts=20
-        let rows_v2 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]];
+        let rows_v2 = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(2)),
+        ])];
         let batch_v2: RecordBatch = build_batch(schema.clone(), rows_v2).expect("batch v2");
         m.insert_batch(extractor.as_ref(), batch_v2, Timestamp::new(20))
             .expect("insert v2");
 
         // Third commit overwrites key at ts=30
-        let rows_v3 = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]];
+        let rows_v3 = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(3)),
+        ])];
         let batch_v3: RecordBatch = build_batch(schema.clone(), rows_v3).expect("batch v3");
         m.insert_batch(extractor.as_ref(), batch_v3, Timestamp::new(30))
             .expect("insert v3");
@@ -848,7 +928,10 @@ mod tests {
         // four versions for the same key
         let batch1: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(1)),
+            ])],
         )
         .expect("batch1");
         layout
@@ -857,7 +940,10 @@ mod tests {
 
         let batch2: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(2)),
+            ])],
         )
         .expect("batch2");
         layout
@@ -866,7 +952,10 @@ mod tests {
 
         let batch3: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(3))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(3)),
+            ])],
         )
         .expect("batch3");
         layout
@@ -875,7 +964,10 @@ mod tests {
 
         let batch4: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(4))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(4)),
+            ])],
         )
         .expect("batch4");
         layout
@@ -952,16 +1044,16 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let mut m = DynMem::new(schema.clone());
         let rows = vec![
-            vec![
+            DynRow(vec![
                 Some(DynCell::I64(1)),
                 Some(DynCell::Str("alice".into())),
                 Some(DynCell::I32(10)),
-            ],
-            vec![
+            ]),
+            DynRow(vec![
                 Some(DynCell::I64(2)),
                 Some(DynCell::Str("bob".into())),
                 Some(DynCell::I32(20)),
-            ],
+            ]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
         m.insert_batch(extractor.as_ref(), batch, Timestamp::new(10))
@@ -1007,10 +1099,10 @@ mod tests {
         let insert = |layout: &mut DynMem, val: i32, ts: u64| {
             let batch: RecordBatch = build_batch(
                 schema.clone(),
-                vec![vec![
+                vec![DynRow(vec![
                     Some(DynCell::Str("k".into())),
                     Some(DynCell::I32(val)),
-                ]],
+                ])],
             )
             .expect("batch");
             layout
@@ -1027,14 +1119,17 @@ mod tests {
         insert(&mut layout, 3, 30);
 
         let delete_schema = std::sync::Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
+            Field::new("id", DataType::Utf8, true),
             Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
         ]));
         let delete_projection =
             projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
         let delete_batch = build_batch(
             delete_schema,
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::U64(20))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::U64(20)),
+            ])],
         )
         .expect("delete batch");
         layout
@@ -1070,7 +1165,10 @@ mod tests {
 
         let batch1: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(1))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(1)),
+            ])],
         )
         .expect("batch1");
         layout
@@ -1084,7 +1182,10 @@ mod tests {
 
         let batch2: RecordBatch = build_batch(
             schema.clone(),
-            vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::I32(2))]],
+            vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(2)),
+            ])],
         )
         .expect("batch2");
         layout
@@ -1129,9 +1230,9 @@ mod tests {
         .expect("delete projection");
 
         let rows = vec![
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::U64(10))],
-            vec![Some(DynCell::Str("b".into())), Some(DynCell::U64(20))],
-            vec![Some(DynCell::Str("a".into())), Some(DynCell::U64(30))],
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::U64(10))]),
+            DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::U64(20))]),
+            DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::U64(30))]),
         ];
         let delete_batch = build_batch(delete_schema, rows).expect("delete batch");
 
@@ -1173,7 +1274,10 @@ mod tests {
         let delete_projection =
             projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
 
-        let rows = vec![vec![Some(DynCell::Str("k".into())), Some(DynCell::U64(42))]];
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::U64(42)),
+        ])];
         let delete_batch = build_batch(delete_schema, rows).expect("delete batch");
 
         layout

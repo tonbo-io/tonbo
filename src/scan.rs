@@ -47,6 +47,25 @@ impl<K> KeyRange<K> {
     }
 }
 
+impl<K: Ord> KeyRange<K> {
+    /// Whether this range contains `key`.
+    pub fn contains(&self, key: &K) -> bool {
+        let start_ok = match &self.start {
+            Bound::Unbounded => true,
+            Bound::Included(bound) => key >= bound,
+            Bound::Excluded(bound) => key > bound,
+        };
+        if !start_ok {
+            return false;
+        }
+        match &self.end {
+            Bound::Unbounded => true,
+            Bound::Included(bound) => key <= bound,
+            Bound::Excluded(bound) => key < bound,
+        }
+    }
+}
+
 /// A normalized set of disjoint, sorted key ranges.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct RangeSet<K> {
@@ -101,6 +120,11 @@ impl<K: Ord> RangeSet<K> {
     /// Borrow the underlying normalized ranges as a slice.
     pub fn as_slice(&self) -> &[KeyRange<K>] {
         &self.ranges
+    }
+
+    /// Whether the set contains `key`.
+    pub fn contains(&self, key: &K) -> bool {
+        self.ranges.iter().any(|range| range.contains(key))
     }
 
     /// Union with another set, returning a normalized result.

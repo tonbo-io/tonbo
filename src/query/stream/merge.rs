@@ -171,7 +171,7 @@ mod tests {
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
     use futures::{StreamExt, executor::block_on};
-    use typed_arrow_dyn::DynCell;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
@@ -197,10 +197,10 @@ mod tests {
             let insert_row = |table: &mut DynMem, key: &str, value: i64, ts: u64| {
                 let batch = build_batch(
                     schema.clone(),
-                    vec![vec![
+                    vec![DynRow(vec![
                         Some(DynCell::Str(key.into())),
                         Some(DynCell::I64(value)),
-                    ]],
+                    ])],
                 )
                 .expect("batch");
                 table

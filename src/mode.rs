@@ -3,7 +3,7 @@
 //! The `Mode` trait describes the storage primitives plugged into the core DB,
 //! while concrete mode implementations (today only `DynMode`) live alongside it.
 
-use std::hash::Hash;
+use std::{hash::Hash, sync::Arc};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -21,6 +21,7 @@ use crate::{
     key::KeyOwned,
     manifest::TableDefinition,
     mvcc::Timestamp,
+    transaction::CommitAckMode,
     wal::frame::WalEvent,
 };
 
@@ -78,8 +79,9 @@ pub trait CatalogDescribe: Mode {
 pub struct DynMode {
     pub(crate) schema: SchemaRef,
     pub(crate) delete_schema: SchemaRef,
-    pub(crate) extractor: Box<dyn KeyProjection>,
-    pub(crate) delete_projection: Box<dyn KeyProjection>,
+    pub(crate) extractor: Arc<dyn KeyProjection>,
+    pub(crate) delete_projection: Arc<dyn KeyProjection>,
+    pub(crate) commit_ack_mode: CommitAckMode,
 }
 
 /// Configuration bundle for constructing a `DynMode`.
@@ -87,7 +89,9 @@ pub struct DynModeConfig {
     /// Arrow schema describing the dynamic table.
     pub schema: SchemaRef,
     /// Extractor used to derive logical keys from dynamic batches.
-    pub extractor: Box<dyn KeyProjection>,
+    pub extractor: Arc<dyn KeyProjection>,
+    /// WAL acknowledgement mode for transactional commits.
+    pub commit_ack_mode: CommitAckMode,
 }
 
 impl DynModeConfig {
@@ -97,7 +101,18 @@ impl DynModeConfig {
         extractor: Box<dyn KeyProjection>,
     ) -> Result<Self, KeyExtractError> {
         extractor.validate_schema(&schema)?;
-        Ok(Self { schema, extractor })
+        let extractor: Arc<dyn KeyProjection> = extractor.into();
+        Ok(Self {
+            schema,
+            extractor,
+            commit_ack_mode: CommitAckMode::default(),
+        })
+    }
+
+    /// Override the commit acknowledgement mode for transactional writes.
+    pub fn with_commit_ack_mode(mut self, mode: CommitAckMode) -> Self {
+        self.commit_ack_mode = mode;
+        self
     }
 }
 
@@ -109,7 +124,11 @@ impl Mode for DynMode {
     type InsertInput = RecordBatch;
 
     fn build(config: Self::Config) -> Result<(Self, Self::Mutable), KeyExtractError> {
-        let DynModeConfig { schema, extractor } = config;
+        let DynModeConfig {
+            schema,
+            extractor,
+            commit_ack_mode,
+        } = config;
         // schema already validated in DynModeConfig::new, but double-check for defensive callers.
         extractor.validate_schema(&schema)?;
         let key_schema = extractor.key_schema();
@@ -117,6 +136,7 @@ impl Mode for DynMode {
         let key_columns = key_schema.fields().len();
         let delete_projection =
             projection_for_columns(delete_schema.clone(), (0..key_columns).collect())?;
+        let delete_projection: Arc<dyn KeyProjection> = delete_projection.into();
 
         let mutable = DynMem::new(schema.clone());
         Ok((
@@ -125,6 +145,7 @@ impl Mode for DynMode {
                 delete_schema,
                 extractor,
                 delete_projection,
+                commit_ack_mode,
             },
             mutable,
         ))

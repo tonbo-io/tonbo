@@ -1,6 +1,6 @@
 // 03: Dynamic (runtime) schema: infer key from Arrow metadata
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use fusio::executor::BlockingExecutor;
 use futures::executor::block_on;
@@ -14,36 +14,14 @@ use typed_arrow::{
     arrow_array::RecordBatch,
     arrow_schema::{DataType, Field, Schema},
 };
-use typed_arrow_dyn::{DynCell, DynColumnBuilder, new_dyn_builder, validate_nullability};
+use typed_arrow_dyn::{DynBuilders, DynCell, DynRow};
 
-fn build_batch(schema: Arc<Schema>, rows: Vec<Vec<Option<DynCell>>>) -> RecordBatch {
-    let mut builders: Vec<Box<dyn DynColumnBuilder>> = schema
-        .fields()
-        .iter()
-        .map(|f| new_dyn_builder(f.data_type()))
-        .collect();
+fn build_batch(schema: Arc<Schema>, rows: Vec<DynRow>) -> RecordBatch {
+    let mut builders = DynBuilders::new(schema.clone(), rows.len());
     for row in rows {
-        assert_eq!(row.len(), builders.len(), "row width mismatch");
-        for (idx, cell) in row.into_iter().enumerate() {
-            let builder = &mut builders[idx];
-            match cell {
-                None => builder.append_null(),
-                Some(cell) => builder.append_dyn(cell).expect("append cell"),
-            }
-        }
+        builders.append_option_row(Some(row)).expect("append row");
     }
-
-    let mut arrays = Vec::with_capacity(builders.len());
-    let mut union_null_rows: HashMap<usize, Vec<usize>> = HashMap::new();
-    for builder in builders.iter_mut() {
-        let finished = builder.try_finish().expect("finish column");
-        for (array_key, rows) in finished.union_metadata {
-            union_null_rows.entry(array_key).or_default().extend(rows);
-        }
-        arrays.push(finished.array);
-    }
-    validate_nullability(schema.as_ref(), &arrays, &union_null_rows).expect("nullability");
-    RecordBatch::try_new(schema, arrays).expect("record batch")
+    builders.try_finish_into_batch().expect("record batch")
 }
 
 fn main() {
@@ -56,8 +34,8 @@ fn main() {
 
     // Build a batch
     let rows = vec![
-        vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
-        vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
+        DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+        DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
     ];
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
