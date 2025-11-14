@@ -12,6 +12,7 @@ use arrow_select::take::take;
 use fusio::executor::{Executor, Timer};
 use futures::executor::block_on;
 use lockable::LockableHashMap;
+use typed_arrow_dyn::DynRow;
 mod builder;
 
 pub use builder::{
@@ -265,17 +266,27 @@ where
     pub fn scan_mutable_rows<'a>(
         &'a self,
         ranges: &'a RangeSet<KeyOwned>,
-    ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
-        self.mem.scan_rows(ranges)
+        projection_schema: Option<SchemaRef>,
+    ) -> Result<impl Iterator<Item = Result<DynRow, KeyExtractError>> + 'a, KeyExtractError> {
+        let rows = self.mem.scan_rows(ranges, projection_schema)?;
+        Ok(rows.map(|item| match item {
+            Ok((_, row)) => Ok(row.into_owned()?),
+            Err(err) => Err(err.into()),
+        }))
     }
 
     /// Scan the dynamic mutable memtable with MVCC visibility at `read_ts`.
     pub fn scan_mutable_rows_at<'a>(
         &'a self,
         ranges: &'a RangeSet<KeyOwned>,
+        projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
-    ) -> impl Iterator<Item = Vec<Option<typed_arrow_dyn::DynCell>>> + 'a {
-        self.mem.scan_rows_at(ranges, read_ts)
+    ) -> Result<impl Iterator<Item = Result<DynRow, KeyExtractError>> + 'a, KeyExtractError> {
+        let rows = self.mem.scan_rows_at(ranges, projection_schema, read_ts)?;
+        Ok(rows.map(|item| match item {
+            Ok((_, row)) => Ok(row.into_owned()?),
+            Err(err) => Err(err.into()),
+        }))
     }
 
     pub(crate) fn maybe_seal_after_insert(&mut self) -> Result<(), KeyExtractError> {
@@ -1168,10 +1179,14 @@ mod tests {
 
         let all: RangeSet<KeyOwned> = RangeSet::all();
         let visible: Vec<String> = db
-            .scan_mutable_rows(&all)
-            .map(|row| match &row[0] {
-                Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
-                _ => panic!("unexpected cell variant"),
+            .scan_mutable_rows(&all, None)
+            .expect("scan rows")
+            .map(|row| {
+                let row = row.expect("row projection");
+                match row.0[0].as_ref() {
+                    Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
+                    _ => panic!("unexpected cell variant"),
+                }
             })
             .collect();
         assert_eq!(visible, vec!["k1".to_string()]);
@@ -1299,9 +1314,11 @@ mod tests {
 
         let ranges = RangeSet::<KeyOwned>::all();
         let rows: Vec<(String, i32)> = recovered
-            .scan_mutable_rows(&ranges)
+            .scan_mutable_rows(&ranges, None)
+            .expect("scan rows")
             .map(|row| {
-                let mut cells = row.into_iter();
+                let row = row.expect("row projection");
+                let mut cells = row.0.into_iter();
                 let id = match cells.next().expect("id cell") {
                     Some(DynCell::Str(value)) => value,
                     other => panic!("unexpected id cell {other:?}"),
@@ -1420,10 +1437,14 @@ mod tests {
 
         let ranges = RangeSet::<KeyOwned>::all();
         let rows: Vec<_> = db
-            .scan_mutable_rows(&ranges)
-            .map(|row| match &row[0] {
-                Some(DynCell::Str(s)) => s.clone(),
-                _ => panic!("unexpected row"),
+            .scan_mutable_rows(&ranges, None)
+            .expect("scan rows")
+            .map(|row| {
+                let row = row.expect("row projection");
+                match row.0[0].as_ref() {
+                    Some(DynCell::Str(s)) => s.clone(),
+                    _ => panic!("unexpected row"),
+                }
             })
             .collect();
         assert_eq!(rows, vec!["k".to_string()]);
@@ -1835,13 +1856,17 @@ mod tests {
             B::Included(hi),
         )]);
         let got: Vec<(String, i64)> = db
-            .scan_mutable_rows(&rs)
-            .map(|row| match (&row[0], &row[1]) {
-                (
-                    Some(typed_arrow_dyn::DynCell::Str(s)),
-                    Some(typed_arrow_dyn::DynCell::I64(ts)),
-                ) => (s.clone(), *ts),
-                _ => panic!("unexpected row content"),
+            .scan_mutable_rows(&rs, None)
+            .expect("scan rows")
+            .map(|row| {
+                let row = row.expect("row projection");
+                match (row.0[0].as_ref(), row.0[1].as_ref()) {
+                    (
+                        Some(typed_arrow_dyn::DynCell::Str(s)),
+                        Some(typed_arrow_dyn::DynCell::I64(ts)),
+                    ) => (s.clone(), *ts),
+                    _ => panic!("unexpected row content"),
+                }
             })
             .collect();
         assert_eq!(got, vec![("a".to_string(), 5), ("a".to_string(), 10)]);
@@ -1888,13 +1913,17 @@ mod tests {
             B::Included(hi),
         )]);
         let got: Vec<(String, i64)> = db
-            .scan_mutable_rows(&rs)
-            .map(|row| match (&row[0], &row[1]) {
-                (
-                    Some(typed_arrow_dyn::DynCell::Str(s)),
-                    Some(typed_arrow_dyn::DynCell::I64(ts)),
-                ) => (s.clone(), *ts),
-                _ => panic!("unexpected row content"),
+            .scan_mutable_rows(&rs, None)
+            .expect("scan rows")
+            .map(|row| {
+                let row = row.expect("row projection");
+                match (row.0[0].as_ref(), row.0[1].as_ref()) {
+                    (
+                        Some(typed_arrow_dyn::DynCell::Str(s)),
+                        Some(typed_arrow_dyn::DynCell::I64(ts)),
+                    ) => (s.clone(), *ts),
+                    _ => panic!("unexpected row content"),
+                }
             })
             .collect();
         assert_eq!(got, vec![("a".to_string(), 5), ("a".to_string(), 10)]);
@@ -1986,7 +2015,9 @@ mod tests {
             B::Included(KeyOwned::from("k")),
         )]);
         let visible: Vec<_> = db
-            .scan_mutable_rows_at(&ranges, Timestamp::new(50))
+            .scan_mutable_rows_at(&ranges, None, Timestamp::new(50))
+            .expect("scan rows")
+            .map(|row| row.expect("row projection"))
             .collect();
         assert!(visible.is_empty());
 

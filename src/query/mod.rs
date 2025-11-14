@@ -5,6 +5,8 @@
 //! residual predicate describing the portion that could not be pushed into the
 //! key-range scan.
 
+pub(crate) mod stream;
+
 use std::{convert::TryFrom, marker::PhantomData};
 
 pub use predicate::{

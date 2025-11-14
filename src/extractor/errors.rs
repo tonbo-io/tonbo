@@ -1,4 +1,5 @@
 use arrow_schema::{ArrowError, DataType, SchemaRef};
+use typed_arrow_dyn::DynViewError;
 
 use crate::wal::WalError;
 
@@ -57,4 +58,7 @@ pub enum KeyExtractError {
     /// Generic Arrow failure while materializing dynamic rows.
     #[error("arrow error: {0}")]
     Arrow(#[from] ArrowError),
+    /// Error when viewing the data.
+    #[error("dyn view error: {0}")]
+    DynView(#[from] DynViewError),
 }

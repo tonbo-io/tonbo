@@ -118,6 +118,7 @@ impl Mode for DynMode {
         let delete_projection =
             projection_for_columns(delete_schema.clone(), (0..key_columns).collect())?;
 
+        let mutable = DynMem::new(schema.clone());
         Ok((
             Self {
                 schema,
@@ -125,7 +126,7 @@ impl Mode for DynMode {
                 extractor,
                 delete_projection,
             },
-            DynMem::new(),
+            mutable,
         ))
     }
 

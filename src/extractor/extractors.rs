@@ -3,10 +3,7 @@ use arrow_schema::{ArrowError, DataType, Fields, Schema, SchemaRef};
 use typed_arrow_dyn::{DynProjection, DynSchema, DynViewError};
 
 use super::{KeyProjection, errors::KeyExtractError};
-use crate::{
-    inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
-    key::{KeyRow, KeyRowError},
-};
+use crate::key::{KeyRow, KeyRowError};
 
 /// Build a boxed key projection for a single column.
 pub fn projection_for_field(
@@ -117,6 +114,7 @@ fn ensure_supported_type(data_type: &DataType, col: usize) -> Result<(), KeyExtr
         | DataType::LargeUtf8
         | DataType::Binary
         | DataType::LargeBinary
+        | DataType::Union(_, _)
         | DataType::FixedSizeBinary(_) => Ok(()),
         other => Err(KeyExtractError::UnsupportedType {
             col,
@@ -143,7 +141,7 @@ fn map_key_row_err(err: KeyRowError, row: usize, fields: &Fields) -> KeyExtractE
     }
 }
 
-fn map_view_err(err: DynViewError) -> KeyExtractError {
+pub(crate) fn map_view_err(err: DynViewError) -> KeyExtractError {
     match err {
         DynViewError::RowOutOfBounds { row, len } => KeyExtractError::RowOutOfBounds(row, len),
         DynViewError::ColumnOutOfBounds { column, width } => {
@@ -170,174 +168,6 @@ fn map_view_err(err: DynViewError) -> KeyExtractError {
         ),
         DynViewError::Invalid { path, message, .. } => {
             KeyExtractError::Arrow(ArrowError::ComputeError(format!("{path}: {message}")))
-        }
-    }
-}
-
-/// Build a row of dynamic cells by reading a single row from a `RecordBatch`.
-pub(crate) fn row_from_batch(
-    batch: &RecordBatch,
-    row: usize,
-) -> Result<Vec<Option<typed_arrow_dyn::DynCell>>, KeyExtractError> {
-    use typed_arrow_dyn::DynCell as C;
-    if row >= batch.num_rows() {
-        return Err(KeyExtractError::RowOutOfBounds(row, batch.num_rows()));
-    }
-    let schema = batch.schema();
-    let mut cells = Vec::with_capacity(batch.num_columns());
-    for (col_idx, arr) in batch.columns().iter().enumerate() {
-        let field = schema.field(col_idx);
-        if field.name() == MVCC_COMMIT_COL || field.name() == MVCC_TOMBSTONE_COL {
-            continue;
-        }
-        if arr.is_null(row) {
-            cells.push(None);
-            continue;
-        }
-        let dt = arr.data_type();
-        let cell = match dt {
-            DataType::Boolean => Some(C::Bool(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::BooleanArray>()
-                    .unwrap()
-                    .value(row),
-            )),
-            DataType::Int32 => Some(C::I32(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Int32Array>()
-                    .unwrap()
-                    .value(row),
-            )),
-            DataType::Int64 => Some(C::I64(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Int64Array>()
-                    .unwrap()
-                    .value(row),
-            )),
-            DataType::UInt32 => Some(C::U32(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::UInt32Array>()
-                    .unwrap()
-                    .value(row),
-            )),
-            DataType::UInt64 => Some(C::U64(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::UInt64Array>()
-                    .unwrap()
-                    .value(row),
-            )),
-            DataType::Float32 => Some(C::F32(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Float32Array>()
-                    .unwrap()
-                    .value(row),
-            )),
-            DataType::Float64 => Some(C::F64(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Float64Array>()
-                    .unwrap()
-                    .value(row),
-            )),
-            DataType::Utf8 => Some(C::Str(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .unwrap()
-                    .value(row)
-                    .to_owned(),
-            )),
-            DataType::Binary => Some(C::Bin(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::BinaryArray>()
-                    .unwrap()
-                    .value(row)
-                    .to_vec(),
-            )),
-            other => {
-                return Err(KeyExtractError::UnsupportedType {
-                    col: col_idx,
-                    data_type: other.clone(),
-                });
-            }
-        };
-        cells.push(cell);
-    }
-    Ok(cells)
-}
-
-#[cfg(test)]
-mod tests {
-    use typed_arrow::schema::BuildRows;
-    use typed_arrow_dyn::DynCell;
-
-    use super::*;
-
-    #[derive(typed_arrow::Record, Clone)]
-    struct User {
-        id: String,
-        score: i32,
-    }
-
-    #[test]
-    fn extract_single_and_composite_keys() {
-        let mut builders = User::new_builders(3);
-        <User as BuildRows>::Builders::append_row(
-            &mut builders,
-            User {
-                id: "a".into(),
-                score: 1,
-            },
-        );
-        <User as BuildRows>::Builders::append_row(
-            &mut builders,
-            User {
-                id: "b".into(),
-                score: 2,
-            },
-        );
-        let batch = <User as BuildRows>::Builders::finish(builders).into_record_batch();
-        let schema = batch.schema();
-
-        let utf8 = projection_for_field(schema.clone(), 0).unwrap();
-        let i32k = projection_for_field(schema.clone(), 1).unwrap();
-
-        KeyProjection::validate_schema(&*utf8, &schema).unwrap();
-        KeyProjection::validate_schema(&*i32k, &schema).unwrap();
-
-        let first = utf8
-            .project_view(&batch, &[0])
-            .unwrap()
-            .remove(0)
-            .to_owned();
-        assert_eq!(first.as_utf8(), Some("a"));
-
-        let second = i32k
-            .project_view(&batch, &[1])
-            .unwrap()
-            .remove(0)
-            .to_owned();
-        let second_cell = second
-            .as_row()
-            .cells()
-            .first()
-            .and_then(|cell| cell.as_ref())
-            .expect("i32 key");
-        assert!(matches!(second_cell, DynCell::I32(2)));
-
-        let composite = projection_for_columns(schema.clone(), vec![0, 1]).unwrap();
-        let tuple = composite
-            .project_view(&batch, &[1])
-            .unwrap()
-            .remove(0)
-            .to_owned();
-        let parts = tuple.as_row().cells();
-        assert_eq!(parts.len(), 2);
-        match parts[0].as_ref().expect("utf8 component") {
-            DynCell::Str(value) => assert_eq!(value, "b"),
-            other => panic!("unexpected component: {other:?}"),
-        }
-        match parts[1].as_ref().expect("i32 component") {
-            DynCell::I32(value) => assert_eq!(*value, 2),
-            other => panic!("unexpected component: {other:?}"),
         }
     }
 }

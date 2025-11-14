@@ -1,16 +1,20 @@
 use std::{
     collections::{BTreeMap, btree_map::Range as BTreeRange},
+    fmt,
     ops::Bound,
+    sync::Arc,
     time::Duration,
+    vec,
 };
 
 use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array, new_null_array};
-use arrow_schema::SchemaRef;
+use arrow_schema::{Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
+use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
 use super::{MutableLayout, MutableMemTableMetrics};
 use crate::{
-    extractor::KeyProjection,
+    extractor::{KeyExtractError, KeyProjection, map_view_err},
     inmem::{
         immutable::memtable::{ImmutableMemTable, MVCC_COMMIT_COL, bundle_mvcc_sidecar},
         policy::{MemStats, StatsProvider},
@@ -21,6 +25,7 @@ use crate::{
     scan::{KeyRange, RangeSet},
 };
 
+#[derive(Debug)]
 struct BatchAttachment {
     storage: RecordBatch,
     commit_ts: UInt64Array,
@@ -100,11 +105,12 @@ pub struct DynMem {
     /// Key-only delete batches tracked separately from value payloads.
     delete_batches: Vec<DeleteAttachment>,
     metrics: MutableMemTableMetrics,
+    schema: SchemaRef,
 }
 
 impl DynMem {
     /// Create an empty columnar mutable table for dynamic batches.
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(schema: SchemaRef) -> Self {
         Self {
             index: BTreeMap::new(),
             batches_attached: Vec::new(),
@@ -113,6 +119,7 @@ impl DynMem {
                 entry_overhead: 32,
                 ..Default::default()
             },
+            schema,
         }
     }
 
@@ -313,20 +320,39 @@ impl DynMem {
         }
     }
 
-    /// Scan dynamic rows in key order returning owned `Vec<Option<DynCell>>` for each key's
+    /// Scan dynamic rows in key order returning owned [`DynRow`]s for each key's
     /// latest visible version across attached batches.
-    pub(crate) fn scan_rows<'t>(&'t self, ranges: &RangeSet<KeyOwned>) -> DynRowScan<'t> {
-        self.scan_rows_at(ranges, Timestamp::MAX)
+    pub(crate) fn scan_rows<'t>(
+        &'t self,
+        ranges: &RangeSet<KeyOwned>,
+        projection_schema: Option<SchemaRef>,
+    ) -> Result<DynRowScan<'t>, KeyExtractError> {
+        self.scan_rows_at(ranges, projection_schema, Timestamp::MAX)
     }
 
     /// Scan dynamic rows using MVCC visibility semantics at `read_ts`.
     pub(crate) fn scan_rows_at<'t>(
         &'t self,
         ranges: &RangeSet<KeyOwned>,
+        projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
-    ) -> DynRowScan<'t> {
+    ) -> Result<DynRowScan<'t>, KeyExtractError> {
         let converted = convert_ranges(ranges);
-        DynRowScan::new(&self.index, &self.batches_attached, converted, read_ts)
+        let base_schema = self
+            .batches_attached
+            .first()
+            .map(|batch| batch.storage().schema())
+            .unwrap_or_else(|| self.schema.clone());
+        let dyn_schema = DynSchema::from_ref(base_schema.clone());
+        let projection = build_projection(&base_schema, projection_schema.as_ref())?;
+        Ok(DynRowScan::new(
+            &self.index,
+            &self.batches_attached,
+            converted,
+            read_ts,
+            dyn_schema,
+            projection,
+        ))
     }
 
     /// Approximate memory usage for keys stored in the mutable table.
@@ -432,9 +458,27 @@ impl DynMem {
     }
 }
 
+fn build_projection(
+    schema: &SchemaRef,
+    projection_schema: Option<&SchemaRef>,
+) -> Result<DynProjection, KeyExtractError> {
+    if let Some(projected) = projection_schema {
+        if projected.fields().is_empty() {
+            return Err(KeyExtractError::Arrow(
+                arrow_schema::ArrowError::ComputeError(
+                    "projection requires at least one column".to_string(),
+                ),
+            ));
+        }
+        DynProjection::from_schema(schema.as_ref(), projected.as_ref()).map_err(map_view_err)
+    } else {
+        DynProjection::from_schema(schema.as_ref(), schema.as_ref()).map_err(map_view_err)
+    }
+}
+
 impl Default for DynMem {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(Schema::new(Vec::<arrow_schema::Field>::new())))
     }
 }
 
@@ -478,6 +522,18 @@ pub(crate) struct DynRowScan<'t> {
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
     emitted_for_key: bool,
+    dyn_schema: DynSchema,
+    projection: DynProjection,
+}
+
+impl<'t> fmt::Debug for DynRowScan<'t> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynRowScan")
+            .field("range_idx", &self.range_idx)
+            .field("read_ts", &self.read_ts)
+            .field("emitted_for_key", &self.emitted_for_key)
+            .finish()
+    }
 }
 
 impl<'t> DynRowScan<'t> {
@@ -486,6 +542,8 @@ impl<'t> DynRowScan<'t> {
         batches: &'t [BatchAttachment],
         converted: ConvertedRanges,
         read_ts: Timestamp,
+        dyn_schema: DynSchema,
+        projection: DynProjection,
     ) -> Self {
         Self {
             index,
@@ -497,12 +555,14 @@ impl<'t> DynRowScan<'t> {
             read_ts,
             current_key: None,
             emitted_for_key: false,
+            dyn_schema,
+            projection,
         }
     }
 }
 
 impl<'t> Iterator for DynRowScan<'t> {
-    type Item = Vec<Option<typed_arrow_dyn::DynCell>>;
+    type Item = Result<(&'t KeyTsViewRaw, DynRowRaw), DynViewError>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
@@ -546,9 +606,17 @@ impl<'t> Iterator for DynRowScan<'t> {
                     };
                     let attachment = &self.batches[loc.batch_idx];
                     let batch = attachment.storage();
-                    let row = crate::extractor::row_from_batch(batch, loc.row_idx).unwrap();
+                    let row =
+                        match self
+                            .projection
+                            .project_row_raw(&self.dyn_schema, batch, loc.row_idx)
+                        {
+                            Ok(row) => row,
+                            Err(err) => return Some(Err(err)),
+                        };
+
                     self.emitted_for_key = true;
-                    return Some(row);
+                    return Some(Ok((composite, row)));
                 }
                 self.cursor = None;
                 continue;
@@ -621,7 +689,7 @@ fn synthesize_delete_row(
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
-    use typed_arrow_dyn::DynCell;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
@@ -630,12 +698,12 @@ mod tests {
 
     #[test]
     fn dyn_stats_and_scan() {
-        let mut m = DynMem::new();
         // Build a batch: id Utf8 is key
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
+        let mut m = DynMem::new(schema.clone());
         let rows = vec![
             vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))],
             vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))],
@@ -662,8 +730,13 @@ mod tests {
             B::Unbounded,
         )]);
         let got: Vec<String> = m
-            .scan_rows(&rs)
-            .map(|row| match &row[0] {
+            .scan_rows(&rs, None)
+            .expect("scan rows")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
+            .map(|row| match row.0[0].as_ref() {
                 Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
                 _ => unreachable!(),
             })
@@ -677,11 +750,11 @@ mod tests {
 
     #[test]
     fn mvcc_scan_respects_read_ts() {
-        let mut m = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
+        let mut m = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
@@ -706,36 +779,57 @@ mod tests {
         let ranges = RangeSet::all();
 
         // Before the first commit nothing should be visible
-        let rows_before: Vec<Vec<Option<DynCell>>> =
-            m.scan_rows_at(&ranges, Timestamp::new(5)).collect();
+        let rows_before: Vec<DynRow> = m
+            .scan_rows_at(&ranges, None, Timestamp::new(5))
+            .expect("scan rows at")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
+            .collect();
         assert!(rows_before.is_empty());
 
         // Between first and second commits the first value is visible
         let rows_after_first: Vec<i32> = m
-            .scan_rows_at(&ranges, Timestamp::new(15))
-            .map(|row| match &row[1] {
-                Some(DynCell::I32(v)) => *v,
-                _ => unreachable!(),
+            .scan_rows_at(&ranges, None, Timestamp::new(15))
+            .expect("scan rows at")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                let row = row.into_owned().expect("row");
+                match row.0[1].as_ref() {
+                    Some(DynCell::I32(v)) => *v,
+                    _ => unreachable!(),
+                }
             })
             .collect();
         assert_eq!(rows_after_first, vec![1]);
 
         // Between second and third commits the second value is visible
         let rows_after_second: Vec<i32> = m
-            .scan_rows_at(&ranges, Timestamp::new(25))
-            .map(|row| match &row[1] {
-                Some(DynCell::I32(v)) => *v,
-                _ => unreachable!(),
+            .scan_rows_at(&ranges, None, Timestamp::new(25))
+            .expect("scan rows at")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                let row = row.into_owned().expect("row");
+                match row.0[1].as_ref() {
+                    Some(DynCell::I32(v)) => *v,
+                    _ => unreachable!(),
+                }
             })
             .collect();
         assert_eq!(rows_after_second, vec![2]);
 
         // Between third and fourth commits the third value is visible
         let row_latest: Vec<i32> = m
-            .scan_rows_at(&ranges, Timestamp::new(35))
-            .map(|row| match &row[1] {
-                Some(DynCell::I32(v)) => *v,
-                _ => unreachable!(),
+            .scan_rows_at(&ranges, None, Timestamp::new(35))
+            .expect("scan rows at")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                let row = row.into_owned().expect("row");
+                match row.0[1].as_ref() {
+                    Some(DynCell::I32(v)) => *v,
+                    _ => unreachable!(),
+                }
             })
             .collect();
         assert_eq!(row_latest, vec![3]);
@@ -743,11 +837,11 @@ mod tests {
 
     #[test]
     fn seal_into_immutable_emits_mvcc_segments() {
-        let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
+        let mut layout = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
@@ -799,42 +893,44 @@ mod tests {
             B::Included(KeyOwned::from("k")),
             B::Included(KeyOwned::from("k")),
         )]);
+        let row_after_first = segment
+            .scan_visible(&ranges, None, Timestamp::new(15))
+            .expect("scan visible")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
+            .next()
+            .expect("row after first commit");
+        let row_after_second = segment
+            .scan_visible(&ranges, None, Timestamp::new(25))
+            .expect("scan visible")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
+            .next()
+            .expect("row after second commit");
+        let row_after_third = segment
+            .scan_visible(&ranges, None, Timestamp::new(35))
+            .expect("scan visible")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
+            .next()
+            .expect("row after third commit");
+        let row_latest = segment
+            .scan_visible(&ranges, None, Timestamp::new(45))
+            .expect("scan visible")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
+            .next()
+            .expect("row after latest commit");
 
-        let visible_after_first: Vec<u32> = segment
-            .scan_visible(&ranges, Timestamp::new(15))
-            .map(|(_, row)| row)
-            .collect();
-        assert_eq!(visible_after_first, vec![3]);
-
-        let visible_after_second: Vec<u32> = segment
-            .scan_visible(&ranges, Timestamp::new(25))
-            .map(|(_, row)| row)
-            .collect();
-        assert_eq!(visible_after_second, vec![2]);
-
-        let visible_after_third: Vec<u32> = segment
-            .scan_visible(&ranges, Timestamp::new(35))
-            .map(|(_, row)| row)
-            .collect();
-        assert_eq!(visible_after_third, vec![1]);
-
-        let visible_latest: Vec<u32> = segment
-            .scan_visible(&ranges, Timestamp::new(45))
-            .map(|(_, row)| row)
-            .collect();
-        assert_eq!(visible_latest, vec![0]);
-
-        let batch = segment.storage();
-        let row_after_first =
-            crate::extractor::row_from_batch(batch, visible_after_first[0] as usize).expect("row");
-        let row_after_second =
-            crate::extractor::row_from_batch(batch, visible_after_second[0] as usize).expect("row");
-        let row_after_third =
-            crate::extractor::row_from_batch(batch, visible_after_third[0] as usize).expect("row");
-        let row_latest =
-            crate::extractor::row_from_batch(batch, visible_latest[0] as usize).expect("row");
-
-        let cell_value = |row: &[Option<DynCell>]| match &row[1] {
+        let cell_value = |row: &DynRow| match &row.0[1] {
             Some(DynCell::I32(v)) => *v,
             _ => panic!("unexpected cell"),
         };
@@ -846,12 +942,65 @@ mod tests {
     }
 
     #[test]
+    fn scan_rows_respects_projection_indices() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("score", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+        let mut m = DynMem::new(schema.clone());
+        let rows = vec![
+            vec![
+                Some(DynCell::I64(1)),
+                Some(DynCell::Str("alice".into())),
+                Some(DynCell::I32(10)),
+            ],
+            vec![
+                Some(DynCell::I64(2)),
+                Some(DynCell::Str("bob".into())),
+                Some(DynCell::I32(20)),
+            ],
+        ];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+        m.insert_batch(extractor.as_ref(), batch, Timestamp::new(10))
+            .expect("insert");
+
+        let ranges = RangeSet::<KeyOwned>::all();
+        let projection_schema = Arc::new(Schema::new(vec![
+            schema.field(0).clone(),
+            schema.field(2).clone(),
+        ]));
+        let rows: Vec<DynRow> = m
+            .scan_rows(&ranges, Some(Arc::clone(&projection_schema)))
+            .expect("scan rows")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
+            .collect();
+        assert_eq!(rows.len(), 2);
+
+        let first = &rows[0];
+        assert_eq!(first.0.len(), 2);
+        match first.0[0].as_ref() {
+            Some(DynCell::I64(value)) => assert_eq!(*value, 1),
+            other => panic!("unexpected id cell {other:?}"),
+        }
+        match first.0[1].as_ref() {
+            Some(DynCell::I32(value)) => assert_eq!(*value, 10),
+            other => panic!("unexpected score cell {other:?}"),
+        }
+    }
+
+    #[test]
     fn sealed_segment_row_iter_matches_versions() {
-        let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, true),
             Field::new("v", DataType::Int32, true),
         ]));
+        let mut layout = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
@@ -911,11 +1060,11 @@ mod tests {
 
     #[test]
     fn insert_batch_with_mvcc_preserves_metadata() {
-        let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
+        let mut layout = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
@@ -957,11 +1106,11 @@ mod tests {
 
     #[test]
     fn insert_delete_batch_tracks_key_only_tombstones() {
-        let mut layout = DynMem::new();
         let table_schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, true),
         ]));
+        let mut layout = DynMem::new(table_schema.clone());
         let extractor =
             crate::extractor::projection_for_field(table_schema.clone(), 0).expect("extractor");
         let key_schema = extractor.key_schema();
@@ -1009,11 +1158,11 @@ mod tests {
 
     #[test]
     fn delete_placeholder_handles_timestamp_columns() {
-        let mut layout = DynMem::new();
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
         ]));
+        let mut layout = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 

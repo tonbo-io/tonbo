@@ -1,9 +1,11 @@
-use std::{collections::BTreeMap, marker::PhantomData, ops::Bound};
+use std::{collections::BTreeMap, fmt, marker::PhantomData, ops::Bound};
 
 use arrow_array::RecordBatch;
+use arrow_schema::{Schema, SchemaRef};
+use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
 use crate::{
-    extractor::{KeyExtractError, KeyProjection, projection_for_field},
+    extractor::{KeyExtractError, KeyProjection, map_view_err, projection_for_field},
     key::{KeyOwned, KeyRow, KeyTsViewRaw},
     mvcc::Timestamp,
     scan::{KeyRange, RangeSet},
@@ -13,6 +15,7 @@ pub(crate) const MVCC_COMMIT_COL: &str = "_commit_ts";
 pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 
 /// Read-only immutable memtable backed by Arrow storage and MVCC metadata.
+#[derive(Debug)]
 pub(crate) struct ImmutableMemTable<S> {
     storage: S,
     index: BTreeMap<KeyTsViewRaw, u32>,
@@ -66,9 +69,13 @@ impl<S> ImmutableMemTable<S> {
     pub(crate) fn scan_visible<'t>(
         &'t self,
         ranges: &RangeSet<KeyOwned>,
+        projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
-    ) -> ImmutableVisibleScan<'t, S> {
-        ImmutableVisibleScan::new(self, ranges, read_ts)
+    ) -> Result<ImmutableVisibleScan<'t, S>, KeyExtractError>
+    where
+        S: RecordBatchStorage,
+    {
+        ImmutableVisibleScan::new(self, ranges, projection_schema, read_ts)
     }
 }
 
@@ -160,15 +167,34 @@ pub(crate) struct ImmutableVisibleScan<'t, S> {
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
     emitted_for_key: bool,
+    dyn_schema: DynSchema,
+    projection: DynProjection,
 }
 
-impl<'t, S> ImmutableVisibleScan<'t, S> {
+impl<'t, S> fmt::Debug for ImmutableVisibleScan<'t, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImmutableVisibleScan")
+            .field("range_idx", &self.range_idx)
+            .field("read_ts", &self.read_ts)
+            .field("emitted_for_key", &self.emitted_for_key)
+            .finish()
+    }
+}
+
+impl<'t, S> ImmutableVisibleScan<'t, S>
+where
+    S: RecordBatchStorage,
+{
     fn new(
         table: &'t ImmutableMemTable<S>,
         ranges: &RangeSet<KeyOwned>,
+        projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, KeyExtractError> {
+        let base_schema = table.storage.as_record_batch().schema();
+        let dyn_schema = DynSchema::from_ref(base_schema.clone());
+        let projection = build_projection(&base_schema, projection_schema.as_ref())?;
+        Ok(Self {
             table,
             converted: convert_ranges(ranges),
             range_idx: 0,
@@ -176,12 +202,17 @@ impl<'t, S> ImmutableVisibleScan<'t, S> {
             read_ts,
             current_key: None,
             emitted_for_key: false,
-        }
+            dyn_schema,
+            projection,
+        })
     }
 }
 
-impl<'t, S> Iterator for ImmutableVisibleScan<'t, S> {
-    type Item = (KeyOwned, u32);
+impl<'t, S> Iterator for ImmutableVisibleScan<'t, S>
+where
+    S: RecordBatchStorage,
+{
+    type Item = Result<(&'t KeyTsViewRaw, DynRowRaw), DynViewError>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
@@ -216,9 +247,19 @@ impl<'t, S> Iterator for ImmutableVisibleScan<'t, S> {
                     if commit_ts > self.read_ts || tombstone {
                         continue;
                     }
+                    let batch = self.table.storage.as_record_batch();
+                    let row_idx = *row as usize;
+                    let row =
+                        match self
+                            .projection
+                            .project_row_raw(&self.dyn_schema, batch, row_idx)
+                        {
+                            Ok(row) => row,
+                            Err(err) => return Some(Err(err)),
+                        };
 
                     self.emitted_for_key = true;
-                    return Some((key_view.to_owned(), *row));
+                    return Some(Ok((view, row)));
                 }
                 self.cursor = None;
                 continue;
@@ -227,6 +268,7 @@ impl<'t, S> Iterator for ImmutableVisibleScan<'t, S> {
     }
 }
 
+#[derive(Debug)]
 struct ConvertedRanges {
     _key_backing: Vec<KeyOwned>,
     ranges: RangeSet<KeyTsViewRaw>,
@@ -296,6 +338,44 @@ fn convert_upper_bound(
             Bound::Excluded(KeyTsViewRaw::from_owned(owned, Timestamp::MAX))
         }
     }
+}
+
+fn build_projection(
+    schema: &SchemaRef,
+    projection_schema: Option<&SchemaRef>,
+) -> Result<DynProjection, KeyExtractError> {
+    if let Some(projected) = projection_schema {
+        if projected.fields().is_empty() {
+            return Err(KeyExtractError::Arrow(
+                arrow_schema::ArrowError::ComputeError(
+                    "projection requires at least one column".to_string(),
+                ),
+            ));
+        }
+        return DynProjection::from_schema(schema.as_ref(), projected.as_ref())
+            .map_err(map_view_err);
+    }
+
+    let logical_fields: Vec<_> = schema
+        .fields()
+        .iter()
+        .filter(|field| {
+            let name = field.name();
+            name != MVCC_COMMIT_COL && name != MVCC_TOMBSTONE_COL
+        })
+        .map(|field| field.as_ref().clone())
+        .collect();
+
+    if logical_fields.is_empty() {
+        return Err(KeyExtractError::Arrow(
+            arrow_schema::ArrowError::ComputeError(
+                "projection requires at least one column".to_string(),
+            ),
+        ));
+    }
+
+    let logical_schema = SchemaRef::new(Schema::new(logical_fields));
+    DynProjection::from_schema(schema.as_ref(), logical_schema.as_ref()).map_err(map_view_err)
 }
 
 pub(crate) struct ImmutableRowIter<'t, S> {
@@ -394,8 +474,12 @@ mod tests {
             B::Unbounded,
         )]);
         let got: Vec<String> = seg
-            .scan_visible(&ranges, Timestamp::MAX)
-            .map(|(key, _)| key)
+            .scan_visible(&ranges, None, Timestamp::MAX)
+            .expect("scan visible")
+            .map(|res| {
+                let (view, _) = res.expect("row projection");
+                view.key().to_owned()
+            })
             .map(|k| k.as_utf8().expect("utf8 key").to_string())
             .collect();
         assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
@@ -439,30 +523,37 @@ mod tests {
             B::Included(KeyOwned::from("k")),
             B::Included(KeyOwned::from("k")),
         )]);
-
-        let first_visible: Vec<u32> = seg
-            .scan_visible(&ranges, Timestamp::new(15))
-            .map(|(_, row)| row)
+        let first_visible: Vec<_> = seg
+            .scan_visible(&ranges, None, Timestamp::new(15))
+            .expect("scan visible")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
             .collect();
-        assert_eq!(first_visible, vec![3]);
+        assert_eq!(first_visible.len(), 1);
 
-        let latest: Vec<u32> = seg
-            .scan_visible(&ranges, Timestamp::new(45))
-            .map(|(_, row)| row)
+        let latest: Vec<_> = seg
+            .scan_visible(&ranges, None, Timestamp::new(45))
+            .expect("scan visible")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
             .collect();
-        assert_eq!(latest, vec![0]);
+        assert_eq!(latest.len(), 1);
 
-        let batch = seg.storage();
-        let value_at = |idx: u32| {
-            let row = crate::extractor::row_from_batch(batch, idx as usize).expect("row");
-            match row[1].as_ref() {
-                Some(DynCell::I32(v)) => *v,
-                _ => panic!("unexpected cell"),
-            }
+        let value_after_first = match first_visible[0].0[1].as_ref() {
+            Some(DynCell::I32(v)) => *v,
+            _ => panic!("unexpected cell"),
+        };
+        let value_latest = match latest[0].0[1].as_ref() {
+            Some(DynCell::I32(v)) => *v,
+            _ => panic!("unexpected cell"),
         };
 
-        assert_eq!(value_at(first_visible[0]), 1);
-        assert_eq!(value_at(latest[0]), 4);
+        assert_eq!(value_after_first, 1);
+        assert_eq!(value_latest, 4);
     }
 
     #[test]
@@ -507,20 +598,55 @@ mod tests {
             B::Included(KeyOwned::from("k")),
             B::Included(KeyOwned::from("k")),
         )]);
-
-        let visible: Vec<u32> = seg
-            .scan_visible(&ranges, Timestamp::new(21))
-            .map(|(_, row)| row)
+        let visible: Vec<_> = seg
+            .scan_visible(&ranges, None, Timestamp::new(21))
+            .expect("scan visible")
+            .map(|res| {
+                let (_, row) = res.expect("row projection");
+                row.into_owned().expect("row")
+            })
             .collect();
-        assert_eq!(visible, vec![2]);
-
-        let batch = seg.storage();
-        let cells = crate::extractor::row_from_batch(batch, visible[0] as usize).expect("row");
-        let value = match cells[1].as_ref() {
+        assert_eq!(visible.len(), 1);
+        let value = match visible[0].0[1].as_ref() {
             Some(DynCell::I32(v)) => *v,
             _ => panic!("unexpected cell"),
         };
         assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn default_projection_omits_mvcc_columns() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+            Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
+        ]));
+        let rows = vec![vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+            Some(DynCell::U64(10)),
+            Some(DynCell::Bool(false)),
+        ]];
+        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
+        let mut key_storage = Vec::new();
+        let view = push_view(&mut key_storage, "k", Timestamp::new(10));
+        let mut composite = BTreeMap::new();
+        composite.insert(view, 0);
+        let mvcc = MvccColumns::new(vec![Timestamp::new(10)], vec![false]);
+        let seg = ImmutableMemTable::new(batch, composite, mvcc);
+
+        let ranges = RangeSet::<KeyOwned>::all();
+        let mut scan = seg
+            .scan_visible(&ranges, None, Timestamp::MAX)
+            .expect("scan visible");
+        let (_, row) = scan.next().expect("row present").expect("row projection");
+        let owned = row.into_owned().expect("row owned");
+        assert_eq!(
+            owned.0.len(),
+            2,
+            "mvcc columns leaked into default projection"
+        );
     }
 
     #[test]
@@ -574,5 +700,14 @@ mod tests {
         assert_eq!(min_key.as_deref(), Some("a"));
         assert_eq!(max_key.as_deref(), Some("b"));
         assert_eq!(seg.len(), 3);
+    }
+}
+pub(crate) trait RecordBatchStorage {
+    fn as_record_batch(&self) -> &RecordBatch;
+}
+
+impl RecordBatchStorage for RecordBatch {
+    fn as_record_batch(&self) -> &RecordBatch {
+        self
     }
 }

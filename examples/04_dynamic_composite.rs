@@ -93,10 +93,14 @@ fn main() {
         Bound::Included(hi),
     )]);
     let got: Vec<(String, i64)> = db
-        .scan_mutable_rows(&rs)
-        .map(|r| match (&r[0], &r[1]) {
-            (Some(DynCell::Str(s)), Some(DynCell::I64(ts))) => (s.clone(), *ts),
-            _ => unreachable!(),
+        .scan_mutable_rows(&rs, None)
+        .expect("scan rows")
+        .map(|result| match result {
+            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
+                (Some(DynCell::Str(s)), Some(DynCell::I64(ts))) => (s.clone(), *ts),
+                _ => unreachable!(),
+            },
+            Err(_) => unreachable!(),
         })
         .collect();
     println!("dynamic composite range rows: {:?}", got);

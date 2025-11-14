@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, fmt};
 
 use fusio_manifest::snapshot::Snapshot as ManifestLease;
 use thiserror::Error;
-use typed_arrow_dyn::DynCell;
+use typed_arrow_dyn::DynRow;
 
 use crate::{
     key::KeyOwned,
@@ -81,7 +81,7 @@ pub(crate) struct StagedMutations {
     /// Snapshot timestamp guarding conflict detection for this transaction.
     snapshot_ts: Timestamp,
     /// Per-key mutation map preserving deterministic commit ordering.
-    entries: BTreeMap<KeyOwned, DynMutation<Vec<Option<DynCell>>>>,
+    entries: BTreeMap<KeyOwned, DynMutation<DynRow>>,
 }
 
 impl fmt::Debug for StagedMutations {
@@ -114,7 +114,7 @@ impl StagedMutations {
     }
 
     /// Stage an upsert mutation for `key`, replacing any prior staged value.
-    pub(crate) fn upsert(&mut self, key: KeyOwned, row: Vec<Option<DynCell>>) {
+    pub(crate) fn upsert(&mut self, key: KeyOwned, row: DynRow) {
         self.entries.insert(key, DynMutation::Upsert(row));
     }
 
@@ -124,9 +124,7 @@ impl StagedMutations {
     }
 
     /// Iterate over staged entries in key order.
-    pub(crate) fn iter(
-        &self,
-    ) -> impl Iterator<Item = (&KeyOwned, &DynMutation<Vec<Option<DynCell>>>)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&KeyOwned, &DynMutation<DynRow>)> {
         self.entries.iter()
     }
 }

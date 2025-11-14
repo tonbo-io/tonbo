@@ -7,3 +7,6 @@
 
 /// Sorted-string-table primitives and planning helpers.
 pub mod sstable;
+
+/// Scan stream for a sstable
+pub mod scan;

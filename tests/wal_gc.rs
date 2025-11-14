@@ -72,9 +72,11 @@ fn single_row_batch(schema: Arc<Schema>, id: &str, value: i32) -> RecordBatch {
 fn rows_from_db(db: &DB<DynMode, TokioExecutor>) -> Vec<(String, i32)> {
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = db
-        .scan_mutable_rows(&ranges)
+        .scan_mutable_rows(&ranges, None)
+        .expect("scan rows")
         .map(|row| {
-            let mut cells = row.into_iter();
+            let row = row.expect("row scan failed");
+            let mut cells = row.0.into_iter();
             let id = match cells.next().expect("id cell") {
                 Some(DynCell::Str(value)) => value,
                 other => panic!("unexpected id cell {other:?}"),

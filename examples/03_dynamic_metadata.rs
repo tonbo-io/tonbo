@@ -73,10 +73,14 @@ fn main() {
     // Scan all rows
     let all = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = db
-        .scan_mutable_rows(&all)
-        .map(|r| match (&r[0], &r[1]) {
-            (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-            _ => unreachable!(),
+        .scan_mutable_rows(&all, None)
+        .expect("scan rows")
+        .map(|result| match result {
+            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
+                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
+                _ => unreachable!(),
+            },
+            Err(_) => unreachable!(),
         })
         .collect();
     println!("dynamic (metadata) rows: {:?}", rows);

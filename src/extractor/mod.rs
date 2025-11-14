@@ -11,7 +11,7 @@ mod extractors;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 pub(crate) use errors::KeyExtractError;
-pub(crate) use extractors::{projection_for_columns, projection_for_field, row_from_batch};
+pub(crate) use extractors::{map_view_err, projection_for_columns, projection_for_field};
 
 use crate::key::KeyRow;
 

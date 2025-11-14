@@ -76,10 +76,14 @@ fn main() {
         Bound::Included(KeyOwned::from("carol")),
     )]);
     let out: Vec<(String, i32)> = db
-        .scan_mutable_rows(&carol)
-        .map(|r| match (&r[0], &r[1]) {
-            (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-            _ => unreachable!(),
+        .scan_mutable_rows(&carol, None)
+        .expect("scan rows")
+        .map(|result| match result {
+            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
+                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
+                _ => unreachable!(),
+            },
+            Err(_) => unreachable!(),
         })
         .collect();
     println!("dynamic scan rows (carol): {:?}", out);
@@ -92,10 +96,14 @@ fn main() {
     let (rs, residual) = tonbo::query::extract_key_ranges::<KeyOwned>(&expr, &[key_col]);
     assert!(residual.is_none());
     let out_q: Vec<(String, i32)> = db
-        .scan_mutable_rows(&rs)
-        .map(|r| match (&r[0], &r[1]) {
-            (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-            _ => unreachable!(),
+        .scan_mutable_rows(&rs, None)
+        .expect("scan rows")
+        .map(|result| match result {
+            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
+                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
+                _ => unreachable!(),
+            },
+            Err(_) => unreachable!(),
         })
         .collect();
     println!("dynamic query rows (id == dave): {:?}", out_q);
@@ -103,10 +111,14 @@ fn main() {
     // Or scan all dynamic rows
     let all = RangeSet::<KeyOwned>::all();
     let all_rows: Vec<(String, i32)> = db
-        .scan_mutable_rows(&all)
-        .map(|r| match (&r[0], &r[1]) {
-            (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-            _ => unreachable!(),
+        .scan_mutable_rows(&all, None)
+        .expect("scan rows")
+        .map(|result| match result {
+            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
+                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
+                _ => unreachable!(),
+            },
+            Err(_) => unreachable!(),
         })
         .collect();
     println!("dynamic rows (all): {:?}", all_rows);
