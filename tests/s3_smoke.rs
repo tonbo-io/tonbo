@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{Array, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
+use arrow_array::{Array, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field};
 use fusio::executor::tokio::TokioExecutor;
 use tonbo::{
@@ -107,7 +107,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     db.ingest(batch).await?;
-    db.disable_wal()?;
+    db.disable_wal().await?;
 
     // Verify we can stream the newly written WAL frames back from the backend.
     let replayer = Replayer::new(wal_cfg.clone());
@@ -134,18 +134,6 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
                     .downcast_ref::<UInt64Array>()
                     .expect("commit column missing");
                 assert_eq!(commit_column.len(), expected_rows);
-
-                let tombstone_column = payload
-                    .tombstones
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .expect("tombstone column missing");
-                assert_eq!(tombstone_column.len(), expected_rows);
-                assert!(
-                    tombstone_column
-                        .iter()
-                        .all(|val| matches!(val, Some(false)))
-                );
 
                 let ids = payload
                     .batch

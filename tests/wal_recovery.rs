@@ -5,9 +5,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
-use fusio::{Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
+use fusio::{DynFs, Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
     DB,
     db::WalConfig as BuilderWalConfig,
@@ -16,8 +16,10 @@ use tonbo::{
     mvcc::Timestamp,
     scan::RangeSet,
     wal::{
-        WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
-        frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames, encode_command},
+        DynBatchPayload, WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalRecoveryMode,
+        WalSyncPolicy,
+        frame::{INITIAL_FRAME_SEQ, WalEvent, encode_autocommit_frames, encode_command},
+        replay::Replayer,
         storage::WalStorage,
     },
 };
@@ -69,7 +71,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     )?;
     db.ingest(batch).await?;
 
-    db.disable_wal()?;
+    db.disable_wal().await?;
     drop(db);
 
     let (_, mode_config_recover) = schema_and_config(
@@ -109,9 +111,11 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     rows.sort();
     assert_eq!(rows, vec![("user-1".into(), 10), ("user-2".into(), 20)]);
 
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     drop(recovered);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
     Ok(())
 }
@@ -146,7 +150,7 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     )?;
     db.ingest(batch).await?;
 
-    db.disable_wal()?;
+    db.disable_wal().await?;
     drop(db);
 
     let mode_config_recover = DynModeConfig::from_metadata(schema.clone())?;
@@ -188,10 +192,127 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
         ]
     );
 
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     drop(recovered);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_replay_emits_delete_frames_for_tombstones() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = workspace_temp_dir("tonbo-wal-delete-frame");
+    let wal_path = dir.join("wal");
+    fs::create_dir_all(&wal_path)?;
+
+    let backend = Arc::new(fusio::mem::fs::InMemoryFs::new());
+    let fs_dyn: Arc<dyn DynFs> = backend.clone();
+    let wal_root = FusioPath::from_filesystem_path(&wal_path).expect("wal path");
+    let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
+    storage
+        .ensure_dir(storage.root())
+        .await
+        .expect("ensure dir");
+
+    let upsert_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    let delete_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("_commit_ts", DataType::UInt64, false),
+    ]));
+
+    let upsert_batch = RecordBatch::try_new(
+        upsert_schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["keep", "remove"])) as _,
+            Arc::new(Int32Array::from(vec![1, 2])) as _,
+        ],
+    )?;
+    let delete_batch = RecordBatch::try_new(
+        delete_schema,
+        vec![
+            Arc::new(StringArray::from(vec!["remove"])) as _,
+            Arc::new(UInt64Array::from(vec![99_u64])) as _,
+        ],
+    )?;
+
+    let provisional_id = 33;
+    let commit_ts = Timestamp::new(99);
+    let commit_array: ArrayRef = Arc::new(UInt64Array::from(vec![
+        commit_ts.get();
+        upsert_batch.num_rows()
+    ])) as ArrayRef;
+    let payload_upsert = DynBatchPayload::Row {
+        batch: upsert_batch,
+        commit_ts_column: commit_array,
+    };
+    let payload_delete = DynBatchPayload::Delete {
+        batch: delete_batch,
+    };
+
+    let mut frames = Vec::new();
+    frames.extend(encode_command(WalCommand::TxnAppend {
+        provisional_id,
+        payload: payload_upsert,
+    })?);
+    frames.extend(encode_command(WalCommand::TxnAppend {
+        provisional_id,
+        payload: payload_delete,
+    })?);
+    frames.extend(encode_command(WalCommand::TxnCommit {
+        provisional_id,
+        commit_ts,
+    })?);
+
+    let mut seq = INITIAL_FRAME_SEQ;
+    let mut bytes = Vec::new();
+    for frame in frames {
+        bytes.extend_from_slice(&frame.into_bytes(seq));
+        seq += 1;
+    }
+
+    let mut segment = storage.open_segment(0).await.expect("segment");
+    let (write_res, _) = segment.file_mut().write_all(bytes).await;
+    write_res.expect("write wal");
+    segment.file_mut().flush().await.expect("flush");
+
+    let mut cfg = RuntimeWalConfig::default();
+    cfg.dir = wal_root.clone();
+    cfg.segment_backend = fs_dyn;
+    cfg.state_store = None;
+
+    let replayer = Replayer::new(cfg);
+    let events = replayer.scan().await.expect("scan");
+    assert_eq!(events.len(), 3);
+
+    match &events[0] {
+        WalEvent::DynAppend { payload, .. } => {
+            assert_eq!(payload.batch.num_rows(), 2);
+        }
+        other => panic!("unexpected first event: {other:?}"),
+    }
+    match &events[1] {
+        WalEvent::DynDelete { payload, .. } => {
+            assert_eq!(payload.batch.num_rows(), 1);
+            let ids = payload
+                .batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("string column");
+            assert_eq!(ids.value(0), "remove");
+        }
+        other => panic!("unexpected second event: {other:?}"),
+    }
+    assert!(matches!(events[2], WalEvent::TxnCommit { .. }));
+
+    if let Err(err) = fs::remove_dir_all(&dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &dir);
+    }
     Ok(())
 }
 
@@ -225,12 +346,8 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_frames = encode_autocommit_frames(
-        committed_batch.clone(),
-        vec![false],
-        11,
-        Timestamp::new(100),
-    )?;
+    let committed_frames =
+        encode_autocommit_frames(committed_batch.clone(), 11, Timestamp::new(100))?;
 
     let partial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -239,8 +356,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_frames =
-        encode_autocommit_frames(partial_batch.clone(), vec![false], 17, Timestamp::new(200))?;
+    let partial_frames = encode_autocommit_frames(partial_batch.clone(), 17, Timestamp::new(200))?;
 
     let mut seq = INITIAL_FRAME_SEQ;
     for frame in committed_frames {
@@ -261,6 +377,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     write_res?;
     segment.file_mut().flush().await?;
     drop(segment);
+    drop(storage);
 
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config)
@@ -292,9 +409,11 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     rows.sort();
     assert_eq!(rows, vec![("committed".into(), 1)]);
 
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     drop(recovered);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
     Ok(())
 }
@@ -330,12 +449,8 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_frames = encode_autocommit_frames(
-        committed_batch.clone(),
-        vec![false],
-        11,
-        Timestamp::new(100),
-    )?;
+    let committed_frames =
+        encode_autocommit_frames(committed_batch.clone(), 11, Timestamp::new(100))?;
 
     let partial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -344,8 +459,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_frames =
-        encode_autocommit_frames(partial_batch.clone(), vec![false], 17, Timestamp::new(200))?;
+    let partial_frames = encode_autocommit_frames(partial_batch.clone(), 17, Timestamp::new(200))?;
 
     let mut seq = INITIAL_FRAME_SEQ;
     for frame in committed_frames {
@@ -400,9 +514,11 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     rows.sort();
     assert_eq!(rows, vec![("committed".into(), 1)]);
 
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     drop(recovered);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
     Ok(())
 }
@@ -437,12 +553,8 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_frames = encode_autocommit_frames(
-        committed_batch.clone(),
-        vec![false],
-        11,
-        Timestamp::new(100),
-    )?;
+    let committed_frames =
+        encode_autocommit_frames(committed_batch.clone(), 11, Timestamp::new(100))?;
 
     let partial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -451,8 +563,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             Arc::new(Int32Array::from(vec![999])) as _,
         ],
     )?;
-    let partial_frames =
-        encode_autocommit_frames(partial_batch.clone(), vec![false], 17, Timestamp::new(200))?;
+    let partial_frames = encode_autocommit_frames(partial_batch.clone(), 17, Timestamp::new(200))?;
 
     let mut seq = INITIAL_FRAME_SEQ;
     for frame in committed_frames {
@@ -507,7 +618,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
         .wal_config()
         .cloned()
         .expect("wal config available");
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     recovered.enable_wal(runtime_cfg.clone())?;
     let rewrite_batch = RecordBatch::try_new(
         schema.clone(),
@@ -517,7 +628,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
         ],
     )?;
     recovered.ingest(rewrite_batch).await?;
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     drop(recovered);
 
     let (_, final_config) = schema_and_config(
@@ -556,9 +667,11 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     rows_after.sort();
     assert!(rows_after.contains(&("rewrite".into(), 2)));
 
-    recovered_again.disable_wal()?;
+    recovered_again.disable_wal().await?;
     drop(recovered_again);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
     Ok(())
 }
@@ -592,12 +705,8 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
             Arc::new(Int32Array::from(vec![1])) as _,
         ],
     )?;
-    let committed_frames = encode_autocommit_frames(
-        committed_batch.clone(),
-        vec![false],
-        41,
-        Timestamp::new(100),
-    )?;
+    let committed_frames =
+        encode_autocommit_frames(committed_batch.clone(), 41, Timestamp::new(100))?;
 
     let aborted_batch = RecordBatch::try_new(
         schema.clone(),
@@ -607,7 +716,7 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
         ],
     )?;
     let mut aborted_frames =
-        encode_autocommit_frames(aborted_batch.clone(), vec![false], 55, Timestamp::new(150))?;
+        encode_autocommit_frames(aborted_batch.clone(), 55, Timestamp::new(150))?;
     let aborted_append = aborted_frames.remove(0);
     drop(aborted_frames);
 
@@ -670,7 +779,9 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
     assert_eq!(rows, vec![("live".into(), 1)]);
 
     drop(recovered);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
     Ok(())
 }
@@ -713,7 +824,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
         db.ingest(batch).await?;
     }
 
-    db.disable_wal()?;
+    db.disable_wal().await?;
     drop(db);
 
     let (_, mode_config_recover) = schema_and_config(
@@ -768,7 +879,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
         .wal_config()
         .cloned()
         .expect("wal config available");
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     recovered.enable_wal(runtime_cfg.clone())?;
     let extra_batch = RecordBatch::try_new(
         schema.clone(),
@@ -778,7 +889,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
         ],
     )?;
     recovered.ingest(extra_batch).await?;
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     drop(recovered);
 
     let (_, mode_config_final) = schema_and_config(
@@ -823,9 +934,11 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     expected_final.sort();
     assert_eq!(rows_final, expected_final);
 
-    recovered_again.disable_wal()?;
+    recovered_again.disable_wal().await?;
     drop(recovered_again);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
     Ok(())
 }
@@ -858,7 +971,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     )?;
     db.ingest(initial_batch).await?;
 
-    db.disable_wal()?;
+    db.disable_wal().await?;
     drop(db);
 
     let (_, mode_config_recover) = schema_and_config(
@@ -878,7 +991,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
         .wal_config()
         .cloned()
         .expect("wal config available");
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     recovered.enable_wal(runtime_cfg.clone())?;
 
     let wal_handle = recovered.wal().cloned().expect("wal handle");
@@ -890,14 +1003,16 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
         ],
     )?;
     let ticket = wal_handle
-        .append(&append_batch, &[false], Timestamp::new(777))
+        .append(&append_batch, Timestamp::new(777))
         .await?;
     assert_eq!(ticket.seq, INITIAL_FRAME_SEQ.saturating_add(1));
     ticket.durable().await?;
 
-    recovered.disable_wal()?;
+    recovered.disable_wal().await?;
     drop(recovered);
-    fs::remove_dir_all(&root_dir)?;
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
 
     Ok(())
 }

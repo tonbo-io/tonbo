@@ -7,7 +7,7 @@ use std::{
     vec,
 };
 
-use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{Array, RecordBatch, UInt64Array};
 use arrow_schema::{Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
@@ -135,8 +135,7 @@ impl DynMem {
     ) -> Result<(), crate::extractor::KeyExtractError> {
         let rows = batch.num_rows();
         let commit_ts_column = UInt64Array::from(vec![commit_ts.get(); rows]);
-        let tombstone_column = BooleanArray::from(vec![false; rows]);
-        self.insert_batch_with_mvcc(extractor, batch, commit_ts_column, tombstone_column)
+        self.insert_batch_with_mvcc(extractor, batch, commit_ts_column)
     }
 
     /// Insert a batch using explicit MVCC metadata columns.
@@ -145,7 +144,6 @@ impl DynMem {
         extractor: &dyn KeyProjection,
         batch: RecordBatch,
         commit_ts_column: UInt64Array,
-        tombstone_column: BooleanArray,
     ) -> Result<(), crate::extractor::KeyExtractError> {
         extractor.validate_schema(&batch.schema())?;
         let rows = batch.num_rows();
@@ -153,19 +151,6 @@ impl DynMem {
             return Err(crate::extractor::KeyExtractError::Arrow(
                 arrow_schema::ArrowError::ComputeError(
                     "commit_ts column length mismatch record batch".to_string(),
-                ),
-            ));
-        }
-        if tombstone_column.len() != rows {
-            return Err(crate::extractor::KeyExtractError::TombstoneLengthMismatch {
-                expected: rows,
-                actual: tombstone_column.len(),
-            });
-        }
-        if tombstone_column.null_count() > 0 {
-            return Err(crate::extractor::KeyExtractError::Arrow(
-                arrow_schema::ArrowError::ComputeError(
-                    "tombstone column contained null".to_string(),
                 ),
             ));
         }
@@ -180,12 +165,7 @@ impl DynMem {
         let batch_id = self.batches_attached.len();
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
         let key_rows = extractor.project_view(&batch, &row_indices)?;
-        debug_assert_eq!(tombstone_column.null_count(), 0);
         for (row_idx, key_row) in key_rows.into_iter().enumerate() {
-            debug_assert!(
-                !tombstone_column.value(row_idx),
-                "row payload tombstones are no longer supported"
-            );
             let key_size = key_row.heap_size();
             let has_existing = self
                 .index
@@ -1106,12 +1086,7 @@ mod tests {
             )
             .expect("batch");
             layout
-                .insert_batch_with_mvcc(
-                    extractor.as_ref(),
-                    batch,
-                    UInt64Array::from(vec![ts]),
-                    BooleanArray::from(vec![false]),
-                )
+                .insert_batch_with_mvcc(extractor.as_ref(), batch, UInt64Array::from(vec![ts]))
                 .expect("insert");
         };
 
@@ -1172,12 +1147,7 @@ mod tests {
         )
         .expect("batch1");
         layout
-            .insert_batch_with_mvcc(
-                extractor.as_ref(),
-                batch1,
-                UInt64Array::from(vec![10]),
-                BooleanArray::from(vec![false]),
-            )
+            .insert_batch_with_mvcc(extractor.as_ref(), batch1, UInt64Array::from(vec![10]))
             .expect("insert batch1");
 
         let batch2: RecordBatch = build_batch(
@@ -1189,12 +1159,7 @@ mod tests {
         )
         .expect("batch2");
         layout
-            .insert_batch_with_mvcc(
-                extractor.as_ref(),
-                batch2,
-                UInt64Array::from(vec![20]),
-                BooleanArray::from(vec![false]),
-            )
+            .insert_batch_with_mvcc(extractor.as_ref(), batch2, UInt64Array::from(vec![20]))
             .expect("insert batch2");
 
         let chain = layout

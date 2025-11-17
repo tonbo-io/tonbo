@@ -4,6 +4,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical column name storing MVCC commit timestamps alongside Arrow payloads.
+pub const MVCC_COMMIT_COL: &str = "_commit_ts";
+
 /// Logical commit timestamp assigned to mutations and read views.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Timestamp(u64);

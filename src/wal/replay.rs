@@ -161,7 +161,7 @@ impl Replayer {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
+    use arrow_array::{Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use fusio::{
         Write,
@@ -201,8 +201,8 @@ mod tests {
         )
         .expect("batch");
 
-        let frames = encode_autocommit_frames(batch.clone(), vec![false], 7, Timestamp::new(42))
-            .expect("encode");
+        let frames =
+            encode_autocommit_frames(batch.clone(), 7, Timestamp::new(42)).expect("encode");
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
         for frame in frames {
@@ -245,13 +245,6 @@ mod tests {
                     .expect("u64 column");
                 assert_eq!(commit_array.len(), 1);
                 assert_eq!(commit_array.value(0), 42);
-                let tombstone_array = payload
-                    .tombstones
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .expect("boolean column");
-                assert_eq!(tombstone_array.len(), 1);
-                assert!(!tombstone_array.value(0));
                 assert_eq!(payload.batch.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -347,8 +340,8 @@ mod tests {
         )
         .expect("batch");
 
-        let frames = encode_autocommit_frames(batch.clone(), vec![false], 9, Timestamp::new(42))
-            .expect("encode");
+        let frames =
+            encode_autocommit_frames(batch.clone(), 9, Timestamp::new(42)).expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
         let append_bytes = frames[0].clone().into_bytes(seq);
@@ -388,13 +381,6 @@ mod tests {
                     .expect("u64 column");
                 assert_eq!(commit_array.len(), 1);
                 assert_eq!(commit_array.value(0), 42);
-                let tombstone_array = payload
-                    .tombstones
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .expect("boolean column");
-                assert_eq!(tombstone_array.len(), 1);
-                assert!(!tombstone_array.value(0));
                 assert_eq!(payload.batch.num_rows(), 1);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -426,8 +412,8 @@ mod tests {
         )
         .expect("batch");
 
-        let frames = encode_autocommit_frames(batch.clone(), vec![false], 11, Timestamp::new(7))
-            .expect("encode");
+        let frames =
+            encode_autocommit_frames(batch.clone(), 11, Timestamp::new(7)).expect("encode");
 
         let mut seq = INITIAL_FRAME_SEQ;
         let mut bytes = Vec::new();
@@ -566,9 +552,7 @@ mod tests {
         commit_ts: Timestamp,
         next_seq: &mut u64,
     ) -> (u64, u64) {
-        let tombstones = vec![false; batch.num_rows()];
-        let frames =
-            encode_autocommit_frames(batch, tombstones, provisional_id, commit_ts).expect("encode");
+        let frames = encode_autocommit_frames(batch, provisional_id, commit_ts).expect("encode");
         let first_seq = *next_seq;
         let mut segment = storage
             .open_segment(segment_seq)

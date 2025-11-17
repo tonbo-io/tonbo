@@ -4,14 +4,13 @@ use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{Schema, SchemaRef};
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
+pub(crate) use crate::mvcc::MVCC_COMMIT_COL;
 use crate::{
     extractor::{KeyExtractError, KeyProjection, map_view_err, projection_for_field},
     key::{KeyOwned, KeyRow, KeyTsViewRaw},
     mvcc::Timestamp,
     scan::{KeyRange, RangeSet},
 };
-
-pub(crate) const MVCC_COMMIT_COL: &str = "_commit_ts";
 pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 
 /// Read-only immutable memtable backed by Arrow storage and MVCC metadata.

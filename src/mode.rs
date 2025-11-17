@@ -174,10 +174,9 @@ impl Mode for DynMode {
             let commit_ts = db.next_commit_ts();
             let mut wal_spans: Vec<(u64, u64)> = Vec::new();
             if let Some(handle) = db.wal_handle().cloned() {
-                let tombstones = vec![false; batch.num_rows()];
                 let provisional_id = handle.next_provisional_id();
                 let append_ticket = handle
-                    .txn_append(provisional_id, &batch, &tombstones, commit_ts)
+                    .txn_append(provisional_id, &batch, commit_ts)
                     .await
                     .map_err(KeyExtractError::from)?;
                 let commit_ticket = handle

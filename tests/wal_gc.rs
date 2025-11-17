@@ -206,7 +206,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
         "pinned WAL file should be deleted after mutable flush"
     );
 
-    db.disable_wal()?;
+    db.disable_wal().await?;
     fs::remove_dir_all(&temp_root)?;
     Ok(())
 }

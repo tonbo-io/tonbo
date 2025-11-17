@@ -1139,7 +1139,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use arrow_array::{ArrayRef, BooleanArray, UInt64Array};
+    use arrow_array::{ArrayRef, UInt64Array};
     use fusio::{
         DynFs, executor::BlockingExecutor, fs::FsCas, impls::mem::fs::InMemoryFs, path::Path,
     };
@@ -1208,12 +1208,9 @@ mod tests {
     ) -> (WalCommand, WalCommand) {
         let commit_array: ArrayRef =
             Arc::new(UInt64Array::from(vec![commit_ts; batch.num_rows()])) as ArrayRef;
-        let tombstone_array: ArrayRef =
-            Arc::new(BooleanArray::from(vec![false; batch.num_rows()])) as ArrayRef;
         let payload = DynBatchPayload::Row {
             batch: batch.clone(),
             commit_ts_column: commit_array,
-            tombstone_column: tombstone_array,
         };
         let append = WalCommand::TxnAppend {
             provisional_id,

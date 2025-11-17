@@ -35,7 +35,7 @@
 ## Background
 
 - `DynMem::seal_into_immutable` currently synthesizes null rows for tombstones and calls `attach_mvcc_columns`, which appends hidden columns to the batch (`src/inmem/mutable/memtable.rs`).
-- WAL appends rely on `append_tombstone_column`/`split_tombstone_column` to shuttle the hidden column through Arrow IPC (`src/wal/mod.rs`, `src/wal/frame.rs`).
+- WAL appends rely on `append_commit_column`/`split_commit_column` to shuttle the hidden column through Arrow IPC (`src/wal/mod.rs`, `src/wal/frame.rs`).
 - SST flushes stream the widened batch into Parquet, so user readers see `_commit_ts`/`_tombstone`, conflicting with schema guarantees outlined in `docs/overview.md` §Data Model/MVCC.
 
 ## Proposal

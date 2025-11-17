@@ -931,7 +931,6 @@ mod tests {
 
             let frames = crate::wal::frame::encode_autocommit_frames(
                 batch.clone(),
-                vec![false],
                 7,
                 crate::mvcc::Timestamp::new(42),
             )

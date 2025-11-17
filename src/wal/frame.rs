@@ -2,7 +2,7 @@
 
 use std::{convert::TryFrom, io::Cursor, mem::size_of, sync::Arc};
 
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use crc32c::crc32c;
 
@@ -11,7 +11,7 @@ use crate::wal::DynBatchPayload;
 use crate::{
     inmem::immutable::memtable::MVCC_COMMIT_COL,
     mvcc::Timestamp,
-    wal::{WalCommand, WalError, WalResult, append_mvcc_columns, split_mvcc_columns},
+    wal::{WalCommand, WalError, WalResult, append_commit_column, split_commit_column},
 };
 
 /// Maximum supported frame version.
@@ -57,7 +57,7 @@ const TXN_COMMIT_PAYLOAD_SIZE: usize = 8 + 8;
 /// Logical payload type encoded inside a `TxnAppend` frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DynRowMode {
-    /// Full row payload carrying `_commit_ts` + `_tombstone`.
+    /// Full row payload carrying `_commit_ts` metadata.
     RowPayload = 0,
     /// Key-only delete payload carrying key columns + `_commit_ts`.
     KeyDelete = 1,
@@ -309,10 +309,7 @@ pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
             crate::wal::DynBatchPayload::Row {
                 batch,
                 commit_ts_column,
-                tombstone_column,
-            } => {
-                encode_txn_append_row(provisional_id, &batch, &commit_ts_column, &tombstone_column)
-            }
+            } => encode_txn_append_row(provisional_id, &batch, &commit_ts_column),
             crate::wal::DynBatchPayload::Delete { batch } => {
                 encode_txn_append_delete(provisional_id, &batch)
             }
@@ -334,9 +331,8 @@ fn encode_txn_append_row(
     provisional_id: u64,
     batch: &RecordBatch,
     commit_ts_column: &ArrayRef,
-    tombstones: &ArrayRef,
 ) -> WalResult<Vec<Frame>> {
-    let wal_batch = append_mvcc_columns(batch, commit_ts_column, tombstones)?;
+    let wal_batch = append_commit_column(batch, commit_ts_column)?;
     let append = encode_txn_append_batch(provisional_id, DynRowMode::RowPayload, wal_batch)?;
     Ok(vec![Frame::new(FrameType::TxnAppend, append)])
 }
@@ -349,21 +345,12 @@ fn encode_txn_append_delete(provisional_id: u64, batch: &RecordBatch) -> WalResu
 /// Convenience helper used mainly by tests to encode a single append + commit from raw inputs.
 pub fn encode_autocommit_frames(
     batch: RecordBatch,
-    tombstones: Vec<bool>,
     provisional_id: u64,
     commit_ts: Timestamp,
 ) -> WalResult<Vec<Frame>> {
-    if batch.num_rows() != tombstones.len() {
-        return Err(WalError::TombstoneLengthMismatch {
-            expected: batch.num_rows(),
-            actual: tombstones.len(),
-        });
-    }
     let commit_array: ArrayRef =
         Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()])) as ArrayRef;
-    let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones)) as ArrayRef;
-    let append_frames =
-        encode_txn_append_row(provisional_id, &batch, &commit_array, &tombstone_array)?;
+    let append_frames = encode_txn_append_row(provisional_id, &batch, &commit_array)?;
     let mut frames = append_frames;
     let commit_frame = Frame::new(
         FrameType::TxnCommit,
@@ -479,14 +466,12 @@ fn decode_dyn_append(
 
     match row_mode {
         DynRowMode::RowPayload => {
-            let (stripped, commit_ts_hint, commit_ts_column, tombstones) =
-                split_mvcc_columns(batch)?;
+            let (stripped, commit_ts_hint, commit_ts_column) = split_commit_column(batch)?;
 
             let payload = DynAppendEvent {
                 batch: stripped,
                 commit_ts_hint,
                 commit_ts_column,
-                tombstones,
             };
 
             Ok(WalEvent::DynAppend {
@@ -589,8 +574,6 @@ pub struct DynAppendEvent {
     pub commit_ts_hint: Option<Timestamp>,
     /// Commit timestamp column recovered from the payload.
     pub commit_ts_column: ArrayRef,
-    /// Tombstone bitmap associated with the batch.
-    pub tombstones: ArrayRef,
 }
 
 impl DynAppendEvent {
@@ -651,7 +634,7 @@ pub enum WalEvent {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
+    use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray, UInt64Array};
     use typed_arrow::arrow_schema::{DataType, Field, Schema};
 
     use super::*;
@@ -759,14 +742,12 @@ mod tests {
     #[test]
     fn encode_command_dyn_batch_round_trip() {
         let base = sample_batch();
-        let tombstones = vec![true, false, true];
         let user_expected = base.clone();
         let commit_ts = Timestamp::new(42);
         let provisional_id = 7;
 
-        let frames =
-            encode_autocommit_frames(base.clone(), tombstones.clone(), provisional_id, commit_ts)
-                .expect("encode succeeds");
+        let frames = encode_autocommit_frames(base.clone(), provisional_id, commit_ts)
+            .expect("encode succeeds");
 
         assert_eq!(frames.len(), 2);
 
@@ -790,15 +771,6 @@ mod tests {
                         .iter()
                         .all(|value| value.expect("non-null") == commit_ts.get())
                 );
-                let tombstone_array = payload
-                    .tombstones
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .expect("boolean array");
-                assert_eq!(tombstone_array.len(), base.num_rows());
-                assert_eq!(tombstone_array.value(0), true);
-                assert_eq!(tombstone_array.value(1), false);
-                assert_eq!(tombstone_array.value(2), true);
                 assert_eq!(
                     payload.batch.schema().as_ref(),
                     user_expected.schema().as_ref()
@@ -827,12 +799,9 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let ids = Arc::new(Int32Array::from((0..12).collect::<Vec<_>>())) as _;
         let large_batch = RecordBatch::try_new(schema, vec![ids]).expect("large batch");
-        let tombstones: Vec<bool> = (0..12).map(|idx| idx % 3 == 0).collect();
         let commit_ts = Timestamp::new(77);
 
-        let frames =
-            encode_autocommit_frames(large_batch.clone(), tombstones.clone(), 11, commit_ts)
-                .expect("encode");
+        let frames = encode_autocommit_frames(large_batch.clone(), 11, commit_ts).expect("encode");
 
         match decode_frame(frames[0].frame_type(), frames[0].payload())
             .expect("decode append frame")
@@ -854,15 +823,6 @@ mod tests {
                         .iter()
                         .all(|value| value.expect("non-null") == commit_ts.get())
                 );
-                let tombstone_array = payload
-                    .tombstones
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .expect("boolean column");
-                assert_eq!(tombstone_array.len(), large_batch.num_rows());
-                for (idx, expected) in tombstones.iter().enumerate() {
-                    assert_eq!(tombstone_array.value(idx), *expected);
-                }
                 assert_eq!(payload.batch.num_rows(), 12);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -873,13 +833,10 @@ mod tests {
     fn encode_command_does_not_clone_mvcc_columns() {
         let base = sample_batch();
         let commit_array = Arc::new(UInt64Array::from(vec![42_u64; base.num_rows()]));
-        let tombstone_array = Arc::new(BooleanArray::from(vec![false; base.num_rows()]));
         let commit_ref: ArrayRef = Arc::clone(&commit_array) as ArrayRef;
-        let tombstone_ref: ArrayRef = Arc::clone(&tombstone_array) as ArrayRef;
         let payload = DynBatchPayload::Row {
             batch: base,
             commit_ts_column: commit_ref,
-            tombstone_column: tombstone_ref,
         };
 
         let command = WalCommand::TxnAppend {
@@ -890,7 +847,6 @@ mod tests {
         let frames = encode_command(command).expect("encode succeeds");
         assert_eq!(frames.len(), 1);
         assert_eq!(Arc::strong_count(&commit_array), 1);
-        assert_eq!(Arc::strong_count(&tombstone_array), 1);
     }
 
     #[test]
@@ -931,13 +887,8 @@ mod tests {
     #[test]
     fn decode_append_rejects_truncated_payload() {
         let batch = sample_batch();
-        let frames = encode_autocommit_frames(
-            batch.clone(),
-            vec![false, false, false],
-            9,
-            Timestamp::new(1),
-        )
-        .expect("encode succeeds");
+        let frames =
+            encode_autocommit_frames(batch.clone(), 9, Timestamp::new(1)).expect("encode succeeds");
 
         let mut truncated = frames[0].payload().to_vec();
         truncated.truncate(TXN_APPEND_PREFIX_SIZE - 1);

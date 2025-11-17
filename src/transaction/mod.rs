@@ -438,8 +438,7 @@ impl Transaction {
         } else {
             let batch =
                 build_record_batch(&schema, rows).map_err(TransactionCommitError::RowEncoding)?;
-            let tombstones = vec![false; batch.num_rows()];
-            Some((batch, tombstones))
+            Some(batch)
         };
         let mut delete_payload = if delete_keys.is_empty() {
             None
@@ -452,9 +451,7 @@ impl Transaction {
             )?)
         };
 
-        let upsert_refs = upsert_payload
-            .as_ref()
-            .map(|(batch, tombstones)| (batch, tombstones.as_slice()));
+        let upsert_refs = upsert_payload.as_ref();
         let delete_ref = delete_payload.as_ref();
         let tickets =
             write_wal_transaction(&wal, provisional_id, upsert_refs, delete_ref, commit_ts).await?;
@@ -524,15 +521,15 @@ fn build_delete_batch(
 
 fn apply_staged_payloads<E>(
     db: &mut DB<DynMode, E>,
-    upserts: Option<(RecordBatch, Vec<bool>)>,
+    upserts: Option<RecordBatch>,
     deletes: Option<RecordBatch>,
     commit_ts: Timestamp,
 ) -> Result<(), TransactionCommitError>
 where
     E: Executor + Timer,
 {
-    if let Some((batch, tombstones)) = upserts {
-        db.apply_committed_batch(batch, tombstones, commit_ts)
+    if let Some(batch) = upserts {
+        db.apply_committed_batch(batch, commit_ts)
             .map_err(TransactionCommitError::Apply)?;
     }
     if let Some(batch) = deletes {
@@ -796,7 +793,7 @@ mod tests {
 async fn write_wal_transaction<E>(
     wal: &crate::wal::WalHandle<E>,
     provisional_id: u64,
-    upserts: Option<(&RecordBatch, &[bool])>,
+    upserts: Option<&RecordBatch>,
     deletes: Option<&RecordBatch>,
     commit_ts: Timestamp,
 ) -> Result<WalTxnTickets<E>, TransactionCommitError>
@@ -808,10 +805,8 @@ where
     tickets.push(begin_ticket);
 
     let result = async {
-        if let Some((batch, tombstones)) = upserts {
-            let ticket = wal
-                .txn_append(provisional_id, batch, tombstones, commit_ts)
-                .await?;
+        if let Some(batch) = upserts {
+            let ticket = wal.txn_append(provisional_id, batch, commit_ts).await?;
             tickets.push(ticket);
         }
         if let Some(batch) = deletes {

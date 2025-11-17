@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
+use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
 use fusio::executor::{Executor, RwLock, Timer};
@@ -49,7 +49,7 @@ use crate::{
     scan::RangeSet,
     transaction::{Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionError},
     wal::{
-        WalConfig as RuntimeWalConfig, WalError, WalHandle,
+        WalConfig as RuntimeWalConfig, WalError, WalHandle, WalResult,
         frame::{DynAppendEvent, INITIAL_FRAME_SEQ, WalEvent},
         manifest_ext,
         replay::Replayer,
@@ -64,7 +64,6 @@ enum PendingWalPayload {
     Upsert {
         batch: RecordBatch,
         commit_ts_column: ArrayRef,
-        tombstones: ArrayRef,
         commit_ts_hint: Option<Timestamp>,
     },
     Delete {
@@ -236,7 +235,6 @@ where
                         batch,
                         commit_ts_hint,
                         commit_ts_column,
-                        tombstones,
                     } = payload;
                     pending
                         .entry(provisional_id)
@@ -244,7 +242,6 @@ where
                         .push(PendingWalPayload::Upsert {
                             batch,
                             commit_ts_column,
-                            tombstones,
                             commit_ts_hint,
                         });
                 }
@@ -273,7 +270,6 @@ where
                                 PendingWalPayload::Upsert {
                                     batch,
                                     commit_ts_column,
-                                    tombstones,
                                     commit_ts_hint,
                                 } => {
                                     if let Some(hint) = commit_ts_hint {
@@ -282,13 +278,7 @@ where
                                             "commit timestamp derived from append payload diverged"
                                         );
                                     }
-                                    apply_dyn_wal_batch(
-                                        self,
-                                        batch,
-                                        commit_ts_column,
-                                        tombstones,
-                                        commit_ts,
-                                    )?;
+                                    apply_dyn_wal_batch(self, batch, commit_ts_column, commit_ts)?;
                                     self.maybe_seal_after_insert()?;
                                 }
                                 PendingWalPayload::Delete {
@@ -396,13 +386,11 @@ where
     pub(crate) fn apply_committed_batch(
         &mut self,
         batch: RecordBatch,
-        tombstones: Vec<bool>,
         commit_ts: Timestamp,
     ) -> Result<(), KeyExtractError> {
         let commit_array: ArrayRef =
             Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()]));
-        let tombstone_array: ArrayRef = Arc::new(BooleanArray::from(tombstones));
-        apply_dyn_wal_batch(self, batch, commit_array, tombstone_array, commit_ts)
+        apply_dyn_wal_batch(self, batch, commit_array, commit_ts)
     }
 
     /// Apply a WAL-durable key-only delete batch directly into the mutable table.
@@ -761,6 +749,16 @@ where
         self.wal_config = cfg;
     }
 
+    pub(crate) async fn disable_wal_async(&mut self) -> WalResult<()> {
+        if let Some(handle) = self.wal_handle().cloned() {
+            self.set_wal_handle(None);
+            handle.shutdown().await?;
+        } else {
+            self.set_wal_handle(None);
+        }
+        Ok(())
+    }
+
     fn manifest_wal_floor(&self) -> Option<WalSegmentRef> {
         block_on(self.manifest.wal_floor(self.manifest_table))
             .ok()
@@ -999,9 +997,8 @@ where
         let provisional_id = handle.next_provisional_id();
         let mut append_tickets = Vec::new();
         if let Some(ref batch) = upsert_batch {
-            let tombstone_mask = vec![false; batch.num_rows()];
             let ticket = handle
-                .txn_append(provisional_id, batch, &tombstone_mask, commit_ts)
+                .txn_append(provisional_id, batch, commit_ts)
                 .await
                 .map_err(KeyExtractError::from)?;
             append_tickets.push(ticket);
@@ -1067,7 +1064,6 @@ fn apply_dyn_wal_batch<E>(
     db: &mut DB<DynMode, E>,
     batch: RecordBatch,
     commit_ts_column: ArrayRef,
-    tombstones: ArrayRef,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
 where
@@ -1093,20 +1089,8 @@ where
         )));
     }
 
-    let tombstone_array = tombstones
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| {
-            KeyExtractError::from(WalError::Codec("_tombstone column not boolean".into()))
-        })?
-        .clone();
-    validate_tombstone_bitmap(&batch, &tombstone_array)?;
-    db.mem.insert_batch_with_mvcc(
-        db.mode.extractor.as_ref(),
-        batch,
-        commit_array,
-        tombstone_array,
-    )?;
+    db.mem
+        .insert_batch_with_mvcc(db.mode.extractor.as_ref(), batch, commit_array)?;
     Ok(())
 }
 
@@ -1137,24 +1121,6 @@ where
             expected: db.mode.schema.clone(),
             actual: batch.schema(),
         });
-    }
-    Ok(())
-}
-
-fn validate_tombstone_bitmap(
-    batch: &RecordBatch,
-    tombstones: &BooleanArray,
-) -> Result<(), KeyExtractError> {
-    if batch.num_rows() != tombstones.len() {
-        return Err(KeyExtractError::TombstoneLengthMismatch {
-            expected: batch.num_rows(),
-            actual: tombstones.len(),
-        });
-    }
-    if tombstones.null_count() > 0 {
-        return Err(KeyExtractError::from(WalError::Codec(
-            "tombstone column contained null".into(),
-        )));
     }
     Ok(())
 }
@@ -1249,6 +1215,7 @@ fn partition_batch_for_mutations(
             &batch,
             &delete_indices,
             commit_ts,
+            None,
         )?)
     };
     let upsert_batch = if delete_indices.is_empty() {
@@ -1266,6 +1233,7 @@ fn build_delete_batch(
     batch: &RecordBatch,
     delete_indices: &[u32],
     commit_ts: Timestamp,
+    commit_ts_column: Option<&UInt64Array>,
 ) -> Result<RecordBatch, KeyExtractError> {
     let idx_array = UInt32Array::from(delete_indices.to_vec());
     let mut columns = Vec::with_capacity(mode.extractor.key_indices().len() + 1);
@@ -1274,10 +1242,14 @@ fn build_delete_batch(
         let taken = take(column.as_ref(), &idx_array, None).map_err(KeyExtractError::Arrow)?;
         columns.push(taken);
     }
-    let commit_values: ArrayRef = Arc::new(UInt64Array::from(vec![
-        commit_ts.get();
-        delete_indices.len()
-    ]));
+    let commit_values: ArrayRef = if let Some(column) = commit_ts_column {
+        take(column, &idx_array, None).map_err(KeyExtractError::Arrow)?
+    } else {
+        Arc::new(UInt64Array::from(vec![
+            commit_ts.get();
+            delete_indices.len()
+        ])) as ArrayRef
+    };
     columns.push(commit_values);
     RecordBatch::try_new(mode.delete_schema.clone(), columns).map_err(KeyExtractError::Arrow)
 }
@@ -1299,7 +1271,7 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use arrow_array::{Int32Array, RecordBatch, StringArray, UInt64Array};
+    use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
@@ -1408,6 +1380,43 @@ mod tests {
             })
             .collect();
         assert_eq!(visible, vec!["k1".to_string()]);
+    }
+
+    #[test]
+    fn apply_dyn_wal_batch_inserts_live_rows() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
+        let executor = Arc::new(BlockingExecutor);
+        let mut db: DB<DynMode, BlockingExecutor> =
+            DB::new(config, Arc::clone(&executor)).expect("db");
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["k1", "k2"])) as _,
+                Arc::new(Int32Array::from(vec![1, 2])) as _,
+            ],
+        )
+        .expect("batch");
+        let commit_ts = Timestamp::new(5);
+        let commit_array: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get(); 2]));
+
+        apply_dyn_wal_batch(&mut db, batch, commit_array, commit_ts).expect("apply");
+
+        let live = db
+            .mem
+            .inspect_versions(&KeyOwned::from("k1"))
+            .expect("live key");
+        assert_eq!(live, vec![(commit_ts, false)]);
+
+        let deleted = db
+            .mem
+            .inspect_versions(&KeyOwned::from("k2"))
+            .expect("second key");
+        assert_eq!(deleted, vec![(commit_ts, false)]);
     }
 
     #[test]
@@ -2359,7 +2368,7 @@ mod tests {
             );
         }
 
-        db.disable_wal()?;
+        db.disable_wal().await?;
         fs::remove_dir_all(&temp_root)?;
         Ok(())
     }
@@ -2449,7 +2458,7 @@ mod tests {
             );
         }
 
-        db.disable_wal()?;
+        db.disable_wal().await?;
         fs::remove_dir_all(&temp_root)?;
         Ok(())
     }
@@ -2545,7 +2554,7 @@ mod tests {
             assert!(guard.wal_floor_advancements >= 1);
         }
 
-        db.disable_wal()?;
+        db.disable_wal().await?;
         fs::remove_dir_all(&temp_root)?;
         Ok(())
     }
