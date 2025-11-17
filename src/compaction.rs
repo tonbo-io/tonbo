@@ -1,7 +1,10 @@
-//! Lightweight compaction orchestrators.
+//! Lightweight compaction orchestrators and planners.
 //!
 //! These helpers sit on top of the in-memory staging surfaces and decide when
 //! to drain immutable runs into on-disk SSTables.
+
+/// Leveled compaction planning helpers.
+pub mod planner;
 
 use std::sync::{
     Arc,
@@ -79,19 +82,19 @@ mod tests {
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::MinorCompactor;
-    use crate::{
-        db::DB,
-        mode::{DynMode, DynModeConfig},
-        ondisk::sstable::SsTableConfig,
-        test_util::build_batch,
-    };
+    use crate::{db::DB, mode::DynMode, ondisk::sstable::SsTableConfig, test_util::build_batch};
 
     fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, BlockingExecutor>) {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key field");
+        let config = crate::schema::SchemaBuilder::from_schema(schema)
+            .primary_key("id")
+            .with_metadata()
+            .build()
+            .expect("key field");
+        let schema = Arc::clone(&config.schema);
         let executor = Arc::new(BlockingExecutor);
         let db = DB::<DynMode, BlockingExecutor>::builder(config)
             .in_memory("compaction-test")

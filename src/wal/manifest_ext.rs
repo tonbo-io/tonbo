@@ -124,5 +124,14 @@ pub(crate) async fn prune_wal_segments(
     floor: &WalSegmentRef,
 ) -> Result<usize, WalError> {
     let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
-    storage.prune_below(floor.seq()).await
+    if cfg.prune_dry_run {
+        let segments = storage.list_segments_with_hint(None).await?;
+        let removable = segments
+            .into_iter()
+            .filter(|descriptor| descriptor.seq < floor.seq())
+            .count();
+        Ok(removable)
+    } else {
+        storage.prune_below(floor.seq()).await
+    }
 }

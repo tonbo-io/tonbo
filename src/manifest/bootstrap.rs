@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use fusio::{
     fs::{Fs, FsCas},
@@ -9,7 +9,13 @@ use fusio_manifest::{
     BackoffPolicy, BlockingExecutor, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl,
     ManifestContext, SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
 };
-use futures::{executor::block_on, future::BoxFuture};
+#[cfg(test)]
+use futures::executor::block_on;
+use futures::future::BoxFuture;
+use tokio::{
+    runtime::{Handle, Runtime},
+    task,
+};
 
 use super::{
     codec::{CatalogCodec, ManifestCodec, VersionCodec},
@@ -339,7 +345,7 @@ where
         wrap_version_manifest(version_manifest),
         wrap_catalog_manifest(catalog_manifest),
     );
-    block_on(async { tonbo.init_catalog().await })?;
+    run_in_tokio(async { tonbo.init_catalog().await })?;
     Ok(tonbo)
 }
 
@@ -347,7 +353,7 @@ fn ensure_dir_path<FS>(path: &Path) -> ManifestResult<()>
 where
     FS: Fs,
 {
-    block_on(async { FS::create_dir_all(path).await })
+    run_in_tokio(async { FS::create_dir_all(path).await })
         .map_err(|err| ManifestError::Backend(FusioManifestError::Io(err)))?;
     Ok(())
 }
@@ -394,12 +400,10 @@ where
         fs.clone(),
         prefix.child(PathPart::parse("checkpoints").expect("checkpoints")),
     );
-    let lease = LeaseStoreImpl::new(
-        fs,
-        prefix.child(PathPart::parse("leases").expect("leases")),
-        BackoffPolicy::default(),
-        BlockingExecutor,
-    );
+    // LeaseStoreImpl appends the `leases/` suffix internally; pass the manifest prefix so
+    // lease records land under `<prefix>/leases/...` alongside other manifest metadata.
+    let lease_prefix = prefix.as_ref().to_string();
+    let lease = LeaseStoreImpl::new(fs, lease_prefix, BackoffPolicy::default(), BlockingExecutor);
     let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
     Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx)
 }
@@ -409,5 +413,81 @@ fn append_segment(base: &Path, segment: &str) -> Path {
         Path::parse(segment).expect("segment path")
     } else {
         base.child(PathPart::parse(segment).expect("segment part"))
+    }
+}
+
+fn run_in_tokio<F, T>(future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    match Handle::try_current() {
+        Ok(handle) => task::block_in_place(|| handle.block_on(future)),
+        Err(_) => Runtime::new()
+            .expect("tokio runtime for manifest init")
+            .block_on(future),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use fusio::{
+        disk::LocalFs,
+        mem::fs::InMemoryFs,
+        path::{Path as FusioPath, PathPart},
+    };
+    use fusio_manifest::LeaseStore;
+    use futures::TryStreamExt;
+
+    use super::*;
+
+    #[test]
+    fn init_disk_manifest_smoke() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = FusioPath::from_filesystem_path(dir.path()).expect("fs path");
+        init_fs_manifest(LocalFs {}, &path).expect("disk manifest");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lease_store_writes_under_leases_prefix() {
+        let fs = InMemoryFs::new();
+        let root = FusioPath::default();
+        let manifest_root = append_segment(&root, "manifest");
+        let version_root = append_segment(&manifest_root, "version");
+        ensure_manifest_dirs::<InMemoryFs>(&version_root).expect("dirs created");
+
+        let lease_store = LeaseStoreImpl::new(
+            fs.clone(),
+            version_root.as_ref().to_string(),
+            BackoffPolicy::default(),
+            BlockingExecutor,
+        );
+        let lease = lease_store
+            .create(1, None, Duration::from_secs(30))
+            .await
+            .expect("lease created");
+
+        let leases_dir = version_root.child(PathPart::parse("leases").expect("leases part"));
+        let files: Vec<_> = fs
+            .list(&leases_dir)
+            .await
+            .expect("list leases dir")
+            .try_collect()
+            .await
+            .expect("collect leases dir entries");
+
+        assert!(
+            files
+                .iter()
+                .any(|meta| meta.path.as_ref().contains(&lease.id.0)),
+            "lease documents must be placed under the leases directory"
+        );
+        assert!(
+            files
+                .iter()
+                .all(|meta| meta.path.as_ref().starts_with(leases_dir.as_ref())),
+            "all lease files should live under the leases/ prefix"
+        );
     }
 }

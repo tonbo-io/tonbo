@@ -20,7 +20,7 @@ use tonbo::{
     mode::{DynMode, DynModeConfig},
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     scan::RangeSet,
-    wal::{WalConfig, WalExt, WalSyncPolicy},
+    wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
 };
 use typed_arrow_dyn::{DynCell, DynRow};
 
@@ -103,6 +103,7 @@ fn rows_from_db(db: &DB<DynMode, TokioExecutor>) -> Vec<(String, i32)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Error>> {
     let temp_root = workspace_temp_dir("wal-gc-regression");
+    let root_str = temp_root.to_string_lossy().into_owned();
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("value", DataType::Int32, false),
@@ -110,23 +111,18 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let executor = Arc::new(TokioExecutor::default());
     let build_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
 
-    let wal_dir = temp_root.join("wal");
-    fs::create_dir_all(&wal_dir)?;
-    let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
-    let mut wal_cfg = WalConfig::default();
-    wal_cfg.dir = wal_path;
-    wal_cfg.segment_max_bytes = 512;
-    wal_cfg.flush_interval = Duration::from_millis(1);
-    wal_cfg.sync = WalSyncPolicy::Disabled;
-
     let sst_dir = temp_root.join("sst");
-    fs::create_dir_all(&sst_dir)?;
     let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
     let sst_path = FusioPath::from_filesystem_path(&sst_dir)?;
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_path));
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(build_config, Arc::clone(&executor))?;
-    db.enable_wal(wal_cfg.clone())?;
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .wal_segment_bytes(512)
+        .wal_flush_interval(Duration::from_millis(1))
+        .wal_sync_policy(WalSyncPolicy::Disabled)
+        .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let wal_dir_local = path_to_local(&db.wal_config().expect("wal").dir).expect("local wal dir");
 
@@ -177,7 +173,13 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     // Recovery happens before releasing the pinned WAL range: older GC logic
     // would have dropped the segment here which meant WAL replay lost data.
     let recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(recovery_config, Arc::clone(&executor), wal_cfg.clone()).await?;
+        DB::<DynMode, TokioExecutor>::builder(recovery_config)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .wal_segment_bytes(512)
+            .wal_flush_interval(Duration::from_millis(1))
+            .wal_sync_policy(WalSyncPolicy::Disabled)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
     assert_eq!(rows_from_db(&recovered), {
         let mut rows = ingested_rows.clone();
         rows.sort();
@@ -223,7 +225,7 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
     let wal_dir = temp_root.join("wal");
     fs::create_dir_all(&wal_dir)?;
     let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
-    let mut wal_cfg = WalConfig::default();
+    let mut wal_cfg = RuntimeWalConfig::default();
     wal_cfg.dir = wal_path;
     wal_cfg.segment_max_bytes = 256;
     wal_cfg.flush_interval = Duration::from_millis(1);
@@ -265,7 +267,7 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
     let wal_dir = temp_root.join("wal");
     fs::create_dir_all(&wal_dir)?;
     let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
-    let mut wal_cfg = WalConfig::default();
+    let mut wal_cfg = RuntimeWalConfig::default();
     wal_cfg.dir = wal_path;
     wal_cfg.segment_max_bytes = 256;
     wal_cfg.flush_interval = Duration::from_millis(1);

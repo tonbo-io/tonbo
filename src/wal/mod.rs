@@ -115,6 +115,8 @@ pub struct WalConfig {
     pub segment_backend: Arc<dyn DynFs>,
     /// Optional store used for `state.json` persistence.
     pub state_store: Option<Arc<dyn state::WalStateStore>>,
+    /// When enabled, WAL pruning only reports planned deletions without removing objects.
+    pub prune_dry_run: bool,
 }
 
 impl Default for WalConfig {
@@ -132,6 +134,7 @@ impl Default for WalConfig {
             queue_size: 65_536,
             segment_backend: filesystem,
             state_store: None,
+            prune_dry_run: false,
         }
     }
 }
@@ -150,6 +153,7 @@ impl fmt::Debug for WalConfig {
             .field("queue_size", &self.queue_size)
             .field("segment_backend", &fs_tag)
             .field("state_store_present", &self.state_store.is_some())
+            .field("prune_dry_run", &self.prune_dry_run)
             .finish()
     }
 }
@@ -166,6 +170,13 @@ impl WalConfig {
     #[must_use]
     pub fn without_state_store(mut self) -> Self {
         self.state_store = None;
+        self
+    }
+
+    /// Enable or disable WAL prune dry-run mode.
+    #[must_use]
+    pub fn with_prune_dry_run(mut self, dry_run: bool) -> Self {
+        self.prune_dry_run = dry_run;
         self
     }
 }
@@ -468,6 +479,7 @@ where
     queue_depth: Arc<AtomicUsize>, // current queue occupancy
     next_payload_seq: AtomicU64,   // monotonic sequence handed to payloads and commands
     join: Mutex<Option<E::JoinHandle<WalResult<()>>>>,
+    metrics: Arc<E::RwLock<WalMetrics>>,
 }
 
 impl<E> WalHandleInner<E>
@@ -479,12 +491,14 @@ where
         queue_depth: Arc<AtomicUsize>,
         start_seq: u64,
         join: E::JoinHandle<WalResult<()>>,
+        metrics: Arc<E::RwLock<WalMetrics>>,
     ) -> Self {
         Self {
             sender,
             queue_depth,
             next_payload_seq: AtomicU64::new(start_seq),
             join: Mutex::new(Some(join)),
+            metrics,
         }
     }
 
@@ -503,6 +517,10 @@ where
 
     fn next_payload_seq(&self) -> u64 {
         self.next_payload_seq.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn metrics(&self) -> Arc<E::RwLock<WalMetrics>> {
+        Arc::clone(&self.metrics)
     }
 }
 
@@ -543,9 +561,16 @@ where
         queue_depth: Arc<AtomicUsize>,
         join: E::JoinHandle<WalResult<()>>,
         start_seq: u64,
+        metrics: Arc<E::RwLock<WalMetrics>>,
     ) -> Self {
         Self {
-            inner: Arc::new(WalHandleInner::new(sender, queue_depth, start_seq, join)),
+            inner: Arc::new(WalHandleInner::new(
+                sender,
+                queue_depth,
+                start_seq,
+                join,
+                metrics,
+            )),
         }
     }
 
@@ -652,14 +677,20 @@ where
         Ok(())
     }
 
+    /// Access the metrics collected by the WAL writer.
+    pub fn metrics(&self) -> Arc<E::RwLock<WalMetrics>> {
+        self.inner.metrics()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_from_parts(
         sender: mpsc::Sender<writer::WriterMsg>,
         queue_depth: Arc<AtomicUsize>,
         join: E::JoinHandle<WalResult<()>>,
         start_seq: u64,
+        metrics: Arc<E::RwLock<WalMetrics>>,
     ) -> Self {
-        Self::from_parts(sender, queue_depth, join, start_seq)
+        Self::from_parts(sender, queue_depth, join, start_seq, metrics)
     }
 
     /// Log a transaction begin marker.
@@ -890,7 +921,13 @@ where
             initial_frame_seq,
         );
         let (sender, queue_depth, join) = writer.into_parts();
-        let handle = WalHandle::from_parts(sender, queue_depth, join, next_payload_seq);
+        let handle = WalHandle::from_parts(
+            sender,
+            queue_depth,
+            join,
+            next_payload_seq,
+            Arc::clone(&metrics),
+        );
 
         self.set_wal_config(Some(cfg.clone()));
         self.set_wal_handle(Some(handle.clone()));

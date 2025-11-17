@@ -9,6 +9,14 @@ pub struct WalMetrics {
     pub bytes_written: u64,
     /// Number of durability operations performed.
     pub sync_operations: u64,
+    /// Number of times the manifest advanced the WAL floor.
+    pub wal_floor_advancements: u64,
+    /// Total WAL segments physically pruned.
+    pub wal_segments_pruned: u64,
+    /// Total WAL segments flagged for deletion during dry-runs.
+    pub wal_prune_dry_runs: u64,
+    /// Number of failed prune attempts.
+    pub wal_prune_failures: u64,
 }
 
 impl WalMetrics {
@@ -25,5 +33,25 @@ impl WalMetrics {
     /// Record a durability operation.
     pub fn record_sync(&mut self) {
         self.sync_operations = self.sync_operations.saturating_add(1);
+    }
+
+    /// Record an advancement of the WAL retention floor.
+    pub fn record_wal_floor_advance(&mut self) {
+        self.wal_floor_advancements = self.wal_floor_advancements.saturating_add(1);
+    }
+
+    /// Record physical WAL segment deletions.
+    pub fn record_wal_pruned(&mut self, segments: u64) {
+        self.wal_segments_pruned = self.wal_segments_pruned.saturating_add(segments);
+    }
+
+    /// Record the number of segments that would be deleted in dry-run mode.
+    pub fn record_wal_prune_dry_run(&mut self, segments: u64) {
+        self.wal_prune_dry_runs = self.wal_prune_dry_runs.saturating_add(segments);
+    }
+
+    /// Record a prune failure.
+    pub fn record_wal_prune_failure(&mut self) {
+        self.wal_prune_failures = self.wal_prune_failures.saturating_add(1);
     }
 }

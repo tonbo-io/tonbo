@@ -14,7 +14,7 @@ use std::{
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
-use fusio::executor::{Executor, Timer};
+use fusio::executor::{Executor, RwLock, Timer};
 use futures::{Stream, executor::block_on, stream};
 use lockable::LockableHashMap;
 use typed_arrow_dyn::DynRow;
@@ -28,6 +28,7 @@ use predicate::Predicate;
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
+    compaction::planner::{CompactionSnapshot, LeveledCompactionPlanner},
     db::error::DBError,
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
@@ -38,8 +39,8 @@ use crate::{
     },
     key::KeyOwned,
     manifest::{
-        ManifestError, SstEntry, TableId, TonboManifest, VersionEdit, WalSegmentRef,
-        init_in_memory_manifest,
+        ManifestError, ManifestResult, SstEntry, TableId, TonboManifest, VersionEdit,
+        WalSegmentRef, init_in_memory_manifest,
     },
     mode::CatalogDescribe,
     mvcc::{CommitClock, ReadView, Timestamp},
@@ -481,15 +482,62 @@ where
         let Ok(Some(floor)) = self.manifest.wal_floor(self.manifest_table).await else {
             return;
         };
-        if let Err(err) = manifest_ext::prune_wal_segments(cfg, &floor).await {
-            eprintln!(
-                "failed to prune wal segments below manifest floor {}: {}",
-                floor.seq(),
-                err
-            );
+        let wal_handle = self.wal_handle().cloned();
+        match manifest_ext::prune_wal_segments(cfg, &floor).await {
+            Ok(removed) => {
+                if let Some(handle) = wal_handle {
+                    let metrics = handle.metrics();
+                    let mut guard = metrics.write().await;
+                    guard.record_wal_floor_advance();
+                    if cfg.prune_dry_run {
+                        guard.record_wal_prune_dry_run(removed as u64);
+                    } else {
+                        guard.record_wal_pruned(removed as u64);
+                    }
+                }
+                if cfg.prune_dry_run {
+                    eprintln!(
+                        "wal prune dry-run: floor {} would remove {removed} segment(s)",
+                        floor.seq()
+                    );
+                } else if removed > 0 {
+                    eprintln!(
+                        "wal prune removed {removed} segment(s) below floor {}",
+                        floor.seq()
+                    );
+                }
+            }
+            Err(err) => {
+                if let Some(handle) = wal_handle {
+                    let metrics = handle.metrics();
+                    let mut guard = metrics.write().await;
+                    guard.record_wal_prune_failure();
+                }
+                eprintln!(
+                    "failed to prune wal segments below manifest floor {}: {}",
+                    floor.seq(),
+                    err
+                );
+            }
         }
     }
 
+    /// Build a leveled compaction plan based on the latest manifest snapshot.
+    pub async fn plan_compaction_task(
+        &self,
+        planner: &LeveledCompactionPlanner,
+    ) -> ManifestResult<Option<crate::compaction::planner::CompactionTask>> {
+        let snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
+        let version = match snapshot.latest_version {
+            Some(ref state) => state,
+            None => return Ok(None),
+        };
+        let layout: CompactionSnapshot = version.into();
+        if layout.is_empty() {
+            return Ok(None);
+        }
+        Ok(planner.plan(&layout))
+    }
     /// Construct a database from pre-initialised components.
     fn from_components(
         mode: M,
@@ -544,34 +592,6 @@ where
             file_ids,
             executor,
         ))
-    }
-
-    /// Recover a DB by replaying WAL segments before enabling ingest.
-    pub async fn recover_with_wal(
-        config: M::Config,
-        executor: Arc<E>,
-        wal_cfg: RuntimeWalConfig,
-    ) -> Result<Self, KeyExtractError>
-    where
-        M: Sized + CatalogDescribe,
-    {
-        let table_definition = M::table_definition(&config, builder::DEFAULT_TABLE_NAME);
-        let manifest = init_in_memory_manifest().map_err(manifest_error_as_key_extract)?;
-        let file_ids = FileIdGenerator::default();
-        let table_meta = manifest
-            .register_table(&file_ids, &table_definition)
-            .await
-            .map_err(manifest_error_as_key_extract)?;
-        let manifest_table = table_meta.table_id;
-        Self::recover_with_wal_with_manifest(
-            config,
-            executor,
-            wal_cfg,
-            manifest,
-            manifest_table,
-            file_ids,
-        )
-        .await
     }
 
     pub(crate) async fn recover_with_wal_with_manifest(
@@ -844,6 +864,14 @@ where
                     level: descriptor_ref.level() as u32,
                     entries: vec![sst_entry],
                 }];
+
+                if let Some(stats) = descriptor_ref.stats()
+                    && let Some(max_commit) = stats.max_commit_ts
+                {
+                    edits.push(VersionEdit::SetTombstoneWatermark {
+                        watermark: max_commit.get(),
+                    });
+                }
 
                 if let Some(refs) = wal_refs {
                     edits.push(VersionEdit::SetWalSegments { segments: refs });
@@ -1291,6 +1319,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        compaction::planner::{LeveledCompactionPlanner, LeveledPlannerConfig},
         inmem::policy::BatchesThreshold,
         manifest::init_fs_manifest,
         mvcc::Timestamp,
@@ -1299,6 +1328,7 @@ mod tests {
         wal::{
             DynBatchPayload, WalCommand, WalExt, WalResult, WalSyncPolicy,
             frame::{INITIAL_FRAME_SEQ, encode_command},
+            metrics::WalMetrics,
             state::FsWalStateStore,
         },
     };
@@ -1526,7 +1556,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_waits_for_wal_durable_ack() {
         use crate::wal::{WalAck, WalHandle, WalSnapshot, frame, writer};
 
@@ -1616,8 +1646,14 @@ mod tests {
 
         let mut db: DB<DynMode, TokioExecutor> =
             DB::new(config, Arc::clone(&executor)).expect("db");
-        let handle =
-            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
+        let handle = WalHandle::test_from_parts(
+            sender,
+            queue_depth,
+            join,
+            frame::INITIAL_FRAME_SEQ,
+            metrics,
+        );
         db.set_wal_handle(Some(handle));
 
         let mut ingest_future = Box::pin(db.ingest(batch));
@@ -1644,7 +1680,7 @@ mod tests {
         assert_eq!(rows, vec!["k".to_string()]);
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wal_live_frame_floor_tracks_multi_frame_append() {
         use crate::wal::{WalAck, WalHandle, WalSnapshot, frame, writer};
 
@@ -1705,8 +1741,14 @@ mod tests {
 
         let mut db: DB<DynMode, TokioExecutor> =
             DB::new(config, Arc::clone(&executor)).expect("db");
-        let handle =
-            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
+        let handle = WalHandle::test_from_parts(
+            sender,
+            queue_depth,
+            join,
+            frame::INITIAL_FRAME_SEQ,
+            metrics,
+        );
         db.set_wal_handle(Some(handle));
         assert!(db.wal_handle().is_some(), "wal handle should be installed");
 
@@ -1740,7 +1782,7 @@ mod tests {
         assert_eq!(db.wal_live_frame_floor(), None);
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wal_live_frame_floor_tracks_multi_frame_append_via_insert() {
         use crate::wal::{WalAck, WalHandle, WalSnapshot, frame, writer};
 
@@ -1801,8 +1843,14 @@ mod tests {
 
         let mut db: DB<DynMode, TokioExecutor> =
             DB::new(config, Arc::clone(&executor)).expect("db");
-        let handle =
-            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
+        let handle = WalHandle::test_from_parts(
+            sender,
+            queue_depth,
+            join,
+            frame::INITIAL_FRAME_SEQ,
+            metrics,
+        );
         db.set_wal_handle(Some(handle));
         assert!(db.wal_handle().is_some(), "wal handle should be installed");
 
@@ -1834,7 +1882,7 @@ mod tests {
         assert_eq!(db.wal_live_frame_floor(), None);
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dyn_insert_enqueues_commit_before_append_ack() {
         use tokio::time;
 
@@ -1929,8 +1977,14 @@ mod tests {
 
         let mut db: DB<DynMode, TokioExecutor> =
             DB::new(config, Arc::clone(&executor)).expect("db");
-        let handle =
-            WalHandle::test_from_parts(sender, queue_depth, join, frame::INITIAL_FRAME_SEQ);
+        let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
+        let handle = WalHandle::test_from_parts(
+            sender,
+            queue_depth,
+            join,
+            frame::INITIAL_FRAME_SEQ,
+            metrics,
+        );
         db.set_wal_handle(Some(handle));
 
         let mut ingest_future = Box::pin(db.ingest(batch));
@@ -2113,6 +2167,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plan_compaction_returns_task() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let config = crate::schema::SchemaBuilder::from_schema(schema.clone())
+            .primary_key("id")
+            .with_metadata()
+            .build()
+            .expect("schema builder");
+        let schema = Arc::clone(&config.schema);
+        let executor = Arc::new(TokioExecutor::default());
+        let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor))?;
+        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sst_cfg = Arc::new(SsTableConfig::new(
+            Arc::clone(&schema),
+            fs,
+            Path::from("/tmp/plan-compaction"),
+        ));
+
+        for pass in 0..2 {
+            let rows = vec![vec![
+                Some(DynCell::Str(format!("comp-{pass}").into())),
+                Some(DynCell::I32(pass as i32)),
+            ]];
+            let batch = build_batch(Arc::clone(&schema), rows).expect("batch");
+            db.ingest(batch).await.expect("ingest");
+            let descriptor = SsTableDescriptor::new(SsTableId::new(pass as u64 + 1), 0);
+            db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor)
+                .await
+                .expect("flush");
+        }
+
+        let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
+            l0_trigger: 1,
+            l0_max_inputs: 2,
+            level_thresholds: vec![usize::MAX],
+            max_inputs_per_task: 2,
+        });
+        let task = db
+            .plan_compaction_task(&planner)
+            .await?
+            .expect("compaction task");
+        assert_eq!(task.source_level, 0);
+        assert_eq!(task.target_level, 1);
+        assert_eq!(task.input.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plan_compaction_empty_manifest_is_none() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let config = crate::schema::SchemaBuilder::from_schema(schema.clone())
+            .primary_key("id")
+            .with_metadata()
+            .build()
+            .expect("schema builder");
+        let executor = Arc::new(TokioExecutor::default());
+        let db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor))?;
+        let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig::default());
+        let plan = db.plan_compaction_task(&planner).await?;
+        assert!(plan.is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::error::Error>> {
         let temp_root = workspace_temp_dir("wal-gc-smoke");
         let schema = Arc::new(Schema::new(vec![
@@ -2216,6 +2341,209 @@ mod tests {
             !removed.is_empty(),
             "second flush should prune at least one WAL segment"
         );
+
+        if let Some(handle) = db.wal().cloned() {
+            let metrics = handle.metrics();
+            let guard = metrics.read().await;
+            assert!(
+                guard.wal_segments_pruned >= removed.len() as u64,
+                "pruned segment count should be reflected in metrics"
+            );
+            assert!(
+                guard.wal_floor_advancements >= 2,
+                "floor should advance at least once per flush"
+            );
+            assert_eq!(
+                guard.wal_prune_dry_runs, 0,
+                "regular pruning should not increment dry-run counters"
+            );
+        }
+
+        db.disable_wal()?;
+        fs::remove_dir_all(&temp_root)?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_root = workspace_temp_dir("wal-gc-dry-run");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        let mode_config = crate::schema::SchemaBuilder::from_schema(schema)
+            .primary_key("id")
+            .with_metadata()
+            .build()
+            .expect("key field");
+        let schema = Arc::clone(&mode_config.schema);
+        let executor = Arc::new(TokioExecutor::default());
+        let namespace = temp_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("wal-gc-dry-run");
+        let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+            .in_memory(namespace.to_string())
+            .build_with_executor(Arc::clone(&executor))?;
+
+        let wal_local_fs = Arc::new(LocalFs {});
+        let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
+        let wal_cas: Arc<dyn FsCas> = wal_local_fs.clone();
+        let wal_dir = temp_root.join("wal");
+        fs::create_dir_all(&wal_dir)?;
+        let wal_path = Path::from_filesystem_path(&wal_dir)?;
+
+        let mut wal_cfg = RuntimeWalConfig::default();
+        wal_cfg.dir = wal_path;
+        wal_cfg.segment_backend = wal_dyn_fs;
+        wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
+        wal_cfg.segment_max_bytes = 1;
+        wal_cfg.prune_dry_run = true;
+
+        db.enable_wal(wal_cfg.clone())?;
+        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+
+        let sst_dir = temp_root.join("sst");
+        fs::create_dir_all(&sst_dir)?;
+        let sst_root = Path::from_filesystem_path(&sst_dir)?;
+        let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
+
+        for idx in 0..4 {
+            let rows = vec![vec![
+                Some(DynCell::Str(format!("dry-{idx}").into())),
+                Some(DynCell::I32(idx as i32)),
+            ]];
+            let batch = build_batch(schema.clone(), rows)?;
+            db.ingest(batch).await?;
+        }
+        let descriptor_a = SsTableDescriptor::new(SsTableId::new(991), 0);
+        db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_a)
+            .await?;
+        let before = wal_segment_paths(&wal_dir);
+
+        for idx in 4..8 {
+            let rows = vec![vec![
+                Some(DynCell::Str(format!("dry-{idx}").into())),
+                Some(DynCell::I32(idx as i32)),
+            ]];
+            let batch = build_batch(schema.clone(), rows)?;
+            db.ingest(batch).await?;
+        }
+        let descriptor_b = SsTableDescriptor::new(SsTableId::new(992), 0);
+        db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_b)
+            .await?;
+        let after = wal_segment_paths(&wal_dir);
+        assert!(
+            after.len() >= before.len(),
+            "dry-run pruning should not delete WAL segments"
+        );
+
+        if let Some(handle) = db.wal().cloned() {
+            let metrics = handle.metrics();
+            let guard = metrics.read().await;
+            assert_eq!(guard.wal_segments_pruned, 0);
+            assert!(
+                guard.wal_prune_dry_runs > 0,
+                "dry-run pruning should report would-be deletions"
+            );
+        }
+
+        db.disable_wal()?;
+        fs::remove_dir_all(&temp_root)?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_records_manifest_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_root = workspace_temp_dir("wal-manifest-metadata");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        let mode_config = crate::schema::SchemaBuilder::from_schema(schema)
+            .primary_key("id")
+            .with_metadata()
+            .build()
+            .expect("key field");
+        let schema = Arc::clone(&mode_config.schema);
+        let executor = Arc::new(TokioExecutor::default());
+        let namespace = temp_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("wal-manifest-metadata");
+        let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+            .in_memory(namespace.to_string())
+            .build_with_executor(Arc::clone(&executor))?;
+
+        let wal_local_fs = Arc::new(LocalFs {});
+        let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
+        let wal_cas: Arc<dyn FsCas> = wal_local_fs.clone();
+        let wal_dir = temp_root.join("wal");
+        fs::create_dir_all(&wal_dir)?;
+        let wal_path = Path::from_filesystem_path(&wal_dir)?;
+
+        let mut wal_cfg = RuntimeWalConfig::default();
+        wal_cfg.dir = wal_path;
+        wal_cfg.segment_backend = wal_dyn_fs;
+        wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(wal_cas)));
+        wal_cfg.segment_max_bytes = 1;
+        wal_cfg.flush_interval = Duration::from_millis(1);
+        wal_cfg.sync = WalSyncPolicy::Disabled;
+
+        db.enable_wal(wal_cfg.clone())?;
+        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+
+        let rows = vec![
+            vec![Some(DynCell::Str("alpha".into())), Some(DynCell::I32(7))],
+            vec![Some(DynCell::Str("beta".into())), Some(DynCell::I32(9))],
+        ];
+        let batch = build_batch(schema.clone(), rows)?;
+        db.ingest(batch).await?;
+        assert!(db.num_immutable_segments() >= 1);
+
+        let sst_dir = temp_root.join("sst");
+        fs::create_dir_all(&sst_dir)?;
+        let sst_root = Path::from_filesystem_path(&sst_dir)?;
+        let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
+        let descriptor = SsTableDescriptor::new(SsTableId::new(555), 0);
+        db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor.clone())
+            .await?;
+
+        let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
+        let latest = snapshot
+            .latest_version
+            .expect("latest version should exist after flush");
+        assert!(
+            !latest.wal_segments().is_empty(),
+            "manifest should track wal segments for the version"
+        );
+        assert!(
+            latest.wal_floor().is_some(),
+            "wal floor should be derived from recorded segments"
+        );
+        let recorded = &latest.ssts()[0][0];
+        let stats = recorded.stats().expect("sst stats should be recorded");
+        assert_eq!(stats.rows, 2);
+        assert!(stats.min_key.is_some() && stats.max_key.is_some());
+        assert!(stats.min_commit_ts.is_some() && stats.max_commit_ts.is_some());
+        let watermark = latest
+            .tombstone_watermark()
+            .expect("tombstone watermark should be populated");
+        assert_eq!(
+            watermark,
+            stats
+                .max_commit_ts
+                .expect("max commit timestamp should be recorded")
+                .get()
+        );
+
+        if let Some(handle) = db.wal().cloned() {
+            let metrics = handle.metrics();
+            let guard = metrics.read().await;
+            assert!(guard.wal_floor_advancements >= 1);
+        }
 
         db.disable_wal()?;
         fs::remove_dir_all(&temp_root)?;
@@ -2406,9 +2734,26 @@ mod tests {
         cfg.dir = fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
+        let table_definition = DynMode::table_definition(&config, builder::DEFAULT_TABLE_NAME);
+        let manifest = init_in_memory_manifest().expect("init manifest");
+        let file_ids = FileIdGenerator::default();
+        let manifest_table = block_on(async {
+            manifest
+                .register_table(&file_ids, &table_definition)
+                .await
+                .expect("register table")
+                .table_id
+        });
         let runtime = Runtime::new().expect("tokio runtime");
         let mut db: DB<DynMode, BlockingExecutor> = runtime
-            .block_on(DB::recover_with_wal(config, executor.clone(), cfg))
+            .block_on(DB::recover_with_wal_with_manifest(
+                config,
+                executor.clone(),
+                cfg,
+                manifest,
+                manifest_table,
+                file_ids,
+            ))
             .expect("recover");
         runtime.shutdown_timeout(Duration::from_secs(0));
 

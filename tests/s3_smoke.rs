@@ -9,13 +9,17 @@ use std::{
 };
 
 use arrow_array::{Array, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field};
 use fusio::executor::tokio::TokioExecutor;
 use tonbo::{
     db::{AwsCreds, DB, DynMode, ObjectSpec, S3Spec},
-    mode::DynModeConfig,
     wal::{WalConfig, WalExt, WalSyncPolicy, frame::WalEvent, replay::Replayer},
 };
+
+#[path = "common/mod.rs"]
+mod common;
+
+use common::schema_and_config;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,11 +60,13 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
     };
     let session_token = std::env::var("TONBO_S3_SESSION_TOKEN").ok();
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (schema, config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
 
     let label = format!(
         "smoke-{}",

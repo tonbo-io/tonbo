@@ -366,12 +366,11 @@ impl VersionState {
         &self.table_id
     }
 
-    #[cfg(test)]
     pub(crate) fn ssts(&self) -> &[Vec<SstEntry>] {
         &self.ssts
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn wal_segments(&self) -> &[WalSegmentRef] {
         &self.wal_segments
     }
@@ -453,7 +452,6 @@ impl SstEntry {
         &self.sst_id
     }
 
-    #[cfg(test)]
     pub(crate) fn stats(&self) -> Option<&SsTableStats> {
         self.stats.as_ref()
     }

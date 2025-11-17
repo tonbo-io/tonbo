@@ -10,17 +10,23 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
 use tonbo::{
     DB,
+    db::WalConfig as BuilderWalConfig,
     key::KeyOwned,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
     scan::RangeSet,
     wal::{
-        WalCommand, WalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
+        WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalRecoveryMode, WalSyncPolicy,
         frame::{INITIAL_FRAME_SEQ, encode_autocommit_frames, encode_command},
         storage::WalStorage,
     },
 };
 use typed_arrow_dyn::DynCell;
+
+#[path = "common/mod.rs"]
+mod common;
+
+use common::schema_and_config;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -38,22 +44,21 @@ fn workspace_temp_dir(prefix: &str) -> PathBuf {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Error>> {
     let root_dir = workspace_temp_dir("tonbo-wal-e2e");
+    let root_str = root_dir.to_string_lossy().into_owned();
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (schema, mode_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
-
-    let wal_dir = root_dir.join("wal");
-    fs::create_dir_all(&wal_dir)?;
-    let mut wal_cfg = WalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-    let recovery_cfg = wal_cfg.clone();
-    db.enable_wal(wal_cfg)?;
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -67,9 +72,18 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     db.disable_wal()?;
     drop(db);
 
-    let mode_config_recover = DynModeConfig::from_key_name(schema.clone(), "id")?;
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
+    let (_, mode_config_recover) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -95,6 +109,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     rows.sort();
     assert_eq!(rows, vec![("user-1".into(), 10), ("user-2".into(), 20)]);
 
+    recovered.disable_wal()?;
     drop(recovered);
     fs::remove_dir_all(&root_dir)?;
 
@@ -103,31 +118,23 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = workspace_temp_dir("tonbo-wal-composite");
+    let root_dir = workspace_temp_dir("tonbo-wal-composite");
+    let root_str = root_dir.to_string_lossy().into_owned();
 
-    let metadata: std::collections::HashMap<_, _> = std::iter::once((
-        "tonbo.keys".to_string(),
-        r#"["tenant","bucket"]"#.to_string(),
-    ))
-    .collect();
-    let schema = Arc::new(Schema::new_with_metadata(
+    let (schema, mode_config) = schema_and_config(
         vec![
             Field::new("tenant", DataType::Utf8, false),
             Field::new("bucket", DataType::Int64, false),
             Field::new("value", DataType::Int32, false),
         ],
-        metadata,
-    ));
-    let mode_config = DynModeConfig::from_metadata(schema.clone())?;
+        &["tenant", "bucket"],
+    );
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
-
-    let mut wal_cfg = WalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-    let recovery_cfg = wal_cfg.clone();
-
-    db.enable_wal(wal_cfg)?;
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -143,8 +150,11 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     drop(db);
 
     let mode_config_recover = DynModeConfig::from_metadata(schema.clone())?;
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<((String, i64), i32)> = recovered
@@ -178,25 +188,30 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
         ]
     );
 
+    recovered.disable_wal()?;
     drop(recovered);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = workspace_temp_dir("tonbo-wal-truncated");
+    let root_dir = workspace_temp_dir("tonbo-wal-truncated");
+    let root_str = root_dir.to_string_lossy().into_owned();
+    let wal_dir = root_dir.join("wal");
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (schema, mode_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
 
     let executor = Arc::new(TokioExecutor::default());
 
-    let mut wal_cfg = WalConfig::default();
+    let mut wal_cfg = RuntimeWalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
 
     let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
@@ -247,8 +262,11 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     segment.file_mut().flush().await?;
     drop(segment);
 
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(mode_config)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -274,25 +292,30 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     rows.sort();
     assert_eq!(rows, vec![("committed".into(), 1)]);
 
+    recovered.disable_wal()?;
     drop(recovered);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = workspace_temp_dir("tonbo-wal-tolerate");
+    let root_dir = workspace_temp_dir("tonbo-wal-tolerate");
+    let root_str = root_dir.to_string_lossy().into_owned();
+    let wal_dir = root_dir.join("wal");
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (schema, mode_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
 
     let executor = Arc::new(TokioExecutor::default());
 
-    let mut wal_cfg = WalConfig::default();
+    let mut wal_cfg = RuntimeWalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
     wal_cfg.recovery = WalRecoveryMode::TolerateCorruptedTail;
 
@@ -344,8 +367,14 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     segment.file_mut().flush().await?;
     drop(segment);
 
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(mode_config)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .wal_config(
+                BuilderWalConfig::default().recovery_mode(WalRecoveryMode::TolerateCorruptedTail),
+            )
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -371,25 +400,30 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     rows.sort();
     assert_eq!(rows, vec![("committed".into(), 1)]);
 
+    recovered.disable_wal()?;
     drop(recovered);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = workspace_temp_dir("tonbo-wal-rewrite");
+    let root_dir = workspace_temp_dir("tonbo-wal-rewrite");
+    let root_str = root_dir.to_string_lossy().into_owned();
+    let wal_dir = root_dir.join("wal");
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (schema, mode_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
 
     let executor = Arc::new(TokioExecutor::default());
 
-    let mut wal_cfg = WalConfig::default();
+    let mut wal_cfg = RuntimeWalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
 
     let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
@@ -440,8 +474,11 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     segment.file_mut().flush().await?;
     drop(segment);
 
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg.clone()).await?;
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(mode_config)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = recovered
@@ -466,8 +503,12 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
         .collect();
     assert_eq!(rows, vec![("committed".into(), 1)]);
 
-    let mut recovered = recovered;
-    recovered.enable_wal(wal_cfg.clone())?;
+    let runtime_cfg = recovered
+        .wal_config()
+        .cloned()
+        .expect("wal config available");
+    recovered.disable_wal()?;
+    recovered.enable_wal(runtime_cfg.clone())?;
     let rewrite_batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -479,9 +520,18 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     recovered.disable_wal()?;
     drop(recovered);
 
-    let final_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
-    let recovered_again: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(final_config, Arc::clone(&executor), wal_cfg.clone()).await?;
+    let (_, final_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
+    let mut recovered_again: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(final_config)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let mut rows_after: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges, None)
@@ -506,15 +556,19 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     rows_after.sort();
     assert!(rows_after.contains(&("rewrite".into(), 2)));
 
+    recovered_again.disable_wal()?;
     drop(recovered_again);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = workspace_temp_dir("tonbo-wal-abort");
+    let root_dir = workspace_temp_dir("tonbo-wal-abort");
+    let root_str = root_dir.to_string_lossy().into_owned();
+    let wal_dir = root_dir.join("wal");
+    fs::create_dir_all(&wal_dir)?;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -524,7 +578,7 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
 
     let executor = Arc::new(TokioExecutor::default());
 
-    let mut wal_cfg = WalConfig::default();
+    let mut wal_cfg = RuntimeWalConfig::default();
     wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
 
     let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
@@ -590,8 +644,10 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
     segment.file_mut().flush().await?;
     drop(segment);
 
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config, Arc::clone(&executor), wal_cfg).await?;
+    let recovered: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = recovered
@@ -614,31 +670,32 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
     assert_eq!(rows, vec![("live".into(), 1)]);
 
     drop(recovered);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = workspace_temp_dir("tonbo-wal-rotate");
+    let root_dir = workspace_temp_dir("tonbo-wal-rotate");
+    let root_str = root_dir.to_string_lossy().into_owned();
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (schema, mode_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
-
-    let mut wal_cfg = WalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-    wal_cfg.segment_max_bytes = 1;
-    wal_cfg.flush_interval = Duration::from_millis(0);
-    wal_cfg.sync = WalSyncPolicy::Always;
-
-    db.enable_wal(wal_cfg.clone())?;
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .wal_segment_bytes(1)
+        .wal_flush_interval(Duration::from_millis(0))
+        .wal_sync_policy(WalSyncPolicy::Always)
+        .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     for chunk in 0..3 {
         let ids = vec![
@@ -659,9 +716,21 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     db.disable_wal()?;
     drop(db);
 
-    let mode_config_recover = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (_, mode_config_recover) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
     let mut recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), wal_cfg.clone()).await?;
+        DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .wal_segment_bytes(1)
+            .wal_flush_interval(Duration::from_millis(0))
+            .wal_sync_policy(WalSyncPolicy::Always)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -695,7 +764,12 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     ];
     assert_eq!(rows, expected);
 
-    recovered.enable_wal(wal_cfg.clone())?;
+    let runtime_cfg = recovered
+        .wal_config()
+        .cloned()
+        .expect("wal config available");
+    recovered.disable_wal()?;
+    recovered.enable_wal(runtime_cfg.clone())?;
     let extra_batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -707,9 +781,21 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     recovered.disable_wal()?;
     drop(recovered);
 
-    let mode_config_final = DynModeConfig::from_key_name(schema.clone(), "id")?;
-    let recovered_again: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config_final, Arc::clone(&executor), wal_cfg.clone()).await?;
+    let (_, mode_config_final) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
+    let mut recovered_again: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(mode_config_final)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .wal_segment_bytes(1)
+            .wal_flush_interval(Duration::from_millis(0))
+            .wal_sync_policy(WalSyncPolicy::Always)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let mut rows_final: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges, None)
@@ -737,30 +823,31 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     expected_final.sort();
     assert_eq!(rows_final, expected_final);
 
+    recovered_again.disable_wal()?;
     drop(recovered_again);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::error::Error>> {
-    let wal_dir = workspace_temp_dir("tonbo-wal-seq");
+    let root_dir = workspace_temp_dir("tonbo-wal-seq");
+    let root_str = root_dir.to_string_lossy().into_owned();
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (schema, mode_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_config, Arc::clone(&executor))?;
-
-    let mut wal_cfg = WalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-    let recovery_cfg = wal_cfg.clone();
-
-    db.enable_wal(wal_cfg.clone())?;
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))?;
 
     let initial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -774,11 +861,25 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     db.disable_wal()?;
     drop(db);
 
-    let mode_config_recover = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let (_, mode_config_recover) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
     let mut recovered: DB<DynMode, TokioExecutor> =
-        DB::recover_with_wal(mode_config_recover, Arc::clone(&executor), recovery_cfg).await?;
+        DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .recover_or_init_with_executor(Arc::clone(&executor))?;
 
-    recovered.enable_wal(wal_cfg.clone())?;
+    let runtime_cfg = recovered
+        .wal_config()
+        .cloned()
+        .expect("wal config available");
+    recovered.disable_wal()?;
+    recovered.enable_wal(runtime_cfg.clone())?;
 
     let wal_handle = recovered.wal().cloned().expect("wal handle");
     let append_batch = RecordBatch::try_new(
@@ -796,7 +897,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
 
     recovered.disable_wal()?;
     drop(recovered);
-    fs::remove_dir_all(&wal_dir)?;
+    fs::remove_dir_all(&root_dir)?;
 
     Ok(())
 }

@@ -43,6 +43,7 @@ sha2 = "0.10"
 thiserror = "2.0.17"
 typed-arrow-dyn = { version = "0.0.3", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 
 
 [dev-dependencies]

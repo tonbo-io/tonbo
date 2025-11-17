@@ -1,4 +1,4 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{env, fs, future::Future, io::Write, path::Path as StdPath, sync::Arc, time::Duration};
 
 use fusio::{
     DynFs,
@@ -8,8 +8,11 @@ use fusio::{
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
-use futures::executor::block_on;
 use thiserror::Error;
+use tokio::{
+    runtime::{Handle, Runtime},
+    task,
+};
 
 use super::{DB, Mode};
 use crate::{
@@ -207,6 +210,7 @@ pub struct DiskDurableState {
     root: String,
     table_name: Option<String>,
     wal_config: WalConfig,
+    create_dirs: bool,
 }
 
 pub struct ObjectDurableState {
@@ -221,14 +225,80 @@ impl DiskDurableState {
             root: root.into(),
             table_name: None,
             wal_config: WalConfig::default(),
+            create_dirs: false,
         }
     }
+}
+
+fn ensure_disk_layout(root: &str) -> Result<(), DbBuildError> {
+    if root.is_empty() {
+        return Err(DbBuildError::InvalidPath {
+            path: root.to_string(),
+            reason: "root cannot be empty".into(),
+        });
+    }
+    const REQUIRED_PATHS: &[&str] = &[
+        "wal",
+        "sst",
+        "manifest/catalog",
+        "manifest/catalog/segments",
+        "manifest/catalog/checkpoints",
+        "manifest/catalog/leases",
+        "manifest/version",
+        "manifest/version/segments",
+        "manifest/version/checkpoints",
+        "manifest/version/leases",
+    ];
+    let base = StdPath::new(root);
+    for suffix in REQUIRED_PATHS {
+        let path = base.join(suffix);
+        if let Err(source) = fs::create_dir_all(&path) {
+            return Err(DbBuildError::PreparePath {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+    }
+
+    const EMPTY_HEAD_JSON: &str =
+        r#"{"version":1,"checkpoint_id":null,"last_segment_seq":null,"last_txn_id":0}"#;
+    let catalog_head = base.join("manifest/catalog/head.json");
+    if !catalog_head.exists() {
+        write_head_file(&catalog_head, EMPTY_HEAD_JSON)?;
+    }
+    let version_head = base.join("manifest/version/head.json");
+    if !version_head.exists() {
+        write_head_file(&version_head, EMPTY_HEAD_JSON)?;
+    }
+
+    Ok(())
+}
+
+fn write_head_file(path: &StdPath, body: &str) -> Result<(), DbBuildError> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|source| DbBuildError::PreparePath {
+            path: path.display().to_string(),
+            source,
+        })?;
+    file.write_all(body.as_bytes())
+        .map_err(|source| DbBuildError::PreparePath {
+            path: path.display().to_string(),
+            source,
+        })
 }
 
 pub trait StorageState: sealed::Sealed {
     const CLASS: DurabilityClass;
 
     fn storage_spec(&self) -> StorageBackendSpec;
+
+    fn prepare_layout(&self) -> Result<(), DbBuildError> {
+        Ok(())
+    }
 
     fn table_name(&self) -> Option<&String> {
         None
@@ -281,6 +351,14 @@ impl StorageState for DiskDurableState {
     fn storage_spec(&self) -> StorageBackendSpec {
         StorageBackendSpec::Disk {
             root: self.root.clone(),
+        }
+    }
+
+    fn prepare_layout(&self) -> Result<(), DbBuildError> {
+        if self.create_dirs {
+            ensure_disk_layout(&self.root)
+        } else {
+            Ok(())
         }
     }
 
@@ -398,6 +476,15 @@ pub enum DbBuildError {
     /// WAL configuration or recovery failed during builder orchestration.
     #[error(transparent)]
     Wal(#[from] WalError),
+    /// Filesystem layout preparation failed.
+    #[error("failed to prepare directory `{path}`: {source}")]
+    PreparePath {
+        /// Path that triggered the failure.
+        path: String,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -759,8 +846,20 @@ fn build_s3_backend(spec: S3Spec) -> Result<StorageBackend, DbBuildError> {
 
 fn wal_segments_exist(cfg: &RuntimeWalConfig) -> Result<bool, DbBuildError> {
     let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
-    let segments = block_on(storage.list_segments())?;
+    let segments = block_in_tokio(storage.list_segments())?;
     Ok(!segments.is_empty())
+}
+
+fn block_in_tokio<F, T>(future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    match Handle::try_current() {
+        Ok(handle) => task::block_in_place(|| handle.block_on(future)),
+        Err(_) => Runtime::new()
+            .expect("tokio runtime for db builder")
+            .block_on(future),
+    }
 }
 
 struct ManifestBootstrap<'a> {
@@ -831,6 +930,18 @@ where
     }
 }
 
+impl<M> DbBuilder<M, DiskDurableState>
+where
+    M: Mode + CatalogDescribe,
+{
+    /// Enable or disable provisioning of the on-disk layout prior to build/recovery.
+    #[must_use]
+    pub fn create_dirs(mut self, enable: bool) -> Self {
+        self.state.create_dirs = enable;
+        self
+    }
+}
+
 impl<M, S> DbBuilder<M, S>
 where
     M: Mode + CatalogDescribe,
@@ -847,6 +958,7 @@ where
     where
         E: Executor + Timer + Send + Sync + 'static,
     {
+        self.state.prepare_layout()?;
         let layout = StorageLayout::new(self.state.storage_spec())?;
         self.build_with_layout(executor, layout)
     }
@@ -871,7 +983,7 @@ where
         let (mode, mem) = M::build(self.mode_config).map_err(DbBuildError::Mode)?;
         let manifest = manifest_init.init_manifest()?;
         let table_meta =
-            block_on(async { manifest.register_table(&file_ids, &table_definition).await })
+            block_in_tokio(async { manifest.register_table(&file_ids, &table_definition).await })
                 .map_err(DbBuildError::Manifest)?;
         let manifest_table = table_meta.table_id;
 
@@ -989,6 +1101,7 @@ where
     where
         E: Executor + Timer + Send + Sync + 'static,
     {
+        self.state.prepare_layout()?;
         let layout = StorageLayout::new(self.state.storage_spec())?;
         let mut wal_cfg = RuntimeWalConfig::default();
         layout.apply_wal_defaults(&mut wal_cfg)?;
@@ -1006,11 +1119,12 @@ where
             let table_definition = M::table_definition(&self.mode_config, &table_name);
             let file_ids = FileIdGenerator::default();
             let manifest = manifest_init.init_manifest()?;
-            let table_meta =
-                block_on(async { manifest.register_table(&file_ids, &table_definition).await })
-                    .map_err(DbBuildError::Manifest)?;
+            let table_meta = block_in_tokio(async {
+                manifest.register_table(&file_ids, &table_definition).await
+            })
+            .map_err(DbBuildError::Manifest)?;
             let manifest_table = table_meta.table_id;
-            let mut db = block_on(DB::recover_with_wal_with_manifest(
+            let mut db = block_in_tokio(DB::recover_with_wal_with_manifest(
                 self.mode_config,
                 Arc::clone(&executor),
                 wal_cfg.clone(),
