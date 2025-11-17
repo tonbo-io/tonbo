@@ -101,22 +101,21 @@ Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar c
 
 | Component | Status | Evidence |
 | --- | --- | --- |
-| Manifest Core | Not started | No manifest modules; flush returns `SsTable` only (`src/db.rs:215-324`). |
-| Recovery Pipeline | Not started | Startup rebuilds purely from WAL replay (`src/db.rs:94-167`). |
-| GC & Watermarks | Not started | Watermark tracking or object deletion logic absent across crate. |
+| Manifest Core | In progress | `TonboManifest` wraps catalog+version stores and `flush_immutables_with_descriptor` publishes SST + WAL refs (`src/manifest/bootstrap.rs:63-185`; `src/db/mod.rs:776-855`). |
+| Recovery Pipeline | In progress | `recover_with_wal` replays segments with state hints and is exercised end-to-end (`src/db/mod.rs:549-657`; `tests/wal_recovery.rs:1-185`). |
+| GC & Watermarks | In progress | Manifest `wal_floor` plus `prune_wal_segments_below_floor` and `wal_gc_respects_pinned_segments` enforce retention (`src/db/mod.rs:460-489`; `tests/wal_gc.rs:96-199`). |
 | Table Catalog & Admin Surface | Not started | No catalog/admin modules exported (`src/lib.rs:9-41`). |
 | Range Planner MVP | Not started | Only `RangeSet` utilities exist; no planner implementation (`src/scan.rs:1-160`). |
-| Merge Executor | In progress | MergeStream/ordered merge code missing entirely. |
+| Merge Executor | In progress | `MergeStream` + `PackageStream` perform MVCC-aware k-way merges, but DB `plan_scan`/`execute_scan` still stubbed (`src/query/stream/merge.rs:1-165`; `src/db/mod.rs:353-372`). |
 | SST Integration | Not started | `SsTableReader::collect` returns `Unimplemented` (`src/ondisk/sstable.rs:335-347`). |
-| Projection & Filters | Not started | Read path materializes full rows; no projection helpers (`src/inmem/mutable/memtable.rs:42-200`). |
-| Minor Flush Pipeline | In progress | Parquet writer stages immutables but lacks publish wiring (`src/ondisk/sstable.rs:180-310`). |
-| Stats & PK Index Build | In progress | Writer accumulates stats yet no sidecar PK index persisted (`src/ondisk/sstable.rs:180-310`). |
+| Projection & Filters | In progress | Dynamic memtable builds `DynProjection`s and scans honor optional projection schemas (`src/inmem/mutable/memtable.rs:525-571`). |
+| Minor Flush Pipeline | In progress | Parquet writer emits data/MVCC/delete files and manifest publication runs after flush (`src/ondisk/sstable.rs:420-640`; `src/db/mod.rs:776-860`). |
+| Stats & PK Index Build | In progress | `StagedTableStats` tracks key/ts bounds and bytes though PK sidecar persistence still TBD (`src/ondisk/sstable.rs:320-520`). |
 | Leveled/Range Planner | Not started | Compaction module lacks leveled scheduling or overlap logic (`src/compaction.rs:21-140`). |
-| Observability & Tuning | Not started | Metrics types exist but no exported counters/hooks (`src/inmem/mutable/metrics.rs`; `src/wal/metrics.rs`). |
+| Observability & Tuning | In progress | Memtable stats drive sealing decisions and WAL writer updates `WalMetrics` queue-depth/sync counters (`src/inmem/mutable/memtable.rs:557-569`; `src/wal/writer.rs:210-219`). |
 | Snapshot Tokens & Reader Registry | Not started | MVCC module offers timestamps only; no durable snapshots (`src/mvcc/mod.rs:1-120`). |
 | Tombstone Pruning | In progress | Immutable segments track tombstones without compaction pruning (`src/inmem/immutable/memtable.rs:18-200`). |
-| Conflict Detection & Idempotency | Not started | Transactions/manifest commits unimplemented despite docs. |
-| WAL Replay Hardening | In progress | Frame codec & writer exist; rotation/idempotent replay still TODO (`src/wal/writer.rs:180-360`; `src/wal/mod.rs:296-540`). |
+| Conflict Detection & Idempotency | In progress | Transaction commit path locks keys, checks mutable/immutable conflicts, and batches WAL tickets before publishing (`src/transaction/mod.rs:388-479`). |
+| WAL Replay Hardening | In progress | Replayer honors manifest WAL floors and recovery bumps commit clocks with tests guarding pinned segments (`src/db/mod.rs:599-657`; `src/wal/manifest_ext.rs:1-78`). |
 
 This table is the concise requirements tracker referenced throughout the migration; keep it in sync with `docs/overview.md` and the RFCs as implementation progresses.
-
