@@ -16,8 +16,8 @@ use typed_arrow_dyn::{DynError, DynRowRaw, DynViewError};
 
 use crate::{
     inmem::{
-        immutable::memtable::{ImmutableVisibleScan, RecordBatchStorage},
-        mutable::memtable::DynRowScan,
+        immutable::memtable::{ImmutableVisibleEntry, ImmutableVisibleScan, RecordBatchStorage},
+        mutable::memtable::{DynRowScan, DynRowScanEntry},
     },
     key::KeyTsViewRaw,
     mvcc::Timestamp,
@@ -69,6 +69,8 @@ pub enum StreamError {
 pub enum StreamEntry<'t> {
     /// Entry sourced from the mutable layer.
     MemTable((&'t KeyTsViewRaw, DynRowRaw)),
+    /// Tombstone sourced from a mutable layer.
+    MemTableTombstone(&'t KeyTsViewRaw),
     /// Entry produced by the SSTable scan pipeline.
     Sstable((KeyTsViewRaw, DynRowRaw)),
 }
@@ -78,6 +80,7 @@ impl<'t> StreamEntry<'t> {
     pub(crate) fn key(&self) -> &KeyTsViewRaw {
         match self {
             StreamEntry::MemTable((key_ts, _)) => key_ts,
+            StreamEntry::MemTableTombstone(key_ts) => key_ts,
             StreamEntry::Sstable((key_ts, _)) => key_ts,
         }
     }
@@ -85,15 +88,21 @@ impl<'t> StreamEntry<'t> {
     pub(crate) fn ts(&self) -> Timestamp {
         match self {
             StreamEntry::MemTable((key_ts, _)) => key_ts.timestamp(),
+            StreamEntry::MemTableTombstone(key_ts) => key_ts.timestamp(),
             StreamEntry::Sstable((key_ts, _)) => key_ts.timestamp(),
         }
     }
 
-    pub(crate) fn into_row(self) -> DynRowRaw {
+    pub(crate) fn into_row(self) -> Option<DynRowRaw> {
         match self {
-            StreamEntry::MemTable((_, row)) => row,
-            StreamEntry::Sstable((_, row)) => row,
+            StreamEntry::MemTable((_, row)) => Some(row),
+            StreamEntry::Sstable((_, row)) => Some(row),
+            StreamEntry::MemTableTombstone(_) => None,
         }
+    }
+
+    pub(crate) fn is_tombstone(&self) -> bool {
+        matches!(self, StreamEntry::MemTableTombstone(_))
     }
 }
 
@@ -173,12 +182,22 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.project() {
             ScanStreamProject::Mutable { inner } => match ready!(inner.poll_next(cx)) {
-                Some(Ok(entry)) => Poll::Ready(Some(Ok(StreamEntry::MemTable(entry)))),
+                Some(Ok(DynRowScanEntry::Row(key, row))) => {
+                    Poll::Ready(Some(Ok(StreamEntry::MemTable((key, row)))))
+                }
+                Some(Ok(DynRowScanEntry::Tombstone(key))) => {
+                    Poll::Ready(Some(Ok(StreamEntry::MemTableTombstone(key))))
+                }
                 Some(Err(err)) => Poll::Ready(Some(Err(StreamError::DynRow(err)))),
                 None => Poll::Ready(None),
             },
             ScanStreamProject::Immutable { inner } => match ready!(inner.poll_next(cx)) {
-                Some(Ok(entry)) => Poll::Ready(Some(Ok(StreamEntry::MemTable(entry)))),
+                Some(Ok(ImmutableVisibleEntry::Row(key, row))) => {
+                    Poll::Ready(Some(Ok(StreamEntry::MemTable((key, row)))))
+                }
+                Some(Ok(ImmutableVisibleEntry::Tombstone(key))) => {
+                    Poll::Ready(Some(Ok(StreamEntry::MemTableTombstone(key))))
+                }
                 Some(Err(err)) => Poll::Ready(Some(Err(StreamError::DynRow(err)))),
                 None => Poll::Ready(None),
             },

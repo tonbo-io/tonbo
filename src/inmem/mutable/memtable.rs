@@ -570,6 +570,21 @@ pub(crate) struct DynRowScan<'t> {
     projection: DynProjection,
 }
 
+pub(crate) enum DynRowScanEntry<'t> {
+    Row(&'t KeyTsViewRaw, DynRowRaw),
+    Tombstone(&'t KeyTsViewRaw),
+}
+
+impl<'t> DynRowScanEntry<'t> {
+    #[allow(dead_code)]
+    pub(crate) fn into_row(self) -> Option<(&'t KeyTsViewRaw, DynRowRaw)> {
+        match self {
+            DynRowScanEntry::Row(key, row) => Some((key, row)),
+            DynRowScanEntry::Tombstone(_) => None,
+        }
+    }
+}
+
 impl<'t> fmt::Debug for DynRowScan<'t> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DynRowScan")
@@ -606,7 +621,7 @@ impl<'t> DynRowScan<'t> {
 }
 
 impl<'t> Iterator for DynRowScan<'t> {
-    type Item = Result<(&'t KeyTsViewRaw, DynRowRaw), DynViewError>;
+    type Item = Result<DynRowScanEntry<'t>, DynViewError>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
@@ -641,8 +656,9 @@ impl<'t> Iterator for DynRowScan<'t> {
                         continue;
                     }
 
-                    if matches!(mutation, DynMutation::Delete(_)) {
-                        continue;
+                    if let DynMutation::Delete(_) = mutation {
+                        self.emitted_for_key = true;
+                        return Some(Ok(DynRowScanEntry::Tombstone(composite)));
                     }
                     let loc = match mutation {
                         DynMutation::Upsert(loc) => *loc,
@@ -660,7 +676,7 @@ impl<'t> Iterator for DynRowScan<'t> {
                         };
 
                     self.emitted_for_key = true;
-                    return Some(Ok((composite, row)));
+                    return Some(Ok(DynRowScanEntry::Row(composite, row)));
                 }
                 self.cursor = None;
                 continue;
@@ -749,9 +765,11 @@ mod tests {
         let got: Vec<String> = m
             .scan_rows(&rs, None)
             .expect("scan rows")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .map(|row| match row.0[0].as_ref() {
                 Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
@@ -842,9 +860,11 @@ mod tests {
         let rows_before: Vec<DynRow> = m
             .scan_rows_at(&ranges, None, Timestamp::new(5))
             .expect("scan rows at")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .collect();
         assert!(rows_before.is_empty());
@@ -853,13 +873,15 @@ mod tests {
         let rows_after_first: Vec<i32> = m
             .scan_rows_at(&ranges, None, Timestamp::new(15))
             .expect("scan rows at")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                let row = row.into_owned().expect("row");
-                match row.0[1].as_ref() {
-                    Some(DynCell::I32(v)) => *v,
-                    _ => unreachable!(),
-                }
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry.into_row().map(|(_, row)| {
+                    let row = row.into_owned().expect("row");
+                    match row.0[1].as_ref() {
+                        Some(DynCell::I32(v)) => *v,
+                        _ => unreachable!(),
+                    }
+                })
             })
             .collect();
         assert_eq!(rows_after_first, vec![1]);
@@ -868,13 +890,15 @@ mod tests {
         let rows_after_second: Vec<i32> = m
             .scan_rows_at(&ranges, None, Timestamp::new(25))
             .expect("scan rows at")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                let row = row.into_owned().expect("row");
-                match row.0[1].as_ref() {
-                    Some(DynCell::I32(v)) => *v,
-                    _ => unreachable!(),
-                }
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry.into_row().map(|(_, row)| {
+                    let row = row.into_owned().expect("row");
+                    match row.0[1].as_ref() {
+                        Some(DynCell::I32(v)) => *v,
+                        _ => unreachable!(),
+                    }
+                })
             })
             .collect();
         assert_eq!(rows_after_second, vec![2]);
@@ -883,16 +907,149 @@ mod tests {
         let row_latest: Vec<i32> = m
             .scan_rows_at(&ranges, None, Timestamp::new(35))
             .expect("scan rows at")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                let row = row.into_owned().expect("row");
-                match row.0[1].as_ref() {
-                    Some(DynCell::I32(v)) => *v,
-                    _ => unreachable!(),
-                }
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry.into_row().map(|(_, row)| {
+                    let row = row.into_owned().expect("row");
+                    match row.0[1].as_ref() {
+                        Some(DynCell::I32(v)) => *v,
+                        _ => unreachable!(),
+                    }
+                })
             })
             .collect();
         assert_eq!(row_latest, vec![3]);
+    }
+
+    #[test]
+    fn scan_rows_at_hides_versions_after_delete() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let mut m = DynMem::new(schema.clone());
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+
+        let initial = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
+        let initial_batch: RecordBatch = build_batch(schema.clone(), initial).expect("batch");
+        m.insert_batch(extractor.as_ref(), initial_batch, Timestamp::new(10))
+            .expect("insert");
+
+        let delete_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
+        let delete_rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::U64(20)),
+        ])];
+        let delete_batch: RecordBatch = build_batch(delete_schema, delete_rows).expect("delete");
+        m.insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .expect("delete row");
+
+        let ranges = RangeSet::all();
+        let visible_before_delete: Vec<_> = m
+            .scan_rows_at(&ranges, None, Timestamp::new(15))
+            .expect("scan before delete")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
+            })
+            .collect();
+        assert_eq!(visible_before_delete.len(), 1);
+
+        let after_delete: Vec<_> = m
+            .scan_rows_at(&ranges, None, Timestamp::new(25))
+            .expect("scan after delete")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
+            })
+            .collect();
+        assert!(
+            after_delete.is_empty(),
+            "rows at or below delete_ts should be hidden"
+        );
+    }
+
+    #[test]
+    fn scan_rows_at_sees_newer_upsert_after_delete() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let mut m = DynMem::new(schema.clone());
+        let extractor =
+            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
+
+        let initial = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
+        let initial_batch: RecordBatch = build_batch(schema.clone(), initial).expect("batch");
+        m.insert_batch(extractor.as_ref(), initial_batch, Timestamp::new(10))
+            .expect("insert");
+
+        let delete_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
+        let delete_rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::U64(20)),
+        ])];
+        let delete_batch: RecordBatch = build_batch(delete_schema, delete_rows).expect("delete");
+        m.insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .expect("delete row");
+
+        let reinserts = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(99)),
+        ])];
+        let reinserts_batch: RecordBatch = build_batch(schema.clone(), reinserts).expect("batch");
+        m.insert_batch(extractor.as_ref(), reinserts_batch, Timestamp::new(30))
+            .expect("reinsert");
+
+        let ranges = RangeSet::all();
+        let after_delete: Vec<_> = m
+            .scan_rows_at(&ranges, None, Timestamp::new(25))
+            .expect("scan after delete")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
+            })
+            .collect();
+        assert!(after_delete.is_empty());
+
+        let after_reinsert: Vec<_> = m
+            .scan_rows_at(&ranges, None, Timestamp::new(35))
+            .expect("scan after reinsert")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
+            })
+            .collect();
+        assert_eq!(after_reinsert.len(), 1);
+        match after_reinsert[0].0[1].as_ref() {
+            Some(DynCell::I32(v)) => assert_eq!(*v, 99),
+            other => panic!("unexpected cell {other:?}"),
+        }
     }
 
     #[test]
@@ -968,36 +1125,44 @@ mod tests {
         let row_after_first = segment
             .scan_visible(&ranges, None, Timestamp::new(15))
             .expect("scan visible")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .next()
             .expect("row after first commit");
         let row_after_second = segment
             .scan_visible(&ranges, None, Timestamp::new(25))
             .expect("scan visible")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .next()
             .expect("row after second commit");
         let row_after_third = segment
             .scan_visible(&ranges, None, Timestamp::new(35))
             .expect("scan visible")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .next()
             .expect("row after third commit");
         let row_latest = segment
             .scan_visible(&ranges, None, Timestamp::new(45))
             .expect("scan visible")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .next()
             .expect("row after latest commit");
@@ -1047,9 +1212,11 @@ mod tests {
         let rows: Vec<DynRow> = m
             .scan_rows(&ranges, Some(Arc::clone(&projection_schema)))
             .expect("scan rows")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .collect();
         assert_eq!(rows.len(), 2);

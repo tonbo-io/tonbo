@@ -265,6 +265,21 @@ pub(crate) struct ImmutableVisibleScan<'t, S> {
     projection: DynProjection,
 }
 
+pub(crate) enum ImmutableVisibleEntry<'t> {
+    Row(&'t KeyTsViewRaw, DynRowRaw),
+    Tombstone(&'t KeyTsViewRaw),
+}
+
+impl<'t> ImmutableVisibleEntry<'t> {
+    #[allow(dead_code)]
+    pub(crate) fn into_row(self) -> Option<(&'t KeyTsViewRaw, DynRowRaw)> {
+        match self {
+            ImmutableVisibleEntry::Row(key, row) => Some((key, row)),
+            ImmutableVisibleEntry::Tombstone(_) => None,
+        }
+    }
+}
+
 impl<'t, S> fmt::Debug for ImmutableVisibleScan<'t, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ImmutableVisibleScan")
@@ -306,7 +321,7 @@ impl<'t, S> Iterator for ImmutableVisibleScan<'t, S>
 where
     S: RecordBatchStorage,
 {
-    type Item = Result<(&'t KeyTsViewRaw, DynRowRaw), DynViewError>;
+    type Item = Result<ImmutableVisibleEntry<'t>, DynViewError>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.cursor.is_none() {
@@ -343,11 +358,18 @@ where
                     }
 
                     match entry {
-                        ImmutableIndexEntry::Delete => continue,
+                        ImmutableIndexEntry::Delete => {
+                            self.emitted_for_key = true;
+                            return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
+                        }
                         ImmutableIndexEntry::Row(row_idx) => {
                             let (commit_ts, tombstone) = self.table.mvcc_row(*row_idx);
-                            if commit_ts > self.read_ts || tombstone {
+                            if commit_ts > self.read_ts {
                                 continue;
+                            }
+                            if tombstone {
+                                self.emitted_for_key = true;
+                                return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
                             }
                             let batch = self.table.storage.as_record_batch();
                             let row_idx = *row_idx as usize;
@@ -360,7 +382,7 @@ where
                                 Err(err) => return Some(Err(err)),
                             };
                             self.emitted_for_key = true;
-                            return Some(Ok((view, row)));
+                            return Some(Ok(ImmutableVisibleEntry::Row(view, row)));
                         }
                     }
                 }
@@ -545,7 +567,11 @@ mod tests {
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
-    use crate::test_util::build_batch;
+    use crate::{
+        extractor::{projection_for_columns, projection_for_field},
+        inmem::mutable::memtable::DynMem,
+        test_util::build_batch,
+    };
 
     fn push_view(storage: &mut Vec<KeyOwned>, key: &str, ts: Timestamp) -> KeyTsViewRaw {
         storage.push(KeyOwned::from(key));
@@ -574,9 +600,9 @@ mod tests {
         let got: Vec<String> = seg
             .scan_visible(&ranges, None, Timestamp::MAX)
             .expect("scan visible")
-            .map(|res| {
-                let (view, _) = res.expect("row projection");
-                view.key().to_owned()
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry.into_row().map(|(view, _)| view.key().to_owned())
             })
             .map(|k| k.as_utf8().expect("utf8 key").to_string())
             .collect();
@@ -626,9 +652,11 @@ mod tests {
         let first_visible: Vec<_> = seg
             .scan_visible(&ranges, None, Timestamp::new(15))
             .expect("scan visible")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .collect();
         assert_eq!(first_visible.len(), 1);
@@ -636,9 +664,11 @@ mod tests {
         let latest: Vec<_> = seg
             .scan_visible(&ranges, None, Timestamp::new(45))
             .expect("scan visible")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .collect();
         assert_eq!(latest.len(), 1);
@@ -710,17 +740,101 @@ mod tests {
         let visible: Vec<_> = seg
             .scan_visible(&ranges, None, Timestamp::new(21))
             .expect("scan visible")
-            .map(|res| {
-                let (_, row) = res.expect("row projection");
-                row.into_owned().expect("row")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
             })
             .collect();
-        assert_eq!(visible.len(), 1);
-        let value = match visible[0].0[1].as_ref() {
-            Some(DynCell::I32(v)) => *v,
-            _ => panic!("unexpected cell"),
+        assert_eq!(
+            visible.len(),
+            0,
+            "tombstoned rows should be hidden once delete is visible"
+        );
+    }
+
+    #[test]
+    fn scan_visible_handles_delete_then_reinsert() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let mut mutable = DynMem::new(schema.clone());
+        let extractor =
+            projection_for_field(schema.clone(), 0).expect("mutable delete test extractor");
+
+        let insert_value = |mem: &mut DynMem, value: i32, ts: u64| {
+            let rows = vec![DynRow(vec![
+                Some(DynCell::Str("k".into())),
+                Some(DynCell::I32(value)),
+            ])];
+            let batch: RecordBatch = build_batch(schema.clone(), rows).expect("insert batch");
+            mem.insert_batch(extractor.as_ref(), batch, Timestamp::new(ts))
+                .expect("insert value");
         };
-        assert_eq!(value, 1);
+
+        insert_value(&mut mutable, 1, 10);
+
+        let delete_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
+        let delete_rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::U64(20)),
+        ])];
+        let delete_batch: RecordBatch =
+            build_batch(delete_schema.clone(), delete_rows).expect("delete batch");
+        mutable
+            .insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .expect("delete");
+
+        insert_value(&mut mutable, 3, 30);
+
+        let segment = mutable
+            .seal_into_immutable(&schema, extractor.as_ref())
+            .expect("seal immutable")
+            .expect("segment");
+
+        use std::ops::Bound as B;
+        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
+            B::Included(KeyOwned::from("k")),
+            B::Included(KeyOwned::from("k")),
+        )]);
+
+        let rows_after_delete: Vec<DynRow> = segment
+            .scan_visible(&ranges, None, Timestamp::new(25))
+            .expect("scan after delete")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
+            })
+            .collect();
+        assert!(
+            rows_after_delete.is_empty(),
+            "rows at or below delete_ts should be hidden"
+        );
+
+        let rows_after_reinsert: Vec<DynRow> = segment
+            .scan_visible(&ranges, None, Timestamp::MAX)
+            .expect("scan after reinsert")
+            .filter_map(|res| {
+                let entry = res.expect("row projection");
+                entry
+                    .into_row()
+                    .map(|(_, row)| row.into_owned().expect("row"))
+            })
+            .collect();
+        assert_eq!(rows_after_reinsert.len(), 1);
+        match rows_after_reinsert[0].0[1].as_ref() {
+            Some(DynCell::I32(v)) => assert_eq!(*v, 3),
+            other => panic!("unexpected cell {other:?}"),
+        }
     }
 
     #[test]
@@ -751,7 +865,11 @@ mod tests {
         let mut scan = seg
             .scan_visible(&ranges, None, Timestamp::MAX)
             .expect("scan visible");
-        let (_, row) = scan.next().expect("row present").expect("row projection");
+        let entry = scan.next().expect("row present").expect("row projection");
+        let row = match entry {
+            ImmutableVisibleEntry::Row(_, row) => row,
+            ImmutableVisibleEntry::Tombstone(_) => panic!("expected row entry"),
+        };
         let owned = row.into_owned().expect("row owned");
         assert_eq!(
             owned.0.len(),

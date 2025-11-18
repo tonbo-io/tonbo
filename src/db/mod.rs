@@ -33,8 +33,11 @@ use crate::{
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
     inmem::{
-        immutable::{Immutable, memtable::MVCC_COMMIT_COL},
-        mutable::MutableLayout,
+        immutable::{
+            Immutable,
+            memtable::{ImmutableVisibleEntry, MVCC_COMMIT_COL},
+        },
+        mutable::{MutableLayout, memtable::DynRowScanEntry},
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
     key::KeyOwned,
@@ -321,9 +324,12 @@ where
         projection_schema: Option<SchemaRef>,
     ) -> Result<impl Iterator<Item = Result<DynRow, KeyExtractError>> + 'a, KeyExtractError> {
         let rows = self.mem.scan_rows(ranges, projection_schema)?;
-        Ok(rows.map(|item| match item {
-            Ok((_, row)) => Ok(row.into_owned()?),
-            Err(err) => Err(err.into()),
+        Ok(rows.filter_map(|item| match item {
+            Ok(DynRowScanEntry::Row(_, row)) => {
+                Some(row.into_owned().map_err(KeyExtractError::from))
+            }
+            Ok(DynRowScanEntry::Tombstone(_)) => None,
+            Err(err) => Some(Err(err.into())),
         }))
     }
 
@@ -335,9 +341,12 @@ where
         read_ts: Timestamp,
     ) -> Result<impl Iterator<Item = Result<DynRow, KeyExtractError>> + 'a, KeyExtractError> {
         let rows = self.mem.scan_rows_at(ranges, projection_schema, read_ts)?;
-        Ok(rows.map(|item| match item {
-            Ok((_, row)) => Ok(row.into_owned()?),
-            Err(err) => Err(err.into()),
+        Ok(rows.filter_map(|item| match item {
+            Ok(DynRowScanEntry::Row(_, row)) => {
+                Some(row.into_owned().map_err(KeyExtractError::from))
+            }
+            Ok(DynRowScanEntry::Tombstone(_)) => None,
+            Err(err) => Some(Err(err.into())),
         }))
     }
 
@@ -371,12 +380,17 @@ where
         for segment in &self.immutables {
             let scan = segment.scan_visible(ranges, None, read_ts)?;
             for result in scan {
-                let (key_view, row_raw) = result.map_err(KeyExtractError::from)?;
-                let row = row_raw.into_owned().map_err(|err| {
-                    KeyExtractError::Arrow(ArrowError::ComputeError(err.to_string()))
-                })?;
-                let (key_owned, _) = key_view.to_owned().into_parts();
-                rows.push((key_owned, row));
+                match result {
+                    Ok(ImmutableVisibleEntry::Row(key_view, row_raw)) => {
+                        let row = row_raw.into_owned().map_err(|err| {
+                            KeyExtractError::Arrow(ArrowError::ComputeError(err.to_string()))
+                        })?;
+                        let (key_owned, _) = key_view.to_owned().into_parts();
+                        rows.push((key_owned, row));
+                    }
+                    Ok(ImmutableVisibleEntry::Tombstone(_)) => {}
+                    Err(err) => return Err(KeyExtractError::from(err)),
+                }
             }
         }
         Ok(rows)

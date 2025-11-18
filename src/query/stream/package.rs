@@ -57,10 +57,13 @@ where
         while *this.row_count < *this.batch_size {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(entry))) => {
-                    if let Err(err) = this.builder.append_row(entry.into_row()) {
-                        return Poll::Ready(Some(Err(err)));
+                    if let Some(row) = entry.into_row() {
+                        if let Err(err) = this.builder.append_row(row) {
+                            return Poll::Ready(Some(Err(err)));
+                        }
+                        *this.row_count += 1;
+                        continue;
                     }
-                    *this.row_count += 1;
                 }
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
                 Poll::Ready(None) => {

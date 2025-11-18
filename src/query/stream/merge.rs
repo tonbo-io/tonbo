@@ -80,6 +80,7 @@ where
         while let Some(Reverse(heap_entry)) = this.peeked.pop() {
             let stream_idx = heap_entry.stream_idx;
             let entry = heap_entry.entry;
+            let entry_is_tombstone = entry.is_tombstone();
             let next = ready!(Pin::new(&mut this.streams[stream_idx]).poll_next(cx)).transpose()?;
             if let Some(next) = next {
                 let priority = this.stream_priority[stream_idx];
@@ -101,14 +102,22 @@ where
             if duplicate_key {
                 continue;
             }
-            if let Some(limit) = this.limit.as_ref() {
-                this.limit.replace(*limit - 1);
+            if !entry_is_tombstone && let Some(limit) = this.limit.as_ref() {
+                this.limit.replace(limit.saturating_sub(1));
             }
             if let Some(prev) = this.buf.replace(entry) {
+                if prev.is_tombstone() {
+                    continue;
+                }
                 return Poll::Ready(Some(Ok(prev)));
             }
         }
-        Poll::Ready(this.buf.take().map(Ok))
+        loop {
+            match this.buf.take() {
+                Some(entry) if entry.is_tombstone() => continue,
+                opt => return Poll::Ready(opt.map(Ok)),
+            }
+        }
     }
 }
 
@@ -244,6 +253,7 @@ mod tests {
                     StreamEntry::MemTable((key_ts, row)) => {
                         (key_ts.key().to_owned(), key_ts.timestamp(), row)
                     }
+                    StreamEntry::MemTableTombstone(_) => continue,
                     StreamEntry::Sstable((key_ts, row)) => {
                         (key_ts.key().to_owned(), key_ts.timestamp(), row)
                     }
