@@ -1002,11 +1002,16 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
             Arc::new(Int32Array::from(vec![5])) as _,
         ],
     )?;
-    let ticket = wal_handle
+    let append = wal_handle
         .append(&append_batch, Timestamp::new(777))
         .await?;
-    assert_eq!(ticket.seq, INITIAL_FRAME_SEQ.saturating_add(1));
-    ticket.durable().await?;
+    assert_eq!(
+        append.commit_ticket.seq,
+        INITIAL_FRAME_SEQ.saturating_add(1)
+    );
+    let (append_ack, commit_ack) = append.durable().await?;
+    assert!(append_ack.first_seq <= append_ack.last_seq);
+    assert!(commit_ack.first_seq <= commit_ack.last_seq);
 
     recovered.disable_wal().await?;
     drop(recovered);

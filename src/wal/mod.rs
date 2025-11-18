@@ -579,15 +579,25 @@ where
     }
 
     /// Append a record batch of live rows to the WAL (autocommit helper).
+    ///
+    /// Returns the `WalAck` for the append frame(s) plus the `WalTicket` for
+    /// the commit marker so callers can surface the full WAL span to GC
+    /// pinning (`WalRangeAccumulator`). This avoids the previous footgun where
+    /// the append ack was dropped and the span could not be observed.
     pub async fn append(
         &self,
         batch: &RecordBatch,
         commit_ts: Timestamp,
-    ) -> WalResult<WalTicket<E>> {
+    ) -> WalResult<WalAppendResult<E>> {
         let provisional_id = self.next_provisional_id();
         let append_ticket = self.txn_append(provisional_id, batch, commit_ts).await?;
-        append_ticket.durable().await?;
-        self.txn_commit(provisional_id, commit_ts).await
+        let append_ack = append_ticket.durable().await?;
+        let commit_ticket = self.txn_commit(provisional_id, commit_ts).await?;
+
+        Ok(WalAppendResult {
+            append_ack,
+            commit_ticket,
+        })
     }
 
     /// Force manual rotation of the active WAL segment.
@@ -723,11 +733,33 @@ pub(crate) fn wal_segment_file_id(seq: u64) -> FileId {
 }
 
 /// Ticket returned after a successful submission.
+#[must_use = "propagate WAL spans into GC pinning before dropping"]
 pub struct WalTicket<E> {
     /// Sequence number assigned to the payload.
     pub seq: u64,
     receiver: oneshot::Receiver<WalResult<WalAck>>,
     _exec: PhantomData<E>,
+}
+
+/// Result of the `WalHandle::append` helper.
+#[must_use = "propagate WAL spans into GC pinning before dropping"]
+pub struct WalAppendResult<E> {
+    /// Ack for the append frame(s), required for WAL span tracking.
+    pub append_ack: WalAck,
+    /// Ticket for the commit marker; callers must still await durability.
+    pub commit_ticket: WalTicket<E>,
+}
+
+impl<E> WalAppendResult<E>
+where
+    E: Executor + Timer,
+{
+    /// Resolve the commit marker and return both acks (append, commit).
+    pub async fn durable(self) -> WalResult<(WalAck, WalAck)> {
+        let append_ack = self.append_ack;
+        let commit_ack = self.commit_ticket.durable().await?;
+        Ok((append_ack, commit_ack))
+    }
 }
 
 impl<E> WalTicket<E>
@@ -758,6 +790,9 @@ mod tests {
 
     use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
+    use fusio::executor::tokio::TokioExecutor;
+    use futures::StreamExt;
+    use tokio::task::JoinHandle;
 
     use super::*;
 
@@ -811,6 +846,76 @@ mod tests {
         let batch = sample_batch();
         let err = split_commit_column(batch).expect_err("missing column");
         assert!(matches!(err, WalError::Codec(msg) if msg.contains("_commit_ts column missing")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_returns_both_acks_in_order() {
+        use crate::wal::{frame, writer};
+
+        let executor = Arc::new(TokioExecutor::default());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let queue_depth = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let join: tokio::task::JoinHandle<WalResult<()>> = executor.spawn(async move {
+            let mut next_seq = frame::INITIAL_FRAME_SEQ;
+            while let Some(msg) = receiver.next().await {
+                match msg {
+                    writer::WriterMsg::Enqueue {
+                        command, ack_tx, ..
+                    } => {
+                        let (first_seq, last_seq, advance) = match command {
+                            WalCommand::TxnAppend { .. } => {
+                                (next_seq, next_seq.saturating_add(1), 2)
+                            }
+                            WalCommand::TxnCommit { .. } => (next_seq, next_seq, 1),
+                            _ => (next_seq, next_seq, 1),
+                        };
+                        next_seq = next_seq.saturating_add(advance);
+                        let ack = WalAck {
+                            first_seq,
+                            last_seq,
+                            bytes_flushed: 0,
+                            elapsed: Duration::from_millis(0),
+                        };
+                        let _ = ack_tx.send(Ok(ack));
+                    }
+                    writer::WriterMsg::Rotate { ack_tx } => {
+                        let _ = ack_tx.send(Ok(()));
+                    }
+                    writer::WriterMsg::Snapshot { ack_tx } => {
+                        let snapshot = WalSnapshot {
+                            sealed_segments: Vec::new(),
+                            active_segment: None,
+                        };
+                        let _ = ack_tx.send(Ok(snapshot));
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
+        let handle: WalHandle<TokioExecutor> = WalHandle::test_from_parts(
+            sender,
+            queue_depth,
+            join,
+            frame::INITIAL_FRAME_SEQ,
+            metrics,
+        );
+
+        let batch = sample_batch();
+        let append = handle
+            .append(&batch, Timestamp::new(1))
+            .await
+            .expect("append result");
+        let (append_ack, commit_ack) = append.durable().await.expect("both acks");
+
+        assert!(append_ack.first_seq <= append_ack.last_seq);
+        assert!(commit_ack.first_seq <= commit_ack.last_seq);
+        assert!(append_ack.last_seq < commit_ack.first_seq);
+        assert_eq!(append_ack.first_seq, frame::INITIAL_FRAME_SEQ);
+        assert_eq!(append_ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
+        assert_eq!(commit_ack.first_seq, frame::INITIAL_FRAME_SEQ + 2);
+        assert_eq!(commit_ack.last_seq, frame::INITIAL_FRAME_SEQ + 2);
     }
 }
 
