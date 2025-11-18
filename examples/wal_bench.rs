@@ -11,7 +11,6 @@ use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use arrow_select::take::take;
 use clap::{Parser, ValueEnum};
 use fusio::executor::tokio::TokioExecutor;
-use tokio::runtime::Runtime;
 use tonbo::{
     db::DB,
     mode::{DynMode, DynModeConfig},
@@ -20,14 +19,14 @@ use tonbo::{
 };
 use ulid::Ulid;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cfg = Config::parse();
-    let runtime = Runtime::new().expect("tokio runtime");
     let schema = Arc::new(build_schema(cfg.value_columns));
 
     match cfg.mode {
         Mode::Wal => {
-            let (duration, bytes) = runtime.block_on(bench_wal_append(&cfg, schema));
+            let (duration, bytes) = bench_wal_append(&cfg, schema).await;
             report("wal", &cfg, duration, bytes);
         }
     }
@@ -164,6 +163,7 @@ async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, Tokio
         .on_disk(root.to_string_lossy().into_owned())
         .wal_sync_policy(sync)
         .build()
+        .await
         .expect("db");
     db
 }

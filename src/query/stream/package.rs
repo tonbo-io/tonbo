@@ -127,7 +127,7 @@ mod tests {
 
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
-    use futures::{StreamExt, executor::block_on};
+    use futures::StreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
@@ -140,8 +140,8 @@ mod tests {
         test_util::build_batch,
     };
 
-    #[test]
-    fn package_stream_emits_multiple_batches() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn package_stream_emits_multiple_batches() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int64, true),
@@ -164,22 +164,23 @@ mod tests {
 
         let ranges = RangeSet::all();
         let mutable_scan = mutable.scan_rows(&ranges, None).expect("scan rows");
-        let merge = block_on(MergeStream::from_vec(
+        let merge = MergeStream::from_vec(
             vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
             Timestamp::MAX,
             None,
             Some(Order::Asc),
-        ))
+        )
+        .await
         .expect("merge stream");
 
         let mut stream = Box::pin(PackageStream::new(2, merge, Arc::clone(&schema)));
-        let batches = block_on(async {
+        let batches = {
             let mut out = Vec::new();
             while let Some(batch) = stream.next().await {
                 out.push(batch.expect("batch ok"));
             }
             out
-        });
+        };
 
         assert_eq!(batches.len(), 3, "expected three batches");
         assert_eq!(batches[0].num_rows(), 2);

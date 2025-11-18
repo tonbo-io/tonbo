@@ -539,8 +539,9 @@ mod tests {
     #[tokio::test]
     async fn apply_version_edits_snapshot_latest_and_list_versions_happy_path() {
         let file_ids = FileIdGenerator::default();
-        let (manifest, table_id) =
-            init_in_memory_manifest_raw(1, &file_ids).expect("manifest should initialize");
+        let (manifest, table_id) = init_in_memory_manifest_raw(1, &file_ids)
+            .await
+            .expect("manifest should initialize");
 
         let wal_segment_a = WalSegmentRef::new(40, file_ids.generate(), 0, 10);
         let wal_segment_b = WalSegmentRef::new(42, file_ids.generate(), 5, 20);
@@ -799,8 +800,9 @@ mod tests {
     #[tokio::test]
     async fn wal_floor_clears_once_no_segments_remain() {
         let file_ids = FileIdGenerator::default();
-        let (manifest, table_id) =
-            init_in_memory_manifest_raw(1, &file_ids).expect("manifest should initialize");
+        let (manifest, table_id) = init_in_memory_manifest_raw(1, &file_ids)
+            .await
+            .expect("manifest should initialize");
 
         let wal_segment = WalSegmentRef::new(9, file_ids.generate(), 0, 4);
         manifest

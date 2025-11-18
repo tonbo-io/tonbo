@@ -903,15 +903,6 @@ mod tests {
         ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar)
     }
 
-    fn tokio_block_on<F: std::future::Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .expect("tokio runtime")
-            .block_on(future)
-    }
-
     #[test]
     fn parquet_writer_accumulates_segment_stats() {
         let schema = Arc::new(Schema::new(vec![
@@ -957,8 +948,8 @@ mod tests {
         assert_eq!(max_key, "e");
     }
 
-    #[test]
-    fn finish_without_segments_errors() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_without_segments_errors() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, true),
             Field::new("v", DataType::Int32, true),
@@ -966,12 +957,12 @@ mod tests {
         let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
         let writer: ParquetTableWriter<crate::mode::DynMode> =
             ParquetTableWriter::new(test_config(schema), descriptor);
-        let result = futures::executor::block_on(writer.finish());
+        let result = writer.finish().await;
         assert!(matches!(result, Err(SsTableError::NoImmutableSegments)));
     }
 
-    #[test]
-    fn finish_threads_wal_ids_into_descriptor() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_threads_wal_ids_into_descriptor() {
         use std::str::FromStr;
 
         let schema = Arc::new(Schema::new(vec![
@@ -988,58 +979,54 @@ mod tests {
         let segment = sample_segment(vec![("k".into(), 1)], vec![42], vec![false]);
         writer.stage_immutable(&segment).expect("stage segment");
 
-        let table = tokio_block_on(writer.finish()).expect("finish");
+        let table = writer.finish().await.expect("finish");
         let recorded = table.descriptor().wal_ids().expect("descriptor wal ids");
         assert_eq!(recorded, wal_ids.as_slice());
     }
 
-    #[test]
-    fn finish_records_data_and_sidecar_paths() {
-        tokio_block_on(async {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, true),
-                Field::new("v", DataType::Int32, true),
-            ]));
-            let descriptor = SsTableDescriptor::new(SsTableId::new(21), 0);
-            let mut writer: ParquetTableWriter<crate::mode::DynMode> =
-                ParquetTableWriter::new(test_config(schema.clone()), descriptor);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_records_data_and_sidecar_paths() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let descriptor = SsTableDescriptor::new(SsTableId::new(21), 0);
+        let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+            ParquetTableWriter::new(test_config(schema.clone()), descriptor);
 
-            let segment = sample_segment(vec![("m".into(), 9)], vec![123], vec![false]);
-            writer.stage_immutable(&segment).expect("stage segment");
+        let segment = sample_segment(vec![("m".into(), 9)], vec![123], vec![false]);
+        writer.stage_immutable(&segment).expect("stage segment");
 
-            let table = writer.finish().await.expect("finish table");
-            let descriptor = table.descriptor();
-            let data_path = descriptor.data_path().expect("data path present");
-            let mvcc_path = descriptor.mvcc_path().expect("mvcc path present");
-            assert!(data_path.as_ref().ends_with(".parquet"));
-            assert!(mvcc_path.as_ref().ends_with(".mvcc.parquet"));
-            assert_ne!(data_path.as_ref(), mvcc_path.as_ref());
-            assert!(descriptor.delete_path().is_none());
-        });
+        let table = writer.finish().await.expect("finish table");
+        let descriptor = table.descriptor();
+        let data_path = descriptor.data_path().expect("data path present");
+        let mvcc_path = descriptor.mvcc_path().expect("mvcc path present");
+        assert!(data_path.as_ref().ends_with(".parquet"));
+        assert!(mvcc_path.as_ref().ends_with(".mvcc.parquet"));
+        assert_ne!(data_path.as_ref(), mvcc_path.as_ref());
+        assert!(descriptor.delete_path().is_none());
     }
 
-    #[test]
-    fn finish_records_delete_sidecar_when_tombstones_exist() {
-        tokio_block_on(async {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, true),
-                Field::new("v", DataType::Int32, true),
-            ]));
-            let descriptor = SsTableDescriptor::new(SsTableId::new(22), 0);
-            let mut writer: ParquetTableWriter<crate::mode::DynMode> =
-                ParquetTableWriter::new(test_config(schema.clone()), descriptor);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_records_delete_sidecar_when_tombstones_exist() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let descriptor = SsTableDescriptor::new(SsTableId::new(22), 0);
+        let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+            ParquetTableWriter::new(test_config(schema.clone()), descriptor);
 
-            let segment = sample_segment(
-                vec![("z".into(), 1), ("tomb".into(), 0)],
-                vec![100, 200],
-                vec![false, true],
-            );
-            writer.stage_immutable(&segment).expect("stage segment");
+        let segment = sample_segment(
+            vec![("z".into(), 1), ("tomb".into(), 0)],
+            vec![100, 200],
+            vec![false, true],
+        );
+        writer.stage_immutable(&segment).expect("stage segment");
 
-            let table = writer.finish().await.expect("finish table");
-            let descriptor = table.descriptor();
-            let delete_path = descriptor.delete_path().expect("delete sidecar present");
-            assert!(delete_path.as_ref().ends_with(".delete.parquet"));
-        });
+        let table = writer.finish().await.expect("finish table");
+        let descriptor = table.descriptor();
+        let delete_path = descriptor.delete_path().expect("delete sidecar present");
+        assert!(delete_path.as_ref().ends_with(".delete.parquet"));
     }
 }

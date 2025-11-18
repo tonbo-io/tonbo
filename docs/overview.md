@@ -180,10 +180,11 @@ By default, durable builders create a `WalConfig` using layout-derived defaults 
 ```rust,no_run
 use tonbo::{db::{DB, DbBuildError, DynMode}, mode::DynModeConfig};
 
-fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
-    let db = DB::<DynMode, _>::builder(config)
+async fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
+    let _db = DB::<DynMode, _>::builder(config)
         .on_disk("/srv/tonbo".to_string())
-        .build()?;
+        .build()
+        .await?;
     Ok(())
 }
 ```
@@ -198,14 +199,15 @@ use tonbo::{
     wal::WalSyncPolicy,
 };
 
-fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
+async fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
     let overrides = WalConfig::default()
         .sync_policy(WalSyncPolicy::Always)
         .flush_interval(Duration::from_millis(1));
-    let db = DB::<DynMode, _>::builder(config)
+    let _db = DB::<DynMode, _>::builder(config)
         .on_disk("/srv/tonbo".to_string())
         .wal_config(overrides)
-        .build()?;
+        .build()
+        .await?;
     Ok(())
 }
 ```
@@ -387,18 +389,21 @@ use tonbo::{CommitAckMode, DB, DynModeConfig, Transaction};
 use tonbo::extractor;
 use tonbo::key::KeyOwned;
 
-let schema = Arc::new(build_arrow_schema()); // application-defined helper
-let key_projection = extractor::projection_for_field(schema.clone(), 0)?;
-let config = DynModeConfig::new(schema.clone(), key_projection)?
-    .with_commit_ack_mode(CommitAckMode::Fast); // optional: trade durability for latency
-let executor = Arc::new(BlockingExecutor);
-let db = DB::new(config, executor)?;
+async fn run_transaction() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(build_arrow_schema()); // application-defined helper
+    let key_projection = extractor::projection_for_field(schema.clone(), 0)?;
+    let config = DynModeConfig::new(schema.clone(), key_projection)?
+        .with_commit_ack_mode(CommitAckMode::Fast); // optional: trade durability for latency
+    let executor = Arc::new(BlockingExecutor);
+    let mut db = DB::new(config, executor).await?;
 
-let mut tx: Transaction = db.begin_transaction()?;
-let incoming_batch = build_record_batch(); // supply your Arrow RecordBatch
-tx.upsert_batch(&incoming_batch)?;
-tx.delete(KeyOwned::from("row_to_remove"))?;
-tx.commit(&mut db).await?;
+    let mut tx: Transaction = db.begin_transaction().await?;
+    let incoming_batch = build_record_batch(); // supply your Arrow RecordBatch
+    tx.upsert_batch(&incoming_batch)?;
+    tx.delete(KeyOwned::from("row_to_remove"))?;
+    tx.commit(&mut db).await?;
+    Ok(())
+}
 ```
 
 ### Compaction Interaction

@@ -3,7 +3,6 @@
 use std::{collections::HashMap, ops::Bound, sync::Arc};
 
 use fusio::executor::BlockingExecutor;
-use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
     key::KeyOwned,
@@ -24,7 +23,8 @@ fn build_batch(schema: Arc<Schema>, rows: Vec<DynRow>) -> RecordBatch {
     builders.try_finish_into_batch().expect("record batch")
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Field-level metadata: tonbo.key ordinals define lexicographic order
     let mut m1 = HashMap::new();
     m1.insert("tonbo.key".to_string(), "1".to_string());
@@ -41,6 +41,7 @@ fn main() {
     let mut db: DB<DynMode, BlockingExecutor> = DB::<DynMode, BlockingExecutor>::builder(config)
         .in_memory("dynamic-composite")
         .build_with_executor(Arc::clone(&executor))
+        .await
         .expect("composite ok");
 
     // Build a batch with three rows
@@ -62,7 +63,7 @@ fn main() {
         ]),
     ];
     let batch: RecordBatch = build_batch(schema.clone(), rows);
-    block_on(db.ingest(batch)).expect("insert");
+    db.ingest(batch).await.expect("insert");
 
     // Range over composite key: ("a", 5) ..= ("a", 10)
     let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(5i64)]);

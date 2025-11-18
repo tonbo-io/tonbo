@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use fusio::executor::BlockingExecutor;
-use futures::executor::block_on;
 use tonbo::{
     db::{DB, DynMode},
     key::KeyOwned,
@@ -24,7 +23,8 @@ fn build_batch(schema: Arc<Schema>, rows: Vec<DynRow>) -> RecordBatch {
     builders.try_finish_into_batch().expect("record batch")
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Schema-level metadata: tonbo.keys = "id"
     let f_id = Field::new("id", DataType::Utf8, false);
     let f_score = Field::new("score", DataType::Int32, false);
@@ -45,8 +45,9 @@ fn main() {
     let mut db: DB<DynMode, BlockingExecutor> = DB::<DynMode, BlockingExecutor>::builder(config)
         .in_memory("dynamic-metadata")
         .build_with_executor(Arc::clone(&executor))
+        .await
         .expect("metadata ok");
-    block_on(db.ingest(batch)).expect("insert");
+    db.ingest(batch).await.expect("insert");
 
     // Scan all rows
     let all = RangeSet::<KeyOwned>::all();

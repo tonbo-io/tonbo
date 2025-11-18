@@ -84,7 +84,7 @@ mod tests {
     use super::MinorCompactor;
     use crate::{db::DB, mode::DynMode, ondisk::sstable::SsTableConfig, test_util::build_batch};
 
-    fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, BlockingExecutor>) {
+    async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, BlockingExecutor>) {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -99,6 +99,7 @@ mod tests {
         let db = DB::<DynMode, BlockingExecutor>::builder(config)
             .in_memory("compaction-test")
             .build_with_executor(Arc::clone(&executor))
+            .await
             .expect("db init");
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
@@ -110,27 +111,18 @@ mod tests {
         (cfg, db)
     }
 
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .expect("tokio runtime")
-            .block_on(future)
-    }
-
-    #[test]
-    fn below_threshold_noop() {
-        let (cfg, mut db) = build_db();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn below_threshold_noop() {
+        let (cfg, mut db) = build_db().await;
         let compactor = MinorCompactor::new(2, 0, 7);
-        let result = block_on(compactor.maybe_compact(&mut db, cfg));
+        let result = compactor.maybe_compact(&mut db, cfg).await;
         assert!(matches!(result, Ok(None)));
         assert_eq!(db.num_immutable_segments(), 0);
     }
 
-    #[test]
-    fn threshold_met_invokes_flush() {
-        let (cfg, mut db) = build_db();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn threshold_met_invokes_flush() {
+        let (cfg, mut db) = build_db().await;
         db.set_seal_policy(Box::new(crate::inmem::policy::BatchesThreshold {
             batches: 1,
         }));
@@ -139,11 +131,13 @@ mod tests {
             Some(DynCell::I32(1)),
         ])];
         let batch = build_batch(cfg.schema().clone(), rows).expect("batch");
-        block_on(db.ingest(batch)).expect("ingest");
+        db.ingest(batch).await.expect("ingest");
         assert_eq!(db.num_immutable_segments(), 1);
 
         let compactor = MinorCompactor::new(1, 0, 9);
-        let table = block_on(compactor.maybe_compact(&mut db, cfg))
+        let table = compactor
+            .maybe_compact(&mut db, cfg)
+            .await
             .expect("flush result")
             .expect("sstable");
         assert_eq!(db.num_immutable_segments(), 0);

@@ -592,7 +592,7 @@ mod tests {
         impls::mem::fs::InMemoryFs,
         path::Path,
     };
-    use futures::{executor::block_on, stream};
+    use futures::stream;
 
     use super::*;
     use crate::schema::SchemaBuilder;
@@ -700,295 +700,278 @@ mod tests {
         }
     }
 
-    #[test]
-    fn list_segments_only_falls_back_with_hint() {
-        block_on(async {
-            let base = Arc::new(InMemoryFs::new());
-            let base_dyn: Arc<dyn DynFs> = base.clone();
-            let root = Path::parse("wal-s3").expect("root path");
-            let instrumented = Arc::new(S3ProbeFs::new(base_dyn, root.clone()));
-            let fs_dyn: Arc<dyn DynFs> = instrumented.clone();
-            let storage = WalStorage::new(fs_dyn, root.clone());
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_segments_only_falls_back_with_hint() {
+        let base = Arc::new(InMemoryFs::new());
+        let base_dyn: Arc<dyn DynFs> = base.clone();
+        let root = Path::parse("wal-s3").expect("root path");
+        let instrumented = Arc::new(S3ProbeFs::new(base_dyn, root.clone()));
+        let fs_dyn: Arc<dyn DynFs> = instrumented.clone();
+        let storage = WalStorage::new(fs_dyn, root.clone());
 
-            storage
-                .ensure_dir(storage.root())
-                .await
-                .expect("ensure dir");
-            let mut segment = storage.open_segment(7).await.expect("open segment");
-            let (write_res, buf) = segment.file_mut().write_all(vec![1u8; 4]).await;
-            write_res.expect("write wal");
-            drop(buf);
-            segment.file_mut().flush().await.expect("flush");
+        storage
+            .ensure_dir(storage.root())
+            .await
+            .expect("ensure dir");
+        let mut segment = storage.open_segment(7).await.expect("open segment");
+        let (write_res, buf) = segment.file_mut().write_all(vec![1u8; 4]).await;
+        write_res.expect("write wal");
+        drop(buf);
+        segment.file_mut().flush().await.expect("flush");
 
-            instrumented
-                .suppress_prefix_listing
-                .store(true, Ordering::SeqCst);
+        instrumented
+            .suppress_prefix_listing
+            .store(true, Ordering::SeqCst);
 
-            let empty = storage
-                .list_segments_with_hint(None)
-                .await
-                .expect("listing without hint should succeed");
-            assert!(empty.is_empty(), "prefix listing is suppressed");
-            assert_eq!(
-                instrumented.root_list_calls.load(Ordering::SeqCst),
-                0,
-                "fallback should not run without a hint",
-            );
+        let empty = storage
+            .list_segments_with_hint(None)
+            .await
+            .expect("listing without hint should succeed");
+        assert!(empty.is_empty(), "prefix listing is suppressed");
+        assert_eq!(
+            instrumented.root_list_calls.load(Ordering::SeqCst),
+            0,
+            "fallback should not run without a hint",
+        );
 
-            let discovered = storage
-                .list_segments_with_hint(Some(7))
-                .await
-                .expect("listing with hint should succeed");
-            assert_eq!(discovered.len(), 1);
-            assert_eq!(discovered[0].seq, 7);
-            assert_eq!(
-                instrumented.root_list_calls.load(Ordering::SeqCst),
-                1,
-                "fallback should run exactly once when hint is present",
-            );
-        });
+        let discovered = storage
+            .list_segments_with_hint(Some(7))
+            .await
+            .expect("listing with hint should succeed");
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].seq, 7);
+        assert_eq!(
+            instrumented.root_list_calls.load(Ordering::SeqCst),
+            1,
+            "fallback should run exactly once when hint is present",
+        );
     }
 
-    #[test]
-    fn list_segments_surfaces_fallback_errors() {
-        block_on(async {
-            let base = Arc::new(InMemoryFs::new());
-            let base_dyn: Arc<dyn DynFs> = base.clone();
-            let root = Path::parse("wal-s3-deny").expect("root path");
-            let instrumented = Arc::new(S3ProbeFs::new(base_dyn, root.clone()));
-            instrumented
-                .suppress_prefix_listing
-                .store(true, Ordering::SeqCst);
-            instrumented.deny_root_listing.store(true, Ordering::SeqCst);
-            let storage = WalStorage::new(instrumented.clone() as Arc<dyn DynFs>, root);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_segments_surfaces_fallback_errors() {
+        let base = Arc::new(InMemoryFs::new());
+        let base_dyn: Arc<dyn DynFs> = base.clone();
+        let root = Path::parse("wal-s3-deny").expect("root path");
+        let instrumented = Arc::new(S3ProbeFs::new(base_dyn, root.clone()));
+        instrumented
+            .suppress_prefix_listing
+            .store(true, Ordering::SeqCst);
+        instrumented.deny_root_listing.store(true, Ordering::SeqCst);
+        let storage = WalStorage::new(instrumented.clone() as Arc<dyn DynFs>, root);
 
-            let err = storage
-                .list_segments_with_hint(Some(3))
-                .await
-                .expect_err("fallback failures should surface");
-            if let WalError::Storage(msg) = err {
-                assert!(
-                    msg.contains("failed fallback listing"),
-                    "unexpected storage error message: {msg}"
-                );
-            } else {
-                panic!("expected WalError::Storage, got {err:?}");
-            }
-            assert_eq!(
-                instrumented.root_list_calls.load(Ordering::SeqCst),
-                1,
-                "fallback listing should still be attempted",
-            );
-        });
-    }
-
-    #[test]
-    fn ensure_dir_is_idempotent() {
-        block_on(async {
-            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-            let root = Path::parse("wal").expect("valid wal root");
-            let storage = WalStorage::new(fs, root.clone());
-
-            storage
-                .ensure_dir(&root)
-                .await
-                .expect("first create succeeds");
-            storage
-                .ensure_dir(&root)
-                .await
-                .expect("second create succeeds");
-        });
-    }
-
-    #[test]
-    fn open_segment_persists_and_removes() {
-        block_on(async {
-            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-            let root = Path::parse("wal").expect("valid wal root");
-            let storage = WalStorage::new(Arc::clone(&fs), root.clone());
-
-            let mut segment = storage.open_segment(1).await.expect("open segment");
-            let data = vec![1_u8, 2, 3];
-            let (write_res, _buf) = segment.file_mut().write_all(data.clone()).await;
-            write_res.expect("write succeeds");
-            segment.file_mut().flush().await.expect("flush succeeds");
-
-            let segment_path = segment.path().clone();
-            drop(segment);
-
-            let mut reopened = storage
-                .fs()
-                .open_options(&segment_path, WalStorage::read_options())
-                .await
-                .expect("reopen for read");
-            let (read_res, contents) = reopened.read_to_end_at(Vec::new(), 0).await;
-            read_res.expect("read succeeds");
-            assert_eq!(contents, data);
-
-            storage
-                .remove_segment(&segment_path)
-                .await
-                .expect("remove succeeds");
-            let reopen_result = storage
-                .fs()
-                .open_options(&segment_path, WalStorage::read_options())
-                .await;
-            assert!(reopen_result.is_err(), "segment should be gone");
-        });
-    }
-
-    #[test]
-    fn open_segment_appends_existing_data() {
-        block_on(async {
-            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-            let root = Path::parse("wal").expect("valid wal root");
-            let storage = WalStorage::new(Arc::clone(&fs), root);
-
-            let mut first = storage.open_segment(5).await.expect("open segment");
-            let (write_res, _) = first.file_mut().write_all(b"abc".to_vec()).await;
-            write_res.expect("initial write succeeds");
-            first.file_mut().flush().await.expect("flush succeeds");
-            drop(first);
-
-            let mut second = storage.open_segment(5).await.expect("reopen segment");
-            let (write_res, _) = second.file_mut().write_all(b"def".to_vec()).await;
-            write_res.expect("append succeeds");
-            second.file_mut().flush().await.expect("flush succeeds");
-            let path = second.path().clone();
-            drop(second);
-
-            let mut reader = storage
-                .fs()
-                .open_options(&path, WalStorage::read_options())
-                .await
-                .expect("open for read");
-            let (read_res, contents) = reader.read_to_end_at(Vec::new(), 0).await;
-            read_res.expect("read succeeds");
-            assert_eq!(contents, b"abcdef");
-        });
-    }
-
-    #[test]
-    fn list_segments_reports_sequence_and_size() {
-        block_on(async {
-            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-            let root = Path::parse("wal").expect("valid wal root");
-            let storage = WalStorage::new(Arc::clone(&fs), root.clone());
-
-            let mut first = storage.open_segment(1).await.expect("open first");
-            let (write_res, _) = first.file_mut().write_all(b"abc".to_vec()).await;
-            write_res.expect("write first");
-            first.file_mut().flush().await.expect("flush first");
-            drop(first);
-
-            let mut second = storage.open_segment(2).await.expect("open second");
-            let (write_res, _) = second.file_mut().write_all(b"defghi".to_vec()).await;
-            write_res.expect("write second");
-            second.file_mut().flush().await.expect("flush second");
-            drop(second);
-
-            let segments = storage.list_segments().await.expect("list segments");
-            assert_eq!(segments.len(), 2);
-            assert_eq!(segments[0].seq, 1);
-            assert_eq!(segments[0].bytes, 3);
-            assert_eq!(segments[1].seq, 2);
-            assert_eq!(segments[1].bytes, 6);
+        let err = storage
+            .list_segments_with_hint(Some(3))
+            .await
+            .expect_err("fallback failures should surface");
+        if let WalError::Storage(msg) = err {
             assert!(
-                segments[0]
-                    .path
-                    .as_ref()
-                    .ends_with("wal-00000000000000000001.tonwal")
+                msg.contains("failed fallback listing"),
+                "unexpected storage error message: {msg}"
             );
-            assert!(
-                segments[1]
-                    .path
-                    .as_ref()
-                    .ends_with("wal-00000000000000000002.tonwal")
-            );
-        });
+        } else {
+            panic!("expected WalError::Storage, got {err:?}");
+        }
+        assert_eq!(
+            instrumented.root_list_calls.load(Ordering::SeqCst),
+            1,
+            "fallback listing should still be attempted",
+        );
     }
 
-    #[test]
-    fn tail_metadata_reports_last_frame_sequence() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_dir_is_idempotent() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal").expect("valid wal root");
+        let storage = WalStorage::new(fs, root.clone());
+
+        storage
+            .ensure_dir(&root)
+            .await
+            .expect("first create succeeds");
+        storage
+            .ensure_dir(&root)
+            .await
+            .expect("second create succeeds");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_segment_persists_and_removes() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal").expect("valid wal root");
+        let storage = WalStorage::new(Arc::clone(&fs), root.clone());
+
+        let mut segment = storage.open_segment(1).await.expect("open segment");
+        let data = vec![1_u8, 2, 3];
+        let (write_res, _buf) = segment.file_mut().write_all(data.clone()).await;
+        write_res.expect("write succeeds");
+        segment.file_mut().flush().await.expect("flush succeeds");
+
+        let segment_path = segment.path().clone();
+        drop(segment);
+
+        let mut reopened = storage
+            .fs()
+            .open_options(&segment_path, WalStorage::read_options())
+            .await
+            .expect("reopen for read");
+        let (read_res, contents) = reopened.read_to_end_at(Vec::new(), 0).await;
+        read_res.expect("read succeeds");
+        assert_eq!(contents, data);
+
+        storage
+            .remove_segment(&segment_path)
+            .await
+            .expect("remove succeeds");
+        let reopen_result = storage
+            .fs()
+            .open_options(&segment_path, WalStorage::read_options())
+            .await;
+        assert!(reopen_result.is_err(), "segment should be gone");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_segment_appends_existing_data() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal").expect("valid wal root");
+        let storage = WalStorage::new(Arc::clone(&fs), root);
+
+        let mut first = storage.open_segment(5).await.expect("open segment");
+        let (write_res, _) = first.file_mut().write_all(b"abc".to_vec()).await;
+        write_res.expect("initial write succeeds");
+        first.file_mut().flush().await.expect("flush succeeds");
+        drop(first);
+
+        let mut second = storage.open_segment(5).await.expect("reopen segment");
+        let (write_res, _) = second.file_mut().write_all(b"def".to_vec()).await;
+        write_res.expect("append succeeds");
+        second.file_mut().flush().await.expect("flush succeeds");
+        let path = second.path().clone();
+        drop(second);
+
+        let mut reader = storage
+            .fs()
+            .open_options(&path, WalStorage::read_options())
+            .await
+            .expect("open for read");
+        let (read_res, contents) = reader.read_to_end_at(Vec::new(), 0).await;
+        read_res.expect("read succeeds");
+        assert_eq!(contents, b"abcdef");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_segments_reports_sequence_and_size() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal").expect("valid wal root");
+        let storage = WalStorage::new(Arc::clone(&fs), root.clone());
+
+        let mut first = storage.open_segment(1).await.expect("open first");
+        let (write_res, _) = first.file_mut().write_all(b"abc".to_vec()).await;
+        write_res.expect("write first");
+        first.file_mut().flush().await.expect("flush first");
+        drop(first);
+
+        let mut second = storage.open_segment(2).await.expect("open second");
+        let (write_res, _) = second.file_mut().write_all(b"defghi".to_vec()).await;
+        write_res.expect("write second");
+        second.file_mut().flush().await.expect("flush second");
+        drop(second);
+
+        let segments = storage.list_segments().await.expect("list segments");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].seq, 1);
+        assert_eq!(segments[0].bytes, 3);
+        assert_eq!(segments[1].seq, 2);
+        assert_eq!(segments[1].bytes, 6);
+        assert!(
+            segments[0]
+                .path
+                .as_ref()
+                .ends_with("wal-00000000000000000001.tonwal")
+        );
+        assert!(
+            segments[1]
+                .path
+                .as_ref()
+                .ends_with("wal-00000000000000000002.tonwal")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tail_metadata_reports_last_frame_sequence() {
         use arrow_array::{Int32Array, RecordBatch, StringArray};
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal-tail").expect("valid wal root");
+        let storage = WalStorage::new(Arc::clone(&fs), root.clone());
 
-        block_on(async {
-            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-            let root = Path::parse("wal-tail").expect("valid wal root");
-            let storage = WalStorage::new(Arc::clone(&fs), root.clone());
+        storage.ensure_dir(&root).await.expect("ensure dir");
 
-            storage.ensure_dir(&root).await.expect("ensure dir");
+        let schema = wal_test_schema();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a"])) as _,
+                Arc::new(Int32Array::from(vec![1])) as _,
+            ],
+        )
+        .expect("batch");
 
-            let schema = wal_test_schema();
-            let batch = RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(StringArray::from(vec!["a"])) as _,
-                    Arc::new(Int32Array::from(vec![1])) as _,
-                ],
-            )
-            .expect("batch");
+        let frames = crate::wal::frame::encode_autocommit_frames(
+            batch.clone(),
+            7,
+            crate::mvcc::Timestamp::new(42),
+        )
+        .expect("encode");
 
-            let frames = crate::wal::frame::encode_autocommit_frames(
-                batch.clone(),
-                7,
-                crate::mvcc::Timestamp::new(42),
-            )
-            .expect("encode");
+        let mut seq = crate::wal::frame::INITIAL_FRAME_SEQ;
+        let mut bytes = Vec::new();
+        for frame in frames {
+            bytes.extend_from_slice(&frame.into_bytes(seq));
+            seq += 1;
+        }
 
-            let mut seq = crate::wal::frame::INITIAL_FRAME_SEQ;
-            let mut bytes = Vec::new();
-            for frame in frames {
-                bytes.extend_from_slice(&frame.into_bytes(seq));
-                seq += 1;
-            }
+        let mut segment = storage.open_segment(5).await.expect("open segment");
+        let (write_res, _) = segment.file_mut().write_all(bytes).await;
+        write_res.expect("write wal");
+        segment.file_mut().flush().await.expect("flush");
+        drop(segment);
 
-            let mut segment = storage.open_segment(5).await.expect("open segment");
-            let (write_res, _) = segment.file_mut().write_all(bytes).await;
-            write_res.expect("write wal");
-            segment.file_mut().flush().await.expect("flush");
-            drop(segment);
-
-            let tail = storage
-                .tail_metadata_with_hint(None)
-                .await
-                .expect("tail metadata");
-            let tail = tail.expect("existing tail");
-            assert_eq!(tail.active.seq, 5);
-            assert!(tail.completed.is_empty());
-            assert_eq!(
-                tail.last_frame_seq,
-                Some(crate::wal::frame::INITIAL_FRAME_SEQ + 1)
-            );
-            assert_eq!(tail.last_provisional_id, Some(7));
-        });
+        let tail = storage
+            .tail_metadata_with_hint(None)
+            .await
+            .expect("tail metadata");
+        let tail = tail.expect("existing tail");
+        assert_eq!(tail.active.seq, 5);
+        assert!(tail.completed.is_empty());
+        assert_eq!(
+            tail.last_frame_seq,
+            Some(crate::wal::frame::INITIAL_FRAME_SEQ + 1)
+        );
+        assert_eq!(tail.last_provisional_id, Some(7));
     }
 
-    #[test]
-    fn prune_below_removes_segments_under_floor() {
-        block_on(async {
-            let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
-            let root = Path::parse("wal-prune").expect("root path");
-            let storage = WalStorage::new(fs, root.clone());
-            storage
-                .ensure_dir(storage.root())
-                .await
-                .expect("ensure dir");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_below_removes_segments_under_floor() {
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        let root = Path::parse("wal-prune").expect("root path");
+        let storage = WalStorage::new(fs, root.clone());
+        storage
+            .ensure_dir(storage.root())
+            .await
+            .expect("ensure dir");
 
-            for seq in 1..=3 {
-                let mut segment = storage.open_segment(seq).await.expect("open segment");
-                let (res, _buf) = segment.file_mut().write_all(vec![seq as u8]).await;
-                res.expect("write bytes");
-                segment.file_mut().flush().await.expect("flush");
-            }
+        for seq in 1..=3 {
+            let mut segment = storage.open_segment(seq).await.expect("open segment");
+            let (res, _buf) = segment.file_mut().write_all(vec![seq as u8]).await;
+            res.expect("write bytes");
+            segment.file_mut().flush().await.expect("flush");
+        }
 
-            let removed = storage.prune_below(3).await.expect("prune");
-            assert_eq!(removed, 2, "segments below floor should be removed");
+        let removed = storage.prune_below(3).await.expect("prune");
+        assert_eq!(removed, 2, "segments below floor should be removed");
 
-            let remaining = storage.list_segments().await.expect("list segments");
-            assert_eq!(remaining.len(), 1);
-            assert_eq!(remaining[0].seq, 3);
-        });
+        let remaining = storage.list_segments().await.expect("list segments");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].seq, 3);
     }
 
     fn wal_test_schema() -> SchemaRef {

@@ -15,7 +15,7 @@ use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
 use fusio::executor::{Executor, RwLock, Timer};
-use futures::{Stream, executor::block_on, stream};
+use futures::{Stream, stream};
 use lockable::LockableHashMap;
 use typed_arrow_dyn::DynRow;
 mod builder;
@@ -196,8 +196,8 @@ where
     /// Captures a manifest/MVCC snapshot so reads observe a stable view and returns a
     /// [`Transaction`] handle that supports staging `DynRow` values, `RecordBatch`es,
     /// and key-only deletes before calling [`Transaction::commit`].
-    pub fn begin_transaction(&self) -> Result<Transaction, TransactionError> {
-        let snapshot = self.begin_snapshot()?;
+    pub async fn begin_transaction(&self) -> Result<Transaction, TransactionError> {
+        let snapshot = self.begin_snapshot().await?;
         Ok(Transaction::new(
             self.mode.schema.clone(),
             self.mode.delete_schema.clone(),
@@ -559,17 +559,20 @@ where
     }
 
     /// Construct a new DB in mode `M` using its configuration.
-    pub fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError>
+    pub async fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError>
     where
         M: Sized + CatalogDescribe,
     {
         let table_definition = M::table_definition(&config, builder::DEFAULT_TABLE_NAME);
         let (mode, mem) = M::build(config)?;
         let file_ids = FileIdGenerator::default();
-        let manifest = init_in_memory_manifest().map_err(manifest_error_as_key_extract)?;
-        let table_meta =
-            block_on(async { manifest.register_table(&file_ids, &table_definition).await })
-                .map_err(manifest_error_as_key_extract)?;
+        let manifest = init_in_memory_manifest()
+            .await
+            .map_err(manifest_error_as_key_extract)?;
+        let table_meta = manifest
+            .register_table(&file_ids, &table_definition)
+            .await
+            .map_err(manifest_error_as_key_extract)?;
         let manifest_table = table_meta.table_id;
         Ok(Self::from_components(
             mode,
@@ -635,7 +638,7 @@ where
         );
         db.set_wal_config(Some(wal_cfg.clone()));
 
-        let wal_floor = db.manifest_wal_floor();
+        let wal_floor = db.manifest_wal_floor().await;
         let replayer = Replayer::new(wal_cfg);
         let events = replayer
             .scan_with_floor(wal_floor.as_ref())
@@ -712,8 +715,8 @@ where
 
     /// Open a read-only snapshot pinned to the current manifest head.
     #[allow(dead_code)]
-    pub(crate) fn begin_snapshot(&self) -> Result<TxSnapshot, SnapshotError> {
-        let manifest_snapshot = block_on(self.manifest.snapshot_latest(self.manifest_table))?;
+    pub(crate) async fn begin_snapshot(&self) -> Result<TxSnapshot, SnapshotError> {
+        let manifest_snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
         let next_ts = self.commit_clock.peek();
         let read_ts = next_ts.saturating_sub(1);
         let read_view = ReadView::new(read_ts);
@@ -759,15 +762,17 @@ where
         Ok(())
     }
 
-    fn manifest_wal_floor(&self) -> Option<WalSegmentRef> {
-        block_on(self.manifest.wal_floor(self.manifest_table))
+    async fn manifest_wal_floor(&self) -> Option<WalSegmentRef> {
+        self.manifest
+            .wal_floor(self.manifest_table)
+            .await
             .ok()
             .flatten()
     }
 
     /// Sequence number of the WAL floor currently recorded in the manifest.
-    pub fn wal_floor_seq(&self) -> Option<u64> {
-        self.manifest_wal_floor().map(|ref_| ref_.seq())
+    pub async fn wal_floor_seq(&self) -> Option<u64> {
+        self.manifest_wal_floor().await.map(|ref_| ref_.seq())
     }
 
     pub(crate) fn wal_live_frame_floor(&self) -> Option<u64> {
@@ -807,7 +812,7 @@ where
         for seg in &self.immutables {
             builder.add_immutable(seg)?;
         }
-        let existing_floor = self.manifest_wal_floor();
+        let existing_floor = self.manifest_wal_floor().await;
         let live_floor = self.wal_live_frame_floor();
         let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
             match manifest_ext::collect_wal_segment_refs(cfg, existing_floor.as_ref(), live_floor)
@@ -1284,7 +1289,6 @@ mod tests {
     use futures::{
         StreamExt,
         channel::{mpsc, oneshot as futures_oneshot},
-        executor::block_on,
     };
     use tokio::sync::{Mutex, oneshot};
     use typed_arrow_dyn::{DynCell, DynRow};
@@ -1305,8 +1309,8 @@ mod tests {
         },
     };
 
-    #[test]
-    fn ingest_tombstone_length_mismatch() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn ingest_tombstone_length_mismatch() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -1320,9 +1324,12 @@ mod tests {
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
         let executor = Arc::new(BlockingExecutor);
         let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
 
-        let err = block_on(db.ingest_with_tombstones(batch, vec![])).expect_err("length mismatch");
+        let err = db
+            .ingest_with_tombstones(batch, vec![])
+            .await
+            .expect_err("length mismatch");
         assert!(matches!(
             err,
             KeyExtractError::TombstoneLengthMismatch {
@@ -1332,8 +1339,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn ingest_batch_with_tombstones_marks_versions_and_visibility() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn ingest_batch_with_tombstones_marks_versions_and_visibility() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -1343,14 +1350,14 @@ mod tests {
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
             DynRow(vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
-        let result = block_on(db.ingest_with_tombstones(batch, vec![false, true]));
+        let result = db.ingest_with_tombstones(batch, vec![false, true]).await;
         result.expect("ingest");
 
         let chain_k1 = db
@@ -1382,8 +1389,8 @@ mod tests {
         assert_eq!(visible, vec!["k1".to_string()]);
     }
 
-    #[test]
-    fn apply_dyn_wal_batch_inserts_live_rows() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_dyn_wal_batch_inserts_live_rows() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -1391,7 +1398,7 @@ mod tests {
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
         let executor = Arc::new(BlockingExecutor);
         let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let batch = RecordBatch::try_new(
             schema,
@@ -1419,8 +1426,8 @@ mod tests {
         assert_eq!(deleted, vec![(commit_ts, false)]);
     }
 
-    #[test]
-    fn begin_snapshot_tracks_commit_clock() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn begin_snapshot_tracks_commit_clock() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -1430,9 +1437,9 @@ mod tests {
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
 
-        let snapshot = db.begin_snapshot().expect("snapshot");
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
         assert_eq!(snapshot.read_view().read_ts(), Timestamp::MIN);
         assert!(snapshot.head().last_manifest_txn.is_none());
         assert!(snapshot.latest_version().is_none());
@@ -1442,16 +1449,18 @@ mod tests {
             Some(DynCell::I32(1)),
         ])];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
-        block_on(db.ingest_with_tombstones(batch, vec![false])).expect("ingest");
+        db.ingest_with_tombstones(batch, vec![false])
+            .await
+            .expect("ingest");
 
-        let snapshot_after = db.begin_snapshot().expect("snapshot after ingest");
+        let snapshot_after = db.begin_snapshot().await.expect("snapshot after ingest");
         assert_eq!(snapshot_after.read_view().read_ts(), Timestamp::new(0));
         assert!(snapshot_after.head().last_manifest_txn.is_none());
         assert!(snapshot_after.latest_version().is_none());
     }
 
-    #[test]
-    fn dynamic_seal_on_batches_threshold() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_seal_on_batches_threshold() {
         // Build a simple schema: id: Utf8 (key), v: Int32
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -1465,11 +1474,12 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name");
-        let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::new(BlockingExecutor)).expect("schema ok");
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+            .await
+            .expect("schema ok");
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
         assert_eq!(db.num_immutable_segments(), 0);
-        block_on(db.ingest(batch)).expect("insert batch");
+        db.ingest(batch).await.expect("insert batch");
         assert_eq!(db.num_immutable_segments(), 1);
     }
 
@@ -1493,14 +1503,17 @@ mod tests {
         let cas_backend: Arc<dyn FsCas> = Arc::new(fs.clone());
         wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(cas_backend)));
 
-        let manifest = init_fs_manifest(fs.clone(), &manifest_root).expect("init manifest");
+        let manifest = init_fs_manifest(fs.clone(), &manifest_root)
+            .await
+            .expect("init manifest");
         let file_ids = FileIdGenerator::default();
         let table_definition =
             DynMode::table_definition(&build_config, builder::DEFAULT_TABLE_NAME);
-        let manifest_table =
-            block_on(async { manifest.register_table(&file_ids, &table_definition).await })
-                .expect("register table")
-                .table_id;
+        let manifest_table = manifest
+            .register_table(&file_ids, &table_definition)
+            .await
+            .expect("register table")
+            .table_id;
 
         let (mode, mem) = DynMode::build(build_config)?;
         let mut db = DB::from_components(
@@ -1512,7 +1525,7 @@ mod tests {
             file_ids,
             Arc::clone(&executor),
         );
-        db.enable_wal(wal_cfg.clone()).expect("enable wal");
+        db.enable_wal(wal_cfg.clone()).await.expect("enable wal");
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -1526,7 +1539,9 @@ mod tests {
             .expect("ingest");
         drop(db);
 
-        let manifest = init_fs_manifest(fs.clone(), &manifest_root).expect("reopen manifest");
+        let manifest = init_fs_manifest(fs.clone(), &manifest_root)
+            .await
+            .expect("reopen manifest");
         let recover_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
         let mut recovered = DB::recover_with_wal_with_manifest(
             recover_config,
@@ -1538,7 +1553,7 @@ mod tests {
         )
         .await
         .expect("recover");
-        recovered.enable_wal(wal_cfg).expect("re-enable wal");
+        recovered.enable_wal(wal_cfg).await.expect("re-enable wal");
 
         assert_eq!(recovered.manifest_table_id(), manifest_table);
 
@@ -1654,7 +1669,7 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
         let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
         let handle = WalHandle::test_from_parts(
             sender,
@@ -1749,7 +1764,7 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
         let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
         let handle = WalHandle::test_from_parts(
             sender,
@@ -1851,7 +1866,7 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
         let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
         let handle = WalHandle::test_from_parts(
             sender,
@@ -1985,7 +2000,7 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let mut db: DB<DynMode, TokioExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
         let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
         let handle = WalHandle::test_from_parts(
             sender,
@@ -2016,8 +2031,8 @@ mod tests {
 
         ingest_future.await.expect("ingest complete");
     }
-    #[test]
-    fn dynamic_new_from_metadata_field_marker() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_new_from_metadata_field_marker() {
         use std::collections::HashMap;
         // Schema: mark id with field-level metadata tonbo.key = true
         let mut fm = HashMap::new();
@@ -2026,8 +2041,9 @@ mod tests {
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata key config");
-        let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::new(BlockingExecutor)).expect("metadata key");
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+            .await
+            .expect("metadata key");
 
         // Build one batch and insert to ensure extractor wired
         let rows = vec![
@@ -2035,12 +2051,12 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
-        block_on(db.ingest(batch)).expect("insert via metadata");
+        db.ingest(batch).await.expect("insert via metadata");
         assert_eq!(db.num_immutable_segments(), 0);
     }
 
-    #[test]
-    fn dynamic_new_from_metadata_schema_level() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_new_from_metadata_schema_level() {
         use std::collections::HashMap;
         let f_id = Field::new("id", DataType::Utf8, false);
         let f_v = Field::new("v", DataType::Int32, false);
@@ -2048,15 +2064,16 @@ mod tests {
         sm.insert("tonbo.keys".to_string(), "id".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]).with_metadata(sm));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("schema metadata config");
-        let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::new(BlockingExecutor)).expect("schema metadata key");
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+            .await
+            .expect("schema metadata key");
 
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("x".into())), Some(DynCell::I32(1))]),
             DynRow(vec![Some(DynCell::Str("y".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
-        block_on(db.ingest(batch)).expect("insert via metadata");
+        db.ingest(batch).await.expect("insert via metadata");
         assert_eq!(db.num_immutable_segments(), 0);
     }
 
@@ -2081,15 +2098,16 @@ mod tests {
         assert!(DynModeConfig::from_metadata(schema_missing).is_err());
     }
 
-    #[test]
-    fn flush_without_immutables_errors() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn flush_without_immutables_errors() {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name config");
         let executor = Arc::new(BlockingExecutor);
-        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, executor).expect("db init");
+        let mut db: DB<DynMode, BlockingExecutor> =
+            DB::new(config, executor).await.expect("db init");
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
         let sstable_cfg = Arc::new(SsTableConfig::new(
@@ -2099,13 +2117,15 @@ mod tests {
         ));
         let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
 
-        let result = block_on(db.flush_immutables_with_descriptor(sstable_cfg, descriptor.clone()));
+        let result = db
+            .flush_immutables_with_descriptor(sstable_cfg, descriptor.clone())
+            .await;
         assert!(matches!(result, Err(SsTableError::NoImmutableSegments)));
         assert_eq!(db.num_immutable_segments(), 0);
     }
 
-    #[test]
-    fn flush_publishes_manifest_version() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_publishes_manifest_version() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -2115,7 +2135,7 @@ mod tests {
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::clone(&executor)).expect("db");
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let rows = vec![
@@ -2123,10 +2143,7 @@ mod tests {
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        rt.block_on(async {
-            db.ingest(batch).await.expect("ingest triggers seal");
-        });
+        db.ingest(batch).await.expect("ingest triggers seal");
         assert_eq!(db.num_immutable_segments(), 1);
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
@@ -2137,16 +2154,16 @@ mod tests {
         ));
         let descriptor = SsTableDescriptor::new(SsTableId::new(7), 0);
 
-        let table = rt
-            .block_on(async {
-                db.flush_immutables_with_descriptor(sstable_cfg, descriptor.clone())
-                    .await
-            })
+        let table = db
+            .flush_immutables_with_descriptor(sstable_cfg, descriptor.clone())
+            .await
             .expect("flush succeeds");
         assert_eq!(db.num_immutable_segments(), 0);
 
-        let snapshot = rt
-            .block_on(async { db.manifest.snapshot_latest(db.manifest_table).await })
+        let snapshot = db
+            .manifest
+            .snapshot_latest(db.manifest_table)
+            .await
             .expect("manifest snapshot");
         assert_eq!(
             snapshot.head.last_manifest_txn,
@@ -2188,7 +2205,7 @@ mod tests {
             .expect("schema builder");
         let schema = Arc::clone(&config.schema);
         let executor = Arc::new(TokioExecutor::default());
-        let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor))?;
+        let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
@@ -2239,7 +2256,7 @@ mod tests {
             .build()
             .expect("schema builder");
         let executor = Arc::new(TokioExecutor::default());
-        let db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor))?;
+        let db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
         let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig::default());
         let plan = db.plan_compaction_task(&planner).await?;
         assert!(plan.is_none());
@@ -2261,7 +2278,8 @@ mod tests {
             .unwrap_or("wal-gc-smoke");
         let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
             .in_memory(namespace.to_string())
-            .build_with_executor(Arc::clone(&executor))?;
+            .build_with_executor(Arc::clone(&executor))
+            .await?;
 
         let wal_local_fs = Arc::new(LocalFs {});
         let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
@@ -2282,7 +2300,7 @@ mod tests {
         wal_cfg.flush_interval = Duration::from_millis(1);
         wal_cfg.sync = WalSyncPolicy::Disabled;
 
-        db.enable_wal(wal_cfg.clone())?;
+        db.enable_wal(wal_cfg.clone()).await?;
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let sst_dir = temp_root.join("sst");
@@ -2309,6 +2327,7 @@ mod tests {
             .await?;
         let floor_after_first = db
             .manifest_wal_floor()
+            .await
             .map(|ref_| ref_.seq())
             .expect("manifest floor after first flush");
         let first_prune_view = wal_segment_paths(&wal_dir);
@@ -2335,6 +2354,7 @@ mod tests {
             .await?;
         let floor_after_second = db
             .manifest_wal_floor()
+            .await
             .map(|ref_| ref_.seq())
             .expect("manifest floor after second flush");
         assert!(
@@ -2393,7 +2413,8 @@ mod tests {
             .unwrap_or("wal-gc-dry-run");
         let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
             .in_memory(namespace.to_string())
-            .build_with_executor(Arc::clone(&executor))?;
+            .build_with_executor(Arc::clone(&executor))
+            .await?;
 
         let wal_local_fs = Arc::new(LocalFs {});
         let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
@@ -2409,7 +2430,7 @@ mod tests {
         wal_cfg.segment_max_bytes = 1;
         wal_cfg.prune_dry_run = true;
 
-        db.enable_wal(wal_cfg.clone())?;
+        db.enable_wal(wal_cfg.clone()).await?;
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let sst_dir = temp_root.join("sst");
@@ -2483,7 +2504,8 @@ mod tests {
             .unwrap_or("wal-manifest-metadata");
         let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
             .in_memory(namespace.to_string())
-            .build_with_executor(Arc::clone(&executor))?;
+            .build_with_executor(Arc::clone(&executor))
+            .await?;
 
         let wal_local_fs = Arc::new(LocalFs {});
         let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
@@ -2500,7 +2522,7 @@ mod tests {
         wal_cfg.flush_interval = Duration::from_millis(1);
         wal_cfg.sync = WalSyncPolicy::Disabled;
 
-        db.enable_wal(wal_cfg.clone())?;
+        db.enable_wal(wal_cfg.clone()).await?;
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         let rows = vec![
@@ -2559,8 +2581,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn dynamic_composite_from_field_ordinals_and_scan() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_composite_from_field_ordinals_and_scan() {
         use std::collections::HashMap;
         // Fields: id (Utf8, ord 1), ts (Int64, ord 2), v (Int32)
         let mut m1 = HashMap::new();
@@ -2572,8 +2594,9 @@ mod tests {
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-        let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::new(BlockingExecutor)).expect("composite field metadata");
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+            .await
+            .expect("composite field metadata");
 
         let rows = vec![
             DynRow(vec![
@@ -2593,7 +2616,7 @@ mod tests {
             ]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
-        block_on(db.ingest(batch)).expect("insert batch");
+        db.ingest(batch).await.expect("insert batch");
 
         use std::ops::Bound as B;
         let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(5i64)]);
@@ -2619,8 +2642,8 @@ mod tests {
         assert_eq!(got, vec![("a".to_string(), 5), ("a".to_string(), 10)]);
     }
 
-    #[test]
-    fn dynamic_composite_from_schema_list_and_scan() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn dynamic_composite_from_schema_list_and_scan() {
         use std::collections::HashMap;
         let f_id = Field::new("id", DataType::Utf8, false);
         let f_ts = Field::new("ts", DataType::Int64, false);
@@ -2629,8 +2652,9 @@ mod tests {
         sm.insert("tonbo.keys".to_string(), "[\"id\", \"ts\"]".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]).with_metadata(sm));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-        let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, Arc::new(BlockingExecutor)).expect("composite schema metadata");
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+            .await
+            .expect("composite schema metadata");
 
         let rows = vec![
             DynRow(vec![
@@ -2650,7 +2674,7 @@ mod tests {
             ]),
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
-        block_on(db.ingest(batch)).expect("insert batch");
+        db.ingest(batch).await.expect("insert batch");
 
         use std::ops::Bound as B;
         let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(1i64)]);
@@ -2676,14 +2700,9 @@ mod tests {
         assert_eq!(got, vec![("a".to_string(), 5), ("a".to_string(), 10)]);
     }
 
-    #[test]
-    fn recover_replays_commit_timestamps_and_advances_clock() {
-        use std::{
-            fs,
-            time::{Duration, SystemTime},
-        };
-
-        use tokio::runtime::Runtime;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recover_replays_commit_timestamps_and_advances_clock() {
+        use std::time::SystemTime;
 
         let wal_dir = std::env::temp_dir().join(format!(
             "tonbo-replay-test-{}",
@@ -2744,27 +2763,23 @@ mod tests {
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let table_definition = DynMode::table_definition(&config, builder::DEFAULT_TABLE_NAME);
-        let manifest = init_in_memory_manifest().expect("init manifest");
+        let manifest = init_in_memory_manifest().await.expect("init manifest");
         let file_ids = FileIdGenerator::default();
-        let manifest_table = block_on(async {
-            manifest
-                .register_table(&file_ids, &table_definition)
-                .await
-                .expect("register table")
-                .table_id
-        });
-        let runtime = Runtime::new().expect("tokio runtime");
-        let mut db: DB<DynMode, BlockingExecutor> = runtime
-            .block_on(DB::recover_with_wal_with_manifest(
-                config,
-                executor.clone(),
-                cfg,
-                manifest,
-                manifest_table,
-                file_ids,
-            ))
-            .expect("recover");
-        runtime.shutdown_timeout(Duration::from_secs(0));
+        let manifest_table = manifest
+            .register_table(&file_ids, &table_definition)
+            .await
+            .expect("register table")
+            .table_id;
+        let mut db: DB<DynMode, BlockingExecutor> = DB::recover_with_wal_with_manifest(
+            config,
+            executor.clone(),
+            cfg,
+            manifest,
+            manifest_table,
+            file_ids,
+        )
+        .await
+        .expect("recover");
 
         // Replayed version retains commit_ts 42 and tombstone state.
         let chain = db
@@ -2794,7 +2809,7 @@ mod tests {
             ])],
         )
         .expect("batch2");
-        block_on(db.ingest(new_batch)).expect("ingest new");
+        db.ingest(new_batch).await.expect("ingest new");
 
         let chain = db
             .mem

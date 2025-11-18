@@ -170,7 +170,7 @@ mod tests {
 
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
-    use futures::{StreamExt, executor::block_on};
+    use futures::StreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
@@ -183,9 +183,9 @@ mod tests {
         test_util::build_batch,
     };
 
-    #[test]
-    fn merge_stream_prefers_higher_priority_for_same_key() {
-        fn run_merge(order: Order) -> Vec<(String, i64, u64)> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_stream_prefers_higher_priority_for_same_key() {
+        async fn run_merge(order: Order) -> Vec<(String, i64, u64)> {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Utf8, false),
                 Field::new("v", DataType::Int64, true),
@@ -233,41 +233,35 @@ mod tests {
                 ScanStream::<'_, RecordBatch>::from(mutable_scan),
             ];
 
-            let mut merge = block_on(MergeStream::from_vec(
-                streams,
-                Timestamp::MAX,
-                None,
-                Some(order),
-            ))
-            .expect("merge built");
+            let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(order))
+                .await
+                .expect("merge built");
 
-            block_on(async move {
-                let mut rows = Vec::new();
-                while let Some(entry) = merge.next().await {
-                    let entry = entry.expect("entry ok");
-                    let (key, ts, row) = match entry {
-                        StreamEntry::MemTable((key_ts, row)) => {
-                            (key_ts.key().to_owned(), key_ts.timestamp(), row)
-                        }
-                        StreamEntry::Sstable((key_ts, row)) => {
-                            (key_ts.key().to_owned(), key_ts.timestamp(), row)
-                        }
-                    };
-                    let key_str = key.as_utf8().expect("utf8 key").to_string();
-                    let value = row.into_owned().expect("row owned").0[1]
-                        .as_ref()
-                        .and_then(|cell| match cell {
-                            DynCell::I64(v) => Some(*v),
-                            _ => None,
-                        })
-                        .expect("int value");
-                    rows.push((key_str, value, ts.get()));
-                }
-                rows
-            })
+            let mut rows = Vec::new();
+            while let Some(entry) = merge.next().await {
+                let entry = entry.expect("entry ok");
+                let (key, ts, row) = match entry {
+                    StreamEntry::MemTable((key_ts, row)) => {
+                        (key_ts.key().to_owned(), key_ts.timestamp(), row)
+                    }
+                    StreamEntry::Sstable((key_ts, row)) => {
+                        (key_ts.key().to_owned(), key_ts.timestamp(), row)
+                    }
+                };
+                let key_str = key.as_utf8().expect("utf8 key").to_string();
+                let value = row.into_owned().expect("row owned").0[1]
+                    .as_ref()
+                    .and_then(|cell| match cell {
+                        DynCell::I64(v) => Some(*v),
+                        _ => None,
+                    })
+                    .expect("int value");
+                rows.push((key_str, value, ts.get()));
+            }
+            rows
         }
 
-        let asc = run_merge(Order::Asc);
+        let asc = run_merge(Order::Asc).await;
         assert_eq!(
             asc,
             vec![

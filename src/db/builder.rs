@@ -1,4 +1,4 @@
-use std::{env, fs, future::Future, io::Write, path::Path as StdPath, sync::Arc, time::Duration};
+use std::{env, fs, io::Write, path::Path as StdPath, sync::Arc, time::Duration};
 
 use fusio::{
     DynFs,
@@ -9,10 +9,6 @@ use fusio::{
     path::{Path, PathPart},
 };
 use thiserror::Error;
-use tokio::{
-    runtime::{Handle, Runtime},
-    task,
-};
 
 use super::{DB, Mode};
 use crate::{
@@ -844,22 +840,10 @@ fn build_s3_backend(spec: S3Spec) -> Result<StorageBackend, DbBuildError> {
     })
 }
 
-fn wal_segments_exist(cfg: &RuntimeWalConfig) -> Result<bool, DbBuildError> {
+async fn wal_segments_exist(cfg: &RuntimeWalConfig) -> Result<bool, DbBuildError> {
     let storage = WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
-    let segments = block_in_tokio(storage.list_segments())?;
+    let segments = storage.list_segments().await?;
     Ok(!segments.is_empty())
-}
-
-fn block_in_tokio<F, T>(future: F) -> T
-where
-    F: Future<Output = T>,
-{
-    match Handle::try_current() {
-        Ok(handle) => task::block_in_place(|| handle.block_on(future)),
-        Err(_) => Runtime::new()
-            .expect("tokio runtime for db builder")
-            .block_on(future),
-    }
 }
 
 struct ManifestBootstrap<'a> {
@@ -871,18 +855,21 @@ impl<'a> ManifestBootstrap<'a> {
         Self { layout }
     }
 
-    fn init_manifest(&self) -> Result<TonboManifest, DbBuildError> {
+    async fn init_manifest(&self) -> Result<TonboManifest, DbBuildError> {
         let backend = self.layout.backend();
         match backend.kind() {
             StorageBackendKind::InMemory { fs } => {
                 init_fs_manifest(Arc::as_ref(fs).clone(), backend.root())
+                    .await
                     .map_err(DbBuildError::Manifest)
             }
-            StorageBackendKind::Disk { fs } => {
-                init_fs_manifest(*Arc::as_ref(fs), backend.root()).map_err(DbBuildError::Manifest)
-            }
+            StorageBackendKind::Disk { fs } => init_fs_manifest(*Arc::as_ref(fs), backend.root())
+                .await
+                .map_err(DbBuildError::Manifest),
             StorageBackendKind::ObjectStore(ObjectStoreBackend::S3 { fs }) => {
-                init_fs_manifest(fs.clone(), backend.root()).map_err(DbBuildError::Manifest)
+                init_fs_manifest(fs.clone(), backend.root())
+                    .await
+                    .map_err(DbBuildError::Manifest)
             }
         }
     }
@@ -948,22 +935,22 @@ where
     S: StorageState,
 {
     /// Materialise a [`DB`] using the accumulated builder state.
-    pub fn build(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
+    pub async fn build(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
         let executor = Arc::new(TokioExecutor::default());
-        self.build_with_executor(executor)
+        self.build_with_executor(executor).await
     }
 
     /// Materialise a [`DB`] using a caller-provided executor implementation.
-    pub fn build_with_executor<E>(self, executor: Arc<E>) -> Result<DB<M, E>, DbBuildError>
+    pub async fn build_with_executor<E>(self, executor: Arc<E>) -> Result<DB<M, E>, DbBuildError>
     where
         E: Executor + Timer + Send + Sync + 'static,
     {
         self.state.prepare_layout()?;
         let layout = StorageLayout::new(self.state.storage_spec())?;
-        self.build_with_layout(executor, layout)
+        self.build_with_layout(executor, layout).await
     }
 
-    fn build_with_layout<E>(
+    async fn build_with_layout<E>(
         self,
         executor: Arc<E>,
         layout: StorageLayout,
@@ -981,10 +968,11 @@ where
         let table_definition = M::table_definition(&self.mode_config, &table_name);
 
         let (mode, mem) = M::build(self.mode_config).map_err(DbBuildError::Mode)?;
-        let manifest = manifest_init.init_manifest()?;
-        let table_meta =
-            block_in_tokio(async { manifest.register_table(&file_ids, &table_definition).await })
-                .map_err(DbBuildError::Manifest)?;
+        let manifest = manifest_init.init_manifest().await?;
+        let table_meta = manifest
+            .register_table(&file_ids, &table_definition)
+            .await
+            .map_err(DbBuildError::Manifest)?;
         let manifest_table = table_meta.table_id;
 
         let mut wal_cfg = if S::CLASS.is_durable() {
@@ -1009,7 +997,7 @@ where
         );
 
         if let Some(cfg) = wal_cfg.take() {
-            db.enable_wal(cfg)?;
+            db.enable_wal(cfg).await?;
         }
 
         Ok(db)
@@ -1042,14 +1030,15 @@ where
     /// #     mode::DynModeConfig,
     /// #     wal::WalSyncPolicy,
     /// # };
-    /// # fn build(config: DynModeConfig) -> Result<(), DbBuildError> {
+    /// # async fn build(config: DynModeConfig) -> Result<(), DbBuildError> {
     /// let overrides = WalConfig::default()
     ///     .segment_max_bytes(8 * 1024 * 1024)
     ///     .sync_policy(WalSyncPolicy::Always);
-    /// let db = DB::<DynMode, TokioExecutor>::builder(config)
+    /// let _db = DB::<DynMode, TokioExecutor>::builder(config)
     ///     .on_disk("/data/tonbo".to_string())
     ///     .wal_config(overrides)
-    ///     .build()?;
+    ///     .build()
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1088,13 +1077,13 @@ where
     }
 
     /// Attempt to recover from WAL state if present, otherwise build a fresh durable DB.
-    pub fn recover_or_init(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
+    pub async fn recover_or_init(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
         let executor = Arc::new(TokioExecutor::default());
-        self.recover_or_init_with_executor(executor)
+        self.recover_or_init_with_executor(executor).await
     }
 
     /// Attempt to recover from WAL state using a caller-provided executor.
-    pub fn recover_or_init_with_executor<E>(
+    pub async fn recover_or_init_with_executor<E>(
         self,
         executor: Arc<E>,
     ) -> Result<DB<M, E>, DbBuildError>
@@ -1109,7 +1098,7 @@ where
             overrides.apply(&mut wal_cfg);
         }
 
-        if wal_segments_exist(&wal_cfg)? {
+        if wal_segments_exist(&wal_cfg).await? {
             let manifest_init = ManifestBootstrap::new(&layout);
             let table_name = self
                 .state
@@ -1118,25 +1107,26 @@ where
                 .unwrap_or_else(|| DEFAULT_TABLE_NAME.to_string());
             let table_definition = M::table_definition(&self.mode_config, &table_name);
             let file_ids = FileIdGenerator::default();
-            let manifest = manifest_init.init_manifest()?;
-            let table_meta = block_in_tokio(async {
-                manifest.register_table(&file_ids, &table_definition).await
-            })
-            .map_err(DbBuildError::Manifest)?;
+            let manifest = manifest_init.init_manifest().await?;
+            let table_meta = manifest
+                .register_table(&file_ids, &table_definition)
+                .await
+                .map_err(DbBuildError::Manifest)?;
             let manifest_table = table_meta.table_id;
-            let mut db = block_in_tokio(DB::recover_with_wal_with_manifest(
+            let mut db = DB::recover_with_wal_with_manifest(
                 self.mode_config,
                 Arc::clone(&executor),
                 wal_cfg.clone(),
                 manifest,
                 manifest_table,
                 file_ids,
-            ))
+            )
+            .await
             .map_err(DbBuildError::Mode)?;
-            db.enable_wal(wal_cfg)?;
+            db.enable_wal(wal_cfg).await?;
             Ok(db)
         } else {
-            self.build_with_layout(executor, layout)
+            self.build_with_layout(executor, layout).await
         }
     }
 }

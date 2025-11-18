@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 use fusio::{
     fs::{Fs, FsCas},
@@ -9,13 +9,7 @@ use fusio_manifest::{
     BackoffPolicy, BlockingExecutor, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl,
     ManifestContext, SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
 };
-#[cfg(test)]
-use futures::executor::block_on;
 use futures::future::BoxFuture;
-use tokio::{
-    runtime::{Handle, Runtime},
-    task,
-};
 
 use super::{
     codec::{CatalogCodec, ManifestCodec, VersionCodec},
@@ -289,7 +283,7 @@ where
 
 /// Raw helper used by tests needing direct access to the concrete manifest.
 #[cfg(test)]
-pub(crate) fn init_in_memory_manifest_raw(
+pub(crate) async fn init_in_memory_manifest_raw(
     schema_version: u32,
     file_ids: &FileIdGenerator,
 ) -> ManifestResult<(InMemoryManifest, TableId)> {
@@ -301,30 +295,28 @@ pub(crate) fn init_in_memory_manifest_raw(
     let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
     let manifest = Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx);
     let table_id = TableId::new(file_ids);
-    block_on(async {
-        manifest
-            .init_table_head(
+    manifest
+        .init_table_head(
+            table_id,
+            TableHead {
                 table_id,
-                TableHead {
-                    table_id,
-                    schema_version,
-                    wal_floor: None,
-                    last_manifest_txn: None,
-                },
-            )
-            .await
-    })?;
+                schema_version,
+                wal_floor: None,
+                last_manifest_txn: None,
+            },
+        )
+        .await?;
     Ok((manifest, table_id))
 }
 
 /// Construct an in-memory manifest and wrap it in the dynamic handle.
-pub(crate) fn init_in_memory_manifest() -> ManifestResult<TonboManifest> {
+pub(crate) async fn init_in_memory_manifest() -> ManifestResult<TonboManifest> {
     let root = Path::default();
-    init_fs_manifest(InMemoryFs::new(), &root)
+    init_fs_manifest(InMemoryFs::new(), &root).await
 }
 
 /// Construct a manifest rooted under `root/manifest` using the provided filesystem backend.
-pub(crate) fn init_fs_manifest<FS>(fs: FS, root: &Path) -> ManifestResult<TonboManifest>
+pub(crate) async fn init_fs_manifest<FS>(fs: FS, root: &Path) -> ManifestResult<TonboManifest>
 where
     FS: Fs + FsCas + Clone + Send + Sync + 'static,
     HeadStoreImpl<FS>: fusio_manifest::HeadStore,
@@ -336,8 +328,8 @@ where
     let version_root = append_segment(&manifest_root, "version");
     let catalog_root = append_segment(&manifest_root, "catalog");
 
-    ensure_manifest_dirs::<FS>(&version_root)?;
-    ensure_manifest_dirs::<FS>(&catalog_root)?;
+    ensure_manifest_dirs::<FS>(&version_root).await?;
+    ensure_manifest_dirs::<FS>(&catalog_root).await?;
 
     let version_manifest = open_manifest_instance::<FS, VersionCodec>(fs.clone(), &version_root);
     let catalog_manifest = open_manifest_instance::<FS, CatalogCodec>(fs, &catalog_root);
@@ -345,27 +337,29 @@ where
         wrap_version_manifest(version_manifest),
         wrap_catalog_manifest(catalog_manifest),
     );
-    run_in_tokio(async { tonbo.init_catalog().await })?;
+    tonbo.init_catalog().await?;
     Ok(tonbo)
 }
 
-fn ensure_dir_path<FS>(path: &Path) -> ManifestResult<()>
+async fn ensure_dir_path<FS>(path: &Path) -> ManifestResult<()>
 where
     FS: Fs,
 {
-    run_in_tokio(async { FS::create_dir_all(path).await })
+    FS::create_dir_all(path)
+        .await
         .map_err(|err| ManifestError::Backend(FusioManifestError::Io(err)))?;
     Ok(())
 }
 
-fn ensure_manifest_dirs<FS>(base: &Path) -> ManifestResult<()>
+async fn ensure_manifest_dirs<FS>(base: &Path) -> ManifestResult<()>
 where
     FS: Fs,
 {
-    ensure_dir_path::<FS>(base)?;
-    ensure_dir_path::<FS>(&base.child(PathPart::parse("segments").expect("segments part")))?;
-    ensure_dir_path::<FS>(&base.child(PathPart::parse("checkpoints").expect("checkpoints part")))?;
-    ensure_dir_path::<FS>(&base.child(PathPart::parse("leases").expect("leases part")))?;
+    ensure_dir_path::<FS>(base).await?;
+    ensure_dir_path::<FS>(&base.child(PathPart::parse("segments").expect("segments part"))).await?;
+    ensure_dir_path::<FS>(&base.child(PathPart::parse("checkpoints").expect("checkpoints part")))
+        .await?;
+    ensure_dir_path::<FS>(&base.child(PathPart::parse("leases").expect("leases part"))).await?;
     Ok(())
 }
 
@@ -416,18 +410,6 @@ fn append_segment(base: &Path, segment: &str) -> Path {
     }
 }
 
-fn run_in_tokio<F, T>(future: F) -> T
-where
-    F: Future<Output = T>,
-{
-    match Handle::try_current() {
-        Ok(handle) => task::block_in_place(|| handle.block_on(future)),
-        Err(_) => Runtime::new()
-            .expect("tokio runtime for manifest init")
-            .block_on(future),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -442,11 +424,13 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn init_disk_manifest_smoke() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn init_disk_manifest_smoke() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = FusioPath::from_filesystem_path(dir.path()).expect("fs path");
-        init_fs_manifest(LocalFs {}, &path).expect("disk manifest");
+        init_fs_manifest(LocalFs {}, &path)
+            .await
+            .expect("disk manifest");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -455,7 +439,9 @@ mod tests {
         let root = FusioPath::default();
         let manifest_root = append_segment(&root, "manifest");
         let version_root = append_segment(&manifest_root, "version");
-        ensure_manifest_dirs::<InMemoryFs>(&version_root).expect("dirs created");
+        ensure_manifest_dirs::<InMemoryFs>(&version_root)
+            .await
+            .expect("dirs created");
 
         let lease_store = LeaseStoreImpl::new(
             fs.clone(),

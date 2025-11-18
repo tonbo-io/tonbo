@@ -1240,8 +1240,8 @@ mod tests {
         (storage, cfg)
     }
 
-    #[test]
-    fn state_json_tracks_commit_progress() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn state_json_tracks_commit_progress() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_writer: Arc<dyn DynFs> = backend.clone();
         let fs_cas: Arc<dyn FsCas> = backend.clone();
@@ -1322,7 +1322,8 @@ mod tests {
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
 
-        let state_handle = futures::executor::block_on(WalStateHandle::load(state_store, &root))
+        let state_handle = WalStateHandle::load(state_store, &root)
+            .await
             .expect("load state");
         let state = state_handle.state().clone();
         assert_eq!(state.last_frame_seq, Some(frame::INITIAL_FRAME_SEQ + 1));
@@ -1338,8 +1339,8 @@ mod tests {
         assert_eq!(active.last_frame, frame::INITIAL_FRAME_SEQ + 1);
     }
 
-    #[test]
-    fn state_tracks_sealed_segment_metadata() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn state_tracks_sealed_segment_metadata() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_writer: Arc<dyn DynFs> = backend.clone();
         let fs_cas: Arc<dyn FsCas> = backend.clone();
@@ -1426,7 +1427,8 @@ mod tests {
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
 
-        let state_handle = futures::executor::block_on(WalStateHandle::load(state_store, &root))
+        let state_handle = WalStateHandle::load(state_store, &root)
+            .await
             .expect("load state");
         let state = state_handle.state().clone();
         assert!(state.active_segment.is_none());
@@ -1564,8 +1566,8 @@ mod tests {
         assert_eq!(active.last_frame, frame::INITIAL_FRAME_SEQ + 3);
     }
 
-    #[test]
-    fn submit_and_drain_on_shutdown() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn submit_and_drain_on_shutdown() {
         let (storage, cfg) = in_memory_env(4, WalSyncPolicy::Always, "wal-test");
 
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
@@ -1631,13 +1633,13 @@ mod tests {
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
 
-        let metrics_guard = futures::executor::block_on(metrics_reader.read());
+        let metrics_guard = metrics_reader.read().await;
         assert_eq!(metrics_guard.queue_depth, 0);
         assert!(metrics_guard.bytes_written > 0);
     }
 
-    #[test]
-    fn queue_backpressure_and_metrics() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_backpressure_and_metrics() {
         let (storage, cfg) = in_memory_env(1, WalSyncPolicy::Always, "wal-backpressure");
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
@@ -1727,7 +1729,7 @@ mod tests {
             .expect("ack2 ok");
         assert_eq!(ack2.last_seq, frame::INITIAL_FRAME_SEQ + 3);
 
-        let metrics_guard = futures::executor::block_on(metrics_reader.read());
+        let metrics_guard = metrics_reader.read().await;
         assert_eq!(metrics_guard.queue_depth, 0);
         assert!(metrics_guard.bytes_written > 0);
         assert!(metrics_guard.sync_operations >= 2);
@@ -1736,8 +1738,8 @@ mod tests {
         assert!(writer_result.is_ok());
     }
 
-    #[test]
-    fn interval_time_policy_triggers_sync_without_additional_writes() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn interval_time_policy_triggers_sync_without_additional_writes() {
         let (storage, cfg) = in_memory_env(
             2,
             WalSyncPolicy::IntervalTime(Duration::from_millis(0)),
@@ -1805,14 +1807,14 @@ mod tests {
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
 
-        let metrics_guard = futures::executor::block_on(metrics_reader.read());
+        let metrics_guard = metrics_reader.read().await;
         assert_eq!(metrics_guard.queue_depth, 0);
         assert!(metrics_guard.bytes_written > 0);
         assert!(metrics_guard.sync_operations >= 1);
     }
 
-    #[test]
-    fn interval_bytes_policy_honors_threshold() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn interval_bytes_policy_honors_threshold() {
         let (storage, cfg) =
             in_memory_env(4, WalSyncPolicy::IntervalBytes(1), "wal-interval-bytes");
         let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
@@ -1873,7 +1875,7 @@ mod tests {
             .expect("ack ok");
         assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
-        let metrics_guard = futures::executor::block_on(metrics_reader.read());
+        let metrics_guard = metrics_reader.read().await;
         assert_eq!(metrics_guard.queue_depth, 0);
         assert!(metrics_guard.bytes_written > 0);
         assert!(metrics_guard.sync_operations >= 1);
@@ -1882,8 +1884,8 @@ mod tests {
         assert!(writer_result.is_ok());
     }
 
-    #[test]
-    fn manual_rotation_creates_new_segment() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn manual_rotation_creates_new_segment() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_reader: Arc<dyn DynFs> = backend.clone();
         let fs_writer: Arc<dyn DynFs> = backend.clone();
@@ -1985,7 +1987,9 @@ mod tests {
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
 
-        let segments = futures::executor::block_on(storage_reader.list_segments())
+        let segments = storage_reader
+            .list_segments()
+            .await
             .expect("list segments after manual rotation");
         assert!(
             segments.len() >= 2,
@@ -1998,17 +2002,17 @@ mod tests {
         );
         assert_eq!(segments[1].seq, 1);
 
-        let state_handle =
-            futures::executor::block_on(WalStateHandle::load(state_store, storage_reader.root()))
-                .expect("load state after rotation");
+        let state_handle = WalStateHandle::load(state_store, storage_reader.root())
+            .await
+            .expect("load state after rotation");
         let state = state_handle.state();
         assert_eq!(state.last_segment_seq, Some(0));
         assert_eq!(state.last_frame_seq, Some(frame::INITIAL_FRAME_SEQ + 1));
         assert_eq!(state.last_commit_ts, Some(55));
     }
 
-    #[test]
-    fn time_based_rotation_seals_segment() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn time_based_rotation_seals_segment() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_reader: Arc<dyn DynFs> = backend.clone();
         let fs_writer: Arc<dyn DynFs> = backend.clone();
@@ -2087,7 +2091,9 @@ mod tests {
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
 
-        let segments = futures::executor::block_on(storage_reader.list_segments())
+        let segments = storage_reader
+            .list_segments()
+            .await
             .expect("list segments after time rotation");
         assert!(
             segments.len() >= 2,
@@ -2099,8 +2105,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn segment_rotation_enforces_retention() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn segment_rotation_enforces_retention() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_reader: Arc<dyn DynFs> = backend.clone();
         let fs_writer: Arc<dyn DynFs> = backend.clone();
@@ -2189,7 +2195,9 @@ mod tests {
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
 
-        let segments = futures::executor::block_on(storage_reader.list_segments())
+        let segments = storage_reader
+            .list_segments()
+            .await
             .expect("list segments after rotation");
         assert_eq!(
             segments.len(),

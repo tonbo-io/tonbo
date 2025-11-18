@@ -183,8 +183,8 @@ mod tests {
         },
     };
 
-    #[test]
-    fn replayer_returns_logged_events() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn replayer_returns_logged_events() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_dyn: Arc<dyn DynFs> = backend.clone();
         let fs_cas: Arc<dyn FsCas> = backend.clone();
@@ -212,23 +212,21 @@ mod tests {
         let storage_clone = storage.clone();
         let wal_root_for_write = wal_root.clone();
         let bytes_for_write = bytes;
-        futures::executor::block_on(async move {
-            storage_clone
-                .ensure_dir(&wal_root_for_write)
-                .await
-                .expect("ensure dir");
-            let mut segment = storage_clone.open_segment(1).await.expect("open segment");
-            let (write_res, _buf) = segment.file_mut().write_all(bytes_for_write).await;
-            write_res.expect("write wal");
-            segment.file_mut().flush().await.expect("flush");
-        });
+        storage_clone
+            .ensure_dir(&wal_root_for_write)
+            .await
+            .expect("ensure dir");
+        let mut segment = storage_clone.open_segment(1).await.expect("open segment");
+        let (write_res, _buf) = segment.file_mut().write_all(bytes_for_write).await;
+        write_res.expect("write wal");
+        segment.file_mut().flush().await.expect("flush");
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
         cfg.segment_backend = fs_dyn;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
-        let events = futures::executor::block_on(replayer.scan()).expect("scan");
+        let events = replayer.scan().await.expect("scan");
         assert_eq!(events.len(), 2);
 
         match &events[0] {
@@ -262,60 +260,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn replayer_skips_events_below_floor() {
-        futures::executor::block_on(async {
-            let backend = Arc::new(InMemoryFs::new());
-            let fs_dyn: Arc<dyn DynFs> = backend.clone();
-            let wal_root = FusioPath::parse("wal-floor").expect("wal path");
-            let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
+    #[tokio::test(flavor = "current_thread")]
+    async fn replayer_skips_events_below_floor() {
+        let backend = Arc::new(InMemoryFs::new());
+        let fs_dyn: Arc<dyn DynFs> = backend.clone();
+        let wal_root = FusioPath::parse("wal-floor").expect("wal path");
+        let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
 
-            let mut next_seq = INITIAL_FRAME_SEQ;
-            let batch_a = sample_batch_with_label("a", 1);
-            write_autocommit_segment(&storage, 0, batch_a, 10, Timestamp::new(100), &mut next_seq)
-                .await;
-
-            let batch_b = sample_batch_with_label("b", 2);
-            let (floor_first_seq, floor_last_seq) = write_autocommit_segment(
-                &storage,
-                1,
-                batch_b,
-                11,
-                Timestamp::new(200),
-                &mut next_seq,
-            )
+        let mut next_seq = INITIAL_FRAME_SEQ;
+        let batch_a = sample_batch_with_label("a", 1);
+        write_autocommit_segment(&storage, 0, batch_a, 10, Timestamp::new(100), &mut next_seq)
             .await;
 
-            let mut cfg = WalConfig::default();
-            cfg.dir = wal_root;
-            cfg.segment_backend = fs_dyn;
-            cfg.state_store = None;
+        let batch_b = sample_batch_with_label("b", 2);
+        let (floor_first_seq, floor_last_seq) =
+            write_autocommit_segment(&storage, 1, batch_b, 11, Timestamp::new(200), &mut next_seq)
+                .await;
 
-            let replayer = Replayer::new(cfg);
-            let floor =
-                WalSegmentRef::new(1, wal_segment_file_id(1), floor_first_seq, floor_last_seq);
+        let mut cfg = WalConfig::default();
+        cfg.dir = wal_root;
+        cfg.segment_backend = fs_dyn;
+        cfg.state_store = None;
 
-            let events = replayer.scan_with_floor(Some(&floor)).await.expect("scan");
-            assert_eq!(events.len(), 2, "only second segment survives the floor");
+        let replayer = Replayer::new(cfg);
+        let floor = WalSegmentRef::new(1, wal_segment_file_id(1), floor_first_seq, floor_last_seq);
 
-            match events[0] {
-                WalEvent::DynAppend { provisional_id, .. } => {
-                    assert_eq!(provisional_id, 11);
-                }
-                ref other => panic!("unexpected first event: {other:?}"),
+        let events = replayer.scan_with_floor(Some(&floor)).await.expect("scan");
+        assert_eq!(events.len(), 2, "only second segment survives the floor");
+
+        match events[0] {
+            WalEvent::DynAppend { provisional_id, .. } => {
+                assert_eq!(provisional_id, 11);
             }
+            ref other => panic!("unexpected first event: {other:?}"),
+        }
 
-            match events[1] {
-                WalEvent::TxnCommit { provisional_id, .. } => {
-                    assert_eq!(provisional_id, 11);
-                }
-                ref other => panic!("unexpected second event: {other:?}"),
+        match events[1] {
+            WalEvent::TxnCommit { provisional_id, .. } => {
+                assert_eq!(provisional_id, 11);
             }
-        });
+            ref other => panic!("unexpected second event: {other:?}"),
+        }
     }
 
-    #[test]
-    fn replayer_stops_after_truncated_tail() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn replayer_stops_after_truncated_tail() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_dyn: Arc<dyn DynFs> = backend.clone();
         let fs_cas: Arc<dyn FsCas> = backend.clone();
@@ -323,12 +312,10 @@ mod tests {
         let storage = WalStorage::new(Arc::clone(&fs_dyn), wal_root.clone());
         let storage_clone = storage.clone();
         let wal_root_for_dir = wal_root.clone();
-        futures::executor::block_on(async move {
-            storage_clone
-                .ensure_dir(&wal_root_for_dir)
-                .await
-                .expect("ensure dir");
-        });
+        storage_clone
+            .ensure_dir(&wal_root_for_dir)
+            .await
+            .expect("ensure dir");
 
         let schema = default_test_schema();
         let batch = RecordBatch::try_new(
@@ -350,21 +337,19 @@ mod tests {
         commit_bytes.truncate(commit_bytes.len() - 3);
 
         let storage_clone = storage.clone();
-        futures::executor::block_on(async move {
-            let mut segment = storage_clone.open_segment(5).await.expect("open segment");
-            let (res, _buf) = segment.file_mut().write_all(append_bytes).await;
-            res.expect("write append");
-            let (res_commit, _buf) = segment.file_mut().write_all(commit_bytes).await;
-            res_commit.expect("write truncated commit");
-            segment.file_mut().flush().await.expect("flush");
-        });
+        let mut segment = storage_clone.open_segment(5).await.expect("open segment");
+        let (res, _buf) = segment.file_mut().write_all(append_bytes).await;
+        res.expect("write append");
+        let (res_commit, _buf) = segment.file_mut().write_all(commit_bytes).await;
+        res_commit.expect("write truncated commit");
+        segment.file_mut().flush().await.expect("flush");
 
         let mut cfg = WalConfig::default();
         cfg.dir = wal_root;
         cfg.segment_backend = fs_dyn;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
         let replayer = Replayer::new(cfg);
-        let events = futures::executor::block_on(replayer.scan()).expect("scan succeeds");
+        let events = replayer.scan().await.expect("scan succeeds");
 
         assert_eq!(events.len(), 1, "commit frame should be ignored");
         match &events[0] {
@@ -511,8 +496,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn replayer_rejects_unimplemented_recovery_mode() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn replayer_rejects_unimplemented_recovery_mode() {
         let backend = Arc::new(InMemoryFs::new());
         let fs_dyn: Arc<dyn DynFs> = backend.clone();
         let fs_cas: Arc<dyn FsCas> = backend.clone();
@@ -525,7 +510,7 @@ mod tests {
         cfg.recovery = WalRecoveryMode::AbsoluteConsistency;
 
         let replayer = Replayer::new(cfg);
-        let err = futures::executor::block_on(replayer.scan()).expect_err("mode unimplemented");
+        let err = replayer.scan().await.expect_err("mode unimplemented");
         assert!(matches!(
             err,
             WalError::Unimplemented("wal recovery mode AbsoluteConsistency is not implemented")

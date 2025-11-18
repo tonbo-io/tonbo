@@ -550,7 +550,6 @@ mod tests {
     use arrow_array::UInt64Array;
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use fusio::executor::BlockingExecutor;
-    use futures::executor::block_on;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
@@ -559,7 +558,7 @@ mod tests {
         test_util::build_batch,
     };
 
-    fn make_db() -> (DB<DynMode, BlockingExecutor>, SchemaRef) {
+    async fn make_db() -> (DB<DynMode, BlockingExecutor>, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -568,20 +567,26 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let executor = Arc::new(BlockingExecutor);
-        let db = DB::new(config, executor).expect("db");
+        let db = DB::new(config, executor).await.expect("db");
         (db, schema)
     }
 
-    fn ingest_rows(db: &mut DB<DynMode, BlockingExecutor>, schema: &SchemaRef, rows: Vec<DynRow>) {
+    async fn ingest_rows(
+        db: &mut DB<DynMode, BlockingExecutor>,
+        schema: &SchemaRef,
+        rows: Vec<DynRow>,
+    ) {
         let tombstones = vec![false; rows.len()];
         let batch = build_batch(schema.clone(), rows).expect("batch");
-        block_on(db.ingest_with_tombstones(batch, tombstones)).expect("ingest");
+        db.ingest_with_tombstones(batch, tombstones)
+            .await
+            .expect("ingest");
     }
 
-    #[test]
-    fn upsert_batch_stages_rows() {
-        let (db, schema) = make_db();
-        let mut tx = db.begin_transaction().expect("tx");
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_batch_stages_rows() {
+        let (db, schema) = make_db().await;
+        let mut tx = db.begin_transaction().await.expect("tx");
 
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
@@ -601,9 +606,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn get_prefers_staged_rows() {
-        let (mut db, schema) = make_db();
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_prefers_staged_rows() {
+        let (mut db, schema) = make_db().await;
         ingest_rows(
             &mut db,
             &schema,
@@ -611,8 +616,9 @@ mod tests {
                 Some(DynCell::Str("k1".into())),
                 Some(DynCell::I32(10)),
             ])],
-        );
-        let mut tx = db.begin_transaction().expect("tx");
+        )
+        .await;
+        let mut tx = db.begin_transaction().await.expect("tx");
         tx.upsert(DynRow(vec![
             Some(DynCell::Str("k1".into())),
             Some(DynCell::I32(42)),
@@ -629,9 +635,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scan_merges_staged_and_deleted_rows() {
-        let (mut db, schema) = make_db();
+    #[tokio::test(flavor = "current_thread")]
+    async fn scan_merges_staged_and_deleted_rows() {
+        let (mut db, schema) = make_db().await;
         ingest_rows(
             &mut db,
             &schema,
@@ -639,8 +645,9 @@ mod tests {
                 DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
                 DynRow(vec![Some(DynCell::Str("k2".into())), Some(DynCell::I32(2))]),
             ],
-        );
-        let mut tx = db.begin_transaction().expect("tx");
+        )
+        .await;
+        let mut tx = db.begin_transaction().await.expect("tx");
         tx.upsert(DynRow(vec![
             Some(DynCell::Str("k1".into())),
             Some(DynCell::I32(11)),
@@ -670,9 +677,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn delete_hides_rows_from_reads() {
-        let (mut db, schema) = make_db();
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_hides_rows_from_reads() {
+        let (mut db, schema) = make_db().await;
         ingest_rows(
             &mut db,
             &schema,
@@ -680,8 +687,9 @@ mod tests {
                 Some(DynCell::Str("k_del".into())),
                 Some(DynCell::I32(9)),
             ])],
-        );
-        let mut tx = db.begin_transaction().expect("tx");
+        )
+        .await;
+        let mut tx = db.begin_transaction().await.expect("tx");
         tx.delete(KeyOwned::from("k_del")).expect("delete");
 
         assert!(
@@ -693,10 +701,10 @@ mod tests {
         assert!(tx.scan(&db, &ranges).expect("scan").is_empty());
     }
 
-    #[test]
-    fn build_delete_batch_writes_commit_ts() {
-        let (db, _schema) = make_db();
-        let tx = db.begin_transaction().expect("tx");
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_delete_batch_writes_commit_ts() {
+        let (db, _schema) = make_db().await;
+        let tx = db.begin_transaction().await.expect("tx");
         let key = KeyOwned::from("delete-me");
         let commit_ts = Timestamp::new(777);
         let batch = build_delete_batch(&tx.delete_schema, tx.key_components, vec![key], commit_ts)
@@ -711,10 +719,10 @@ mod tests {
         assert_eq!(commits.value(0), commit_ts.get());
     }
 
-    #[test]
-    fn delete_rejects_wrong_key_shape() {
-        let (db, _schema) = make_db();
-        let mut tx = db.begin_transaction().expect("tx");
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_rejects_wrong_key_shape() {
+        let (db, _schema) = make_db().await;
+        let mut tx = db.begin_transaction().await.expect("tx");
         let key = KeyOwned::tuple(vec![KeyOwned::from("k1"), KeyOwned::from("k2")]);
         let err = tx.delete(key).expect_err("delete should fail");
         match err {
@@ -726,9 +734,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn snapshot_reads_sealed_immutable_rows() {
-        let (mut db, schema) = make_db();
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_reads_sealed_immutable_rows() {
+        let (mut db, schema) = make_db().await;
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
         ingest_rows(
             &mut db,
@@ -737,10 +745,11 @@ mod tests {
                 Some(DynCell::Str("sealed".into())),
                 Some(DynCell::I32(1)),
             ])],
-        );
+        )
+        .await;
         assert!(db.num_immutable_segments() >= 1);
 
-        let tx = db.begin_transaction().expect("tx");
+        let tx = db.begin_transaction().await.expect("tx");
         let ranges = RangeSet::all();
         let rows = tx.scan(&db, &ranges).expect("scan immutables");
         assert_eq!(rows.len(), 1);
@@ -750,9 +759,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn commit_conflict_checks_immutables() {
-        let (mut db, schema) = make_db();
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_conflict_checks_immutables() {
+        let (mut db, schema) = make_db().await;
         db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
 
         ingest_rows(
@@ -762,8 +771,9 @@ mod tests {
                 Some(DynCell::Str("user".into())),
                 Some(DynCell::I32(1)),
             ])],
-        );
-        let mut tx = db.begin_transaction().expect("tx");
+        )
+        .await;
+        let mut tx = db.begin_transaction().await.expect("tx");
 
         ingest_rows(
             &mut db,
@@ -772,7 +782,8 @@ mod tests {
                 Some(DynCell::Str("user".into())),
                 Some(DynCell::I32(2)),
             ])],
-        );
+        )
+        .await;
 
         tx.upsert(DynRow(vec![
             Some(DynCell::Str("user".into())),
@@ -780,7 +791,7 @@ mod tests {
         ]))
         .expect("stage conflicting update");
 
-        let err = block_on(tx.commit(&mut db)).expect_err("conflict expected");
+        let err = tx.commit(&mut db).await.expect_err("conflict expected");
         match err {
             TransactionCommitError::WriteConflict(key) => {
                 assert_eq!(key, KeyOwned::from("user"));

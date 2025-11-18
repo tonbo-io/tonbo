@@ -60,7 +60,8 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())
         .create_dirs(true)
-        .recover_or_init_with_executor(Arc::clone(&executor))?;
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -85,7 +86,8 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
         DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())
             .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -138,7 +140,8 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())
         .create_dirs(true)
-        .recover_or_init_with_executor(Arc::clone(&executor))?;
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -158,7 +161,8 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
         DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())
             .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<((String, i64), i32)> = recovered
@@ -383,7 +387,8 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
         DB::<DynMode, TokioExecutor>::builder(mode_config)
             .on_disk(root_str.clone())
             .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -488,7 +493,8 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             .wal_config(
                 BuilderWalConfig::default().recovery_mode(WalRecoveryMode::TolerateCorruptedTail),
             )
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -589,7 +595,8 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
         DB::<DynMode, TokioExecutor>::builder(mode_config)
             .on_disk(root_str.clone())
             .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = recovered
@@ -619,7 +626,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
         .cloned()
         .expect("wal config available");
     recovered.disable_wal().await?;
-    recovered.enable_wal(runtime_cfg.clone())?;
+    recovered.enable_wal(runtime_cfg.clone()).await?;
     let rewrite_batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -642,7 +649,8 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
         DB::<DynMode, TokioExecutor>::builder(final_config)
             .on_disk(root_str.clone())
             .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let mut rows_after: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges, None)
@@ -756,7 +764,8 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
     let recovered: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())
         .create_dirs(true)
-        .recover_or_init_with_executor(Arc::clone(&executor))?;
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let rows: Vec<(String, i32)> = recovered
@@ -806,7 +815,8 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
         .wal_segment_bytes(1)
         .wal_flush_interval(Duration::from_millis(0))
         .wal_sync_policy(WalSyncPolicy::Always)
-        .recover_or_init_with_executor(Arc::clone(&executor))?;
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     for chunk in 0..3 {
         let ids = vec![
@@ -841,7 +851,8 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             .wal_segment_bytes(1)
             .wal_flush_interval(Duration::from_millis(0))
             .wal_sync_policy(WalSyncPolicy::Always)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let ranges = RangeSet::<KeyOwned>::all();
     let mut rows: Vec<(String, i32)> = recovered
@@ -880,7 +891,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
         .cloned()
         .expect("wal config available");
     recovered.disable_wal().await?;
-    recovered.enable_wal(runtime_cfg.clone())?;
+    recovered.enable_wal(runtime_cfg.clone()).await?;
     let extra_batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -906,7 +917,8 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             .wal_segment_bytes(1)
             .wal_flush_interval(Duration::from_millis(0))
             .wal_sync_policy(WalSyncPolicy::Always)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let mut rows_final: Vec<(String, i32)> = recovered_again
         .scan_mutable_rows(&ranges, None)
@@ -960,7 +972,8 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())
         .create_dirs(true)
-        .recover_or_init_with_executor(Arc::clone(&executor))?;
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let initial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -985,14 +998,15 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
         DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())
             .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))?;
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
 
     let runtime_cfg = recovered
         .wal_config()
         .cloned()
         .expect("wal config available");
     recovered.disable_wal().await?;
-    recovered.enable_wal(runtime_cfg.clone())?;
+    recovered.enable_wal(runtime_cfg.clone()).await?;
 
     let wal_handle = recovered.wal().cloned().expect("wal handle");
     let append_batch = RecordBatch::try_new(
