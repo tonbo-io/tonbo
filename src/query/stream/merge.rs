@@ -35,7 +35,6 @@ impl<'t, S> MergeStream<'t, S>
 where
     S: RecordBatchStorage,
 {
-    #[allow(dead_code)]
     pub(crate) async fn from_vec(
         mut streams: Vec<ScanStream<'t, S>>,
         ts: Timestamp,
@@ -80,7 +79,6 @@ where
         while let Some(Reverse(heap_entry)) = this.peeked.pop() {
             let stream_idx = heap_entry.stream_idx;
             let entry = heap_entry.entry;
-            let entry_is_tombstone = entry.is_tombstone();
             let next = ready!(Pin::new(&mut this.streams[stream_idx]).poll_next(cx)).transpose()?;
             if let Some(next) = next {
                 let priority = this.stream_priority[stream_idx];
@@ -102,10 +100,11 @@ where
             if duplicate_key {
                 continue;
             }
-            if !entry_is_tombstone && let Some(limit) = this.limit.as_ref() {
-                this.limit.replace(limit.saturating_sub(1));
-            }
             if let Some(prev) = this.buf.replace(entry) {
+                if prev.is_tombstone() {
+                    continue;
+                }
+                decrement_limit(this.limit);
                 if prev.is_tombstone() {
                     continue;
                 }
@@ -115,7 +114,11 @@ where
         loop {
             match this.buf.take() {
                 Some(entry) if entry.is_tombstone() => continue,
-                opt => return Poll::Ready(opt.map(Ok)),
+                Some(entry) => {
+                    decrement_limit(this.limit);
+                    return Poll::Ready(Some(Ok(entry)));
+                }
+                None => return Poll::Ready(None),
             }
         }
     }
@@ -173,9 +176,15 @@ impl<'t> PartialEq for HeapEntry<'t> {
 
 impl<'t> Eq for HeapEntry<'t> {}
 
+fn decrement_limit(limit: &mut Option<usize>) {
+    if let Some(value) = limit {
+        *value = value.saturating_sub(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
@@ -184,12 +193,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        extractor::projection_for_field,
+        extractor::{projection_for_columns, projection_for_field},
         inmem::{immutable::memtable::ImmutableMemTable, mutable::memtable::DynMem},
-        mvcc::Timestamp,
+        key::{KeyOwned, RangeSet},
+        mutation::DynMutation,
+        mvcc::{MVCC_COMMIT_COL, Timestamp},
         query::stream::ScanStream,
-        scan::RangeSet,
         test_util::build_batch,
+        transaction::TransactionScan,
     };
 
     #[tokio::test(flavor = "multi_thread")]
@@ -237,10 +248,36 @@ mod tests {
             let immutable_scan = immutable_segment
                 .scan_visible(&ranges, None, Timestamp::MAX)
                 .expect("immutable scan");
-            let streams = vec![
+            let mut streams = vec![
                 ScanStream::<'_, RecordBatch>::from(immutable_scan),
                 ScanStream::<'_, RecordBatch>::from(mutable_scan),
             ];
+
+            let mut staged = BTreeMap::new();
+            staged.insert(
+                KeyOwned::from("d"),
+                DynMutation::Upsert(DynRow(vec![
+                    Some(DynCell::Str("d".into())),
+                    Some(DynCell::I64(500)),
+                ])),
+            );
+            let txn_scan =
+                TransactionScan::new(&staged, RangeSet::all(), &schema, Timestamp::new(60), None)
+                    .expect("txn scan");
+            streams.push(ScanStream::<'_, RecordBatch>::from(txn_scan));
+
+            let mut staged = BTreeMap::new();
+            staged.insert(
+                KeyOwned::from("d"),
+                DynMutation::Upsert(DynRow(vec![
+                    Some(DynCell::Str("d".into())),
+                    Some(DynCell::I64(500)),
+                ])),
+            );
+            let txn_scan =
+                TransactionScan::new(&staged, RangeSet::all(), &schema, Timestamp::new(60), None)
+                    .expect("txn scan");
+            streams.push(ScanStream::<'_, RecordBatch>::from(txn_scan));
 
             let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(order))
                 .await
@@ -250,6 +287,9 @@ mod tests {
             while let Some(entry) = merge.next().await {
                 let entry = entry.expect("entry ok");
                 let (key, ts, row) = match entry {
+                    StreamEntry::Txn((key_ts, row)) => {
+                        (key_ts.key().to_owned(), key_ts.timestamp(), row)
+                    }
                     StreamEntry::MemTable((key_ts, row)) => {
                         (key_ts.key().to_owned(), key_ts.timestamp(), row)
                     }
@@ -257,6 +297,7 @@ mod tests {
                     StreamEntry::Sstable((key_ts, row)) => {
                         (key_ts.key().to_owned(), key_ts.timestamp(), row)
                     }
+                    StreamEntry::TxnTombstone(_) => continue,
                 };
                 let key_str = key.as_utf8().expect("utf8 key").to_string();
                 let value = row.into_owned().expect("row owned").0[1]
@@ -278,10 +319,100 @@ mod tests {
                 ("a".to_string(), 2, 50),
                 ("b".to_string(), 5, 20),
                 ("c".to_string(), 40, 40),
-                ("d".to_string(), 100, 60),
+                ("d".to_string(), 500, 60),
             ],
             "ascending order should emit keys from smallest to largest, preferring newer \
              timestamps and higher priority sources",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_stream_hides_rows_for_tombstoned_keys() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int64, false),
+        ]));
+        let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
+
+        let mut mutable = DynMem::new(schema.clone());
+        let mut immutable_builder = DynMem::new(schema.clone());
+        let insert_row = |table: &mut DynMem, key: &str, value: i64, ts: u64| {
+            let batch = build_batch(
+                schema.clone(),
+                vec![DynRow(vec![
+                    Some(DynCell::Str(key.into())),
+                    Some(DynCell::I64(value)),
+                ])],
+            )
+            .expect("batch");
+            table
+                .insert_batch(extractor.as_ref(), batch, Timestamp::new(ts))
+                .expect("insert");
+        };
+
+        insert_row(&mut immutable_builder, "ghost", 10, 10);
+        insert_row(&mut immutable_builder, "keep-immutable", 25, 12);
+        let immutable_segment: ImmutableMemTable<RecordBatch> = immutable_builder
+            .seal_into_immutable(&schema, extractor.as_ref())
+            .expect("seal ok")
+            .expect("segment");
+
+        insert_row(&mut mutable, "mutable-only", 99, 40);
+        let delete_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
+        let delete_rows = vec![DynRow(vec![
+            Some(DynCell::Str("ghost".into())),
+            Some(DynCell::U64(30)),
+        ])];
+        let delete_batch = build_batch(delete_schema, delete_rows).expect("delete batch");
+        mutable
+            .insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .expect("delete row");
+
+        let ranges = RangeSet::all();
+        let immutable_scan = immutable_segment
+            .scan_visible(&ranges, None, Timestamp::MAX)
+            .expect("immutable scan");
+        let mutable_scan = mutable.scan_rows(&ranges, None).expect("mutable scan");
+        let streams = vec![
+            ScanStream::from(immutable_scan),
+            ScanStream::from(mutable_scan),
+        ];
+        let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(Order::Asc))
+            .await
+            .expect("merge built");
+
+        let mut rows = Vec::new();
+        while let Some(entry) = merge.next().await {
+            let entry = entry.expect("entry ok");
+            let (key, row) = match entry {
+                StreamEntry::Txn((key_ts, row)) => (key_ts.key().to_owned(), row),
+                StreamEntry::MemTable((key_ts, row)) => (key_ts.key().to_owned(), row),
+                StreamEntry::Sstable((key_ts, row)) => (key_ts.key().to_owned(), row),
+                StreamEntry::TxnTombstone(_) | StreamEntry::MemTableTombstone(_) => continue,
+            };
+            let key_str = key.as_utf8().expect("utf8 key").to_string();
+            let value = row.into_owned().expect("row").0[1]
+                .as_ref()
+                .and_then(|cell| match cell {
+                    DynCell::I64(v) => Some(*v),
+                    _ => None,
+                })
+                .expect("i64 value");
+            rows.push((key_str, value));
+        }
+
+        assert_eq!(
+            rows,
+            vec![
+                ("keep-immutable".to_string(), 25),
+                ("mutable-only".to_string(), 99)
+            ],
+            "ghost should be suppressed because the mutable tombstone is newer"
         );
     }
 }

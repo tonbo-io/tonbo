@@ -5,10 +5,9 @@ use std::{ops::Bound, sync::Arc};
 use fusio::executor::tokio::TokioExecutor;
 use tonbo::{
     db::{DB, DynMode},
-    key::KeyOwned,
+    key::{KeyOwned, KeyRange, RangeSet},
     mode::DynModeConfig,
     query::{ColumnRef, Predicate, PredicateBuilder, ScalarValue},
-    scan::{KeyRange, RangeSet},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,

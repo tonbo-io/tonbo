@@ -5,25 +5,35 @@
 //! patches will wire these pieces into `DB::begin_transaction`, WAL plumbing,
 //! and recovery.
 
-use std::{collections::BTreeMap, fmt, ops::Bound, sync::Arc};
+use std::{
+    collections::{BTreeMap, btree_map::Range as BTreeRange},
+    fmt,
+    ops::Bound,
+    sync::Arc,
+};
 
 use arrow_array::RecordBatch;
-use arrow_schema::SchemaRef;
+use arrow_schema::{Fields, SchemaRef};
 use fusio::executor::{Executor, Timer};
 use fusio_manifest::snapshot::Snapshot as ManifestLease;
+use futures::{StreamExt, pin_mut};
 use lockable::AsyncLimit;
+use predicate::Predicate;
 use thiserror::Error;
-use typed_arrow_dyn::{DynBuilders, DynCell, DynError, DynRow};
+use typed_arrow_dyn::{
+    DynBuilders, DynCell, DynError, DynProjection, DynRow, DynRowOwned, DynRowRaw, DynSchema,
+    DynViewError,
+};
 
 use crate::{
-    db::{DB, TxnWalPublishContext, WalFrameRange},
+    db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, TxnWalPublishContext, WalFrameRange},
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
-    key::KeyOwned,
+    key::{KeyOwned, KeyRange, KeyTsViewRaw, RangeSet},
     manifest::{ManifestError, TableHead, TableSnapshot, VersionEdit, VersionState, WalSegmentRef},
     mode::DynMode,
     mutation::DynMutation,
     mvcc::{ReadView, Timestamp},
-    scan::{KeyRange, RangeSet},
+    query::stream::{Order, StreamError, merge::MergeStream, package::PackageStream},
     wal::{WalError, manifest_ext},
 };
 
@@ -157,6 +167,10 @@ impl StagedMutations {
         self.entries.get(key)
     }
 
+    pub(crate) fn entries(&self) -> &BTreeMap<KeyOwned, DynMutation<DynRow, ()>> {
+        &self.entries
+    }
+
     fn into_mutations(self) -> (Vec<DynRow>, Vec<KeyOwned>) {
         let mut upserts = Vec::with_capacity(self.entries.len());
         let mut deletes = Vec::new();
@@ -169,6 +183,170 @@ impl StagedMutations {
         (upserts, deletes)
     }
 }
+
+/// Iterator-style scan over staged transaction mutations.
+pub(crate) struct TransactionScan<'a> {
+    staged: &'a BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
+    ranges: RangeSet<KeyOwned>,
+    input_schema: SchemaRef,
+    input_dyn_schema: DynSchema,
+    fields: Fields,
+    visible_ts: Timestamp,
+    range_idx: usize,
+    cursor: Option<BTreeRange<'a, KeyOwned, DynMutation<DynRow, ()>>>,
+    rows: Vec<DynRowOwned>,
+    projection: Option<DynProjection>,
+}
+
+impl<'a> fmt::Debug for TransactionScan<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransactionScan")
+            .field("staged_len", &self.staged.len())
+            .field("ranges", &self.ranges)
+            .field("visible_ts", &self.visible_ts)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum TransactionScanEntry {
+    Row((KeyTsViewRaw, DynRowRaw)),
+    Tombstone(KeyTsViewRaw),
+}
+
+impl<'a> TransactionScan<'a> {
+    pub(crate) fn new(
+        staged: &'a BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
+        ranges: RangeSet<KeyOwned>,
+        schema: &SchemaRef,
+        visible_ts: Timestamp,
+        projection_schema: Option<&SchemaRef>,
+    ) -> Result<Self, DynViewError> {
+        let input_schema = Arc::clone(schema);
+        let input_dyn_schema = DynSchema::from_ref(Arc::clone(schema));
+        let (fields, projection) = match projection_schema {
+            Some(target) => {
+                let projection = if target.as_ref() == schema.as_ref() {
+                    None
+                } else {
+                    Some(DynProjection::from_schema(
+                        schema.as_ref(),
+                        target.as_ref(),
+                    )?)
+                };
+                (target.fields().clone(), projection)
+            }
+            None => (schema.fields().clone(), None),
+        };
+        Ok(Self {
+            staged,
+            ranges,
+            input_schema,
+            input_dyn_schema,
+            fields,
+            visible_ts,
+            range_idx: 0,
+            cursor: None,
+            rows: Vec::new(),
+            projection,
+        })
+    }
+
+    fn materialize_row(&self, row: &DynRow) -> Result<DynRowOwned, DynViewError> {
+        if let Some(projection) = &self.projection {
+            let mut builders = DynBuilders::new(Arc::clone(&self.input_schema), 1);
+            builders
+                .append_option_row(Some(clone_dyn_row(row)))
+                .map_err(|err| DynViewError::Invalid {
+                    column: 0,
+                    path: "transaction_scan_projection".to_string(),
+                    message: err.to_string(),
+                })?;
+            let batch = builders
+                .try_finish_into_batch()
+                .map_err(|err| DynViewError::Invalid {
+                    column: 0,
+                    path: "transaction_scan_projection".to_string(),
+                    message: err.to_string(),
+                })?;
+            let raw = projection.project_row_raw(&self.input_dyn_schema, &batch, 0)?;
+            let projected = raw.into_owned()?;
+            DynRowOwned::from_dyn_row(self.fields.clone(), projected)
+        } else {
+            DynRowOwned::from_dyn_row(self.fields.clone(), clone_dyn_row(row))
+        }
+    }
+}
+
+impl<'a> Iterator for TransactionScan<'a> {
+    type Item = Result<TransactionScanEntry, DynViewError>;
+
+    #[allow(clippy::never_loop)]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.cursor.is_none() {
+                if self.range_idx >= self.ranges.as_slice().len() {
+                    return None;
+                }
+                let (start, end) = self.ranges.as_slice()[self.range_idx].as_borrowed_bounds();
+                self.cursor = Some(self.staged.range((start, end)));
+                self.range_idx += 1;
+            }
+
+            if let Some(cursor) = &mut self.cursor {
+                loop {
+                    match cursor.next() {
+                        Some((key, mutation)) => match mutation {
+                            DynMutation::Upsert(row) => match self.materialize_row(row) {
+                                Ok(owned_row) => {
+                                    self.rows.push(owned_row);
+                                    let raw_row = match self.rows.last() {
+                                        Some(stored) => match stored.as_raw() {
+                                            Ok(raw) => raw,
+                                            Err(err) => return Some(Err(err)),
+                                        },
+                                        None => {
+                                            return Some(Err(DynViewError::Invalid {
+                                                column: 0,
+                                                path: "transaction_scan".to_string(),
+                                                message: "staged row buffer unexpectedly empty"
+                                                    .to_string(),
+                                            }));
+                                        }
+                                    };
+                                    let view = KeyTsViewRaw::from_owned(key, self.visible_ts);
+                                    return Some(Ok(TransactionScanEntry::Row((view, raw_row))));
+                                }
+                                Err(err) => return Some(Err(err)),
+                            },
+                            DynMutation::Delete(_) => {
+                                let view = KeyTsViewRaw::from_owned(key, self.visible_ts);
+                                return Some(Ok(TransactionScanEntry::Tombstone(view)));
+                            }
+                        },
+                        None => {
+                            self.cursor = None;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl From<DBError> for TransactionError {
+    fn from(err: DBError) -> Self {
+        match err {
+            DBError::Key(inner) => TransactionError::KeyExtract(inner),
+            DBError::Manifest(manifest) => {
+                TransactionError::Snapshot(SnapshotError::Manifest(manifest))
+            }
+            DBError::Stream(stream) => TransactionError::Stream(stream),
+        }
+    }
+}
+
 /// Builder-style transaction used by the dynamic mode.
 pub struct Transaction {
     schema: SchemaRef,
@@ -281,18 +459,59 @@ impl Transaction {
         Ok(rows.into_values().next())
     }
 
-    /// Scan `ranges`, returning rows visible at the transaction snapshot with staged overlays.
-    pub fn scan<E>(
+    /// Scan rows matching `predicate`, returning values visible at the transaction snapshot with
+    /// staged overlays.
+    pub async fn scan<E>(
         &self,
         db: &DB<DynMode, E>,
-        ranges: &RangeSet<KeyOwned>,
+        predicate: &Predicate,
+        projected_schema: Option<&SchemaRef>,
+        limit: Option<usize>,
     ) -> Result<Vec<DynRow>, TransactionError>
     where
         E: Executor + Timer,
     {
-        let mut view = self.read_mutable_rows(db, ranges)?;
-        self.overlay_staged(ranges, &mut view);
-        Ok(view.into_values().collect())
+        let read_ts = self.read_ts();
+        let plan = db
+            .plan_scan(predicate, projected_schema, limit, read_ts)
+            .await
+            .map_err(TransactionError::from)?;
+        let txn_ranges = plan.range_set.clone();
+        let txn_scan = if self.staged.is_empty() {
+            None
+        } else {
+            Some(
+                TransactionScan::new(
+                    self.staged.entries(),
+                    txn_ranges,
+                    &self.schema,
+                    read_ts,
+                    Some(&plan.scan_schema),
+                )
+                .map_err(TransactionError::DynKey)?,
+            )
+        };
+        let streams = db
+            .build_scan_streams(&plan, txn_scan)
+            .map_err(TransactionError::from)?;
+        if streams.is_empty() {
+            return Ok(Vec::new());
+        }
+        let merge =
+            MergeStream::from_vec(streams, plan.read_ts, plan.limit, Some(Order::Asc)).await?;
+        let result_schema = plan
+            .projected_schema
+            .clone()
+            .unwrap_or_else(|| Arc::clone(db.schema()));
+        let package = PackageStream::new(
+            DEFAULT_SCAN_BATCH_ROWS,
+            merge,
+            Arc::clone(&plan.scan_schema),
+            Arc::clone(&result_schema),
+            plan.residual_predicate,
+        )
+        .map_err(TransactionError::from)?;
+        Self::collect_rows_from_merge(package, &result_schema).await
     }
 
     fn project_key(&self, row: &DynRow) -> Result<KeyOwned, TransactionError> {
@@ -369,20 +588,22 @@ impl Transaction {
         Ok(out)
     }
 
-    fn overlay_staged(&self, ranges: &RangeSet<KeyOwned>, view: &mut BTreeMap<KeyOwned, DynRow>) {
-        for (key, mutation) in self.staged.iter() {
-            if !ranges.contains(key) {
-                continue;
-            }
-            match mutation {
-                DynMutation::Upsert(row) => {
-                    view.insert(key.clone(), clone_dyn_row(row));
-                }
-                DynMutation::Delete(_) => {
-                    view.remove(key);
-                }
-            }
+    async fn collect_rows_from_merge(
+        package: PackageStream<'_, RecordBatch>,
+        schema: &SchemaRef,
+    ) -> Result<Vec<DynRow>, TransactionError> {
+        let mut rows = Vec::new();
+        pin_mut!(package);
+        while let Some(entry) = package.next().await {
+            let entry = entry?;
+            let schema: DynSchema = DynSchema::from_ref(schema.clone());
+            let row_view = schema.iter_views(&entry)?;
+            let r = row_view
+                .map(|row| row?.to_owned())
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.extend(r);
         }
+        Ok(rows)
     }
 
     /// Commit the staged mutations into the supplied DB, ensuring WAL durability first.
@@ -554,7 +775,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        inmem::policy::BatchesThreshold, mode::DynModeConfig, mvcc::Timestamp, scan::RangeSet,
+        inmem::policy::BatchesThreshold,
+        key::RangeSet,
+        mode::DynModeConfig,
+        mvcc::Timestamp,
+        query::{ColumnRef, PredicateBuilder, ScalarValue},
         test_util::build_batch,
     };
 
@@ -581,6 +806,12 @@ mod tests {
         db.ingest_with_tombstones(batch, tombstones)
             .await
             .expect("ingest");
+    }
+
+    fn all_rows_predicate() -> Predicate {
+        PredicateBuilder::leaf()
+            .greater_than(ColumnRef::new("v", None), ScalarValue::Int64(i64::MIN))
+            .build()
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -660,8 +891,11 @@ mod tests {
         ]))
         .expect("stage insert");
 
-        let ranges = RangeSet::all();
-        let rows = tx.scan(&db, &ranges).expect("scan rows");
+        let predicate = all_rows_predicate();
+        let rows = tx
+            .scan(&db, &predicate, None, None)
+            .await
+            .expect("scan rows");
         let keys: Vec<String> = rows
             .iter()
             .map(|row| match &row.0[0] {
@@ -697,8 +931,13 @@ mod tests {
                 .expect("get")
                 .is_none()
         );
-        let ranges = RangeSet::all();
-        assert!(tx.scan(&db, &ranges).expect("scan").is_empty());
+        let predicate = all_rows_predicate();
+        assert!(
+            tx.scan(&db, &predicate, None, None)
+                .await
+                .expect("scan")
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -750,8 +989,11 @@ mod tests {
         assert!(db.num_immutable_segments() >= 1);
 
         let tx = db.begin_transaction().await.expect("tx");
-        let ranges = RangeSet::all();
-        let rows = tx.scan(&db, &ranges).expect("scan immutables");
+        let predicate = all_rows_predicate();
+        let rows = tx
+            .scan(&db, &predicate, None, None)
+            .await
+            .expect("scan immutables");
         assert_eq!(rows.len(), 1);
         match &rows[0].0[0] {
             Some(DynCell::Str(value)) => assert_eq!(value, "sealed"),
@@ -798,6 +1040,112 @@ mod tests {
             }
             other => panic!("unexpected error {other:?}"),
         }
+    }
+
+    #[test]
+    fn transaction_scan_orders_rows_and_skips_deletes() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let mut staged = BTreeMap::new();
+        staged.insert(
+            KeyOwned::from("a"),
+            DynMutation::Upsert(DynRow(vec![
+                Some(DynCell::Str("a".into())),
+                Some(DynCell::I32(1)),
+            ])),
+        );
+        staged.insert(KeyOwned::from("c"), DynMutation::Delete(()));
+        staged.insert(
+            KeyOwned::from("b"),
+            DynMutation::Upsert(DynRow(vec![
+                Some(DynCell::Str("b".into())),
+                Some(DynCell::I32(2)),
+            ])),
+        );
+        let ranges = RangeSet::all();
+        let mut scan = TransactionScan::new(&staged, ranges, &schema, Timestamp::new(1), None)
+            .expect("txn scan");
+        let mut seen = Vec::new();
+        while let Some(entry) = scan.next() {
+            match entry.expect("txn entry") {
+                TransactionScanEntry::Row((key_ts, row)) => {
+                    let key = key_ts.key().to_owned();
+                    let owned = row.into_owned().expect("owned row");
+                    let value = match owned.0[1].clone() {
+                        Some(DynCell::I32(v)) => v,
+                        other => panic!("unexpected cell {other:?}"),
+                    };
+                    seen.push((key, value));
+                }
+                TransactionScanEntry::Tombstone(_) => continue,
+            }
+        }
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, KeyOwned::from("a"));
+        assert_eq!(seen[0].1, 1);
+        assert_eq!(seen[1].0, KeyOwned::from("b"));
+        assert_eq!(seen[1].1, 2);
+    }
+
+    #[test]
+    fn transaction_scan_respects_ranges() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let mut staged = BTreeMap::new();
+        staged.insert(
+            KeyOwned::from("aa"),
+            DynMutation::Upsert(DynRow(vec![
+                Some(DynCell::Str("aa".into())),
+                Some(DynCell::I32(10)),
+            ])),
+        );
+        staged.insert(
+            KeyOwned::from("bb"),
+            DynMutation::Upsert(DynRow(vec![
+                Some(DynCell::Str("bb".into())),
+                Some(DynCell::I32(20)),
+            ])),
+        );
+        staged.insert(
+            KeyOwned::from("cc"),
+            DynMutation::Upsert(DynRow(vec![
+                Some(DynCell::Str("cc".into())),
+                Some(DynCell::I32(30)),
+            ])),
+        );
+
+        let range = KeyRange::new(
+            Bound::Included(KeyOwned::from("bb")),
+            Bound::Included(KeyOwned::from("cc")),
+        );
+        let scan = TransactionScan::new(
+            &staged,
+            RangeSet::from_ranges(vec![range]),
+            &schema,
+            Timestamp::new(5),
+            None,
+        )
+        .expect("txn scan");
+        let results: Vec<_> = scan
+            .filter_map(|entry| match entry.expect("row") {
+                TransactionScanEntry::Row((key, row)) => {
+                    let owned = row.into_owned().expect("owned");
+                    let value = match owned.0[1].clone() {
+                        Some(DynCell::I32(v)) => v,
+                        other => panic!("unexpected cell {other:?}"),
+                    };
+                    Some((key.key().to_owned(), value))
+                }
+                TransactionScanEntry::Tombstone(_) => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, KeyOwned::from("bb"));
+        assert_eq!(results[1].0, KeyOwned::from("cc"));
     }
 }
 
@@ -1010,6 +1358,15 @@ pub enum TransactionError {
         /// Component index that was null.
         index: usize,
     },
+    /// Planning or stream setup failed inside the DB.
+    #[error("db error: {0}")]
+    Db(DBError),
+    /// Merge/stream execution failed.
+    #[error("stream error: {0}")]
+    Stream(#[from] StreamError),
+    /// Dyn key error.
+    #[error("stream error: {0}")]
+    DynKey(#[from] DynViewError),
 }
 
 /// Errors raised while committing a transaction.

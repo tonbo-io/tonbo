@@ -225,6 +225,35 @@ impl<K: Ord> RangeSet<K> {
     }
 }
 
+/// Whether a `RangeSet` overlaps the `[min, max]` key bounds.
+pub(crate) fn range_set_overlaps_bounds<K: Ord>(ranges: &RangeSet<K>, min: &K, max: &K) -> bool {
+    ranges
+        .as_slice()
+        .iter()
+        .any(|range| range_overlaps_bounds(range, min, max))
+}
+
+/// Whether a single key range overlaps the `[min, max]` bounds.
+fn range_overlaps_bounds<K: Ord>(range: &KeyRange<K>, min: &K, max: &K) -> bool {
+    !range_before_segment(&range.end, min) && !range_after_segment(&range.start, max)
+}
+
+fn range_before_segment<K: Ord>(end: &Bound<K>, min: &K) -> bool {
+    match end {
+        Bound::Unbounded => false,
+        Bound::Included(value) => value < min,
+        Bound::Excluded(value) => value <= min,
+    }
+}
+
+fn range_after_segment<K: Ord>(start: &Bound<K>, max: &K) -> bool {
+    match start {
+        Bound::Unbounded => false,
+        Bound::Included(value) => value > max,
+        Bound::Excluded(value) => value >= max,
+    }
+}
+
 // Lower-bound comparator: Included(x) < Excluded(x) < Included(y) if x<y
 fn cmp_lower<K: Ord>(a: &Bound<K>, b: &Bound<K>) -> Ordering {
     use Bound as B;
@@ -390,8 +419,6 @@ fn max_upper_owned<K: Ord>(a: Bound<K>, b: Bound<K>) -> Bound<K> {
         }
     }
 }
-
-//
 
 fn is_empty_range<K: Ord>(start: &Bound<K>, end: &Bound<K>) -> bool {
     use Bound as B;

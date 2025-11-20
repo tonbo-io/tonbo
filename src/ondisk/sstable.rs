@@ -31,12 +31,11 @@ use crate::{
         Immutable,
         memtable::{DeleteSidecar, MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
     },
-    key::KeyOwned,
+    key::{KeyOwned, RangeSet},
     manifest::ManifestError,
     mode::Mode,
     mvcc::Timestamp,
     query::Predicate,
-    scan::RangeSet,
 };
 
 const MVCC_SCHEMA_VERSION_KEY: &str = "tonbo.mvcc.version";

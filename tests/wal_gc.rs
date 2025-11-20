@@ -16,10 +16,9 @@ use fusio::{
 use tokio::time::sleep;
 use tonbo::{
     BatchesThreshold, CommitAckMode, DB, NeverSeal,
-    key::KeyOwned,
+    key::{KeyOwned, RangeSet},
     mode::{DynMode, DynModeConfig},
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
-    scan::RangeSet,
     wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
 };
 use typed_arrow_dyn::{DynCell, DynRow};

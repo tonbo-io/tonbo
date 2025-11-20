@@ -11,10 +11,9 @@ use fusio::{DynFs, Write, executor::tokio::TokioExecutor, path::Path as FusioPat
 use tonbo::{
     DB,
     db::WalConfig as BuilderWalConfig,
-    key::KeyOwned,
+    key::{KeyOwned, RangeSet},
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
-    scan::RangeSet,
     wal::{
         DynBatchPayload, WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalRecoveryMode,
         WalSyncPolicy,

@@ -4,7 +4,7 @@
 mod builder;
 mod row_set;
 
-use std::{fmt, sync::Arc};
+use std::{cmp::Ordering, fmt, sync::Arc};
 
 pub use builder::PredicateBuilder;
 pub use row_set::{BitmapRowSet, DynRowSet, RowId, RowIdIter, RowSet};
@@ -33,6 +33,73 @@ impl ScalarValue {
     #[must_use]
     pub fn is_null(&self) -> bool {
         matches!(self, ScalarValue::Null)
+    }
+
+    /// Compares this scalar with another, returning the ordering when both sides are comparable.
+    pub fn compare(&self, other: &Self) -> Option<Ordering> {
+        self.as_ref().compare(other.as_ref())
+    }
+
+    /// Returns a borrowed view over this scalar value.
+    #[must_use]
+    pub fn as_ref(&self) -> ScalarValueRef<'_> {
+        match self {
+            ScalarValue::Null => ScalarValueRef::Null,
+            ScalarValue::Boolean(value) => ScalarValueRef::Boolean(*value),
+            ScalarValue::Int64(value) => ScalarValueRef::Int64(*value),
+            ScalarValue::UInt64(value) => ScalarValueRef::UInt64(*value),
+            ScalarValue::Float64(value) => ScalarValueRef::Float64(*value),
+            ScalarValue::Utf8(value) => ScalarValueRef::Utf8(value.as_str()),
+            ScalarValue::Binary(value) => ScalarValueRef::Binary(value.as_slice()),
+        }
+    }
+}
+
+/// Borrowed view over a scalar value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScalarValueRef<'a> {
+    /// Represents SQL/Arrow `NULL`.
+    Null,
+    /// Boolean literal.
+    Boolean(bool),
+    /// Signed 64-bit integer.
+    Int64(i64),
+    /// Unsigned 64-bit integer.
+    UInt64(u64),
+    /// 64-bit floating point.
+    Float64(f64),
+    /// UTF-8 string slice.
+    Utf8(&'a str),
+    /// Binary slice.
+    Binary(&'a [u8]),
+}
+
+impl<'a> ScalarValueRef<'a> {
+    /// Returns true when the literal is the `Null` variant.
+    #[must_use]
+    pub fn is_null(self) -> bool {
+        matches!(self, ScalarValueRef::Null)
+    }
+
+    /// Compares this scalar with another, returning the ordering when both sides are comparable.
+    pub fn compare(self, other: ScalarValueRef<'_>) -> Option<Ordering> {
+        use ScalarValueRef::*;
+        match (self, other) {
+            (Null, _) | (_, Null) => None,
+            (Boolean(lhs), Boolean(rhs)) => Some(lhs.cmp(&rhs)),
+            (Int64(lhs), Int64(rhs)) => Some(lhs.cmp(&rhs)),
+            (UInt64(lhs), UInt64(rhs)) => Some(lhs.cmp(&rhs)),
+            (Float64(lhs), Float64(rhs)) => lhs.partial_cmp(&rhs),
+            (Utf8(lhs), Utf8(rhs)) => Some(lhs.cmp(rhs)),
+            (Binary(lhs), Binary(rhs)) => Some(lhs.cmp(rhs)),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> From<&'a ScalarValue> for ScalarValueRef<'a> {
+    fn from(value: &'a ScalarValue) -> Self {
+        value.as_ref()
     }
 }
 
@@ -134,6 +201,19 @@ impl ComparisonOp {
             ComparisonOp::LessThanOrEqual => ComparisonOp::GreaterThan,
             ComparisonOp::GreaterThan => ComparisonOp::LessThanOrEqual,
             ComparisonOp::GreaterThanOrEqual => ComparisonOp::LessThan,
+        }
+    }
+
+    /// Evaluates the operator against a comparison ordering.
+    #[must_use]
+    pub fn test_ordering(self, ordering: Ordering) -> bool {
+        match self {
+            ComparisonOp::Equal => ordering == Ordering::Equal,
+            ComparisonOp::NotEqual => ordering != Ordering::Equal,
+            ComparisonOp::LessThan => ordering == Ordering::Less,
+            ComparisonOp::LessThanOrEqual => ordering != Ordering::Greater,
+            ComparisonOp::GreaterThan => ordering == Ordering::Greater,
+            ComparisonOp::GreaterThanOrEqual => ordering != Ordering::Less,
         }
     }
 }

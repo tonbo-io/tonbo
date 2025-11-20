@@ -10,6 +10,7 @@ use std::{
 };
 
 use futures::{Stream, ready, stream};
+pub use package::ResidualError;
 use pin_project_lite::pin_project;
 use thiserror::Error;
 use typed_arrow_dyn::{DynError, DynRowRaw, DynViewError};
@@ -22,21 +23,21 @@ use crate::{
     key::KeyTsViewRaw,
     mvcc::Timestamp,
     ondisk::scan::{SstableScan, SstableScanError},
+    transaction::{TransactionScan, TransactionScanEntry},
 };
 
 /// Direction for ordered scans.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Order {
     /// Ascending (lowest to highest primary key).
     #[default]
     Asc,
+    #[allow(dead_code)]
     /// Descending (highest to lowest primary key).
     Desc,
 }
 
 /// Source priority applied while reconciling overlapping entries.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum SourcePriority {
     /// In-flight transaction stream (highest priority).
@@ -61,12 +62,18 @@ pub enum StreamError {
     /// Building a projected batch failed.
     #[error("dynamic batch construction failed: {0}")]
     DynBuilder(#[from] DynError),
+    /// Residual predicate evaluation failed.
+    #[error(transparent)]
+    Predicate(#[from] ResidualError),
 }
 
 /// Unified entry yielded by the read stream for both in-memory and on-disk sources.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum StreamEntry<'t> {
+    /// Entry sourced from the staging buffer of a transaction.
+    Txn((KeyTsViewRaw, DynRowRaw)),
+    /// Tombstone emitted by the current transaction.
+    TxnTombstone(KeyTsViewRaw),
     /// Entry sourced from the mutable layer.
     MemTable((&'t KeyTsViewRaw, DynRowRaw)),
     /// Tombstone sourced from a mutable layer.
@@ -75,10 +82,11 @@ pub enum StreamEntry<'t> {
     Sstable((KeyTsViewRaw, DynRowRaw)),
 }
 
-#[allow(dead_code)]
 impl<'t> StreamEntry<'t> {
     pub(crate) fn key(&self) -> &KeyTsViewRaw {
         match self {
+            StreamEntry::Txn((key_ts, _)) => key_ts,
+            StreamEntry::TxnTombstone(key_ts) => key_ts,
             StreamEntry::MemTable((key_ts, _)) => key_ts,
             StreamEntry::MemTableTombstone(key_ts) => key_ts,
             StreamEntry::Sstable((key_ts, _)) => key_ts,
@@ -87,6 +95,8 @@ impl<'t> StreamEntry<'t> {
 
     pub(crate) fn ts(&self) -> Timestamp {
         match self {
+            StreamEntry::Txn((key_ts, _)) => key_ts.timestamp(),
+            StreamEntry::TxnTombstone(key_ts) => key_ts.timestamp(),
             StreamEntry::MemTable((key_ts, _)) => key_ts.timestamp(),
             StreamEntry::MemTableTombstone(key_ts) => key_ts.timestamp(),
             StreamEntry::Sstable((key_ts, _)) => key_ts.timestamp(),
@@ -95,14 +105,19 @@ impl<'t> StreamEntry<'t> {
 
     pub(crate) fn into_row(self) -> Option<DynRowRaw> {
         match self {
+            StreamEntry::Txn((_, row)) => Some(row),
             StreamEntry::MemTable((_, row)) => Some(row),
             StreamEntry::Sstable((_, row)) => Some(row),
+            StreamEntry::TxnTombstone(_) => None,
             StreamEntry::MemTableTombstone(_) => None,
         }
     }
 
     pub(crate) fn is_tombstone(&self) -> bool {
-        matches!(self, StreamEntry::MemTableTombstone(_))
+        matches!(
+            self,
+            StreamEntry::TxnTombstone(_) | StreamEntry::MemTableTombstone(_)
+        )
     }
 }
 
@@ -110,6 +125,10 @@ pin_project! {
     #[project = ScanStreamProject]
     pub(crate) enum ScanStream<'t, S>
     {
+        Txn {
+            #[pin]
+            inner: stream::Iter<TransactionScan<'t>>,
+        },
         Mutable {
             #[pin]
             inner: stream::Iter<DynRowScan<'t>>,
@@ -147,9 +166,21 @@ impl<'t, S> From<SstableScan<'t>> for ScanStream<'t, S> {
     }
 }
 
+impl<'t, S> From<TransactionScan<'t>> for ScanStream<'t, S> {
+    fn from(inner: TransactionScan<'t>) -> Self {
+        ScanStream::Txn {
+            inner: stream::iter(inner),
+        }
+    }
+}
+
 impl<'t, S: std::fmt::Debug> fmt::Debug for ScanStream<'t, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Txn { inner } => f
+                .debug_struct("ScanStream::Txn")
+                .field("inner", inner)
+                .finish(),
             Self::Mutable { inner } => f
                 .debug_struct("ScanStream::Mutable")
                 .field("inner", inner)
@@ -166,6 +197,7 @@ impl<'t, S: std::fmt::Debug> fmt::Debug for ScanStream<'t, S> {
 impl<'t, S> ScanStream<'t, S> {
     pub(crate) fn priority(&self) -> SourcePriority {
         match self {
+            ScanStream::Txn { .. } => SourcePriority::Txn,
             ScanStream::Mutable { .. } => SourcePriority::Mutable,
             ScanStream::Immutable { .. } => SourcePriority::Immutable,
             ScanStream::SsTable { .. } => SourcePriority::Sstable,
@@ -181,6 +213,16 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.project() {
+            ScanStreamProject::Txn { inner } => match ready!(inner.poll_next(cx)) {
+                Some(Ok(TransactionScanEntry::Row(entry))) => {
+                    Poll::Ready(Some(Ok(StreamEntry::Txn(entry))))
+                }
+                Some(Ok(TransactionScanEntry::Tombstone(key))) => {
+                    Poll::Ready(Some(Ok(StreamEntry::TxnTombstone(key))))
+                }
+                Some(Err(err)) => Poll::Ready(Some(Err(StreamError::DynRow(err)))),
+                None => Poll::Ready(None),
+            },
             ScanStreamProject::Mutable { inner } => match ready!(inner.poll_next(cx)) {
                 Some(Ok(DynRowScanEntry::Row(key, row))) => {
                     Poll::Ready(Some(Ok(StreamEntry::MemTable((key, row)))))
@@ -212,41 +254,134 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use arrow_array::RecordBatch;
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use futures::StreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        extractor::projection_for_field, inmem::mutable::memtable::DynMem, mvcc::Timestamp,
-        scan::RangeSet, test_util::build_batch,
+        extractor::{KeyProjection, projection_for_field},
+        inmem::{immutable::memtable::ImmutableMemTable, mutable::memtable::DynMem},
+        key::{KeyOwned, RangeSet},
+        mutation::DynMutation,
+        mvcc::Timestamp,
+        test_util::build_batch,
+        transaction::TransactionScan,
     };
+
+    struct ScanStreamFixture {
+        schema: SchemaRef,
+        mutable: DynMem,
+        immutable: ImmutableMemTable<RecordBatch>,
+        staged: BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
+    }
+
+    impl ScanStreamFixture {
+        fn new() -> Self {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, false),
+                Field::new("v", DataType::Int64, true),
+            ]));
+            let extractor = Arc::new(projection_for_field(schema.clone(), 0).expect("extractor"));
+            let mut mutable = DynMem::new(schema.clone());
+            let mut immutable_builder = DynMem::new(schema.clone());
+
+            fn insert_row(
+                table: &mut DynMem,
+                schema: &SchemaRef,
+                extractor: &Arc<Box<dyn KeyProjection>>,
+                key: &str,
+                value: i64,
+                ts: u64,
+            ) {
+                let rows = vec![DynRow(vec![
+                    Some(DynCell::Str(key.into())),
+                    Some(DynCell::I64(value)),
+                ])];
+                let batch = build_batch(schema.clone(), rows).expect("batch");
+                table
+                    .insert_batch(extractor.as_ref().as_ref(), batch, Timestamp::new(ts))
+                    .expect("insert row");
+            }
+
+            insert_row(&mut mutable, &schema, &extractor, "m1", 10, 5);
+            insert_row(&mut mutable, &schema, &extractor, "m2", 20, 7);
+            insert_row(&mut immutable_builder, &schema, &extractor, "i1", 1, 2);
+            insert_row(&mut immutable_builder, &schema, &extractor, "i2", 2, 3);
+
+            let immutable = immutable_builder
+                .seal_into_immutable(&schema, extractor.as_ref().as_ref())
+                .expect("seal immutable")
+                .expect("segment");
+
+            let mut staged = BTreeMap::new();
+            staged.insert(
+                KeyOwned::from("txn-a"),
+                DynMutation::Upsert(DynRow(vec![
+                    Some(DynCell::Str("txn-a".into())),
+                    Some(DynCell::I64(100)),
+                ])),
+            );
+            staged.insert(
+                KeyOwned::from("txn-b"),
+                DynMutation::Upsert(DynRow(vec![
+                    Some(DynCell::Str("txn-b".into())),
+                    Some(DynCell::I64(200)),
+                ])),
+            );
+
+            Self {
+                schema,
+                mutable,
+                immutable,
+                staged,
+            }
+        }
+    }
 
     #[tokio::test]
     async fn scan_stream_mutable_variant_yields_entries() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("v", DataType::Int64, true),
-        ]));
-        let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
-        let mut mem = DynMem::new(schema.clone());
-        let rows = vec![DynRow(vec![
-            Some(DynCell::Str("k0".into())),
-            Some(DynCell::I64(42)),
-        ])];
-        let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
-        mem.insert_batch(extractor.as_ref(), batch, Timestamp::new(1))
-            .expect("insert");
-
+        let setup = ScanStreamFixture::new();
         let ranges = RangeSet::all();
-        let scan = mem
+        let scan = setup
+            .mutable
             .scan_rows(&ranges, None)
             .expect("scan rows produces iterator");
         let mut stream = ScanStream::<RecordBatch>::from(scan);
         let next = stream.next().await.expect("entry present");
-        assert!(next.is_ok(), "entry ok");
+        assert!(matches!(next, Ok(StreamEntry::MemTable(_))));
+    }
+
+    #[tokio::test]
+    async fn scan_stream_immutable_variant_yields_entries() {
+        let setup = ScanStreamFixture::new();
+        let ranges = RangeSet::all();
+        let scan = setup
+            .immutable
+            .scan_visible(&ranges, None, Timestamp::MAX)
+            .expect("scan immutables");
+        let mut stream = ScanStream::<RecordBatch>::from(scan);
+        let next = stream.next().await.expect("entry present");
+        assert!(matches!(next, Ok(StreamEntry::MemTable(_))));
+    }
+
+    #[tokio::test]
+    async fn scan_stream_txn_variant_yields_entries() {
+        let setup = ScanStreamFixture::new();
+        let ranges = RangeSet::all();
+        let txn_scan = TransactionScan::new(
+            &setup.staged,
+            ranges,
+            &setup.schema,
+            Timestamp::new(5),
+            None,
+        )
+        .expect("txn scan");
+        let mut stream = Box::pin(ScanStream::<RecordBatch>::from(txn_scan));
+        let entry = stream.next().await.expect("entry present");
+        assert!(matches!(entry, Ok(StreamEntry::Txn(_))));
     }
 }

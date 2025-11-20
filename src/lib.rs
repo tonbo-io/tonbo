@@ -31,9 +31,6 @@ mod test_util;
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;
 
-/// Shared scan utilities (key ranges, range sets).
-pub mod scan;
-
 /// Minimal key-focused expression tree and helpers.
 pub mod query;
 

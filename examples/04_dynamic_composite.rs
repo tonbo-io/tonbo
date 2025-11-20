@@ -5,9 +5,8 @@ use std::{collections::HashMap, ops::Bound, sync::Arc};
 use fusio::executor::BlockingExecutor;
 use tonbo::{
     db::{DB, DynMode},
-    key::KeyOwned,
+    key::{KeyOwned, KeyRange, RangeSet},
     mode::DynModeConfig,
-    scan::{KeyRange, RangeSet},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,

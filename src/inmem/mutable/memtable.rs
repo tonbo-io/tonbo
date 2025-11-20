@@ -22,10 +22,9 @@ use crate::{
         },
         policy::{MemStats, StatsProvider},
     },
-    key::{KeyOwned, KeyRow, KeyTsViewRaw},
+    key::{KeyOwned, KeyRange, KeyRow, KeyTsViewRaw, RangeSet},
     mutation::DynMutation,
     mvcc::Timestamp,
-    scan::{KeyRange, RangeSet},
 };
 
 #[derive(Debug)]

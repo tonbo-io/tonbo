@@ -7,9 +7,8 @@ use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 pub(crate) use crate::mvcc::MVCC_COMMIT_COL;
 use crate::{
     extractor::{KeyExtractError, KeyProjection, map_view_err, projection_for_field},
-    key::{KeyOwned, KeyRow, KeyTsViewRaw},
+    key::{KeyOwned, KeyRange, KeyRow, KeyTsViewRaw, RangeSet},
     mvcc::Timestamp,
-    scan::{KeyRange, RangeSet},
 };
 pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 
@@ -508,7 +507,6 @@ pub(crate) struct ImmutableRowIter<'t, S> {
     _marker: PhantomData<&'t S>,
 }
 
-#[allow(dead_code)]
 pub(crate) struct ImmutableRowEntry {
     pub key: KeyOwned,
     pub commit_ts: Timestamp,

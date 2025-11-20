@@ -15,10 +15,7 @@ pub use predicate::{
 };
 use predicate::{PredicateVisitor, VisitOutcome};
 
-use crate::{
-    key::KeyOwned,
-    scan::{KeyRange, RangeSet},
-};
+use crate::key::{KeyOwned, KeyRange, RangeSet};
 
 /// Trait describing key types that can be derived from predicate scalar literals.
 pub trait KeyPredicateValue: Ord + Clone {
