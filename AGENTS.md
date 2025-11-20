@@ -64,6 +64,8 @@ Pre-submit routine (every source adjustment):
 - As a data infrastructure project, exhaust every effort to use compile-time dispatch and aggressively control memory, file, and network access patterns to maximize database compute/storage efficiency; prefer static dispatch, preallocation, and explicit IO planning over ad-hoc dynamic code paths.
 - All filesystem and network calls must be async so we can pipeline IO and avoid blocking executors.
 - Do not block async runtimes (no `block_on`, `spawn_blocking`, etc. in read/write paths); prefer native async/await for every operation.
+- Do not clone large struct especially vector or string, use reference as much as you can;
+- Never `unwrap()` or `expect()` in the source code and always surface error up expect for unsafe block. You can use `expect()` in testing code.
 - In runtime paths, favor returning structured errors over panicking; reserve panics for truly unrecoverable invariants and keep best-effort operations on the happy path
 
 ## Testing Guidelines
