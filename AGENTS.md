@@ -63,6 +63,7 @@ Pre-submit routine (every source adjustment):
 - No backward-compatibility constraints; prioritize clean code.
 - As a data infrastructure project, exhaust every effort to use compile-time dispatch and aggressively control memory, file, and network access patterns to maximize database compute/storage efficiency; prefer static dispatch, preallocation, and explicit IO planning over ad-hoc dynamic code paths.
 - All filesystem and network calls must be async so we can pipeline IO and avoid blocking executors.
+- Do not block async runtimes (no `block_on`, `spawn_blocking`, etc. in read/write paths); prefer native async/await for every operation.
 - In runtime paths, favor returning structured errors over panicking; reserve panics for truly unrecoverable invariants and keep best-effort operations on the happy path
 
 ## Testing Guidelines
