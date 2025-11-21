@@ -2980,15 +2980,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recover_replays_commit_timestamps_and_advances_clock() {
-        use std::time::SystemTime;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-        let wal_dir = std::env::temp_dir().join(format!(
-            "tonbo-replay-test-{}",
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let clock_nanos = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(delta) => delta.as_nanos(),
+            Err(err) => panic!("system clock before unix epoch: {err}"),
+        };
+        let wal_dir = std::env::temp_dir().join(format!("tonbo-replay-test-{clock_nanos}"));
         fs::create_dir_all(&wal_dir).expect("create wal dir");
 
         let schema = std::sync::Arc::new(Schema::new(vec![

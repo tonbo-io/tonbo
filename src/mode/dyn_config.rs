@@ -75,8 +75,12 @@ impl DynModeConfig {
                     name: "multiple tonbo.key markers require numeric ordinals".to_string(),
                 });
             }
-            marks.sort_by_key(|(o, _)| o.unwrap());
-            let indices: Vec<usize> = marks.into_iter().map(|(_, idx)| idx).collect();
+            let mut ordered: Vec<(u32, usize)> = marks
+                .into_iter()
+                .filter_map(|(ord, idx)| ord.map(|o| (o, idx)))
+                .collect();
+            ordered.sort_by_key(|(ord, _)| *ord);
+            let indices: Vec<usize> = ordered.into_iter().map(|(_, idx)| idx).collect();
             let extractor = extractor::projection_for_columns(schema.clone(), indices)?;
             return Self::new(schema, extractor);
         }

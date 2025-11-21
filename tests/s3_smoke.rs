@@ -68,13 +68,11 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
         &["id"],
     );
 
-    let label = format!(
-        "smoke-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let label_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system clock before unix epoch: {err}"))?
+        .as_millis();
+    let label = format!("smoke-{label_millis}");
 
     let credentials = match session_token.clone() {
         Some(token) => AwsCreds::with_session_token(access, secret, token),

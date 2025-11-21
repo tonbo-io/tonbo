@@ -8,7 +8,7 @@ use std::{
 };
 
 use arrow_array::{Array, RecordBatch, UInt64Array};
-use arrow_schema::{Schema, SchemaRef};
+use arrow_schema::{ArrowError, Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
@@ -374,6 +374,14 @@ impl DynMem {
             return Ok(None);
         }
 
+        let pop_single_batch = |batches: &mut Vec<RecordBatch>, label: &str| {
+            batches.pop().ok_or_else(|| {
+                crate::extractor::KeyExtractError::Arrow(ArrowError::ComputeError(format!(
+                    "{label} unexpectedly empty while sealing mutable memtable"
+                )))
+            })
+        };
+
         let mut slices = Vec::new();
         let mut commit_ts = Vec::new();
         let mut tombstone = Vec::new();
@@ -438,7 +446,7 @@ impl DynMem {
         let batch = if slices.is_empty() {
             RecordBatch::new_empty(schema.clone())
         } else if slices.len() == 1 {
-            slices.pop().unwrap()
+            pop_single_batch(&mut slices, "upsert slices")?
         } else {
             concat_batches(schema, &slices)?
         };
@@ -450,7 +458,7 @@ impl DynMem {
         let delete_batch = if delete_slices.is_empty() {
             RecordBatch::new_empty(key_schema.clone())
         } else if delete_slices.len() == 1 {
-            delete_slices.pop().unwrap()
+            pop_single_batch(&mut delete_slices, "delete slices")?
         } else {
             concat_batches(&key_schema, &delete_slices)?
         };

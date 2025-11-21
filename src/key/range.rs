@@ -91,15 +91,14 @@ impl<K: Ord> RangeSet<K> {
         ranges.sort_by(|a, b| cmp_lower(&a.start, &b.start));
         let mut out: Vec<KeyRange<K>> = Vec::new();
         for r in ranges.into_iter() {
-            if out.is_empty() {
-                out.push(r);
-                continue;
-            }
-            let last = out.last_mut().unwrap();
-            if overlaps_or_adjacent(&last.end, &r.start) {
-                // Merge by extending the end to the max of both ends
-                last.end =
-                    max_upper_owned(std::mem::replace(&mut last.end, Bound::Unbounded), r.end);
+            if let Some(last) = out.last_mut() {
+                if overlaps_or_adjacent(&last.end, &r.start) {
+                    // Merge by extending the end to the max of both ends
+                    last.end =
+                        max_upper_owned(std::mem::replace(&mut last.end, Bound::Unbounded), r.end);
+                } else {
+                    out.push(r);
+                }
             } else {
                 out.push(r);
             }

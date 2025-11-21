@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{ArrowError, DataType, Fields, Schema, SchemaRef};
 use typed_arrow_dyn::{DynCell, DynProjection, DynRow, DynSchema, DynViewError};
 
@@ -197,58 +197,33 @@ pub(crate) fn row_from_batch(batch: &RecordBatch, row: usize) -> Result<DynRow, 
         let dt = arr.data_type();
         let cell = match dt {
             DataType::Boolean => Some(DynCell::Bool(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::BooleanArray>()
-                    .unwrap()
-                    .value(row),
+                downcast_column::<arrow_array::BooleanArray>(arr, col_idx, dt)?.value(row),
             )),
             DataType::Int32 => Some(DynCell::I32(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Int32Array>()
-                    .unwrap()
-                    .value(row),
+                downcast_column::<arrow_array::Int32Array>(arr, col_idx, dt)?.value(row),
             )),
             DataType::Int64 => Some(DynCell::I64(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Int64Array>()
-                    .unwrap()
-                    .value(row),
+                downcast_column::<arrow_array::Int64Array>(arr, col_idx, dt)?.value(row),
             )),
             DataType::UInt32 => Some(DynCell::U32(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::UInt32Array>()
-                    .unwrap()
-                    .value(row),
+                downcast_column::<arrow_array::UInt32Array>(arr, col_idx, dt)?.value(row),
             )),
             DataType::UInt64 => Some(DynCell::U64(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::UInt64Array>()
-                    .unwrap()
-                    .value(row),
+                downcast_column::<arrow_array::UInt64Array>(arr, col_idx, dt)?.value(row),
             )),
             DataType::Float32 => Some(DynCell::F32(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Float32Array>()
-                    .unwrap()
-                    .value(row),
+                downcast_column::<arrow_array::Float32Array>(arr, col_idx, dt)?.value(row),
             )),
             DataType::Float64 => Some(DynCell::F64(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::Float64Array>()
-                    .unwrap()
-                    .value(row),
+                downcast_column::<arrow_array::Float64Array>(arr, col_idx, dt)?.value(row),
             )),
             DataType::Utf8 => Some(DynCell::Str(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .unwrap()
+                downcast_column::<arrow_array::StringArray>(arr, col_idx, dt)?
                     .value(row)
                     .to_owned(),
             )),
             DataType::Binary => Some(DynCell::Bin(
-                arr.as_any()
-                    .downcast_ref::<arrow_array::BinaryArray>()
-                    .unwrap()
+                downcast_column::<arrow_array::BinaryArray>(arr, col_idx, dt)?
                     .value(row)
                     .to_vec(),
             )),
@@ -262,6 +237,21 @@ pub(crate) fn row_from_batch(batch: &RecordBatch, row: usize) -> Result<DynRow, 
         cells.push(cell);
     }
     Ok(DynRow(cells))
+}
+
+fn downcast_column<'a, A: 'static>(
+    column: &'a ArrayRef,
+    col_idx: usize,
+    expected: &DataType,
+) -> Result<&'a A, KeyExtractError> {
+    column
+        .as_any()
+        .downcast_ref::<A>()
+        .ok_or_else(|| KeyExtractError::WrongType {
+            col: col_idx,
+            expected: expected.clone(),
+            actual: column.data_type().clone(),
+        })
 }
 
 #[cfg(test)]
@@ -297,22 +287,22 @@ mod tests {
         let batch = <User as BuildRows>::Builders::finish(builders).into_record_batch();
         let schema = batch.schema();
 
-        let utf8 = projection_for_field(schema.clone(), 0).unwrap();
-        let i32k = projection_for_field(schema.clone(), 1).unwrap();
+        let utf8 = projection_for_field(schema.clone(), 0).expect("utf8 projection");
+        let i32k = projection_for_field(schema.clone(), 1).expect("i32 projection");
 
-        KeyProjection::validate_schema(&*utf8, &schema).unwrap();
-        KeyProjection::validate_schema(&*i32k, &schema).unwrap();
+        KeyProjection::validate_schema(&*utf8, &schema).expect("utf8 schema");
+        KeyProjection::validate_schema(&*i32k, &schema).expect("i32 schema");
 
         let first = utf8
             .project_view(&batch, &[0])
-            .unwrap()
+            .expect("utf8 key view")
             .remove(0)
             .to_owned();
         assert_eq!(first.as_utf8(), Some("a"));
 
         let second = i32k
             .project_view(&batch, &[1])
-            .unwrap()
+            .expect("i32 key view")
             .remove(0)
             .to_owned();
         let second_cell = second
@@ -323,10 +313,11 @@ mod tests {
             .expect("i32 key");
         assert!(matches!(second_cell, DynCell::I32(2)));
 
-        let composite = projection_for_columns(schema.clone(), vec![0, 1]).unwrap();
+        let composite =
+            projection_for_columns(schema.clone(), vec![0, 1]).expect("composite projection");
         let tuple = composite
             .project_view(&batch, &[1])
-            .unwrap()
+            .expect("composite key view")
             .remove(0)
             .to_owned();
         let parts = tuple.as_row().cells();

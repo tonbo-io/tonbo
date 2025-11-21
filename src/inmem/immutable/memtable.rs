@@ -426,6 +426,13 @@ fn convert_ranges(ranges: &RangeSet<KeyOwned>) -> ConvertedRanges {
     ConvertedRanges::new(key_backing, RangeSet::from_ranges(converted))
 }
 
+fn push_backing_key(storage: &mut Vec<KeyOwned>, key: KeyOwned) -> &KeyOwned {
+    storage.push(key);
+    storage
+        .last()
+        .expect("backing storage should contain the pushed key")
+}
+
 fn convert_lower_bound(
     bound: &Bound<KeyOwned>,
     storage: &mut Vec<KeyOwned>,
@@ -433,13 +440,11 @@ fn convert_lower_bound(
     match bound {
         Bound::Unbounded => Bound::Unbounded,
         Bound::Included(key) => {
-            storage.push(key.clone());
-            let owned = storage.last().unwrap();
+            let owned = push_backing_key(storage, key.clone());
             Bound::Included(KeyTsViewRaw::from_owned(owned, Timestamp::MAX))
         }
         Bound::Excluded(key) => {
-            storage.push(key.clone());
-            let owned = storage.last().unwrap();
+            let owned = push_backing_key(storage, key.clone());
             Bound::Excluded(KeyTsViewRaw::from_owned(owned, Timestamp::MIN))
         }
     }
@@ -452,13 +457,11 @@ fn convert_upper_bound(
     match bound {
         Bound::Unbounded => Bound::Unbounded,
         Bound::Included(key) => {
-            storage.push(key.clone());
-            let owned = storage.last().unwrap();
+            let owned = push_backing_key(storage, key.clone());
             Bound::Included(KeyTsViewRaw::from_owned(owned, Timestamp::MIN))
         }
         Bound::Excluded(key) => {
-            storage.push(key.clone());
-            let owned = storage.last().unwrap();
+            let owned = push_backing_key(storage, key.clone());
             Bound::Excluded(KeyTsViewRaw::from_owned(owned, Timestamp::MAX))
         }
     }
@@ -572,8 +575,7 @@ mod tests {
     };
 
     fn push_view(storage: &mut Vec<KeyOwned>, key: &str, ts: Timestamp) -> KeyTsViewRaw {
-        storage.push(KeyOwned::from(key));
-        let owned = storage.last().unwrap();
+        let owned = push_backing_key(storage, KeyOwned::from(key));
         KeyTsViewRaw::from_owned(owned, ts)
     }
 
