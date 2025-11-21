@@ -320,6 +320,77 @@ async fn wal_replay_emits_delete_frames_for_tombstones() -> Result<(), Box<dyn s
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Error>> {
+    let root_dir = workspace_temp_dir("tonbo-wal-delete-recovery");
+    let root_str = root_dir.to_string_lossy().into_owned();
+
+    let (schema, mode_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, true),
+        ],
+        &["id"],
+    );
+    let executor = Arc::new(TokioExecutor::default());
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
+
+    let live_batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["user-1"])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![10])) as ArrayRef,
+        ],
+    )?;
+    db.ingest_with_tombstones(live_batch, vec![false]).await?;
+
+    let delete_batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["user-1"])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![0])) as ArrayRef,
+        ],
+    )?;
+    db.ingest_with_tombstones(delete_batch, vec![true]).await?;
+
+    db.disable_wal().await?;
+    drop(db);
+
+    let (_, recover_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, true),
+        ],
+        &["id"],
+    );
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(recover_config)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
+
+    let ranges = RangeSet::<KeyOwned>::all();
+    {
+        let mut rows = recovered
+            .scan_mutable_rows(&ranges, None)
+            .expect("scan rows");
+        assert!(rows.next().is_none(), "delete should survive recovery");
+    }
+
+    recovered.disable_wal().await?;
+    drop(recovered);
+    if let Err(err) = fs::remove_dir_all(&root_dir) {
+        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::error::Error>> {
     let root_dir = workspace_temp_dir("tonbo-wal-truncated");
     let root_str = root_dir.to_string_lossy().into_owned();

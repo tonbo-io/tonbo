@@ -1199,6 +1199,22 @@ fn apply_dyn_wal_batch<E>(
 where
     E: Executor + Timer,
 {
+    let schema_contains_tombstone = db
+        .mode
+        .schema
+        .fields()
+        .iter()
+        .any(|field| field.name() == crate::inmem::immutable::memtable::MVCC_TOMBSTONE_COL);
+    let batch_contains_tombstone = batch
+        .schema()
+        .fields()
+        .iter()
+        .any(|field| field.name() == crate::inmem::immutable::memtable::MVCC_TOMBSTONE_COL);
+    if batch_contains_tombstone && !schema_contains_tombstone {
+        return Err(KeyExtractError::from(WalError::Codec(
+            "wal batch contained unexpected _tombstone column".into(),
+        )));
+    }
     validate_record_batch_schema(db, &batch)?;
     let commit_array = commit_ts_column
         .as_any()
@@ -1401,7 +1417,7 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray, UInt64Array};
+    use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
@@ -1423,7 +1439,7 @@ mod tests {
     use super::*;
     use crate::{
         compaction::planner::{LeveledCompactionPlanner, LeveledPlannerConfig},
-        inmem::policy::BatchesThreshold,
+        inmem::{immutable::memtable::MVCC_TOMBSTONE_COL, policy::BatchesThreshold},
         key::KeyRange,
         manifest::init_fs_manifest,
         mvcc::Timestamp,
@@ -1552,6 +1568,75 @@ mod tests {
             .inspect_versions(&KeyOwned::from("k2"))
             .expect("second key");
         assert_eq!(deleted, vec![(commit_ts, false)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_dyn_wal_batch_rejects_tombstone_payloads() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
+        let executor = Arc::new(BlockingExecutor);
+        let mut db: DB<DynMode, BlockingExecutor> =
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
+
+        let wal_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, true),
+            Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
+        ]));
+        let wal_batch = RecordBatch::try_new(
+            wal_schema,
+            vec![
+                Arc::new(StringArray::from(vec!["k"])) as ArrayRef,
+                Arc::new(Int32Array::from(vec![Some(1)])) as ArrayRef,
+                Arc::new(BooleanArray::from(vec![Some(false)])) as ArrayRef,
+            ],
+        )
+        .expect("wal batch");
+        let commit_ts = Timestamp::new(22);
+        let commit_array: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get()]));
+
+        let err = apply_dyn_wal_batch(&mut db, wal_batch, commit_array, commit_ts)
+            .expect_err("apply should fail");
+        match err {
+            KeyExtractError::SchemaMismatch { .. } | KeyExtractError::Wal(_) => {}
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_dyn_wal_batch_allows_user_tombstone_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("_tombstone", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, true),
+        ]));
+        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
+        let executor = Arc::new(BlockingExecutor);
+        let mut db: DB<DynMode, BlockingExecutor> =
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["k"])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("flag")])) as ArrayRef,
+                Arc::new(Int32Array::from(vec![Some(9)])) as ArrayRef,
+            ],
+        )
+        .expect("batch");
+        let commit_ts = Timestamp::new(30);
+        let commit_array: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get()]));
+
+        apply_dyn_wal_batch(&mut db, batch, commit_array, commit_ts).expect("apply");
+
+        let versions = db
+            .mem
+            .inspect_versions(&KeyOwned::from("k"))
+            .expect("versions");
+        assert_eq!(versions, vec![(commit_ts, false)]);
     }
 
     #[tokio::test(flavor = "current_thread")]
