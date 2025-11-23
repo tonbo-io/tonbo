@@ -10,12 +10,17 @@ use fusio::{
 };
 use thiserror::Error;
 
-use super::{DB, Mode};
+use super::{DB, DynMode, Mode};
 use crate::{
+    compaction::{
+        executor::LocalCompactionExecutor,
+        planner::{CompactionStrategy, PlannerInitError},
+    },
     extractor::KeyExtractError,
     id::FileIdGenerator,
     manifest::{ManifestError, TonboManifest, init_fs_manifest},
     mode::CatalogDescribe,
+    ondisk::sstable::SsTableConfig,
     wal::{
         WalConfig as RuntimeWalConfig, WalError, WalExt, WalRecoveryMode, WalSyncPolicy,
         state::{FsWalStateStore, WalStateStore},
@@ -428,6 +433,9 @@ where
 {
     mode_config: M::Config,
     state: S,
+    compaction_strategy: CompactionStrategy,
+    compaction_interval: Option<Duration>,
+    compaction_loop_cfg: Option<CompactionLoopConfig>,
 }
 
 impl ObjectDurableState {
@@ -481,6 +489,9 @@ pub enum DbBuildError {
         #[source]
         source: std::io::Error,
     },
+    /// Compaction strategy selection is not yet supported.
+    #[error(transparent)]
+    CompactionPlanner(#[from] PlannerInitError),
 }
 
 #[derive(Debug, Clone)]
@@ -882,6 +893,9 @@ where
         Self {
             mode_config,
             state: Unconfigured,
+            compaction_strategy: CompactionStrategy::default(),
+            compaction_interval: None,
+            compaction_loop_cfg: None,
         }
     }
 
@@ -895,6 +909,9 @@ where
                 label: label.into(),
                 table_name: None,
             },
+            compaction_strategy: self.compaction_strategy,
+            compaction_interval: self.compaction_interval,
+            compaction_loop_cfg: self.compaction_loop_cfg,
         }
     }
 
@@ -904,6 +921,9 @@ where
         DbBuilder {
             mode_config: self.mode_config,
             state: DiskDurableState::new(root),
+            compaction_strategy: self.compaction_strategy,
+            compaction_interval: self.compaction_interval,
+            compaction_loop_cfg: self.compaction_loop_cfg,
         }
     }
 
@@ -913,6 +933,9 @@ where
         DbBuilder {
             mode_config: self.mode_config,
             state: ObjectDurableState::new(spec),
+            compaction_strategy: self.compaction_strategy,
+            compaction_interval: self.compaction_interval,
+            compaction_loop_cfg: self.compaction_loop_cfg,
         }
     }
 }
@@ -931,9 +954,16 @@ where
 
 impl<M, S> DbBuilder<M, S>
 where
-    M: Mode + CatalogDescribe,
+    M: Mode + CatalogDescribe + 'static,
     S: StorageState,
 {
+    /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
+    #[must_use]
+    pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
+        self.compaction_strategy = strategy;
+        self
+    }
+
     /// Materialise a [`DB`] using the accumulated builder state.
     pub async fn build(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
         let executor = Arc::new(TokioExecutor::default());
@@ -1000,7 +1030,75 @@ where
             db.enable_wal(cfg).await?;
         }
 
+        let mut db = db;
+        if let Some(loop_cfg) = self.compaction_loop_cfg {
+            // Temporary shortcut: spawn a local compaction loop for dyn mode using a
+            // caller-provided SST config. This should be replaced by a real
+            // scheduler/lease + executor selection.
+            let planner = self
+                .compaction_strategy
+                .clone()
+                .build()
+                .map_err(DbBuildError::CompactionPlanner)?;
+            let exec =
+                LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
+            let db_arc = Arc::new(db);
+            let _handle = db_arc.spawn_compaction_worker_local(
+                planner,
+                exec,
+                Some(loop_cfg.sst_config),
+                loop_cfg.interval,
+            );
+            db = match Arc::try_unwrap(db_arc) {
+                Ok(db_owned) => db_owned,
+                Err(_) => panic!("compaction worker should not hold DB strong refs"),
+            };
+        }
+
         Ok(db)
+    }
+}
+
+impl<S> DbBuilder<DynMode, S>
+where
+    S: StorageState,
+{
+    /// Configure an optional background compaction interval (current-thread Tokio only).
+    /// This is a temporary opt-in; a proper scheduler/lease should replace it.
+    #[must_use]
+    pub fn with_compaction_interval(mut self, interval: Duration) -> Self {
+        self.compaction_interval = Some(interval);
+        self
+    }
+}
+
+/// Configures automatic compaction loop spawning for DynMode builds.
+#[derive(Clone)]
+struct CompactionLoopConfig {
+    interval: Duration,
+    sst_config: Arc<SsTableConfig>,
+    start_id: u64,
+}
+
+impl<S> DbBuilder<DynMode, S>
+where
+    S: StorageState,
+{
+    /// Enable a background compaction loop (current-thread Tokio). This is a temporary,
+    /// dyn-mode-only helper; a proper scheduler/lease should replace it.
+    #[must_use]
+    pub fn with_compaction_loop(
+        mut self,
+        interval: Duration,
+        sst_config: Arc<SsTableConfig>,
+        start_id: u64,
+    ) -> Self {
+        self.compaction_loop_cfg = Some(CompactionLoopConfig {
+            interval,
+            sst_config,
+            start_id,
+        });
+        self
     }
 }
 impl<M, S> DbBuilder<M, S>
@@ -1018,7 +1116,7 @@ where
 
 impl<M, S> DbBuilder<M, S>
 where
-    M: Mode + CatalogDescribe,
+    M: Mode + CatalogDescribe + 'static,
     S: DurableStorageState,
 {
     /// Apply a batch of WAL overrides supplied via [`WalConfig`].

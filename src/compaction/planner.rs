@@ -2,11 +2,87 @@
 
 use std::cmp::Ordering;
 
+use thiserror::Error;
+
 use crate::{
     key::KeyOwned,
     manifest::VersionState,
     ondisk::sstable::{SsTableId, SsTableStats},
 };
+
+/// Abstract compaction planner interface to support selectable strategies.
+pub trait CompactionPlanner {
+    /// Examine the snapshot of levels and return the next compaction task, if any.
+    fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask>;
+}
+
+/// Available compaction strategies selectable via configuration.
+#[derive(Clone, Debug)]
+pub enum CompactionStrategy {
+    /// Leveled compaction (tiered levels, non-overlapping within a level).
+    Leveled(LeveledPlannerConfig),
+    /// Size-tiered/universal-style compaction (reserved).
+    Tiered(TieredPlannerConfig),
+    /// Time-windowed compaction (reserved).
+    TimeWindow(TimeWindowPlannerConfig),
+}
+
+impl Default for CompactionStrategy {
+    fn default() -> Self {
+        Self::Leveled(LeveledPlannerConfig::default())
+    }
+}
+
+/// Planner enum used to keep a concrete planner instance around even as strategy becomes pluggable.
+#[derive(Clone, Debug)]
+pub enum CompactionPlannerKind {
+    /// Leveled planner implementation.
+    Leveled(LeveledCompactionPlanner),
+}
+
+impl CompactionPlanner for CompactionPlannerKind {
+    fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
+        match self {
+            Self::Leveled(planner) => LeveledCompactionPlanner::plan(planner, snapshot),
+        }
+    }
+}
+
+/// Placeholder config for size-tiered planning (not implemented yet).
+#[derive(Clone, Debug, Default)]
+pub struct TieredPlannerConfig;
+
+/// Placeholder config for time-windowed planning (not implemented yet).
+#[derive(Clone, Debug, Default)]
+pub struct TimeWindowPlannerConfig;
+
+/// Errors raised when building a planner from a strategy selection.
+#[derive(Debug, Error)]
+pub enum PlannerInitError {
+    /// Strategy variant exists but does not have an implementation yet.
+    #[error("compaction strategy `{strategy}` not implemented yet")]
+    Unsupported {
+        /// Name of the unimplemented strategy.
+        strategy: String,
+    },
+}
+
+impl CompactionStrategy {
+    /// Build a concrete planner for the selected strategy.
+    pub fn build(self) -> Result<CompactionPlannerKind, PlannerInitError> {
+        match self {
+            Self::Leveled(cfg) => Ok(CompactionPlannerKind::Leveled(
+                LeveledCompactionPlanner::new(cfg),
+            )),
+            Self::Tiered(_) => Err(PlannerInitError::Unsupported {
+                strategy: "tiered".into(),
+            }),
+            Self::TimeWindow(_) => Err(PlannerInitError::Unsupported {
+                strategy: "time-window".into(),
+            }),
+        }
+    }
+}
 
 /// Snapshot of SST layout across levels used for leveled compaction planning.
 #[derive(Clone, Debug, Default)]
@@ -115,11 +191,17 @@ pub struct LeveledPlannerConfig {
     pub l0_trigger: usize,
     /// Maximum number of L0 files to include in a single plan.
     pub l0_max_inputs: usize,
+    /// Total bytes in L0 that should trigger compaction into L1.
+    pub l0_max_bytes: Option<usize>,
     /// Per-level thresholds (starting at L1) for how many files can reside in a level
     /// before the planner schedules a compaction into the next level.
     pub level_thresholds: Vec<usize>,
+    /// Per-level byte thresholds (starting at L1) used to trigger compaction into the next level.
+    pub level_max_bytes: Vec<Option<usize>>,
     /// Maximum number of files to compact in a single task for leveled runs.
     pub max_inputs_per_task: usize,
+    /// Maximum total bytes to include in a single compaction task across all selected inputs.
+    pub max_task_bytes: Option<usize>,
 }
 
 impl Default for LeveledPlannerConfig {
@@ -127,8 +209,11 @@ impl Default for LeveledPlannerConfig {
         Self {
             l0_trigger: 8,
             l0_max_inputs: 6,
+            l0_max_bytes: None,
             level_thresholds: vec![10, 12, 14],
+            level_max_bytes: Vec::new(),
             max_inputs_per_task: 10,
+            max_task_bytes: None,
         }
     }
 }
@@ -168,11 +253,17 @@ impl LeveledCompactionPlanner {
 
     fn plan_l0(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
         let level0 = snapshot.level(0)?;
-        if level0.len() < self.cfg.l0_trigger {
+        let over_l0_bytes = self
+            .cfg
+            .l0_max_bytes
+            .map(|cap| total_bytes(level0.files()) >= cap)
+            .unwrap_or(false);
+        if level0.len() < self.cfg.l0_trigger && !over_l0_bytes {
             return None;
         }
         let take = self.cfg.l0_max_inputs.min(level0.len()).max(1);
-        let selected: Vec<&LevelFile> = level0.files().iter().take(take).collect();
+        let selected: Vec<&LevelFile> =
+            select_compaction_run(level0.files(), take, self.cfg.max_task_bytes);
         let input: Vec<SsTableId> = selected.iter().map(|file| file.sst_id.clone()).collect();
         Some(CompactionTask {
             source_level: 0,
@@ -188,19 +279,48 @@ impl LeveledCompactionPlanner {
             let Some(limit) = self.cfg.level_thresholds.get(idx).copied() else {
                 continue;
             };
-            if level_info.len() <= limit {
+            let max_bytes = self.cfg.level_max_bytes.get(idx).and_then(|b| *b);
+            let over_bytes = max_bytes
+                .map(|cap| total_bytes(level_info.files()) >= cap)
+                .unwrap_or(false);
+            if level_info.len() <= limit && !over_bytes {
                 continue;
             }
             let take = self.cfg.max_inputs_per_task.min(level_info.len()).max(1);
-            let selected = select_compaction_run(level_info.files(), take);
+            let selected = select_compaction_run(level_info.files(), take, self.cfg.max_task_bytes);
             if selected.is_empty() {
                 continue;
             }
-            let input: Vec<SsTableId> = selected.iter().map(|file| file.sst_id.clone()).collect();
+            let mut input: Vec<SsTableId> =
+                selected.iter().map(|file| file.sst_id.clone()).collect();
+            let mut key_range = aggregate_key_range(selected.iter().copied());
+            // Pull overlapping SSTs from the next level to reduce post-compaction overlap.
+            if let Some(next_level) = snapshot.level(level_info.level + 1)
+                && let Some((min_key, max_key)) = key_range.as_ref()
+            {
+                let mut overlaps: Vec<&LevelFile> = Vec::new();
+                for file in next_level.files() {
+                    let Some(stats) = file.stats.as_ref() else {
+                        continue;
+                    };
+                    match (&stats.min_key, &stats.max_key) {
+                        (Some(file_min), Some(file_max))
+                            if file_min <= max_key && file_max >= min_key =>
+                        {
+                            overlaps.push(file);
+                            input.push(file.sst_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                if !overlaps.is_empty() {
+                    key_range = aggregate_key_range(selected.iter().copied().chain(overlaps));
+                }
+            }
             return Some(CompactionTask {
                 source_level: level_info.level,
                 target_level: level_info.level + 1,
-                key_range: aggregate_key_range(selected.iter().copied()),
+                key_range,
                 input,
             });
         }
@@ -208,13 +328,39 @@ impl LeveledCompactionPlanner {
     }
 }
 
-fn select_compaction_run(files: &[LevelFile], take: usize) -> Vec<&LevelFile> {
+impl CompactionPlanner for LeveledCompactionPlanner {
+    fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
+        LeveledCompactionPlanner::plan(self, snapshot)
+    }
+}
+
+fn select_compaction_run(
+    files: &[LevelFile],
+    take: usize,
+    max_bytes: Option<usize>,
+) -> Vec<&LevelFile> {
     if files.is_empty() {
         return Vec::new();
     }
     let mut ordered: Vec<&LevelFile> = files.iter().collect();
     ordered.sort_by(|lhs, rhs| compare_key(lhs, rhs));
-    ordered.into_iter().take(take).collect()
+    let mut selected = Vec::new();
+    let mut bytes = 0usize;
+    for file in ordered.into_iter() {
+        if selected.len() >= take {
+            break;
+        }
+        let file_bytes = file.stats.as_ref().map(|s| s.bytes).unwrap_or(0);
+        if let Some(cap) = max_bytes
+            && !selected.is_empty()
+            && bytes + file_bytes > cap
+        {
+            break;
+        }
+        bytes += file_bytes;
+        selected.push(file);
+    }
+    selected
 }
 
 fn compare_key(lhs: &LevelFile, rhs: &LevelFile) -> Ordering {
@@ -253,6 +399,14 @@ fn aggregate_key_range<'a>(
     }
 }
 
+fn total_bytes(files: &[LevelFile]) -> usize {
+    files
+        .iter()
+        .filter_map(|file| file.stats.as_ref())
+        .map(|stats| stats.bytes)
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,8 +423,24 @@ mod tests {
         }
     }
 
+    fn stats_with_bytes(min: &str, max: &str, bytes: usize) -> SsTableStats {
+        SsTableStats {
+            rows: 1,
+            bytes,
+            tombstones: 0,
+            min_key: Some(KeyOwned::from(min)),
+            max_key: Some(KeyOwned::from(max)),
+            min_commit_ts: None,
+            max_commit_ts: None,
+        }
+    }
+
     fn file(id: u64, min: &str, max: &str) -> LevelFile {
         LevelFile::new(SsTableId::new(id), Some(stats_with_keys(min, max)))
+    }
+
+    fn file_with_bytes(id: u64, min: &str, max: &str, bytes: usize) -> LevelFile {
+        LevelFile::new(SsTableId::new(id), Some(stats_with_bytes(min, max, bytes)))
     }
 
     #[test]
@@ -316,6 +486,9 @@ mod tests {
             l0_max_inputs: 0,
             level_thresholds: vec![3],
             max_inputs_per_task: 2,
+            l0_max_bytes: None,
+            level_max_bytes: Vec::new(),
+            max_task_bytes: None,
         });
         let task = planner.plan(&snapshot).expect("plan");
         assert_eq!(task.source_level, 1);
@@ -323,6 +496,51 @@ mod tests {
         assert_eq!(task.input.len(), 2);
         assert_eq!(task.input[0], SsTableId::new(10));
         assert_eq!(task.input[1], SsTableId::new(11));
+    }
+
+    #[test]
+    fn l0_byte_threshold_triggers_plan() {
+        let level0 = LevelInfo::new(
+            0,
+            vec![
+                file_with_bytes(1, "a", "b", 60),
+                file_with_bytes(2, "c", "d", 60),
+            ],
+        );
+        let snapshot = CompactionSnapshot::new(vec![level0]);
+        let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
+            l0_trigger: usize::MAX,
+            l0_max_inputs: 2,
+            l0_max_bytes: Some(50),
+            ..Default::default()
+        });
+        let task = planner.plan(&snapshot).expect("plan");
+        assert_eq!(task.input.len(), 2);
+    }
+
+    #[test]
+    fn max_task_bytes_limits_selection() {
+        let level1 = LevelInfo::new(
+            1,
+            vec![
+                file_with_bytes(1, "a", "b", 40),
+                file_with_bytes(2, "c", "d", 40),
+                file_with_bytes(3, "e", "f", 40),
+            ],
+        );
+        let snapshot = CompactionSnapshot::new(vec![LevelInfo::new(0, vec![]), level1]);
+        let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
+            l0_trigger: usize::MAX,
+            l0_max_inputs: 0,
+            level_thresholds: vec![1],
+            level_max_bytes: vec![None],
+            max_inputs_per_task: 3,
+            max_task_bytes: Some(80),
+            ..Default::default()
+        });
+
+        let task = planner.plan(&snapshot).expect("plan");
+        assert_eq!(task.input.len(), 2);
     }
 
     #[test]
@@ -335,6 +553,9 @@ mod tests {
             l0_max_inputs: 0,
             level_thresholds: vec![0],
             max_inputs_per_task: 1,
+            l0_max_bytes: None,
+            level_max_bytes: Vec::new(),
+            max_task_bytes: None,
         });
         let task = planner.plan(&snapshot).expect("plan");
         assert!(task.key_range.is_none());

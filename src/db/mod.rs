@@ -9,7 +9,7 @@ use std::{
     hash::Hash,
     pin::Pin,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
@@ -30,7 +30,11 @@ use predicate::{ColumnRef, Predicate};
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
-    compaction::planner::{CompactionSnapshot, LeveledCompactionPlanner},
+    compaction::{
+        executor::{CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome},
+        planner::{CompactionPlanner, CompactionSnapshot},
+        spawn_compaction_loop_local,
+    },
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
     inmem::{
@@ -43,8 +47,8 @@ use crate::{
     },
     key::{KeyOwned, RangeSet},
     manifest::{
-        ManifestError, ManifestResult, SstEntry, TableId, TonboManifest, VersionEdit,
-        WalSegmentRef, init_in_memory_manifest,
+        GcPlanState, GcSstRef, ManifestError, ManifestResult, SstEntry, TableId, TonboManifest,
+        VersionEdit, VersionState, WalSegmentRef, init_in_memory_manifest,
     },
     mode::CatalogDescribe,
     mvcc::{CommitClock, ReadView, Timestamp},
@@ -635,22 +639,196 @@ where
         }
     }
 
-    /// Build a leveled compaction plan based on the latest manifest snapshot.
-    pub async fn plan_compaction_task(
+    /// Build a compaction plan based on the latest manifest snapshot.
+    pub async fn plan_compaction_task<P>(
         &self,
-        planner: &LeveledCompactionPlanner,
-    ) -> ManifestResult<Option<crate::compaction::planner::CompactionTask>> {
+        planner: &P,
+    ) -> ManifestResult<Option<crate::compaction::planner::CompactionTask>>
+    where
+        P: CompactionPlanner,
+    {
         let snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
         let version = match snapshot.latest_version {
             Some(ref state) => state,
             None => return Ok(None),
         };
+        self.plan_compaction_from_version(planner, version)
+    }
+
+    fn plan_compaction_from_version<P>(
+        &self,
+        planner: &P,
+        version: &VersionState,
+    ) -> ManifestResult<Option<crate::compaction::planner::CompactionTask>>
+    where
+        P: CompactionPlanner,
+    {
         let layout: CompactionSnapshot = version.into();
         if layout.is_empty() {
             return Ok(None);
         }
         Ok(planner.plan(&layout))
     }
+
+    /// Trigger a single compaction attempt using the provided planner and executor.
+    /// Returns `Ok(None)` when no task is scheduled by the planner.
+    #[allow(dead_code)]
+    pub(crate) async fn compact_once<CE, P>(
+        &self,
+        planner: &P,
+        executor: &CE,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        self.run_compaction_task(planner, executor).await
+    }
+
+    /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
+    #[allow(dead_code)]
+    pub(crate) async fn run_compaction_task<CE, P>(
+        &self,
+        planner: &P,
+        executor: &CE,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        let snapshot = self
+            .manifest
+            .snapshot_latest(self.manifest_table)
+            .await
+            .map_err(CompactionError::Manifest)?;
+        let version = match snapshot.latest_version {
+            Some(ref state) => state,
+            None => return Ok(None),
+        };
+        let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
+
+        let Some(task) = self.plan_compaction_from_version(planner, version)? else {
+            return Ok(None);
+        };
+
+        let inputs = Self::resolve_compaction_inputs(version, &task)?;
+        let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
+        let wal_floor = self.manifest_wal_floor().await;
+        let job = CompactionJob {
+            task,
+            inputs,
+            lease: None,
+        };
+
+        let outcome = executor.execute(job).await?;
+        // Attach GC hints from context.
+        let mut outcome = outcome;
+        outcome.obsolete_sst_ids = obsolete_ids;
+        outcome.wal_floor = wal_floor.or_else(|| existing_wal_segments.first().cloned());
+        if outcome.wal_segments.is_none() && !existing_wal_segments.is_empty() {
+            outcome.wal_segments = Some(existing_wal_segments);
+        }
+        let gc_plan = Self::gc_plan_from_outcome(&outcome)?;
+        let edits = outcome.to_version_edits();
+        if !edits.is_empty() {
+            self.manifest
+                .apply_version_edits(self.manifest_table, &edits)
+                .await
+                .map_err(CompactionError::Manifest)?;
+            self.prune_wal_segments_below_floor().await;
+            if let Some(plan) = gc_plan {
+                self.manifest
+                    .record_gc_plan(self.manifest_table, plan)
+                    .await
+                    .map_err(CompactionError::Manifest)?;
+            }
+        }
+        Ok(Some(outcome))
+    }
+
+    /// Spawn a current-thread compaction worker that calls `compact_once` every `interval`.
+    /// Caller owns cancellation of the returned handle. This is a stopgap until a Send-friendly
+    /// scheduler/lease lands.
+    #[allow(dead_code)]
+    pub(crate) fn spawn_compaction_worker_local<CE, P>(
+        self: &Arc<Self>,
+        planner: P,
+        executor: CE,
+        gc_sst_config: Option<Arc<SsTableConfig>>,
+        interval: Duration,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        CE: CompactionExecutor + 'static,
+        P: CompactionPlanner + 'static,
+        M: 'static,
+        E: 'static,
+    {
+        spawn_compaction_loop_local(Arc::clone(self), planner, executor, gc_sst_config, interval)
+    }
+
+    fn gc_plan_from_outcome(
+        outcome: &CompactionOutcome,
+    ) -> Result<Option<GcPlanState>, CompactionError> {
+        if outcome.remove_ssts.is_empty() {
+            return Ok(None);
+        }
+        let mut obsolete_ssts = Vec::new();
+        for desc in &outcome.remove_ssts {
+            let data_path = desc
+                .data_path()
+                .cloned()
+                .ok_or(CompactionError::MissingPath("data"))?;
+            let mvcc_path = desc
+                .mvcc_path()
+                .cloned()
+                .ok_or(CompactionError::MissingPath("mvcc"))?;
+            obsolete_ssts.push(GcSstRef {
+                id: desc.id().clone(),
+                level: desc.level() as u32,
+                data_path,
+                mvcc_path,
+                delete_path: desc.delete_path().cloned(),
+            });
+        }
+        Ok(Some(GcPlanState {
+            obsolete_ssts,
+            obsolete_wal_segments: Vec::new(),
+        }))
+    }
+
+    pub(crate) fn resolve_compaction_inputs(
+        version: &VersionState,
+        task: &crate::compaction::planner::CompactionTask,
+    ) -> Result<Vec<SsTableDescriptor>, CompactionError> {
+        let level_idx = task.source_level;
+        let Some(bucket) = version.ssts().get(level_idx) else {
+            return Err(CompactionError::Manifest(ManifestError::Invariant(
+                "planner selected level missing in manifest",
+            )));
+        };
+
+        let mut descriptors = Vec::with_capacity(task.input.len());
+        for sst_id in &task.input {
+            let Some(entry) = bucket.iter().find(|entry| entry.sst_id() == sst_id) else {
+                return Err(CompactionError::Manifest(ManifestError::Invariant(
+                    "planner selected SST missing in manifest",
+                )));
+            };
+            let mut descriptor = SsTableDescriptor::new(entry.sst_id().clone(), task.source_level);
+            if let Some(stats) = entry.stats().cloned() {
+                descriptor = descriptor.with_stats(stats);
+            }
+            descriptor = descriptor.with_wal_ids(entry.wal_segments().map(|ids| ids.to_vec()));
+            descriptor = descriptor.with_storage_paths(
+                entry.data_path().clone(),
+                entry.mvcc_path().clone(),
+                entry.delete_path().cloned(),
+            );
+            descriptors.push(descriptor);
+        }
+        Ok(descriptors)
+    }
+
     /// Construct a database from pre-initialised components.
     fn from_components(
         mode: M,
@@ -2515,8 +2693,11 @@ mod tests {
         let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
             l0_trigger: 1,
             l0_max_inputs: 2,
+            l0_max_bytes: None,
             level_thresholds: vec![usize::MAX],
+            level_max_bytes: Vec::new(),
             max_inputs_per_task: 2,
+            max_task_bytes: None,
         });
         let task = db
             .plan_compaction_task(&planner)

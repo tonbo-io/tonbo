@@ -295,7 +295,7 @@ impl VersionState {
         }
     }
 
-    pub(super) fn apply_edits(&mut self, edits: &[VersionEdit]) -> ManifestResult<()> {
+    pub(crate) fn apply_edits(&mut self, edits: &[VersionEdit]) -> ManifestResult<()> {
         for edit in edits {
             match edit {
                 VersionEdit::AddSsts { level, entries } => self.add_ssts(*level, entries)?,
@@ -456,23 +456,18 @@ impl SstEntry {
         self.stats.as_ref()
     }
 
-    #[cfg(test)]
     pub(crate) fn wal_segments(&self) -> Option<&[FileId]> {
         self.wal_segments.as_deref()
     }
 
-    #[cfg(test)]
     pub(crate) fn data_path(&self) -> &Path {
         &self.data_path
     }
 
-    #[cfg(test)]
     pub(crate) fn mvcc_path(&self) -> &Path {
         &self.mvcc_path
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn delete_path(&self) -> Option<&Path> {
         self.delete_path.as_ref()
     }
@@ -533,10 +528,28 @@ impl WalSegmentRef {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct GcPlanState {
-    /// SST identifiers that can be removed.
-    obsolete_sst_ids: Vec<SsTableId>,
+    /// SST identifiers and paths that can be removed.
+    pub obsolete_ssts: Vec<GcSstRef>,
     /// WAL sequence numbers that can be truncated.
-    obsolete_wal_segments: Vec<WalSegmentRef>,
+    pub obsolete_wal_segments: Vec<WalSegmentRef>,
+}
+
+/// Reference to an obsolete SST scheduled for deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GcSstRef {
+    /// Identifier of the SST.
+    pub id: SsTableId,
+    /// Level where the SST resided.
+    pub level: u32,
+    /// Data path for the SST.
+    #[serde(with = "path_serde")]
+    pub data_path: Path,
+    /// MVCC sidecar path for the SST.
+    #[serde(with = "path_serde")]
+    pub mvcc_path: Path,
+    /// Optional delete sidecar path for the SST.
+    #[serde(with = "path_serde_option")]
+    pub delete_path: Option<Path>,
 }
 
 mod path_serde {

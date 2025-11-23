@@ -22,6 +22,8 @@ Major compaction is now wired end-to-end on this branch: the planner emits a tas
 - Turn planner tasks into durable manifest updates (Add/Remove SSTs) with WAL floor hints.
 - Enforce MVCC correctness: latest-commit wins; tombstones suppress older versions.
 - Produce Parquet outputs (data + mvcc + optional delete sidecar) with accurate stats/bounds.
+- Keep outputs size-bounded: stream merge output and spill to additional SSTs once row/size caps
+  are hit to avoid single oversized artifacts.
 - Keep the flow object-storage friendly: write-new-only, CAS manifest, no in-place mutation.
 - Emit GC hints (obsolete SST ids, WAL floor) for a follow-on GC worker.
 
@@ -40,6 +42,29 @@ Major compaction is now wired end-to-end on this branch: the planner emits a tas
 3. Executor (`CompactionExecutor` / `LocalCompactionExecutor`) allocates target descriptors, invokes `SsTableMerger`, and streams outputs.
 4. Outcome builds `VersionEdit`s: `RemoveSsts` (inputs + obsolete ids), `AddSsts` (outputs with stats + wal_ids), `SetWalSegments` (segment set or wal_floor fallback), and optional `SetTombstoneWatermark` (max commit_ts in outputs).
 5. Manifest applies edits atomically; WAL GC uses the published floor; GC hints list obsolete SST ids for a later worker.
+
+### Compaction strategies and selection
+
+- **Strategies:**
+  - *Leveled* — non-overlapping per level with size ratios; favors lower read amplification at the cost of more rewrite.
+  - *Tiered* — size-tiered/universal style; merges similarly sized SSTs and tolerates overlap to minimize rewrite.
+  - *Time-windowed* — groups SSTs by time window; mostly merges within a window to fit TTL/late-arrival workloads.
+- **Selection:** configuration should expose a strategy/planner mode so operators can pick a policy; the executor remains policy-agnostic and consumes whatever tasks the planner emits. Sketch: a `CompactionStrategy` enum with `Leveled(LeveledPlannerConfig)` plus reserved `Tiered(TieredPlannerConfig)` and `TimeWindow(TimeWindowPlannerConfig)` variants, surfaced through the DB builder.
+- **Current branch:** only leveled planning is implemented and remains the default; tiered and time-windowed strategies are reserved for follow-up RFCs/PRs that define their heuristics and metadata needs (window bounds, size buckets, fan-in caps).
+
+### Remote executors and scheduling
+
+The executor trait is intentionally autonomous so this MVP can graduate from a local in-process merger to a remote/serverless one without rewiring the DB orchestrator. A future remote executor would still receive a `CompactionJob` (task + manifest-resolved inputs) and return a `CompactionOutcome`, but the data movement/lease management would live behind the trait. We leave hooks in the outcome for transmitting WAL segment sets and GC hints so that remote workers can publish all manifest-facing metadata in one go.
+
+**Action items to unlock strategy/remote support**
+
+- Implement `CompactionStrategy::Tiered` and `::TimeWindow` planners with their own configs and heuristics; keep the executor policy-agnostic.
+- Define a lease/job abstraction for remote compaction: job IDs, ownership timeout/renewal, and a manifest/CAS return path for edits + WAL/GC hints.
+- Surface the strategy selection knob in public docs/examples and add tests per strategy and for remote executor handoff.
+
+### Concurrency and race safety
+
+Compaction is single-tenant for now: the worker loop in `compaction::spawn_compaction_loop_local` drives one `DB::run_compaction_task` at a time, and the manifest snapshot/planning occurs synchronously within that call. Because only one executor instance is active, there is no risk of overlapping edits or competing WAL floor updates. Manifest `apply_version_edits` still acts as the serialization point, so when we introduce leases or remote executors we can extend that mechanism to coordinate multiple concurrent workers.
 
 ### Merge semantics
 

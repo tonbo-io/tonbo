@@ -4,44 +4,60 @@
 //! on-disk runs without committing to a specific encoding or IO strategy just
 //! yet. Future patches will flesh out the concrete dynamic and typed builders,
 //! readers, and range scans using this scaffolding.
+//!
+//! Design note: all SST readers/writers are expected to use fusio-backed async
+//! Parquet I/O (no std fs) to stay object-store friendly and non-blocking per
+//! `docs/overview.md`/RFC 0005/0006. Readers will stream via Parquet async
+//! reader with projection + page/index pruning; no eager whole-file loads.
 
 use std::{collections::HashMap, convert::TryFrom, fmt, marker::PhantomData, sync::Arc};
 
-use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_select::take::take as arrow_take;
 use fusio::{
     DynFs,
     error::Error as FsError,
     fs::OpenOptions,
     path::{Path, PathPart},
 };
-use fusio_parquet::writer::AsyncWriter;
+use fusio_parquet::{reader::AsyncReader, writer::AsyncWriter};
+use futures::stream::{self, BoxStream, StreamExt};
 use once_cell::sync::Lazy;
 use parquet::{
-    arrow::async_writer::AsyncArrowWriter,
+    arrow::{
+        ProjectionMask,
+        async_reader::{ParquetRecordBatchStream, ParquetRecordBatchStreamBuilder},
+        async_writer::AsyncArrowWriter,
+    },
     basic::{Compression, ZstdLevel},
     errors::ParquetError,
     file::properties::WriterProperties,
 };
 use serde::{Deserialize, Serialize};
 
+pub use crate::ondisk::merge::{SsTableMergeSource, SsTableMerger, SsTableStreamBatch};
 use crate::{
+    extractor::{KeyExtractError, KeyProjection},
     id::FileId,
     inmem::immutable::{
         Immutable,
         memtable::{DeleteSidecar, MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
     },
-    key::{KeyOwned, RangeSet},
+    key::{KeyOwned, KeyOwnedError, RangeSet},
     manifest::ManifestError,
     mode::Mode,
     mvcc::Timestamp,
+    ondisk::merge::{
+        decode_delete_sidecar, extract_delete_key_at, extract_key_at, parse_mvcc_columns,
+    },
     query::Predicate,
 };
 
 const MVCC_SCHEMA_VERSION_KEY: &str = "tonbo.mvcc.version";
 const MVCC_SCHEMA_VERSION_V1: &str = "1";
 
-static MVCC_SIDECAR_SCHEMA_V1: Lazy<SchemaRef> = Lazy::new(|| {
+pub(crate) static MVCC_SIDECAR_SCHEMA_V1: Lazy<SchemaRef> = Lazy::new(|| {
     let mut metadata = HashMap::new();
     metadata.insert(
         MVCC_SCHEMA_VERSION_KEY.to_string(),
@@ -105,6 +121,7 @@ pub struct SsTableConfig {
     compression: SsTableCompression,
     fs: Arc<dyn DynFs>,
     root: Path,
+    key_extractor: Option<Arc<dyn KeyProjection>>,
 }
 
 impl SsTableConfig {
@@ -116,6 +133,7 @@ impl SsTableConfig {
             compression: SsTableCompression::default(),
             fs,
             root,
+            key_extractor: None,
         }
     }
 
@@ -155,6 +173,17 @@ impl SsTableConfig {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Attach a key extractor used for ordered merges or reader planning.
+    pub fn with_key_extractor(mut self, extractor: Arc<dyn KeyProjection>) -> Self {
+        self.key_extractor = Some(extractor);
+        self
+    }
+
+    /// Access the configured key extractor, if any.
+    pub fn key_extractor(&self) -> Option<&Arc<dyn KeyProjection>> {
+        self.key_extractor.as_ref()
+    }
 }
 
 impl fmt::Debug for SsTableConfig {
@@ -164,6 +193,7 @@ impl fmt::Debug for SsTableConfig {
             .field("target_level", &self.target_level)
             .field("compression", &self.compression)
             .field("root", &self.root)
+            .field("has_key_extractor", &self.key_extractor.is_some())
             .finish()
     }
 }
@@ -324,6 +354,15 @@ pub enum SsTableError {
     /// Attempted to use the writer after it was already closed.
     #[error("parquet writer already closed")]
     WriterClosed,
+    /// Merge attempted without any input batches.
+    #[error("sstable merge received no input batches")]
+    EmptyMergeInput,
+    /// Merge attempted to split outputs without an id allocator.
+    #[error("sstable merge missing output id allocator for split outputs")]
+    MissingIdAllocator,
+    /// Merge produced no output rows or deletes.
+    #[error("sstable merge produced no output")]
+    EmptyMergeOutput,
     /// Filesystem operation failed while writing an SSTable.
     #[error("filesystem error: {0}")]
     Fs(#[from] FsError),
@@ -333,9 +372,21 @@ pub enum SsTableError {
     /// Invalid path component produced while building an SSTable destination.
     #[error("invalid sstable path component: {0}")]
     InvalidPath(String),
+    /// Sidecar/data batch streams were misaligned.
+    #[error("sstable sidecar stream length mismatch: {0}")]
+    SidecarMismatch(&'static str),
     /// Manifest backend error
     #[error("failure when persist into manifest: {0}")]
     Manifest(#[from] ManifestError),
+    /// Missing key extractor when ordered merge is required.
+    #[error("sstable key extractor not configured")]
+    MissingKeyExtractor,
+    /// Key projection failed while merging.
+    #[error("key extraction failed: {0}")]
+    KeyExtract(#[from] KeyExtractError),
+    /// Key materialization failed while merging.
+    #[error("key materialization failed: {0}")]
+    KeyOwned(#[from] KeyOwnedError),
 }
 
 /// Scratchpad used while minor compaction plans an SST. Keeps provisional stats
@@ -459,8 +510,8 @@ where
         }
 
         let mut segment_tombstones = 0usize;
-        let mut seg_min_ts = None;
-        let mut seg_max_ts = None;
+        let mut seg_min_ts: Option<Timestamp> = None;
+        let mut seg_max_ts: Option<Timestamp> = None;
         for entry in segment.row_iter() {
             if entry.tombstone {
                 segment_tombstones += 1;
@@ -495,6 +546,84 @@ where
             data: segment.storage().clone(),
             mvcc: segment.mvcc_columns().clone(),
             deletes: segment.delete_sidecar().clone(),
+        };
+        self.segments.push(staged_segment);
+        Ok(())
+    }
+
+    pub(crate) fn stage_stream_batch(
+        &mut self,
+        batch: &SsTableStreamBatch<M>,
+        extractor: &dyn KeyProjection,
+    ) -> Result<(), SsTableError> {
+        let data_rows = batch.data.num_rows();
+        let delete_rows = batch.delete.as_ref().map(|b| b.num_rows()).unwrap_or(0);
+        if data_rows == 0 && delete_rows == 0 {
+            return Ok(());
+        }
+
+        let mut segment_tombstones = 0usize;
+        let mut seg_min_ts = None;
+        let mut seg_max_ts = None;
+
+        if data_rows > 0 {
+            let first = extract_key_at(&batch.data, extractor, 0)?;
+            let last = extract_key_at(&batch.data, extractor, data_rows - 1)?;
+            self.staged.update_key_bounds(&first, &last);
+            let commits = batch
+                .mvcc
+                .column_by_name(MVCC_COMMIT_COL)
+                .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
+                .ok_or(SsTableError::SidecarMismatch(
+                    "mvcc commit_ts column missing",
+                ))?;
+            for idx in 0..data_rows {
+                let ts = Timestamp::new(commits.value(idx));
+                seg_min_ts = Some(seg_min_ts.map(|t| std::cmp::min(t, ts)).unwrap_or(ts));
+                seg_max_ts = Some(seg_max_ts.map(|t| std::cmp::max(t, ts)).unwrap_or(ts));
+            }
+        }
+
+        if let Some(delete_batch) = &batch.delete
+            && delete_batch.num_rows() > 0
+        {
+            segment_tombstones += delete_batch.num_rows();
+            let first = extract_delete_key_at(delete_batch, extractor, 0)?;
+            let last = extract_delete_key_at(delete_batch, extractor, delete_batch.num_rows() - 1)?;
+            self.staged.update_key_bounds(&first, &last);
+
+            let commits = delete_batch
+                .column_by_name(MVCC_COMMIT_COL)
+                .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
+                .ok_or(SsTableError::SidecarMismatch(
+                    "delete sidecar missing commit_ts column",
+                ))?;
+            for idx in 0..delete_batch.num_rows() {
+                let ts = Timestamp::new(commits.value(idx));
+                seg_min_ts = Some(seg_min_ts.map(|t| std::cmp::min(t, ts)).unwrap_or(ts));
+                seg_max_ts = Some(seg_max_ts.map(|t| std::cmp::max(t, ts)).unwrap_or(ts));
+            }
+        }
+
+        if let (Some(min_ts), Some(max_ts)) = (seg_min_ts, seg_max_ts) {
+            self.staged.update_commit_bounds(min_ts, max_ts);
+        }
+
+        self.staged.segments += 1;
+        self.staged.rows += data_rows;
+        self.staged.tombstones += segment_tombstones;
+
+        let mvcc = parse_mvcc_columns(&batch.mvcc)?;
+        let deletes = if let Some(delete_batch) = &batch.delete {
+            decode_delete_sidecar(delete_batch, extractor)?
+        } else {
+            DeleteSidecar::empty(&extractor.key_schema())
+        };
+
+        let staged_segment = StagedSegment {
+            data: batch.data.clone(),
+            mvcc,
+            deletes,
         };
         self.segments.push(staged_segment);
         Ok(())
@@ -539,6 +668,7 @@ fn writer_properties(compression: SsTableCompression) -> WriterProperties {
     };
     builder.build()
 }
+
 struct WriteContext {
     fs: Arc<dyn DynFs>,
     data_path: Path,
@@ -733,7 +863,11 @@ where
 /// Handle used by the read path to stream rows from an SSTable.
 #[derive(Debug)]
 pub struct SsTableReader<M: Mode> {
-    _descriptor: SsTableDescriptor,
+    #[allow(dead_code)]
+    descriptor: SsTableDescriptor,
+    #[allow(dead_code)]
+    config: Arc<SsTableConfig>,
+    // TODO: attach actual Parquet readers when scan/merge lands.
     _mode: PhantomData<M>,
 }
 
@@ -743,14 +877,11 @@ impl<M: Mode> SsTableReader<M> {
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<Self, SsTableError> {
-        let _fs = config.fs();
-        let _root = config.root();
-        let _schema = config.schema();
-        let _descriptor = &descriptor;
-        let _ = config;
-        let _ = descriptor;
-        // IO and cache wiring will live here.
-        Err(SsTableError::Unimplemented)
+        Ok(Self {
+            descriptor,
+            config,
+            _mode: PhantomData,
+        })
     }
 
     /// Plan a range scan across this table.
@@ -759,44 +890,145 @@ impl<M: Mode> SsTableReader<M> {
         _ranges: &RangeSet<M::Key>,
         _ts: Timestamp,
         _predicate: Option<&Predicate>,
-    ) -> Result<SsTableScanPlan<M>, SsTableError> {
-        let _ = self;
-        Err(SsTableError::Unimplemented)
+    ) -> Result<(), SsTableError> {
+        // TODO: implement real scan planning when reader lands.
+        Ok(())
+    }
+
+    /// Stream all rows for the provided ranges/timestamp/predicate (stub).
+    pub async fn into_stream(
+        self,
+        _ranges: RangeSet<M::Key>,
+        _ts: Timestamp,
+        _predicate: Option<&Predicate>,
+    ) -> Result<BoxStream<'static, Result<SsTableStreamBatch<M>, SsTableError>>, SsTableError>
+    where
+        M: Mode<ImmLayout = RecordBatch> + 'static,
+    {
+        let fs = Arc::clone(self.config.fs());
+        let data_path =
+            self.descriptor.data_path().cloned().ok_or_else(|| {
+                SsTableError::InvalidPath("missing data path on descriptor".into())
+            })?;
+        let mvcc_path =
+            self.descriptor.mvcc_path().cloned().ok_or_else(|| {
+                SsTableError::InvalidPath("missing mvcc path on descriptor".into())
+            })?;
+
+        let data_stream = Box::pin(open_parquet_stream(fs.clone(), data_path, None).await?);
+        let mvcc_stream = Box::pin(open_parquet_stream(fs.clone(), mvcc_path, None).await?);
+        let delete_stream = if let Some(path) = self.descriptor.delete_path() {
+            Some(Box::pin(open_parquet_stream(fs, path.clone(), None).await?))
+        } else {
+            None
+        };
+
+        let schema = self.config.schema().clone();
+        let stream = stream::try_unfold(
+            (data_stream, mvcc_stream, delete_stream),
+            move |(mut data_stream, mut mvcc_stream, mut delete_stream)| {
+                let schema = schema.clone();
+                async move {
+                    let data_batch = data_stream
+                        .as_mut()
+                        .next()
+                        .await
+                        .transpose()
+                        .map_err(SsTableError::Parquet)?;
+                    let mvcc_batch = mvcc_stream
+                        .as_mut()
+                        .next()
+                        .await
+                        .transpose()
+                        .map_err(SsTableError::Parquet)?;
+                    let delete_batch = if let Some(ref mut del_stream) = delete_stream {
+                        del_stream
+                            .as_mut()
+                            .next()
+                            .await
+                            .transpose()
+                            .map_err(SsTableError::Parquet)?
+                    } else {
+                        None
+                    };
+
+                    match (data_batch, mvcc_batch, delete_batch) {
+                        (None, None, None) => Ok(None),
+                        (Some(data), Some(mvcc), delete) => {
+                            if data.num_rows() != mvcc.num_rows() {
+                                return Err(SsTableError::SidecarMismatch(
+                                    "mvcc/data row count mismatch",
+                                ));
+                            }
+                            let next_state = (data_stream, mvcc_stream, delete_stream);
+                            Ok(Some((
+                                SsTableStreamBatch { data, mvcc, delete },
+                                next_state,
+                            )))
+                        }
+                        (None, None, Some(delete)) => {
+                            let empty_data = RecordBatch::new_empty(schema.clone());
+                            let empty_mvcc =
+                                RecordBatch::new_empty(Arc::clone(&MVCC_SIDECAR_SCHEMA_V1));
+                            let next_state = (data_stream, mvcc_stream, delete_stream);
+                            Ok(Some((
+                                SsTableStreamBatch {
+                                    data: empty_data,
+                                    mvcc: empty_mvcc,
+                                    delete: Some(delete),
+                                },
+                                next_state,
+                            )))
+                        }
+                        _ => Err(SsTableError::SidecarMismatch("mvcc/data batch count")),
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(stream))
     }
 }
 
-/// Execution plan for reading rows out of an SSTable.
-#[derive(Debug)]
-pub struct SsTableScanPlan<M: Mode> {
-    _descriptor: SsTableDescriptor,
-    _mode: PhantomData<M>,
+async fn open_parquet_stream(
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    projection: Option<ProjectionMask>,
+) -> Result<ParquetRecordBatchStream<AsyncReader>, SsTableError> {
+    let file = fs.open(&path).await?;
+    let size = file.size().await.map_err(SsTableError::Fs)?;
+    let reader = AsyncReader::new(file, size)
+        .await
+        .map_err(SsTableError::Fs)?;
+    let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
+        .await
+        .map_err(SsTableError::Parquet)?;
+    let mask = projection.unwrap_or_else(ProjectionMask::all);
+    builder = builder.with_projection(mask);
+    builder.build().map_err(SsTableError::Parquet)
 }
 
-impl<M: Mode> SsTableScanPlan<M> {
-    /// Materialize the plan into a streaming cursor that yields Arrow batches.
-    pub async fn execute(self) -> Result<SsTableStream<M>, SsTableError> {
-        let _ = self;
-        Err(SsTableError::Unimplemented)
+pub(crate) fn take_record_batch(
+    batch: &RecordBatch,
+    indices: &[u32],
+) -> Result<RecordBatch, SsTableError> {
+    let idx_array = UInt32Array::from(indices.to_vec());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for col in batch.columns() {
+        let taken = arrow_take(col.as_ref(), &idx_array, None)
+            .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))?;
+        columns.push(taken);
     }
-}
-
-/// Placeholder stream returned by executed scan plans.
-#[derive(Debug)]
-pub struct SsTableStream<M: Mode> {
-    _mode: PhantomData<M>,
-}
-
-impl<M: Mode> SsTableStream<M> {
-    /// Consume the stream into owned batches once the reader is implemented.
-    pub async fn collect(self) -> Result<Vec<M::ImmLayout>, SsTableError> {
-        let _ = self;
-        Err(SsTableError::Unimplemented)
-    }
+    RecordBatch::try_new(batch.schema().clone(), columns)
+        .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, atomic::AtomicU64},
+    };
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
@@ -804,11 +1036,320 @@ mod tests {
 
     use super::*;
     use crate::{
+        db::DynMode,
+        extractor::{KeyProjection, projection_for_field},
+        id::FileIdGenerator,
         inmem::immutable::memtable::{ImmutableIndexEntry, ImmutableMemTable, bundle_mvcc_sidecar},
         key::KeyTsViewRaw,
         mvcc::Timestamp,
         test_util::build_batch,
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn merge_source_yields_batches_in_order() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let batch1 = build_batch(
+            Arc::clone(&schema),
+            vec![DynRow(vec![
+                Some(DynCell::Str("a".into())),
+                Some(DynCell::I32(1)),
+            ])],
+        )
+        .expect("batch1");
+        let batch2 = build_batch(
+            Arc::clone(&schema),
+            vec![DynRow(vec![
+                Some(DynCell::Str("b".into())),
+                Some(DynCell::I32(2)),
+            ])],
+        )
+        .expect("batch2");
+
+        let mut source = SsTableMergeSource::<DynMode>::with_batches(vec![
+            SsTableStreamBatch {
+                data: batch1.clone(),
+                mvcc: RecordBatch::new_empty(Arc::clone(&MVCC_SIDECAR_SCHEMA_V1)),
+                delete: None,
+            },
+            SsTableStreamBatch {
+                data: batch2.clone(),
+                mvcc: RecordBatch::new_empty(Arc::clone(&MVCC_SIDECAR_SCHEMA_V1)),
+                delete: None,
+            },
+        ]);
+        let out1 = source.next().await.expect("first").expect("batch");
+        let out2 = source.next().await.expect("second").expect("batch");
+        let out3 = source.next().await.expect("third");
+
+        assert_eq!(out1.data.num_rows(), 1);
+        assert_eq!(out2.data.num_rows(), 1);
+        assert!(out3.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn merger_combines_stats_and_wal_ids() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = Path::from(tempdir.path().to_string_lossy().to_string());
+        let extractor = projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+        let extractor: Arc<dyn KeyProjection> = extractor.into();
+        let config = Arc::new(
+            SsTableConfig::new(Arc::clone(&schema), fs, root).with_key_extractor(extractor),
+        );
+
+        let seg_a = sample_segment(
+            vec![("a".to_string(), 1), ("b".to_string(), 2)],
+            vec![1, 2],
+            vec![false, false],
+        );
+        let seg_b = sample_segment(
+            vec![("c".to_string(), 3), ("d".to_string(), 0)],
+            vec![3, 4],
+            vec![false, true],
+        );
+
+        let wal_a = vec![FileIdGenerator::default().generate()];
+        let wal_b = vec![FileIdGenerator::default().generate(), wal_a[0]]; // include duplicate to ensure dedup
+
+        let mut builder_a = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&config),
+            SsTableDescriptor::new(SsTableId::new(1), 0),
+        );
+        builder_a.set_wal_ids(Some(wal_a.clone()));
+        builder_a.add_immutable(&seg_a).expect("stage a");
+        let input_a = builder_a
+            .finish()
+            .await
+            .expect("sst a")
+            .descriptor()
+            .clone();
+
+        let mut builder_b = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&config),
+            SsTableDescriptor::new(SsTableId::new(2), 0),
+        );
+        builder_b.set_wal_ids(Some(wal_b.clone()));
+        builder_b.add_immutable(&seg_b).expect("stage b");
+        let input_b = builder_b
+            .finish()
+            .await
+            .expect("sst b")
+            .descriptor()
+            .clone();
+
+        let target = SsTableDescriptor::new(SsTableId::new(9), 1);
+        let merger = SsTableMerger::<DynMode>::new(config, vec![input_a, input_b], target)
+            .with_output_id_allocator(Arc::new(AtomicU64::new(10)));
+        let merged = merger.execute().await.expect("merge result");
+        assert_eq!(merged.len(), 1);
+        let descriptor = merged[0].descriptor();
+        let merged_stats = descriptor.stats().expect("merged stats");
+
+        assert_eq!(descriptor.id().raw(), 9);
+        assert_eq!(descriptor.level(), 1);
+        assert_eq!(merged_stats.rows, 3);
+        assert_eq!(merged_stats.tombstones, 1);
+        assert_eq!(
+            merged_stats.min_key.as_ref().map(|k| k.as_utf8().unwrap()),
+            Some("a")
+        );
+        assert_eq!(
+            merged_stats.max_key.as_ref().map(|k| k.as_utf8().unwrap()),
+            Some("d")
+        );
+        assert_eq!(merged_stats.min_commit_ts, Some(Timestamp::new(1)));
+        assert_eq!(merged_stats.max_commit_ts, Some(Timestamp::new(4)));
+
+        let wal_ids = descriptor.wal_ids().expect("wal ids");
+        assert_eq!(wal_ids.len(), 2); // duplicate deduped
+        assert!(wal_ids.contains(&wal_a[0]));
+        assert!(wal_ids.contains(&wal_b[0]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn merger_applies_latest_wins_and_deletes() {
+        use arrow_array::{Int32Array, StringArray};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = Path::from(tempdir.path().to_string_lossy().to_string());
+        let extractor = projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+        let extractor: Arc<dyn KeyProjection> = extractor.into();
+        let config = Arc::new(
+            SsTableConfig::new(Arc::clone(&schema), fs, root).with_key_extractor(extractor),
+        );
+
+        // Older data: k1=1@10, k2=2@20
+        let seg_old = sample_segment(
+            vec![("k1".to_string(), 1), ("k2".to_string(), 2)],
+            vec![10, 20],
+            vec![false, false],
+        );
+        // Newer segment: tombstone k1@30, updated k2=3@40
+        let seg_new = sample_segment(
+            vec![("k1".to_string(), 0), ("k2".to_string(), 3)],
+            vec![30, 40],
+            vec![true, false],
+        );
+
+        let mut builder_old = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&config),
+            SsTableDescriptor::new(SsTableId::new(1), 0),
+        );
+        builder_old.add_immutable(&seg_old).expect("stage old");
+        let input_old = builder_old
+            .finish()
+            .await
+            .expect("sst old")
+            .descriptor()
+            .clone();
+
+        let mut builder_new = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&config),
+            SsTableDescriptor::new(SsTableId::new(2), 0),
+        );
+        builder_new.add_immutable(&seg_new).expect("stage new");
+        let input_new = builder_new
+            .finish()
+            .await
+            .expect("sst new")
+            .descriptor()
+            .clone();
+
+        let target = SsTableDescriptor::new(SsTableId::new(9), 1);
+        let merger =
+            SsTableMerger::<DynMode>::new(config.clone(), vec![input_old, input_new], target)
+                .with_output_id_allocator(Arc::new(AtomicU64::new(10)));
+        let merged = merger.execute().await.expect("merge result");
+        assert_eq!(merged.len(), 1);
+        let descriptor = merged[0].descriptor();
+        let stats = descriptor.stats().expect("stats");
+        assert_eq!(stats.rows, 1);
+        assert_eq!(stats.tombstones, 1);
+        assert_eq!(stats.min_key.as_ref().unwrap().as_utf8(), Some("k1"));
+        assert_eq!(stats.max_key.as_ref().unwrap().as_utf8(), Some("k2"));
+
+        // Read merged output and validate visible rows/tombstones.
+        let reader = SsTableReader::<DynMode>::open(config, descriptor.clone())
+            .await
+            .expect("reader");
+        let mut stream = reader
+            .into_stream(RangeSet::all(), Timestamp::MAX, None)
+            .await
+            .expect("stream");
+        let mut data_keys = Vec::new();
+        let mut data_vals = Vec::new();
+        let mut delete_keys = Vec::new();
+        while let Some(batch) = stream.next().await {
+            let batch = batch.expect("batch ok");
+            if batch.data.num_rows() > 0 {
+                let ids = batch
+                    .data
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("string ids");
+                let vals = batch
+                    .data
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("int vals");
+                for i in 0..batch.data.num_rows() {
+                    data_keys.push(ids.value(i).to_string());
+                    data_vals.push(vals.value(i));
+                }
+            }
+            if let Some(delete) = batch.delete.as_ref() {
+                if delete.num_rows() > 0 {
+                    let ids = delete
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .expect("string delete ids");
+                    for i in 0..delete.num_rows() {
+                        delete_keys.push(ids.value(i).to_string());
+                    }
+                }
+            }
+        }
+        assert_eq!(data_keys, vec!["k2"]);
+        assert_eq!(data_vals, vec![3]);
+        assert_eq!(delete_keys, vec!["k1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn merger_splits_outputs_by_row_cap() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = Path::from(tempdir.path().to_string_lossy().to_string());
+        let extractor = projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+        let extractor: Arc<dyn KeyProjection> = extractor.into();
+        let config = Arc::new(
+            SsTableConfig::new(Arc::clone(&schema), fs, root).with_key_extractor(extractor),
+        );
+
+        let seg_a = sample_segment(
+            vec![("a".to_string(), 1), ("b".to_string(), 2)],
+            vec![1, 2],
+            vec![false, false],
+        );
+        let seg_b = sample_segment(vec![("c".to_string(), 3)], vec![3], vec![false]);
+
+        let mut builder_a = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&config),
+            SsTableDescriptor::new(SsTableId::new(1), 0),
+        );
+        builder_a.add_immutable(&seg_a).expect("stage a");
+        let input_a = builder_a
+            .finish()
+            .await
+            .expect("sst a")
+            .descriptor()
+            .clone();
+
+        let mut builder_b = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&config),
+            SsTableDescriptor::new(SsTableId::new(2), 0),
+        );
+        builder_b.add_immutable(&seg_b).expect("stage b");
+        let input_b = builder_b
+            .finish()
+            .await
+            .expect("sst b")
+            .descriptor()
+            .clone();
+
+        let target = SsTableDescriptor::new(SsTableId::new(9), 1);
+        let outputs = SsTableMerger::<DynMode>::new(config, vec![input_a, input_b], target)
+            .with_output_id_allocator(Arc::new(AtomicU64::new(10)))
+            .with_output_caps(Some(1), None)
+            .with_chunk_rows(1)
+            .execute()
+            .await
+            .expect("merge result");
+
+        assert_eq!(outputs.len(), 3);
+        for table in outputs {
+            let stats = table.descriptor().stats().expect("stats");
+            assert!(stats.rows <= 1);
+        }
+    }
 
     fn test_config(schema: SchemaRef) -> Arc<SsTableConfig> {
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});

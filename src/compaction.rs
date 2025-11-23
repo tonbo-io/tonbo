@@ -3,6 +3,8 @@
 //! These helpers sit on top of the in-memory staging surfaces and decide when
 //! to drain immutable runs into on-disk SSTables.
 
+/// Compaction executor interfaces.
+pub mod executor;
 /// Leveled compaction planning helpers.
 pub mod planner;
 
@@ -13,8 +15,10 @@ use std::sync::{
 
 use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
+use tokio::{task::spawn_local, time::Duration};
 
 use crate::{
+    compaction::{executor::CompactionExecutor, planner::CompactionPlanner},
     db::DB,
     key::KeyOwned,
     mode::Mode,
@@ -26,6 +30,54 @@ pub struct MinorCompactor {
     segment_threshold: usize,
     target_level: usize,
     next_id: AtomicU64,
+}
+
+/// Drive compaction in a simple loop, waiting on a Tokio `interval` between attempts.
+/// Callers should run this in their runtime/task and handle cancellation externally.
+#[allow(dead_code)]
+pub(crate) async fn compaction_loop<M, E, CE, P>(
+    db: Arc<DB<M, E>>,
+    planner: P,
+    executor: CE,
+    _gc_sst_config: Option<Arc<SsTableConfig>>,
+    interval: Duration,
+) where
+    M: Mode,
+    E: Executor + Timer,
+    CE: CompactionExecutor,
+    P: CompactionPlanner,
+{
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+        if let Err(err) = db.compact_once(&planner, &executor).await {
+            eprintln!("compaction loop iteration failed: {err}");
+        }
+        // GC consumption deferred to follow-up; skip draining GC plans in this loop.
+    }
+}
+
+/// Spawn a non-Send compaction loop on the current-thread Tokio runtime.
+/// This is a stopgap to keep compaction running until a proper scheduler/lease lands.
+/// Callers are responsible for choosing an interval and handling cancellation via the returned
+/// handle.
+#[allow(dead_code, private_bounds)]
+pub(crate) fn spawn_compaction_loop_local<M, E, CE, P>(
+    db: Arc<DB<M, E>>,
+    planner: P,
+    executor: CE,
+    gc_sst_config: Option<Arc<SsTableConfig>>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()>
+where
+    M: Mode + 'static,
+    E: Executor + Timer + 'static,
+    CE: CompactionExecutor + 'static,
+    P: CompactionPlanner + 'static,
+{
+    spawn_local(async move {
+        compaction_loop(db, planner, executor, gc_sst_config, interval).await;
+    })
 }
 
 impl MinorCompactor {

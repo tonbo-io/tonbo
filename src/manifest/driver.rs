@@ -13,10 +13,11 @@ use thiserror::Error;
 
 use super::{
     VersionEdit,
-    codec::{CatalogCodec, ManifestCodec, VersionCodec},
+    codec::{CatalogCodec, GcPlanCodec, ManifestCodec, VersionCodec},
     domain::{
-        CatalogKey, CatalogState, CatalogValue, TableCatalogEntry, TableDefinition, TableHead,
-        TableId, TableMeta, VersionKey, VersionState, VersionValue, WalSegmentRef,
+        CatalogKey, CatalogState, CatalogValue, GcPlanKey, GcPlanState, GcPlanValue,
+        TableCatalogEntry, TableDefinition, TableHead, TableId, TableMeta, VersionKey,
+        VersionState, VersionValue, WalSegmentRef,
     },
 };
 use crate::{id::FileIdGenerator, mvcc::Timestamp};
@@ -339,6 +340,46 @@ where
         };
         session.end().await?;
         Ok(floor)
+    }
+}
+
+impl<HS, SS, CS, LS> Manifest<GcPlanCodec, HS, SS, CS, LS>
+where
+    HS: HeadStore + Send + Sync + 'static,
+    SS: SegmentIo + Send + Sync + 'static,
+    CS: CheckpointStore + Send + Sync + 'static,
+    LS: LeaseStore + Send + Sync + 'static,
+{
+    pub(crate) async fn put_gc_plan(
+        &self,
+        table_id: TableId,
+        plan: GcPlanState,
+    ) -> ManifestResult<()> {
+        let mut session = self.inner.session_write().await?;
+        let key = GcPlanKey::Table { table_id };
+        session.put(key, GcPlanValue::Plan(plan));
+        session.commit().await?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn take_gc_plan(
+        &self,
+        table_id: TableId,
+    ) -> ManifestResult<Option<GcPlanState>> {
+        let mut session = self.inner.session_write().await?;
+        let key = GcPlanKey::Table { table_id };
+        let value = session.get(&key).await?;
+        let plan = match value {
+            Some(value) => {
+                <GcPlanCodec as ManifestCodec>::validate_key_value(&key, &value)?;
+                Some(GcPlanState::try_from(value)?)
+            }
+            None => None,
+        };
+        session.delete(key);
+        session.commit().await?;
+        Ok(plan)
     }
 }
 

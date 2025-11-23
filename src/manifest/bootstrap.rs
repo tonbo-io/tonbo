@@ -12,8 +12,10 @@ use fusio_manifest::{
 use futures::future::BoxFuture;
 
 use super::{
-    codec::{CatalogCodec, ManifestCodec, VersionCodec},
-    domain::{TableDefinition, TableHead, TableId, TableMeta, VersionState, WalSegmentRef},
+    codec::{CatalogCodec, GcPlanCodec, ManifestCodec, VersionCodec},
+    domain::{
+        GcPlanState, TableDefinition, TableHead, TableId, TableMeta, VersionState, WalSegmentRef,
+    },
     driver::{Manifest, ManifestError, ManifestResult, Stores, VersionSnapshot},
     version::VersionEdit,
 };
@@ -95,6 +97,21 @@ pub(crate) trait VersionRuntime: Send + Sync {
     ) -> BoxFuture<'a, ManifestResult<Option<WalSegmentRef>>>;
 }
 
+/// Trait object abstraction over GC plan manifest backends.
+pub(crate) trait GcPlanRuntime: Send + Sync {
+    fn put_gc_plan<'a>(
+        &'a self,
+        table_id: TableId,
+        plan: GcPlanState,
+    ) -> BoxFuture<'a, ManifestResult<()>>;
+
+    #[allow(dead_code)]
+    fn take_gc_plan<'a>(
+        &'a self,
+        table_id: TableId,
+    ) -> BoxFuture<'a, ManifestResult<Option<GcPlanState>>>;
+}
+
 /// Trait object abstraction over catalog manifest backends.
 pub(crate) trait CatalogRuntime: Send + Sync {
     fn init_catalog_root<'a>(&'a self) -> BoxFuture<'a, ManifestResult<()>>;
@@ -113,11 +130,20 @@ pub(crate) trait CatalogRuntime: Send + Sync {
 pub(crate) struct TonboManifest {
     version: Arc<dyn VersionRuntime>,
     catalog: Arc<dyn CatalogRuntime>,
+    gc_plan: Arc<dyn GcPlanRuntime>,
 }
 
 impl TonboManifest {
-    fn new(version: Arc<dyn VersionRuntime>, catalog: Arc<dyn CatalogRuntime>) -> Self {
-        Self { version, catalog }
+    fn new(
+        version: Arc<dyn VersionRuntime>,
+        catalog: Arc<dyn CatalogRuntime>,
+        gc_plan: Arc<dyn GcPlanRuntime>,
+    ) -> Self {
+        Self {
+            version,
+            catalog,
+            gc_plan,
+        }
     }
 
     pub(crate) async fn apply_version_edits(
@@ -183,6 +209,19 @@ impl TonboManifest {
     pub(crate) async fn table_meta(&self, table: TableId) -> ManifestResult<TableMeta> {
         self.catalog.table_meta(table).await
     }
+
+    pub(crate) async fn record_gc_plan(
+        &self,
+        table: TableId,
+        plan: GcPlanState,
+    ) -> ManifestResult<()> {
+        self.gc_plan.put_gc_plan(table, plan).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn take_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
+        self.gc_plan.take_gc_plan(table).await
+    }
 }
 
 /// Adapter allowing concrete `Manifest` instances to be used behind the trait object.
@@ -238,6 +277,32 @@ where
     }
 }
 
+/// Adapter allowing GC-plan manifests to participate in the trait object abstraction.
+pub(crate) struct GcPlanHandle<M>(M);
+
+impl<HS, SS, CS, LS> GcPlanRuntime for GcPlanHandle<Manifest<GcPlanCodec, HS, SS, CS, LS>>
+where
+    HS: fusio_manifest::HeadStore + Send + Sync + Clone + 'static,
+    SS: fusio_manifest::SegmentIo + Send + Sync + Clone + 'static,
+    CS: fusio_manifest::CheckpointStore + Send + Sync + Clone + 'static,
+    LS: fusio_manifest::LeaseStore + Send + Sync + Clone + 'static,
+{
+    fn put_gc_plan<'a>(
+        &'a self,
+        table_id: TableId,
+        plan: GcPlanState,
+    ) -> BoxFuture<'a, ManifestResult<()>> {
+        Box::pin(async move { self.0.put_gc_plan(table_id, plan).await })
+    }
+
+    fn take_gc_plan<'a>(
+        &'a self,
+        table_id: TableId,
+    ) -> BoxFuture<'a, ManifestResult<Option<GcPlanState>>> {
+        Box::pin(async move { self.0.take_gc_plan(table_id).await })
+    }
+}
+
 /// Adapter allowing catalog manifests to participate in the trait object abstraction.
 pub(crate) struct CatalogHandle<M>(M);
 
@@ -279,6 +344,14 @@ where
     M: Send + Sync + 'static,
 {
     Arc::new(CatalogHandle(manifest))
+}
+
+fn wrap_gc_plan_manifest<M>(manifest: M) -> Arc<dyn GcPlanRuntime>
+where
+    GcPlanHandle<M>: GcPlanRuntime,
+    M: Send + Sync + 'static,
+{
+    Arc::new(GcPlanHandle(manifest))
 }
 
 /// Raw helper used by tests needing direct access to the concrete manifest.
@@ -327,15 +400,19 @@ where
     let manifest_root = append_segment(root, "manifest");
     let version_root = append_segment(&manifest_root, "version");
     let catalog_root = append_segment(&manifest_root, "catalog");
+    let gc_root = append_segment(&manifest_root, "gc");
 
     ensure_manifest_dirs::<FS>(&version_root).await?;
     ensure_manifest_dirs::<FS>(&catalog_root).await?;
+    ensure_manifest_dirs::<FS>(&gc_root).await?;
 
     let version_manifest = open_manifest_instance::<FS, VersionCodec>(fs.clone(), &version_root);
-    let catalog_manifest = open_manifest_instance::<FS, CatalogCodec>(fs, &catalog_root);
+    let catalog_manifest = open_manifest_instance::<FS, CatalogCodec>(fs.clone(), &catalog_root);
+    let gc_manifest = open_manifest_instance::<FS, GcPlanCodec>(fs, &gc_root);
     let tonbo = TonboManifest::new(
         wrap_version_manifest(version_manifest),
         wrap_catalog_manifest(catalog_manifest),
+        wrap_gc_plan_manifest(gc_manifest),
     );
     tonbo.init_catalog().await?;
     Ok(tonbo)

@@ -8,5 +8,8 @@
 /// Sorted-string-table primitives and planning helpers.
 pub mod sstable;
 
+/// Merge pipeline scaffolding used by major compaction.
+pub mod merge;
+
 /// Scan stream for a sstable
 pub mod scan;
