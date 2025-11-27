@@ -76,6 +76,13 @@ pub(crate) trait VersionRuntime: Send + Sync {
         edits: &'a [VersionEdit],
     ) -> BoxFuture<'a, ManifestResult<Timestamp>>;
 
+    fn apply_version_edits_cas<'a>(
+        &'a self,
+        table: TableId,
+        expected_head: Option<Timestamp>,
+        edits: &'a [VersionEdit],
+    ) -> BoxFuture<'a, ManifestResult<Timestamp>>;
+
     fn snapshot_latest<'a>(
         &'a self,
         table: TableId,
@@ -152,6 +159,18 @@ impl TonboManifest {
         edits: &[VersionEdit],
     ) -> ManifestResult<Timestamp> {
         self.version.apply_version_edits(table, edits).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn apply_version_edits_cas(
+        &self,
+        table: TableId,
+        expected_head: Option<Timestamp>,
+        edits: &[VersionEdit],
+    ) -> ManifestResult<Timestamp> {
+        self.version
+            .apply_version_edits_cas(table, expected_head, edits)
+            .await
     }
 
     pub(crate) async fn snapshot_latest(&self, table: TableId) -> ManifestResult<TableSnapshot> {
@@ -248,6 +267,19 @@ where
         edits: &'a [VersionEdit],
     ) -> BoxFuture<'a, ManifestResult<Timestamp>> {
         Box::pin(async move { self.0.apply_version_edits(table, edits).await })
+    }
+
+    fn apply_version_edits_cas<'a>(
+        &'a self,
+        table: TableId,
+        expected_head: Option<Timestamp>,
+        edits: &'a [VersionEdit],
+    ) -> BoxFuture<'a, ManifestResult<Timestamp>> {
+        Box::pin(async move {
+            self.0
+                .apply_version_edits_cas(table, expected_head, edits)
+                .await
+        })
     }
 
     fn snapshot_latest<'a>(

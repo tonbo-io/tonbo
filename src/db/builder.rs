@@ -10,7 +10,7 @@ use fusio::{
 };
 use thiserror::Error;
 
-use super::{DB, DynMode, Mode};
+use super::{CompactionLoopHandle, DB, DynMode, Mode};
 use crate::{
     compaction::{
         executor::LocalCompactionExecutor,
@@ -1042,17 +1042,18 @@ where
                 .map_err(DbBuildError::CompactionPlanner)?;
             let exec =
                 LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
-            let db_arc = Arc::new(db);
-            let _handle = db_arc.spawn_compaction_worker_local(
+            let driver = Arc::new(db.compaction_driver());
+            let handle = driver.spawn_compaction_worker_local(
                 planner,
                 exec,
                 Some(loop_cfg.sst_config),
                 loop_cfg.interval,
+                1,
             );
-            db = match Arc::try_unwrap(db_arc) {
-                Ok(db_owned) => db_owned,
-                Err(_) => panic!("compaction worker should not hold DB strong refs"),
-            };
+            db.compaction_worker = Some(CompactionLoopHandle {
+                _driver: driver,
+                handle,
+            });
         }
 
         Ok(db)

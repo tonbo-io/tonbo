@@ -31,6 +31,9 @@ pub enum ManifestError {
     /// Tonbo-specific invariant violation detected while manipulating manifest records.
     #[error("invariant violation: {0}")]
     Invariant(&'static str),
+    /// Conditional manifest publish failed because the head changed.
+    #[error("manifest CAS conflict: {0}")]
+    CasConflict(&'static str),
     /// Catalog metadata did not match expectations.
     #[error("catalog conflict: {0}")]
     CatalogConflict(String),
@@ -142,6 +145,27 @@ where
         table: TableId,
         edits: &[VersionEdit],
     ) -> ManifestResult<Timestamp> {
+        self.apply_version_edits_inner(table, edits, None).await
+    }
+
+    /// Apply edits with a CAS guard on the current head transaction. If the manifest head has
+    /// advanced since `expected_head`, this returns `ManifestError::CasConflict`.
+    pub(crate) async fn apply_version_edits_cas(
+        &self,
+        table: TableId,
+        expected_head: Option<Timestamp>,
+        edits: &[VersionEdit],
+    ) -> ManifestResult<Timestamp> {
+        self.apply_version_edits_inner(table, edits, Some(expected_head))
+            .await
+    }
+
+    async fn apply_version_edits_inner(
+        &self,
+        table: TableId,
+        edits: &[VersionEdit],
+        expected_head: Option<Option<Timestamp>>,
+    ) -> ManifestResult<Timestamp> {
         if edits.is_empty() {
             return Err(ManifestError::Invariant("no version edits provided"));
         }
@@ -161,6 +185,15 @@ where
                 ));
             }
         };
+
+        if let Some(expected) = expected_head
+            && head.last_manifest_txn != expected
+        {
+            session.end().await?;
+            return Err(ManifestError::CasConflict(
+                "manifest head advanced during compaction",
+            ));
+        }
 
         let mut state = if let Some(last_txn) = head.last_manifest_txn {
             let version_key = VersionKey::TableVersion {
@@ -1003,5 +1036,46 @@ mod tests {
             versions.is_empty(),
             "no versions should be returned for an uninitialised head"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn apply_version_edits_cas_conflict() {
+        let file_ids = FileIdGenerator::default();
+        let (manifest, table_id) = init_in_memory_manifest_raw(1, &file_ids)
+            .await
+            .expect("manifest should initialize");
+
+        let (data0, mvcc0) = test_paths(30);
+        let edits = vec![VersionEdit::AddSsts {
+            level: 0,
+            entries: vec![SstEntry::new(
+                SsTableId::new(30),
+                None,
+                None,
+                data0,
+                mvcc0,
+                None,
+            )],
+        }];
+
+        manifest
+            .apply_version_edits(table_id, &edits)
+            .await
+            .expect("first apply");
+
+        // Capture the current head, then advance it to force a CAS miss.
+        let snapshot = manifest.snapshot_latest(table_id).await.expect("snapshot");
+        let expected_head = snapshot.head.last_manifest_txn;
+
+        manifest
+            .apply_version_edits(table_id, &edits)
+            .await
+            .expect("second apply");
+
+        let err = manifest
+            .apply_version_edits_cas(table_id, expected_head, &edits)
+            .await
+            .expect_err("cas conflict");
+        assert!(matches!(err, ManifestError::CasConflict(_)));
     }
 }

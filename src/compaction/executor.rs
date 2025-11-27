@@ -24,7 +24,7 @@ use crate::{
     manifest::{ManifestError, SstEntry, VersionEdit, WalSegmentRef},
     mode::DynMode,
     mvcc::Timestamp,
-    ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId, SsTableMerger},
+    ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId, SsTableMerger},
 };
 
 /// Lease/ownership token used when delegating compaction to a remote worker.
@@ -189,6 +189,12 @@ pub enum CompactionError {
     /// Planner or manifest interaction failed.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
+    /// Lease validation failed or no lease was supplied when required.
+    #[error("compaction lease missing or invalid")]
+    LeaseMissing,
+    /// CAS conflict while publishing manifest edits.
+    #[error("manifest CAS conflict")]
+    CasConflict,
     /// An expected storage path was missing from an SST descriptor.
     #[error("compaction output missing path for {0}")]
     MissingPath(&'static str),
@@ -222,6 +228,13 @@ pub(crate) trait CompactionExecutor {
         &self,
         job: CompactionJob,
     ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>>;
+
+    /// Best-effort cleanup hook for outputs produced during execution. Used when manifest
+    /// publication fails (e.g., CAS conflict) so temporary artifacts do not leak.
+    fn cleanup_outputs<'a>(
+        &'a self,
+        outputs: &'a [SsTableDescriptor],
+    ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>>;
 }
 
 /// Local no-op executor placeholder. Returns `Unimplemented` until merge plumbing lands.
@@ -290,6 +303,29 @@ impl CompactionExecutor for LocalCompactionExecutor {
                 job.task.target_level as u32,
                 None,
             )
+        })
+    }
+
+    fn cleanup_outputs<'a>(
+        &'a self,
+        outputs: &'a [SsTableDescriptor],
+    ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
+        Box::pin(async move {
+            let fs = Arc::clone(self.config.fs());
+            for desc in outputs {
+                let data_path = desc
+                    .data_path()
+                    .ok_or(CompactionError::MissingPath("data"))?;
+                let mvcc_path = desc
+                    .mvcc_path()
+                    .ok_or(CompactionError::MissingPath("mvcc"))?;
+                fs.remove(data_path).await.map_err(SsTableError::from)?;
+                fs.remove(mvcc_path).await.map_err(SsTableError::from)?;
+                if let Some(delete_path) = desc.delete_path() {
+                    fs.remove(delete_path).await.map_err(SsTableError::from)?;
+                }
+            }
+            Ok(())
         })
     }
 }

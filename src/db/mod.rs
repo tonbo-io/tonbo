@@ -6,7 +6,9 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     hash::Hash,
+    marker::PhantomData,
     pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -31,9 +33,12 @@ use predicate::{ColumnRef, Predicate};
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
     compaction::{
-        executor::{CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome},
+        CompactionHost,
+        executor::{
+            CompactionError, CompactionExecutor, CompactionJob, CompactionLease, CompactionOutcome,
+        },
         planner::{CompactionPlanner, CompactionSnapshot},
-        spawn_compaction_loop_local,
+        scheduler::{CompactionScheduler, ScheduledCompaction},
     },
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
@@ -73,6 +78,464 @@ use crate::{
 
 type PendingWalTxns = HashMap<u64, PendingWalTxn>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
+
+struct CompactionLoopHandle<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
+    _driver: Arc<CompactionDriver<M, E>>,
+    #[allow(dead_code)]
+    handle: tokio::task::JoinHandle<()>,
+}
+
+pub(crate) struct CompactionDriver<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
+    manifest: TonboManifest,
+    manifest_table: TableId,
+    wal_config: Option<RuntimeWalConfig>,
+    wal_handle: Option<WalHandle<E>>,
+    _marker: PhantomData<M>,
+}
+
+impl<M, E> CompactionDriver<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
+    fn new(db: &DB<M, E>) -> Self {
+        Self {
+            manifest: db.manifest.clone(),
+            manifest_table: db.manifest_table,
+            wal_config: db.wal_config.clone(),
+            wal_handle: db.wal_handle().cloned(),
+            _marker: PhantomData,
+        }
+    }
+
+    async fn prune_wal_segments_below_floor(&self) {
+        let Some(cfg) = self.wal_config.as_ref() else {
+            return;
+        };
+        let Ok(Some(floor)) = self.manifest.wal_floor(self.manifest_table).await else {
+            return;
+        };
+        let wal_handle = self.wal_handle.clone();
+        match manifest_ext::prune_wal_segments(cfg, &floor).await {
+            Ok(removed) => {
+                if let Some(handle) = wal_handle {
+                    let metrics = handle.metrics();
+                    let mut guard = metrics.write().await;
+                    guard.record_wal_floor_advance();
+                    if cfg.prune_dry_run {
+                        guard.record_wal_prune_dry_run(removed as u64);
+                    } else {
+                        guard.record_wal_pruned(removed as u64);
+                    }
+                }
+                if cfg.prune_dry_run {
+                    eprintln!(
+                        "wal prune dry-run: floor {} would remove {removed} segment(s)",
+                        floor.seq()
+                    );
+                } else if removed > 0 {
+                    eprintln!(
+                        "wal prune removed {removed} segment(s) below floor {}",
+                        floor.seq(),
+                    );
+                }
+            }
+            Err(err) => {
+                if let Some(handle) = wal_handle {
+                    let metrics = handle.metrics();
+                    let mut guard = metrics.write().await;
+                    guard.record_wal_prune_failure();
+                }
+                eprintln!(
+                    "failed to prune wal segments below manifest floor {}: {}",
+                    floor.seq(),
+                    err
+                );
+            }
+        }
+    }
+
+    async fn manifest_wal_floor(&self) -> Option<WalSegmentRef> {
+        self.manifest
+            .wal_floor(self.manifest_table)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn wal_floor_seq(&self) -> Option<u64> {
+        self.manifest_wal_floor().await.map(|ref_| ref_.seq())
+    }
+
+    async fn plan_compaction_task<P>(
+        &self,
+        planner: &P,
+    ) -> ManifestResult<Option<crate::compaction::planner::CompactionTask>>
+    where
+        P: CompactionPlanner,
+    {
+        let snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
+        let version = match snapshot.latest_version {
+            Some(ref state) => state,
+            None => return Ok(None),
+        };
+        DB::<M, E>::plan_compaction_from_version(planner, version)
+    }
+
+    async fn plan_compaction_task_with_head<P>(
+        &self,
+        planner: &P,
+    ) -> ManifestResult<
+        Option<(
+            crate::compaction::planner::CompactionTask,
+            Option<Timestamp>,
+        )>,
+    >
+    where
+        P: CompactionPlanner,
+    {
+        let snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
+        let expected_head = snapshot.head.last_manifest_txn;
+        let version = match snapshot.latest_version {
+            Some(ref state) => state,
+            None => return Ok(None),
+        };
+        Ok(DB::<M, E>::plan_compaction_from_version(planner, version)?
+            .map(|task| (task, expected_head)))
+    }
+
+    async fn compact_once<CE, P>(
+        &self,
+        planner: &P,
+        executor: &CE,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        self.run_compaction_task(planner, executor).await
+    }
+
+    async fn run_compaction_task<CE, P>(
+        &self,
+        planner: &P,
+        executor: &CE,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        self.run_compaction_task_with_lease(planner, executor, None)
+            .await
+    }
+
+    async fn run_compaction_task_with_lease<CE, P>(
+        &self,
+        planner: &P,
+        executor: &CE,
+        lease: Option<CompactionLease>,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        let mut attempts = 0usize;
+        loop {
+            attempts += 1;
+            let snapshot = self
+                .manifest
+                .snapshot_latest(self.manifest_table)
+                .await
+                .map_err(CompactionError::Manifest)?;
+            let version = match snapshot.latest_version {
+                Some(ref state) => state,
+                None => return Ok(None),
+            };
+            let expected_head = snapshot.head.last_manifest_txn;
+            let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
+
+            let Some(task) = DB::<M, E>::plan_compaction_from_version(planner, version)? else {
+                return Ok(None);
+            };
+
+            let inputs = DB::<M, E>::resolve_compaction_inputs(version, &task)?;
+            let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
+            let wal_floor = self.manifest_wal_floor().await;
+            let job = CompactionJob {
+                task,
+                inputs,
+                lease: lease.clone(),
+            };
+
+            let outcome = executor.execute(job).await?;
+            let mut outcome = outcome;
+            outcome.obsolete_sst_ids = obsolete_ids;
+            if let Some(filtered) = DB::<M, E>::wal_segments_after_compaction(
+                version,
+                &outcome.remove_ssts,
+                &outcome.outputs,
+            ) {
+                if filtered != existing_wal_segments {
+                    outcome.wal_segments = Some(filtered.clone());
+                }
+                outcome.wal_floor = wal_floor.or_else(|| filtered.first().cloned());
+            } else {
+                outcome.wal_floor = wal_floor.or_else(|| existing_wal_segments.first().cloned());
+                if outcome.wal_segments.is_none() && !existing_wal_segments.is_empty() {
+                    outcome.wal_segments = Some(existing_wal_segments);
+                }
+            }
+            let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
+            let edits = outcome.to_version_edits();
+            if edits.is_empty() {
+                return Ok(Some(outcome));
+            }
+            match self
+                .manifest
+                .apply_version_edits_cas(self.manifest_table, expected_head, &edits)
+                .await
+            {
+                Ok(_) => {
+                    self.prune_wal_segments_below_floor().await;
+                    if let Some(plan) = gc_plan {
+                        self.manifest
+                            .record_gc_plan(self.manifest_table, plan)
+                            .await
+                            .map_err(CompactionError::Manifest)?;
+                    }
+                    return Ok(Some(outcome));
+                }
+                Err(ManifestError::CasConflict(_)) => {
+                    executor.cleanup_outputs(&outcome.outputs).await?;
+                    if attempts >= DB::<M, E>::MAX_COMPACTION_APPLY_RETRIES {
+                        return Err(CompactionError::CasConflict);
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    executor.cleanup_outputs(&outcome.outputs).await?;
+                    return Err(CompactionError::Manifest(err));
+                }
+            }
+        }
+    }
+
+    async fn run_scheduled_compaction<CE>(
+        &self,
+        scheduled: ScheduledCompaction,
+        executor: &CE,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+    {
+        let mut attempts = 0usize;
+        loop {
+            attempts += 1;
+            let snapshot = self
+                .manifest
+                .snapshot_latest(self.manifest_table)
+                .await
+                .map_err(CompactionError::Manifest)?;
+            let version = match snapshot.latest_version {
+                Some(ref state) => state,
+                None => return Ok(None),
+            };
+
+            if let Some(expected) = scheduled.manifest_head
+                && snapshot.head.last_manifest_txn != Some(expected)
+            {
+                return Ok(None);
+            }
+
+            let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
+            let inputs = DB::<M, E>::resolve_compaction_inputs(version, &scheduled.task)?;
+            let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
+            let wal_floor = self.manifest_wal_floor().await;
+            let job = CompactionJob {
+                task: scheduled.task.clone(),
+                inputs,
+                lease: Some(scheduled.lease.clone()),
+            };
+
+            let outcome = executor.execute(job).await?;
+            let mut outcome = outcome;
+            outcome.obsolete_sst_ids = obsolete_ids;
+            if let Some(filtered) = DB::<M, E>::wal_segments_after_compaction(
+                version,
+                &outcome.remove_ssts,
+                &outcome.outputs,
+            ) {
+                if filtered != existing_wal_segments {
+                    outcome.wal_segments = Some(filtered.clone());
+                }
+                outcome.wal_floor = wal_floor.or_else(|| filtered.first().cloned());
+            } else {
+                outcome.wal_floor = wal_floor.or_else(|| existing_wal_segments.first().cloned());
+                if outcome.wal_segments.is_none() && !existing_wal_segments.is_empty() {
+                    outcome.wal_segments = Some(existing_wal_segments);
+                }
+            }
+            let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
+            let edits = outcome.to_version_edits();
+            if edits.is_empty() {
+                return Ok(Some(outcome));
+            }
+            let expected_head = scheduled.manifest_head.or(snapshot.head.last_manifest_txn);
+            match self
+                .manifest
+                .apply_version_edits_cas(self.manifest_table, expected_head, &edits)
+                .await
+            {
+                Ok(_) => {
+                    self.prune_wal_segments_below_floor().await;
+                    if let Some(plan) = gc_plan {
+                        self.manifest
+                            .record_gc_plan(self.manifest_table, plan)
+                            .await
+                            .map_err(CompactionError::Manifest)?;
+                    }
+                    return Ok(Some(outcome));
+                }
+                Err(ManifestError::CasConflict(_)) => {
+                    executor.cleanup_outputs(&outcome.outputs).await?;
+                    if attempts >= DB::<M, E>::MAX_COMPACTION_APPLY_RETRIES {
+                        return Err(CompactionError::CasConflict);
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    executor.cleanup_outputs(&outcome.outputs).await?;
+                    return Err(CompactionError::Manifest(err));
+                }
+            }
+        }
+    }
+
+    /// Spawn a current-thread compaction worker that plans tasks, issues leases, and executes
+    /// them via the scheduler loop.
+    #[allow(dead_code)]
+    pub(crate) fn spawn_compaction_worker_local<CE, P>(
+        self: &Arc<Self>,
+        planner: P,
+        executor: CE,
+        gc_sst_config: Option<Arc<SsTableConfig>>,
+        interval: Duration,
+        budget: usize,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        CE: CompactionExecutor + 'static,
+        P: CompactionPlanner + 'static,
+        M: 'static,
+        E: 'static,
+    {
+        let (scheduler, mut rx) = CompactionScheduler::new(budget.max(1), budget.max(1));
+        let driver = Arc::clone(self);
+        let executor = Arc::new(executor);
+        let _ = gc_sst_config;
+        tokio::task::spawn_local(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                for _ in 0..budget.max(1) {
+                    match driver.plan_compaction_task_with_head(&planner).await {
+                        Ok(Some((task, head))) => {
+                            if let Err(err) = scheduler
+                                .enqueue(
+                                    task,
+                                    head,
+                                    "local-compaction",
+                                    interval.as_millis() as u64,
+                                )
+                                .await
+                            {
+                                eprintln!("compaction scheduler closed: {err}");
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            eprintln!("compaction planner failed: {err}");
+                            break;
+                        }
+                    }
+                }
+                // Avoid parking the worker if no jobs were enqueued this tick.
+                if rx.is_empty() {
+                    continue;
+                }
+
+                if let Err(err) = scheduler
+                    .drain_with_budget(&mut rx, |job| {
+                        let driver = Arc::clone(&driver);
+                        let executor = Arc::clone(&executor);
+                        async move {
+                            if let Err(err) = driver
+                                .run_scheduled_compaction(job, executor.as_ref())
+                                .await
+                            {
+                                eprintln!("scheduled compaction failed: {err}");
+                            }
+                        }
+                    })
+                    .await
+                {
+                    eprintln!("compaction scheduler drain stopped: {err}");
+                    return;
+                }
+            }
+        })
+    }
+}
+
+impl<M, E> CompactionHost<M, E> for CompactionDriver<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
+    fn compact_once<'a, CE, P>(
+        &'a self,
+        planner: &'a P,
+        executor: &'a CE,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
+    where
+        CE: CompactionExecutor + 'a,
+        P: CompactionPlanner + 'a,
+    {
+        Box::pin(self.compact_once(planner, executor))
+    }
+}
+
+impl<M, E> CompactionHost<M, E> for DB<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
+    fn compact_once<'a, CE, P>(
+        &'a self,
+        planner: &'a P,
+        executor: &'a CE,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
+    where
+        CE: CompactionExecutor + 'a,
+        P: CompactionPlanner + 'a,
+    {
+        let driver = self.compaction_driver();
+        Box::pin(async move { driver.compact_once(planner, executor).await })
+    }
+}
 
 /// Default package size for a scan
 pub const DEFAULT_SCAN_BATCH_ROWS: usize = 1024;
@@ -198,6 +661,9 @@ where
     file_ids: FileIdGenerator,
     /// Per-key transactional locks (wired once transactional writes arrive).
     _key_locks: LockMap<M::Key>,
+    /// Optional background compaction driver/handle pair for local loops.
+    #[allow(dead_code)]
+    compaction_worker: Option<CompactionLoopHandle<M, E>>,
 }
 
 impl<E> DB<DynMode, E>
@@ -593,52 +1059,15 @@ where
         DbBuilder::new(config)
     }
 
+    fn compaction_driver(&self) -> CompactionDriver<M, E> {
+        CompactionDriver::new(self)
+    }
+
     /// Remove WAL segments whose sequence is older than the manifest floor.
     pub async fn prune_wal_segments_below_floor(&self) {
-        let Some(cfg) = self.wal_config.as_ref() else {
-            return;
-        };
-        let Ok(Some(floor)) = self.manifest.wal_floor(self.manifest_table).await else {
-            return;
-        };
-        let wal_handle = self.wal_handle().cloned();
-        match manifest_ext::prune_wal_segments(cfg, &floor).await {
-            Ok(removed) => {
-                if let Some(handle) = wal_handle {
-                    let metrics = handle.metrics();
-                    let mut guard = metrics.write().await;
-                    guard.record_wal_floor_advance();
-                    if cfg.prune_dry_run {
-                        guard.record_wal_prune_dry_run(removed as u64);
-                    } else {
-                        guard.record_wal_pruned(removed as u64);
-                    }
-                }
-                if cfg.prune_dry_run {
-                    eprintln!(
-                        "wal prune dry-run: floor {} would remove {removed} segment(s)",
-                        floor.seq()
-                    );
-                } else if removed > 0 {
-                    eprintln!(
-                        "wal prune removed {removed} segment(s) below floor {}",
-                        floor.seq()
-                    );
-                }
-            }
-            Err(err) => {
-                if let Some(handle) = wal_handle {
-                    let metrics = handle.metrics();
-                    let mut guard = metrics.write().await;
-                    guard.record_wal_prune_failure();
-                }
-                eprintln!(
-                    "failed to prune wal segments below manifest floor {}: {}",
-                    floor.seq(),
-                    err
-                );
-            }
-        }
+        self.compaction_driver()
+            .prune_wal_segments_below_floor()
+            .await
     }
 
     /// Build a compaction plan based on the latest manifest snapshot.
@@ -649,16 +1078,10 @@ where
     where
         P: CompactionPlanner,
     {
-        let snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
-        let version = match snapshot.latest_version {
-            Some(ref state) => state,
-            None => return Ok(None),
-        };
-        self.plan_compaction_from_version(planner, version)
+        self.compaction_driver().plan_compaction_task(planner).await
     }
 
     fn plan_compaction_from_version<P>(
-        &self,
         planner: &P,
         version: &VersionState,
     ) -> ManifestResult<Option<crate::compaction::planner::CompactionTask>>
@@ -684,8 +1107,12 @@ where
         CE: CompactionExecutor,
         P: CompactionPlanner,
     {
-        self.run_compaction_task(planner, executor).await
+        self.compaction_driver()
+            .compact_once(planner, executor)
+            .await
     }
+
+    const MAX_COMPACTION_APPLY_RETRIES: usize = 2;
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
     #[allow(dead_code)]
@@ -698,63 +1125,26 @@ where
         CE: CompactionExecutor,
         P: CompactionPlanner,
     {
-        let snapshot = self
-            .manifest
-            .snapshot_latest(self.manifest_table)
+        self.compaction_driver()
+            .run_compaction_task(planner, executor)
             .await
-            .map_err(CompactionError::Manifest)?;
-        let version = match snapshot.latest_version {
-            Some(ref state) => state,
-            None => return Ok(None),
-        };
-        let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
+    }
 
-        let Some(task) = self.plan_compaction_from_version(planner, version)? else {
-            return Ok(None);
-        };
-
-        let inputs = Self::resolve_compaction_inputs(version, &task)?;
-        let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
-        let wal_floor = self.manifest_wal_floor().await;
-        let job = CompactionJob {
-            task,
-            inputs,
-            lease: None,
-        };
-
-        let outcome = executor.execute(job).await?;
-        // Attach GC hints from context.
-        let mut outcome = outcome;
-        outcome.obsolete_sst_ids = obsolete_ids;
-        if let Some(filtered) =
-            Self::wal_segments_after_compaction(version, &outcome.remove_ssts, &outcome.outputs)
-        {
-            if filtered != existing_wal_segments {
-                outcome.wal_segments = Some(filtered.clone());
-            }
-            outcome.wal_floor = wal_floor.or_else(|| filtered.first().cloned());
-        } else {
-            outcome.wal_floor = wal_floor.or_else(|| existing_wal_segments.first().cloned());
-            if outcome.wal_segments.is_none() && !existing_wal_segments.is_empty() {
-                outcome.wal_segments = Some(existing_wal_segments);
-            }
-        }
-        let gc_plan = Self::gc_plan_from_outcome(&outcome)?;
-        let edits = outcome.to_version_edits();
-        if !edits.is_empty() {
-            self.manifest
-                .apply_version_edits(self.manifest_table, &edits)
-                .await
-                .map_err(CompactionError::Manifest)?;
-            self.prune_wal_segments_below_floor().await;
-            if let Some(plan) = gc_plan {
-                self.manifest
-                    .record_gc_plan(self.manifest_table, plan)
-                    .await
-                    .map_err(CompactionError::Manifest)?;
-            }
-        }
-        Ok(Some(outcome))
+    /// End-to-end compaction orchestrator with an optional lease token.
+    #[allow(dead_code)]
+    pub(crate) async fn run_compaction_task_with_lease<CE, P>(
+        &self,
+        planner: &P,
+        executor: &CE,
+        lease: Option<CompactionLease>,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        self.compaction_driver()
+            .run_compaction_task_with_lease(planner, executor, lease)
+            .await
     }
 
     fn wal_ids_for_remaining_ssts(
@@ -833,23 +1223,6 @@ where
     /// Spawn a current-thread compaction worker that calls `compact_once` every `interval`.
     /// Caller owns cancellation of the returned handle. This is a stopgap until a Send-friendly
     /// scheduler/lease lands.
-    #[allow(dead_code)]
-    pub(crate) fn spawn_compaction_worker_local<CE, P>(
-        self: &Arc<Self>,
-        planner: P,
-        executor: CE,
-        gc_sst_config: Option<Arc<SsTableConfig>>,
-        interval: Duration,
-    ) -> tokio::task::JoinHandle<()>
-    where
-        CE: CompactionExecutor + 'static,
-        P: CompactionPlanner + 'static,
-        M: 'static,
-        E: 'static,
-    {
-        spawn_compaction_loop_local(Arc::clone(self), planner, executor, gc_sst_config, interval)
-    }
-
     fn gc_plan_from_outcome(
         outcome: &CompactionOutcome,
     ) -> Result<Option<GcPlanState>, CompactionError> {
@@ -942,6 +1315,7 @@ where
             mutable_wal_range: Arc::new(Mutex::new(None)),
             file_ids,
             _key_locks: Arc::new(LockableHashMap::new()),
+            compaction_worker: None,
         }
     }
 
@@ -1159,7 +1533,7 @@ where
 
     /// Sequence number of the WAL floor currently recorded in the manifest.
     pub async fn wal_floor_seq(&self) -> Option<u64> {
-        self.manifest_wal_floor().await.map(|ref_| ref_.seq())
+        self.compaction_driver().wal_floor_seq().await
     }
 
     pub(crate) fn wal_live_frame_floor(&self) -> Option<u64> {
