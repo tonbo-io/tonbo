@@ -20,9 +20,9 @@ It ensures that Tonbo can read and write Arrow- and Parquet-based data efficient
 
 ### Core Design Goals
 
-- **Runtime-agnostic:**
-  Fusio adapts to multiple async runtimes—including **tokio**, **monoio**, and **io_uring**—without introducing runtime-specific dependencies.
-  This allows Tonbo to achieve low-latency, non-blocking I/O across Linux, serverless, and embedded environments.
+- **Runtime-portable, Arrow-first:**
+  Fusio adapts to multiple async runtimes—including **tokio**, **monoio**, and **io_uring**—without changing Arrow/Parquet semantics or introducing runtime-specific dependencies.
+  This allows Tonbo to achieve low-latency, non-blocking I/O across Linux, serverless, and embedded environments while keeping the same Arrow-native core.
 
 - **Object-storage-native:**
   Fusio treats **S3-compatible storage as a first-class backend**, not just a remote filesystem.

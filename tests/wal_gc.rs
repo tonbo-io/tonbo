@@ -13,12 +13,14 @@ use fusio::{
     executor::tokio::TokioExecutor,
     path::{Path as FusioPath, path_to_local},
 };
+use futures::TryStreamExt;
 use tokio::time::sleep;
 use tonbo::{
     BatchesThreshold, CommitAckMode, DB, NeverSeal,
-    key::{KeyOwned, RangeSet},
     mode::{DynMode, DynModeConfig},
+    mvcc::Timestamp,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
+    query::{ColumnRef, Predicate},
     wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
 };
 use typed_arrow_dyn::{DynCell, DynRow};
@@ -70,22 +72,29 @@ fn single_row_batch(schema: Arc<Schema>, id: &str, value: i32) -> RecordBatch {
 }
 
 fn rows_from_db(db: &DB<DynMode, TokioExecutor>) -> Vec<(String, i32)> {
-    let ranges = RangeSet::<KeyOwned>::all();
-    let mut rows: Vec<(String, i32)> = db
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id = match cells.next().expect("id cell") {
-                Some(DynCell::Str(value)) => value,
-                other => panic!("unexpected id cell {other:?}"),
-            };
-            let value = match cells.next().expect("value cell") {
-                Some(DynCell::I32(v)) => v,
-                other => panic!("unexpected value cell {other:?}"),
-            };
-            (id, value)
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan =
+        futures::executor::block_on(db.plan_scan(&pred, None, None, Timestamp::MAX)).expect("plan");
+    let stream = futures::executor::block_on(db.execute_scan(plan)).expect("execute");
+    let batches =
+        futures::executor::block_on(stream.try_collect::<Vec<_>>()).expect("collect batches");
+    let mut rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     rows.sort();

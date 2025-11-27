@@ -12,7 +12,7 @@ use arrow_schema::SchemaRef;
 use futures::Stream;
 use pin_project_lite::pin_project;
 use predicate::{
-    ComparisonOp, Operand, Predicate, PredicateLeaf, PredicateVisitor, ScalarValueRef, VisitOutcome,
+    ComparisonOp, Operand, Predicate, PredicateNode, PredicateVisitor, ScalarValueRef, VisitOutcome,
 };
 use thiserror::Error;
 use typed_arrow_dyn::{DynBuilders, DynCellRaw, DynProjection, DynRow, DynRowRaw, DynSchema};
@@ -31,8 +31,8 @@ pin_project! {
         #[pin]
         inner: MergeStream<'t, S>,
         builder: DynRecordBatchBuilder,
-        residual_predicate: Option<Predicate>,
-        residual: Option<ResidualEvaluator>,
+    residual_predicate: Option<Predicate>,
+    residual: Option<ResidualEvaluator>,
         scan_schema: SchemaRef,
         scan_dyn_schema: DynSchema,
         projection: Option<DynProjection>,
@@ -241,7 +241,9 @@ impl<'a> ResidualRowVisitor<'a> {
                     .get(idx)
                     .ok_or_else(|| ResidualError::MissingColumn(Arc::clone(&column.name)))?;
                 match cell {
-                    None => Ok(ScalarValueRef::Null),
+                    None => Ok(ScalarValueRef::from_dyn(typed_arrow_dyn::DynCellRef::from(
+                        DynCellRaw::Null,
+                    ))),
                     Some(raw) => convert_cell(raw),
                 }
             }
@@ -262,17 +264,22 @@ impl<'a> PredicateVisitor for ResidualRowVisitor<'a> {
 
     fn visit_leaf(
         &mut self,
-        leaf: &PredicateLeaf,
+        leaf: &PredicateNode,
     ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
         let result = match leaf {
-            PredicateLeaf::Compare { left, op, right } => {
+            PredicateNode::Compare { left, op, right } => {
                 let lhs = self.resolve_operand(left)?;
                 let rhs = self.resolve_operand(right)?;
-                lhs.compare(rhs)
-                    .map(|ordering| op.test_ordering(ordering))
-                    .unwrap_or(false)
+                match op {
+                    ComparisonOp::Equal => lhs == rhs,
+                    ComparisonOp::NotEqual => lhs != rhs,
+                    ComparisonOp::LessThan => lhs < rhs,
+                    ComparisonOp::LessThanOrEqual => lhs <= rhs,
+                    ComparisonOp::GreaterThan => lhs > rhs,
+                    ComparisonOp::GreaterThanOrEqual => lhs >= rhs,
+                }
             }
-            PredicateLeaf::InList {
+            PredicateNode::InList {
                 expr,
                 list,
                 negated,
@@ -281,22 +288,20 @@ impl<'a> PredicateVisitor for ResidualRowVisitor<'a> {
                 if value.is_null() {
                     *negated
                 } else {
-                    let contains = list.iter().any(|literal| {
-                        value
-                            .compare(literal.as_ref())
-                            .map(|ordering| ComparisonOp::Equal.test_ordering(ordering))
-                            .unwrap_or(false)
-                    });
+                    let contains = list.iter().any(|literal| value == literal.as_ref());
                     if *negated { !contains } else { contains }
                 }
             }
-            PredicateLeaf::IsNull { expr, negated } => {
+            PredicateNode::IsNull { expr, negated } => {
                 let value = self.resolve_operand(expr)?;
                 if *negated {
                     !value.is_null()
                 } else {
                     value.is_null()
                 }
+            }
+            PredicateNode::Not(_) | PredicateNode::And(_) | PredicateNode::Or(_) => {
+                unreachable!("visit_leaf only handles terminal variants")
             }
         };
         Ok(VisitOutcome::value(result))
@@ -341,25 +346,22 @@ impl<'a> PredicateVisitor for ResidualRowVisitor<'a> {
 }
 
 fn convert_cell(cell: &DynCellRaw) -> Result<ScalarValueRef<'_>, ResidualError> {
-    use DynCellRaw::*;
     match cell {
-        Bool(v) => Ok(ScalarValueRef::Boolean(*v)),
-        I32(v) => Ok(ScalarValueRef::Int64(i64::from(*v))),
-        I64(v) => Ok(ScalarValueRef::Int64(*v)),
-        U32(v) => Ok(ScalarValueRef::UInt64(u64::from(*v))),
-        U64(v) => Ok(ScalarValueRef::UInt64(*v)),
-        F32(v) => Ok(ScalarValueRef::Float64(f64::from(*v))),
-        F64(v) => Ok(ScalarValueRef::Float64(*v)),
-        Str { ptr, len } => {
+        DynCellRaw::Struct(_)
+        | DynCellRaw::List(_)
+        | DynCellRaw::FixedSizeList(_)
+        | DynCellRaw::Map(_)
+        | DynCellRaw::Union { .. } => Err(ResidualError::UnsupportedColumn),
+        DynCellRaw::Str { ptr, len } => {
             let bytes = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), *len) };
-            let value = std::str::from_utf8(bytes).map_err(|_| ResidualError::InvalidUtf8)?;
-            Ok(ScalarValueRef::Utf8(value))
+            std::str::from_utf8(bytes).map_err(|_| ResidualError::InvalidUtf8)?;
+            Ok(ScalarValueRef::from_dyn(typed_arrow_dyn::DynCellRef::from(
+                cell.clone(),
+            )))
         }
-        Bin { ptr, len } => {
-            let bytes = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), *len) };
-            Ok(ScalarValueRef::Binary(bytes))
-        }
-        _ => Err(ResidualError::UnsupportedColumn),
+        _ => Ok(ScalarValueRef::from_dyn(typed_arrow_dyn::DynCellRef::from(
+            cell.clone(),
+        ))),
     }
 }
 
@@ -376,10 +378,9 @@ mod tests {
     use crate::{
         extractor::projection_for_field,
         inmem::mutable::memtable::DynMem,
-        key::RangeSet,
         mvcc::Timestamp,
         query::{
-            ColumnRef, PredicateBuilder, ScalarValue,
+            ColumnRef, Predicate, ScalarValue,
             stream::{Order, ScanStream, merge::MergeStream},
         },
         test_util::build_batch,
@@ -407,8 +408,9 @@ mod tests {
             .insert_batch(extractor.as_ref(), batch, Timestamp::new(1))
             .expect("insert batch");
 
-        let ranges = RangeSet::all();
-        let mutable_scan = mutable.scan_rows(&ranges, None).expect("scan rows");
+        let mutable_scan = mutable
+            .scan_visible(None, Timestamp::MAX)
+            .expect("scan rows");
         let merge = MergeStream::from_vec(
             vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
             Timestamp::MAX,
@@ -473,12 +475,11 @@ mod tests {
             .insert_batch(extractor.as_ref(), batch, Timestamp::new(1))
             .expect("insert batch");
 
-        let predicate = PredicateBuilder::leaf()
-            .greater_than(ColumnRef::new("v", None), ScalarValue::Int64(0))
-            .build();
+        let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
 
-        let ranges = RangeSet::all();
-        let mutable_scan = mutable.scan_rows(&ranges, None).expect("scan rows");
+        let mutable_scan = mutable
+            .scan_visible(None, Timestamp::MAX)
+            .expect("scan rows");
         let merge = block_on(MergeStream::from_vec(
             vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
             Timestamp::MAX,
@@ -535,12 +536,11 @@ mod tests {
             .expect("insert batch");
 
         // Predicate references a missing column.
-        let predicate = PredicateBuilder::leaf()
-            .greater_than(ColumnRef::new("missing", None), ScalarValue::Int64(0))
-            .build();
+        let predicate = Predicate::gt(ColumnRef::new("missing", None), ScalarValue::from(0i64));
 
-        let ranges = RangeSet::all();
-        let mutable_scan = mutable.scan_rows(&ranges, None).expect("scan rows");
+        let mutable_scan = mutable
+            .scan_visible(None, Timestamp::MAX)
+            .expect("scan rows");
         let merge = block_on(MergeStream::from_vec(
             vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
             Timestamp::MAX,

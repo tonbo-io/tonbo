@@ -7,13 +7,10 @@
 //! where durability requires it.
 mod heap_size;
 mod owned;
-mod range;
 mod row;
 mod ts;
 
 pub use heap_size::KeyHeapSize;
 pub use owned::{KeyOwned, KeyOwnedError};
-pub(crate) use range::range_set_overlaps_bounds;
-pub use range::{KeyRange, RangeSet};
 pub use row::{KeyRow, KeyRowError};
 pub use ts::{KeyTsOwned, KeyTsViewRaw};

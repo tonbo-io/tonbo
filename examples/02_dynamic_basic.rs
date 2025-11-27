@@ -1,13 +1,14 @@
 // 02: Dynamic (runtime) schema: key-by-name, insert a batch, and scan
 
-use std::{ops::Bound, sync::Arc};
+use std::sync::Arc;
 
 use fusio::executor::tokio::TokioExecutor;
+use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DynMode},
-    key::{KeyOwned, KeyRange, RangeSet},
     mode::DynModeConfig,
-    query::{ColumnRef, Predicate, PredicateBuilder, ScalarValue},
+    mvcc::Timestamp,
+    query::{ColumnRef, Predicate, ScalarValue},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,
@@ -57,56 +58,53 @@ async fn main() {
         .expect("schema ok");
     db.ingest(batch).await.expect("insert dynamic batch");
 
-    // Scan for a specific key (id == "carol") using KeyOwned
-    let carol = RangeSet::from_ranges(vec![KeyRange::new(
-        Bound::Included(KeyOwned::from("carol")),
-        Bound::Included(KeyOwned::from("carol")),
-    )]);
-    let out: Vec<(String, i32)> = db
-        .scan_mutable_rows(&carol, None)
-        .expect("scan rows")
-        .map(|result| match result {
-            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
-                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-                _ => unreachable!(),
-            },
-            Err(_) => unreachable!(),
-        })
-        .collect();
+    let key_col = ColumnRef::new("id", Some(0));
+
+    // Scan for a specific key (id == "carol") using predicate
+    let carol_pred = Predicate::eq(key_col.clone(), ScalarValue::from("carol"));
+    let out = scan_pairs(&db, &carol_pred).await;
     println!("dynamic scan rows (carol): {:?}", out);
 
     // Query expression: id == "dave"
-    let key_col = ColumnRef::new("id", Some(0));
-    let expr: Predicate = PredicateBuilder::leaf()
-        .equals(key_col.clone(), ScalarValue::Utf8("dave".into()))
-        .build();
-    let (rs, residual) = tonbo::query::extract_key_ranges::<KeyOwned>(&expr, &[key_col]);
-    assert!(residual.is_none());
-    let out_q: Vec<(String, i32)> = db
-        .scan_mutable_rows(&rs, None)
-        .expect("scan rows")
-        .map(|result| match result {
-            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
-                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-                _ => unreachable!(),
-            },
-            Err(_) => unreachable!(),
-        })
-        .collect();
+    let expr: Predicate = Predicate::eq(key_col.clone(), ScalarValue::from("dave"));
+    let out_q = scan_pairs(&db, &expr).await;
     println!("dynamic query rows (id == dave): {:?}", out_q);
 
-    // Or scan all dynamic rows
-    let all = RangeSet::<KeyOwned>::all();
-    let all_rows: Vec<(String, i32)> = db
-        .scan_mutable_rows(&all, None)
-        .expect("scan rows")
-        .map(|result| match result {
-            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
-                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-                _ => unreachable!(),
-            },
-            Err(_) => unreachable!(),
-        })
-        .collect();
+    // Scan all dynamic rows (id is not null)
+    let all_pred = Predicate::is_not_null(key_col.clone());
+    let all_rows = scan_pairs(&db, &all_pred).await;
     println!("dynamic rows (all): {:?}", all_rows);
+}
+
+async fn scan_pairs(db: &DB<DynMode, TokioExecutor>, predicate: &Predicate) -> Vec<(String, i32)> {
+    let plan = db
+        .plan_scan(predicate, None, None, Timestamp::MAX)
+        .await
+        .expect("plan");
+    let batches = db
+        .execute_scan(plan)
+        .await
+        .expect("execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect");
+    batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<typed_arrow::arrow_array::StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<typed_arrow::arrow_array::Int32Array>()
+                .expect("v col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }

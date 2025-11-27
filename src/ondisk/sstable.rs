@@ -44,7 +44,7 @@ use crate::{
         Immutable,
         memtable::{DeleteSidecar, MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
     },
-    key::{KeyOwned, KeyOwnedError, RangeSet},
+    key::{KeyOwned, KeyOwnedError},
     manifest::ManifestError,
     mode::Mode,
     mvcc::Timestamp,
@@ -887,7 +887,6 @@ impl<M: Mode> SsTableReader<M> {
     /// Plan a range scan across this table.
     pub fn plan_scan(
         &self,
-        _ranges: &RangeSet<M::Key>,
         _ts: Timestamp,
         _predicate: Option<&Predicate>,
     ) -> Result<(), SsTableError> {
@@ -898,7 +897,6 @@ impl<M: Mode> SsTableReader<M> {
     /// Stream all rows for the provided ranges/timestamp/predicate (stub).
     pub async fn into_stream(
         self,
-        _ranges: RangeSet<M::Key>,
         _ts: Timestamp,
         _predicate: Option<&Predicate>,
     ) -> Result<BoxStream<'static, Result<SsTableStreamBatch<M>, SsTableError>>, SsTableError>
@@ -1245,7 +1243,7 @@ mod tests {
             .await
             .expect("reader");
         let mut stream = reader
-            .into_stream(RangeSet::all(), Timestamp::MAX, None)
+            .into_stream(Timestamp::MAX, None)
             .await
             .expect("stream");
         let mut data_keys = Vec::new();

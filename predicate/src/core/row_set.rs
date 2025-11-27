@@ -10,9 +10,6 @@ pub type RowId = u32;
 /// Borrowed iterator that yields [`RowId`] values.
 pub type RowIdIter<'a> = Box<dyn Iterator<Item = RowId> + Send + 'a>;
 
-/// Dynamic dispatched [`RowSet`] implementation.
-pub type DynRowSet = Box<dyn RowSet>;
-
 /// Abstract set of row identifiers that supports basic set algebra.
 pub trait RowSet: Send + Sync {
     /// Returns the number of rows tracked by the set.

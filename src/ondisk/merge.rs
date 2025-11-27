@@ -20,7 +20,7 @@ use crate::{
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileId,
     inmem::immutable::memtable::{DeleteSidecar, MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
-    key::{KeyOwned, RangeSet},
+    key::KeyOwned,
     mvcc::Timestamp,
     ondisk::sstable::{
         ParquetTableWriter, SsTable, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId,
@@ -56,9 +56,7 @@ impl<M: crate::mode::Mode> SsTableMergeSource<M> {
         M: crate::mode::Mode<ImmLayout = RecordBatch> + 'static,
     {
         let reader = SsTableReader::<M>::open(config, descriptor).await?;
-        let stream = reader
-            .into_stream(RangeSet::all(), Timestamp::MAX, None)
-            .await?;
+        let stream = reader.into_stream(Timestamp::MAX, None).await?;
         Ok(Self {
             stream,
             _mode: PhantomData,

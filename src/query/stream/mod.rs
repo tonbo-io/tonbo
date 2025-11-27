@@ -265,7 +265,7 @@ mod tests {
     use crate::{
         extractor::{KeyProjection, projection_for_field},
         inmem::{immutable::memtable::ImmutableMemTable, mutable::memtable::DynMem},
-        key::{KeyOwned, RangeSet},
+        key::KeyOwned,
         mutation::DynMutation,
         mvcc::Timestamp,
         test_util::build_batch,
@@ -345,10 +345,9 @@ mod tests {
     #[tokio::test]
     async fn scan_stream_mutable_variant_yields_entries() {
         let setup = ScanStreamFixture::new();
-        let ranges = RangeSet::all();
         let scan = setup
             .mutable
-            .scan_rows(&ranges, None)
+            .scan_visible(None, Timestamp::MAX)
             .expect("scan rows produces iterator");
         let mut stream = ScanStream::<RecordBatch>::from(scan);
         let next = stream.next().await.expect("entry present");
@@ -358,10 +357,9 @@ mod tests {
     #[tokio::test]
     async fn scan_stream_immutable_variant_yields_entries() {
         let setup = ScanStreamFixture::new();
-        let ranges = RangeSet::all();
         let scan = setup
             .immutable
-            .scan_visible(&ranges, None, Timestamp::MAX)
+            .scan_visible(None, Timestamp::MAX)
             .expect("scan immutables");
         let mut stream = ScanStream::<RecordBatch>::from(scan);
         let next = stream.next().await.expect("entry present");
@@ -371,15 +369,8 @@ mod tests {
     #[tokio::test]
     async fn scan_stream_txn_variant_yields_entries() {
         let setup = ScanStreamFixture::new();
-        let ranges = RangeSet::all();
-        let txn_scan = TransactionScan::new(
-            &setup.staged,
-            ranges,
-            &setup.schema,
-            Timestamp::new(5),
-            None,
-        )
-        .expect("txn scan");
+        let txn_scan = TransactionScan::new(&setup.staged, &setup.schema, Timestamp::new(5), None)
+            .expect("txn scan");
         let mut stream = Box::pin(ScanStream::<RecordBatch>::from(txn_scan));
         let entry = stream.next().await.expect("entry present");
         assert!(matches!(entry, Ok(StreamEntry::Txn(_))));

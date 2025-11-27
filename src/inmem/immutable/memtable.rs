@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, marker::PhantomData, ops::Bound, sync::Arc};
+use std::{collections::BTreeMap, fmt, marker::PhantomData, sync::Arc};
 
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{Schema, SchemaRef};
@@ -7,7 +7,7 @@ use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 pub(crate) use crate::mvcc::MVCC_COMMIT_COL;
 use crate::{
     extractor::{KeyExtractError, KeyProjection, map_view_err, projection_for_field},
-    key::{KeyOwned, KeyRange, KeyRow, KeyTsViewRaw, RangeSet},
+    key::{KeyOwned, KeyRow, KeyTsViewRaw},
     mvcc::Timestamp,
 };
 pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
@@ -153,14 +153,13 @@ impl<S> ImmutableMemTable<S> {
     #[allow(unused)]
     pub(crate) fn scan_visible<'t>(
         &'t self,
-        ranges: &RangeSet<KeyOwned>,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<ImmutableVisibleScan<'t, S>, KeyExtractError>
     where
         S: RecordBatchStorage,
     {
-        ImmutableVisibleScan::new(self, ranges, projection_schema, read_ts)
+        ImmutableVisibleScan::new(self, projection_schema, read_ts)
     }
 }
 
@@ -254,9 +253,7 @@ pub(crate) fn bundle_mvcc_sidecar(
 
 pub(crate) struct ImmutableVisibleScan<'t, S> {
     table: &'t ImmutableMemTable<S>,
-    converted: ConvertedRanges,
-    range_idx: usize,
-    cursor: Option<std::collections::btree_map::Range<'t, KeyTsViewRaw, ImmutableIndexEntry>>,
+    iter: std::collections::btree_map::Iter<'t, KeyTsViewRaw, ImmutableIndexEntry>,
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
     emitted_for_key: bool,
@@ -282,7 +279,6 @@ impl<'t> ImmutableVisibleEntry<'t> {
 impl<'t, S> fmt::Debug for ImmutableVisibleScan<'t, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ImmutableVisibleScan")
-            .field("range_idx", &self.range_idx)
             .field("read_ts", &self.read_ts)
             .field("emitted_for_key", &self.emitted_for_key)
             .finish()
@@ -295,7 +291,6 @@ where
 {
     fn new(
         table: &'t ImmutableMemTable<S>,
-        ranges: &RangeSet<KeyOwned>,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<Self, KeyExtractError> {
@@ -304,9 +299,7 @@ where
         let projection = build_projection(&base_schema, projection_schema.as_ref())?;
         Ok(Self {
             table,
-            converted: convert_ranges(ranges),
-            range_idx: 0,
-            cursor: None,
+            iter: table.index.iter(),
             read_ts,
             current_key: None,
             emitted_for_key: false,
@@ -322,148 +315,57 @@ where
 {
     type Item = Result<ImmutableVisibleEntry<'t>, DynViewError>;
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.cursor.is_none() {
-                if self.range_idx >= self.converted.ranges().as_slice().len() {
-                    return None;
+        for (view, entry) in self.iter.by_ref() {
+            let key_view = view.key();
+            if self
+                .current_key
+                .as_ref()
+                .map(|existing| existing == key_view)
+                .unwrap_or(false)
+            {
+                if self.emitted_for_key {
+                    continue;
                 }
-                let (start, end) =
-                    self.converted.ranges().as_slice()[self.range_idx].as_borrowed_bounds();
-                self.cursor = Some(self.table.index.range((start, end)));
-                self.range_idx += 1;
-                self.current_key = None;
+            } else {
+                self.current_key = Some(key_view.clone());
                 self.emitted_for_key = false;
             }
-            if let Some(cur) = &mut self.cursor {
-                for (view, entry) in cur.by_ref() {
-                    let key_view = view.key();
-                    if self
-                        .current_key
-                        .as_ref()
-                        .map(|existing| existing == key_view)
-                        .unwrap_or(false)
-                    {
-                        if self.emitted_for_key {
-                            continue;
-                        }
-                    } else {
-                        self.current_key = Some(key_view.clone());
-                        self.emitted_for_key = false;
-                    }
 
-                    let entry_commit = view.timestamp();
-                    if entry_commit > self.read_ts {
-                        continue;
-                    }
-
-                    match entry {
-                        ImmutableIndexEntry::Delete => {
-                            self.emitted_for_key = true;
-                            return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
-                        }
-                        ImmutableIndexEntry::Row(row_idx) => {
-                            let (commit_ts, tombstone) = self.table.mvcc_row(*row_idx);
-                            if commit_ts > self.read_ts {
-                                continue;
-                            }
-                            if tombstone {
-                                self.emitted_for_key = true;
-                                return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
-                            }
-                            let batch = self.table.storage.as_record_batch();
-                            let row_idx = *row_idx as usize;
-                            let row = match self.projection.project_row_raw(
-                                &self.dyn_schema,
-                                batch,
-                                row_idx,
-                            ) {
-                                Ok(row) => row,
-                                Err(err) => return Some(Err(err)),
-                            };
-                            self.emitted_for_key = true;
-                            return Some(Ok(ImmutableVisibleEntry::Row(view, row)));
-                        }
-                    }
-                }
-                self.cursor = None;
+            let entry_commit = view.timestamp();
+            if entry_commit > self.read_ts {
                 continue;
             }
+
+            match entry {
+                ImmutableIndexEntry::Delete => {
+                    self.emitted_for_key = true;
+                    return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
+                }
+                ImmutableIndexEntry::Row(row_idx) => {
+                    let (commit_ts, tombstone) = self.table.mvcc_row(*row_idx);
+                    if commit_ts > self.read_ts {
+                        continue;
+                    }
+                    if tombstone {
+                        self.emitted_for_key = true;
+                        return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
+                    }
+                    let batch = self.table.storage.as_record_batch();
+                    let row_idx = *row_idx as usize;
+                    let row =
+                        match self
+                            .projection
+                            .project_row_raw(&self.dyn_schema, batch, row_idx)
+                        {
+                            Ok(row) => row,
+                            Err(err) => return Some(Err(err)),
+                        };
+                    self.emitted_for_key = true;
+                    return Some(Ok(ImmutableVisibleEntry::Row(view, row)));
+                }
+            }
         }
-    }
-}
-
-#[derive(Debug)]
-struct ConvertedRanges {
-    _key_backing: Vec<KeyOwned>,
-    ranges: RangeSet<KeyTsViewRaw>,
-}
-
-impl ConvertedRanges {
-    fn new(key_backing: Vec<KeyOwned>, ranges: RangeSet<KeyTsViewRaw>) -> Self {
-        Self {
-            _key_backing: key_backing,
-            ranges,
-        }
-    }
-
-    fn ranges(&self) -> &RangeSet<KeyTsViewRaw> {
-        &self.ranges
-    }
-}
-
-fn convert_ranges(ranges: &RangeSet<KeyOwned>) -> ConvertedRanges {
-    let mut key_backing: Vec<KeyOwned> = Vec::new();
-    let converted = ranges
-        .as_slice()
-        .iter()
-        .map(|range| {
-            KeyRange::new(
-                convert_lower_bound(&range.start, &mut key_backing),
-                convert_upper_bound(&range.end, &mut key_backing),
-            )
-        })
-        .collect();
-    ConvertedRanges::new(key_backing, RangeSet::from_ranges(converted))
-}
-
-fn push_backing_key(storage: &mut Vec<KeyOwned>, key: KeyOwned) -> &KeyOwned {
-    storage.push(key);
-    storage
-        .last()
-        .expect("backing storage should contain the pushed key")
-}
-
-fn convert_lower_bound(
-    bound: &Bound<KeyOwned>,
-    storage: &mut Vec<KeyOwned>,
-) -> Bound<KeyTsViewRaw> {
-    match bound {
-        Bound::Unbounded => Bound::Unbounded,
-        Bound::Included(key) => {
-            let owned = push_backing_key(storage, key.clone());
-            Bound::Included(KeyTsViewRaw::from_owned(owned, Timestamp::MAX))
-        }
-        Bound::Excluded(key) => {
-            let owned = push_backing_key(storage, key.clone());
-            Bound::Excluded(KeyTsViewRaw::from_owned(owned, Timestamp::MIN))
-        }
-    }
-}
-
-fn convert_upper_bound(
-    bound: &Bound<KeyOwned>,
-    storage: &mut Vec<KeyOwned>,
-) -> Bound<KeyTsViewRaw> {
-    match bound {
-        Bound::Unbounded => Bound::Unbounded,
-        Bound::Included(key) => {
-            let owned = push_backing_key(storage, key.clone());
-            Bound::Included(KeyTsViewRaw::from_owned(owned, Timestamp::MIN))
-        }
-        Bound::Excluded(key) => {
-            let owned = push_backing_key(storage, key.clone());
-            Bound::Excluded(KeyTsViewRaw::from_owned(owned, Timestamp::MAX))
-        }
+        None
     }
 }
 
@@ -575,7 +477,10 @@ mod tests {
     };
 
     fn push_view(storage: &mut Vec<KeyOwned>, key: &str, ts: Timestamp) -> KeyTsViewRaw {
-        let owned = push_backing_key(storage, KeyOwned::from(key));
+        storage.push(KeyOwned::from(key));
+        let owned = storage
+            .last()
+            .expect("storage populated with freshly pushed key");
         KeyTsViewRaw::from_owned(owned, ts)
     }
 
@@ -592,18 +497,14 @@ mod tests {
         ];
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("ok");
         let seg = segment_from_batch_with_key_name(batch, "id").expect("seg");
-        use std::ops::Bound as B;
-        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyOwned::from("b")),
-            B::Unbounded,
-        )]);
         let got: Vec<String> = seg
-            .scan_visible(&ranges, None, Timestamp::MAX)
+            .scan_visible(None, Timestamp::MAX)
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
                 entry.into_row().map(|(view, _)| view.key().to_owned())
             })
+            .filter(|k| k.as_utf8().map(|v| v >= "b").unwrap_or(false))
             .map(|k| k.as_utf8().expect("utf8 key").to_string())
             .collect();
         assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
@@ -644,13 +545,8 @@ mod tests {
         let delete_sidecar = DeleteSidecar::empty(&delete_schema);
         let seg = ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar);
 
-        use std::ops::Bound as B;
-        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyOwned::from("k")),
-            B::Included(KeyOwned::from("k")),
-        )]);
         let first_visible: Vec<_> = seg
-            .scan_visible(&ranges, None, Timestamp::new(15))
+            .scan_visible(None, Timestamp::new(15))
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -662,7 +558,7 @@ mod tests {
         assert_eq!(first_visible.len(), 1);
 
         let latest: Vec<_> = seg
-            .scan_visible(&ranges, None, Timestamp::new(45))
+            .scan_visible(None, Timestamp::new(45))
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -732,13 +628,8 @@ mod tests {
             "unexpected _commit_ts column in immutable storage"
         );
 
-        use std::ops::Bound as B;
-        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyOwned::from("k")),
-            B::Included(KeyOwned::from("k")),
-        )]);
         let visible: Vec<_> = seg
-            .scan_visible(&ranges, None, Timestamp::new(21))
+            .scan_visible(None, Timestamp::new(21))
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -799,14 +690,8 @@ mod tests {
             .expect("seal immutable")
             .expect("segment");
 
-        use std::ops::Bound as B;
-        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyOwned::from("k")),
-            B::Included(KeyOwned::from("k")),
-        )]);
-
         let rows_after_delete: Vec<DynRow> = segment
-            .scan_visible(&ranges, None, Timestamp::new(25))
+            .scan_visible(None, Timestamp::new(25))
             .expect("scan after delete")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -821,7 +706,7 @@ mod tests {
         );
 
         let rows_after_reinsert: Vec<DynRow> = segment
-            .scan_visible(&ranges, None, Timestamp::MAX)
+            .scan_visible(None, Timestamp::MAX)
             .expect("scan after reinsert")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -861,9 +746,8 @@ mod tests {
         let delete_sidecar = DeleteSidecar::empty(&key_schema);
         let seg = ImmutableMemTable::new(batch, composite, mvcc, delete_sidecar);
 
-        let ranges = RangeSet::<KeyOwned>::all();
         let mut scan = seg
-            .scan_visible(&ranges, None, Timestamp::MAX)
+            .scan_visible(None, Timestamp::MAX)
             .expect("scan visible");
         let entry = scan.next().expect("row present").expect("row projection");
         let row = match entry {

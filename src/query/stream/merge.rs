@@ -195,7 +195,7 @@ mod tests {
     use crate::{
         extractor::{projection_for_columns, projection_for_field},
         inmem::{immutable::memtable::ImmutableMemTable, mutable::memtable::DynMem},
-        key::{KeyOwned, RangeSet},
+        key::KeyOwned,
         mutation::DynMutation,
         mvcc::{MVCC_COMMIT_COL, Timestamp},
         query::stream::ScanStream,
@@ -243,10 +243,11 @@ mod tests {
                 .expect("seal ok")
                 .expect("segment");
 
-            let ranges = RangeSet::all();
-            let mutable_scan = mutable.scan_rows(&ranges, None).expect("mutable scan");
+            let mutable_scan = mutable
+                .scan_visible(None, Timestamp::MAX)
+                .expect("mutable scan");
             let immutable_scan = immutable_segment
-                .scan_visible(&ranges, None, Timestamp::MAX)
+                .scan_visible(None, Timestamp::MAX)
                 .expect("immutable scan");
             let mut streams = vec![
                 ScanStream::<'_, RecordBatch>::from(immutable_scan),
@@ -262,8 +263,7 @@ mod tests {
                 ])),
             );
             let txn_scan =
-                TransactionScan::new(&staged, RangeSet::all(), &schema, Timestamp::new(60), None)
-                    .expect("txn scan");
+                TransactionScan::new(&staged, &schema, Timestamp::new(60), None).expect("txn scan");
             streams.push(ScanStream::<'_, RecordBatch>::from(txn_scan));
 
             let mut staged = BTreeMap::new();
@@ -275,8 +275,7 @@ mod tests {
                 ])),
             );
             let txn_scan =
-                TransactionScan::new(&staged, RangeSet::all(), &schema, Timestamp::new(60), None)
-                    .expect("txn scan");
+                TransactionScan::new(&staged, &schema, Timestamp::new(60), None).expect("txn scan");
             streams.push(ScanStream::<'_, RecordBatch>::from(txn_scan));
 
             let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(order))
@@ -373,11 +372,12 @@ mod tests {
             .insert_delete_batch(delete_projection.as_ref(), delete_batch)
             .expect("delete row");
 
-        let ranges = RangeSet::all();
         let immutable_scan = immutable_segment
-            .scan_visible(&ranges, None, Timestamp::MAX)
+            .scan_visible(None, Timestamp::MAX)
             .expect("immutable scan");
-        let mutable_scan = mutable.scan_rows(&ranges, None).expect("mutable scan");
+        let mutable_scan = mutable
+            .scan_visible(None, Timestamp::MAX)
+            .expect("mutable scan");
         let streams = vec![
             ScanStream::from(immutable_scan),
             ScanStream::from(mutable_scan),

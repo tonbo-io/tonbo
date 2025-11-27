@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use fusio::executor::BlockingExecutor;
+use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DynMode},
-    key::{KeyOwned, RangeSet},
     mode::DynModeConfig,
+    mvcc::Timestamp,
+    query::{ColumnRef, Predicate},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,
@@ -48,17 +50,35 @@ async fn main() {
         .expect("metadata ok");
     db.ingest(batch).await.expect("insert");
 
-    // Scan all rows
-    let all = RangeSet::<KeyOwned>::all();
+    // Scan all rows using a trivial predicate
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = db
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await
+        .expect("plan");
     let rows: Vec<(String, i32)> = db
-        .scan_mutable_rows(&all, None)
-        .expect("scan rows")
-        .map(|result| match result {
-            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
-                (Some(DynCell::Str(s)), Some(DynCell::I32(v))) => (s.clone(), *v),
-                _ => unreachable!(),
-            },
-            Err(_) => unreachable!(),
+        .execute_scan(plan)
+        .await
+        .expect("execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect")
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<typed_arrow::arrow_array::StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<typed_arrow::arrow_array::Int32Array>()
+                .expect("v col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     println!("dynamic (metadata) rows: {:?}", rows);

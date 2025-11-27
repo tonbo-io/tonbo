@@ -27,13 +27,14 @@ fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", feat
     "tokio",
     "tokio-http",
 ] }
+fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest" }
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet" }
-fusio_manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest" }
 futures = "0.3"
 lockable = "0.2"
 once_cell = "1"
 parquet = { version = "56.2.0", default-features = false, features = [
-    "async", "zstd"
+    "async",
+    "zstd",
 ] }
 pin-project-lite = "0.2"
 predicate = { version = "0.1.0", path = "predicate" }
@@ -41,9 +42,11 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2.0.17"
-typed-arrow-dyn = { version = "0.0.3", features = ["serde"] }
-ulid = { version = "1", features = ["serde"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+typed-arrow-dyn = { git = "https://github.com/tonbo-io/typed-arrow.git", package = "typed-arrow-dyn", features = [
+    "serde",
+] }
+ulid = { version = "1", features = ["serde"] }
 
 
 [dev-dependencies]

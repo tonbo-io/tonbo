@@ -8,12 +8,13 @@ use std::{
 use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{DynFs, Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
+use futures::TryStreamExt;
 use tonbo::{
     DB,
     db::WalConfig as BuilderWalConfig,
-    key::{KeyOwned, RangeSet},
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
+    query::{ColumnRef, Predicate},
     wal::{
         DynBatchPayload, WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalRecoveryMode,
         WalSyncPolicy,
@@ -22,7 +23,6 @@ use tonbo::{
         storage::WalStorage,
     },
 };
-use typed_arrow_dyn::DynCell;
 
 #[path = "common/mod.rs"]
 mod common;
@@ -88,25 +88,35 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    let mut rows: Vec<(String, i32)> = recovered
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id_cell = cells.next().expect("id cell");
-            let value_cell = cells.next().expect("value cell");
-
-            let id = match id_cell {
-                Some(DynCell::Str(value)) => value,
-                _ => panic!("unexpected id cell"),
-            };
-            let value = match value_cell {
-                Some(DynCell::I32(v)) => v,
-                _ => panic!("unexpected value cell"),
-            };
-            (id, value)
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await
+        .expect("plan");
+    let batches = recovered
+        .execute_scan(plan)
+        .await
+        .expect("execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect");
+    let mut rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     rows.sort();
@@ -163,26 +173,39 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    let rows: Vec<((String, i64), i32)> = recovered
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let tenant = match cells.next().expect("tenant cell") {
-                Some(DynCell::Str(value)) => value,
-                other => panic!("unexpected tenant cell {other:?}"),
-            };
-            let bucket = match cells.next().expect("bucket cell") {
-                Some(DynCell::I64(value)) => value,
-                other => panic!("unexpected bucket cell {other:?}"),
-            };
-            let value = match cells.next().expect("value cell") {
-                Some(DynCell::I32(v)) => v,
-                other => panic!("unexpected value cell {other:?}"),
-            };
-            ((tenant, bucket), value)
+    let pred = Predicate::is_not_null(ColumnRef::new("tenant", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await?;
+    let batches = recovered
+        .execute_scan(plan)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let rows: Vec<((String, i64), i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let tenant = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("tenant");
+            let bucket = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("bucket");
+            let value = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value");
+            tenant
+                .iter()
+                .zip(bucket.iter())
+                .zip(value.iter())
+                .filter_map(|((t, b), v)| Some(((t?.to_string(), b?), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -373,13 +396,17 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    {
-        let mut rows = recovered
-            .scan_mutable_rows(&ranges, None)
-            .expect("scan rows");
-        assert!(rows.next().is_none(), "delete should survive recovery");
-    }
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await?;
+    let batches = recovered
+        .execute_scan(plan)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(row_count, 0, "delete should survive recovery");
 
     recovered.disable_wal().await?;
     drop(recovered);
@@ -460,25 +487,35 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    let mut rows: Vec<(String, i32)> = recovered
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id_cell = cells.next().expect("id cell");
-            let value_cell = cells.next().expect("value cell");
-
-            let id = match id_cell {
-                Some(DynCell::Str(value)) => value,
-                _ => panic!("unexpected id cell"),
-            };
-            let value = match value_cell {
-                Some(DynCell::I32(v)) => v,
-                _ => panic!("unexpected value cell"),
-            };
-            (id, value)
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await
+        .expect("plan");
+    let batches = recovered
+        .execute_scan(plan)
+        .await
+        .expect("execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect");
+    let mut rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     rows.sort();
@@ -566,25 +603,32 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    let mut rows: Vec<(String, i32)> = recovered
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id_cell = cells.next().expect("id cell");
-            let value_cell = cells.next().expect("value cell");
-
-            let id = match id_cell {
-                Some(DynCell::Str(value)) => value,
-                _ => panic!("unexpected id cell"),
-            };
-            let value = match value_cell {
-                Some(DynCell::I32(v)) => v,
-                _ => panic!("unexpected value cell"),
-            };
-            (id, value)
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await?;
+    let batches = recovered
+        .execute_scan(plan)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     rows.sort();
@@ -668,25 +712,32 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    let rows: Vec<(String, i32)> = recovered
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id_cell = cells.next().expect("id cell");
-            let value_cell = cells.next().expect("value cell");
-
-            let id = match id_cell {
-                Some(DynCell::Str(value)) => value,
-                _ => panic!("unexpected id cell"),
-            };
-            let value = match value_cell {
-                Some(DynCell::I32(v)) => v,
-                _ => panic!("unexpected value cell"),
-            };
-            (id, value)
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await?;
+    let batches = recovered
+        .execute_scan(plan)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     assert_eq!(rows, vec![("committed".into(), 1)]);
@@ -722,24 +773,35 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let mut rows_after: Vec<(String, i32)> = recovered_again
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id_cell = cells.next().expect("id cell");
-            let value_cell = cells.next().expect("value cell");
-
-            let id = match id_cell {
-                Some(DynCell::Str(value)) => value,
-                _ => panic!("unexpected id cell"),
-            };
-            let value = match value_cell {
-                Some(DynCell::I32(v)) => v,
-                _ => panic!("unexpected value cell"),
-            };
-            (id, value)
+    let pred_after = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan_after = recovered_again
+        .plan_scan(&pred_after, None, None, Timestamp::MAX)
+        .await
+        .expect("plan");
+    let batches_after = recovered_again
+        .execute_scan(plan_after)
+        .await
+        .expect("execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect");
+    let mut rows_after: Vec<(String, i32)> = batches_after
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     rows_after.sort();
@@ -837,22 +899,32 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    let rows: Vec<(String, i32)> = recovered
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row projection");
-            let mut cells = row.0.into_iter();
-            let id = match cells.next().expect("id cell") {
-                Some(DynCell::Str(value)) => value,
-                other => panic!("unexpected id cell {other:?}"),
-            };
-            let value = match cells.next().expect("value cell") {
-                Some(DynCell::I32(v)) => v,
-                other => panic!("unexpected value cell {other:?}"),
-            };
-            (id, value)
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await?;
+    let batches = recovered
+        .execute_scan(plan)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     assert_eq!(rows, vec![("live".into(), 1)]);
@@ -924,25 +996,32 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let ranges = RangeSet::<KeyOwned>::all();
-    let mut rows: Vec<(String, i32)> = recovered
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id_cell = cells.next().expect("id cell");
-            let value_cell = cells.next().expect("value cell");
-
-            let id = match id_cell {
-                Some(DynCell::Str(value)) => value,
-                _ => panic!("unexpected id cell"),
-            };
-            let value = match value_cell {
-                Some(DynCell::I32(v)) => v,
-                _ => panic!("unexpected value cell"),
-            };
-            (id, value)
+    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await?;
+    let batches = recovered
+        .execute_scan(plan)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     rows.sort();
@@ -990,24 +1069,35 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
 
-    let mut rows_final: Vec<(String, i32)> = recovered_again
-        .scan_mutable_rows(&ranges, None)
-        .expect("scan rows")
-        .map(|row| {
-            let row = row.expect("row scan failed");
-            let mut cells = row.0.into_iter();
-            let id_cell = cells.next().expect("id cell");
-            let value_cell = cells.next().expect("value cell");
-
-            let id = match id_cell {
-                Some(DynCell::Str(value)) => value,
-                _ => panic!("unexpected id cell"),
-            };
-            let value = match value_cell {
-                Some(DynCell::I32(v)) => v,
-                _ => panic!("unexpected value cell"),
-            };
-            (id, value)
+    let pred_final = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan_final = recovered_again
+        .plan_scan(&pred_final, None, None, Timestamp::MAX)
+        .await
+        .expect("plan");
+    let batches_final = recovered_again
+        .execute_scan(plan_final)
+        .await
+        .expect("execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect");
+    let mut rows_final: Vec<(String, i32)> = batches_final
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     rows_final.sort();

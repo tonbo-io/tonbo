@@ -1,12 +1,14 @@
 // 04: Dynamic (runtime) schema: composite keys via metadata ordinals
 
-use std::{collections::HashMap, ops::Bound, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use fusio::executor::BlockingExecutor;
+use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DynMode},
-    key::{KeyOwned, KeyRange, RangeSet},
     mode::DynModeConfig,
+    mvcc::Timestamp,
+    query::{ColumnRef, Predicate, ScalarValue},
 };
 use typed_arrow::{
     arrow_array::RecordBatch,
@@ -64,22 +66,42 @@ async fn main() {
     let batch: RecordBatch = build_batch(schema.clone(), rows);
     db.ingest(batch).await.expect("insert");
 
-    // Range over composite key: ("a", 5) ..= ("a", 10)
-    let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(5i64)]);
-    let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
-    let rs = RangeSet::from_ranges(vec![KeyRange::new(
-        Bound::Included(lo),
-        Bound::Included(hi),
-    )]);
+    // Predicate over composite key: id = 'a' AND ts BETWEEN 5 AND 10
+    let pred = Predicate::and(vec![
+        Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("a")),
+        Predicate::and(vec![
+            Predicate::gte(ColumnRef::new("ts", None), ScalarValue::from(5i64)),
+            Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
+        ]),
+    ]);
+
+    let plan = db
+        .plan_scan(&pred, None, None, Timestamp::MAX)
+        .await
+        .expect("plan");
     let got: Vec<(String, i64)> = db
-        .scan_mutable_rows(&rs, None)
-        .expect("scan rows")
-        .map(|result| match result {
-            Ok(r) => match (r.0[0].as_ref(), r.0[1].as_ref()) {
-                (Some(DynCell::Str(s)), Some(DynCell::I64(ts))) => (s.clone(), *ts),
-                _ => unreachable!(),
-            },
-            Err(_) => unreachable!(),
+        .execute_scan(plan)
+        .await
+        .expect("execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect")
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<typed_arrow::arrow_array::StringArray>()
+                .expect("id col");
+            let ts = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<typed_arrow::arrow_array::Int64Array>()
+                .expect("ts col");
+            ids.iter()
+                .zip(ts.iter())
+                .filter_map(|(id, t)| Some((id?.to_string(), t?)))
+                .collect::<Vec<_>>()
         })
         .collect();
     println!("dynamic composite range rows: {:?}", got);

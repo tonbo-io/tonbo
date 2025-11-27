@@ -1,11 +1,4 @@
-use std::{
-    collections::{BTreeMap, btree_map::Range as BTreeRange},
-    fmt,
-    ops::Bound,
-    sync::Arc,
-    time::Duration,
-    vec,
-};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration, vec};
 
 use arrow_array::{Array, RecordBatch, UInt64Array};
 use arrow_schema::{ArrowError, Schema, SchemaRef};
@@ -22,7 +15,7 @@ use crate::{
         },
         policy::{MemStats, StatsProvider},
     },
-    key::{KeyOwned, KeyRange, KeyRow, KeyTsViewRaw, RangeSet},
+    key::{KeyOwned, KeyRow, KeyTsViewRaw},
     mutation::DynMutation,
     mvcc::Timestamp,
 };
@@ -302,24 +295,12 @@ impl DynMem {
         }
     }
 
-    /// Scan dynamic rows in key order returning owned [`DynRow`]s for each key's
-    /// latest visible version across attached batches.
-    pub(crate) fn scan_rows<'t>(
-        &'t self,
-        ranges: &RangeSet<KeyOwned>,
-        projection_schema: Option<SchemaRef>,
-    ) -> Result<DynRowScan<'t>, KeyExtractError> {
-        self.scan_rows_at(ranges, projection_schema, Timestamp::MAX)
-    }
-
     /// Scan dynamic rows using MVCC visibility semantics at `read_ts`.
-    pub(crate) fn scan_rows_at<'t>(
+    pub(crate) fn scan_visible<'t>(
         &'t self,
-        ranges: &RangeSet<KeyOwned>,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<DynRowScan<'t>, KeyExtractError> {
-        let converted = convert_ranges(ranges);
         let base_schema = self
             .batches_attached
             .first()
@@ -330,7 +311,6 @@ impl DynMem {
         Ok(DynRowScan::new(
             &self.index,
             &self.batches_attached,
-            converted,
             read_ts,
             dyn_schema,
             projection,
@@ -557,19 +537,11 @@ impl StatsProvider for DynMem {
     }
 }
 
-/// Iterator over dynamic rows by key ranges, materializing from `RecordBatch`es.
-struct ConvertedRanges {
-    owned: RangeSet<KeyOwned>,
-    composite: RangeSet<KeyTsViewRaw>,
-}
-
+/// Iterator over dynamic rows, materializing from `RecordBatch`es and filtering by MVCC visibility.
 pub(crate) struct DynRowScan<'t> {
-    index: &'t BTreeMap<KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
     batches: &'t [BatchAttachment],
-    _owned_ranges: RangeSet<KeyOwned>,
-    composite_ranges: RangeSet<KeyTsViewRaw>,
-    range_idx: usize,
-    cursor: Option<BTreeRange<'t, KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>>,
+    cursor:
+        std::collections::btree_map::Iter<'t, KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
     emitted_for_key: bool,
@@ -595,7 +567,6 @@ impl<'t> DynRowScanEntry<'t> {
 impl<'t> fmt::Debug for DynRowScan<'t> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DynRowScan")
-            .field("range_idx", &self.range_idx)
             .field("read_ts", &self.read_ts)
             .field("emitted_for_key", &self.emitted_for_key)
             .finish()
@@ -606,18 +577,13 @@ impl<'t> DynRowScan<'t> {
     fn new(
         index: &'t BTreeMap<KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
         batches: &'t [BatchAttachment],
-        converted: ConvertedRanges,
         read_ts: Timestamp,
         dyn_schema: DynSchema,
         projection: DynProjection,
     ) -> Self {
         Self {
-            index,
             batches,
-            _owned_ranges: converted.owned,
-            composite_ranges: converted.composite,
-            range_idx: 0,
-            cursor: None,
+            cursor: index.iter(),
             read_ts,
             current_key: None,
             emitted_for_key: false,
@@ -630,99 +596,48 @@ impl<'t> DynRowScan<'t> {
 impl<'t> Iterator for DynRowScan<'t> {
     type Item = Result<DynRowScanEntry<'t>, DynViewError>;
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.cursor.is_none() {
-                if self.range_idx >= self.composite_ranges.as_slice().len() {
-                    return None;
+        for (composite, mutation) in self.cursor.by_ref() {
+            let key_raw = composite.key();
+            if self
+                .current_key
+                .as_ref()
+                .map(|k| k == key_raw)
+                .unwrap_or(false)
+            {
+                if self.emitted_for_key {
+                    continue;
                 }
-                let (start, end) =
-                    self.composite_ranges.as_slice()[self.range_idx].as_borrowed_bounds();
-                self.cursor = Some(self.index.range((start, end)));
-                self.range_idx += 1;
-                self.current_key = None;
+            } else {
+                self.current_key = Some(key_raw.clone());
                 self.emitted_for_key = false;
             }
-            if let Some(cur) = &mut self.cursor {
-                for (composite, mutation) in cur.by_ref() {
-                    let key_raw = composite.key();
-                    if self
-                        .current_key
-                        .as_ref()
-                        .map(|k| k == key_raw)
-                        .unwrap_or(false)
-                    {
-                        if self.emitted_for_key {
-                            continue;
-                        }
-                    } else {
-                        self.current_key = Some(key_raw.clone());
-                        self.emitted_for_key = false;
-                    }
 
-                    if composite.timestamp() > self.read_ts {
-                        continue;
-                    }
-
-                    if let DynMutation::Delete(_) = mutation {
-                        self.emitted_for_key = true;
-                        return Some(Ok(DynRowScanEntry::Tombstone(composite)));
-                    }
-                    let loc = match mutation {
-                        DynMutation::Upsert(loc) => *loc,
-                        DynMutation::Delete(_) => unreachable!(),
-                    };
-                    let attachment = &self.batches[loc.batch_idx];
-                    let batch = attachment.storage();
-                    let row =
-                        match self
-                            .projection
-                            .project_row_raw(&self.dyn_schema, batch, loc.row_idx)
-                        {
-                            Ok(row) => row,
-                            Err(err) => return Some(Err(err)),
-                        };
-
-                    self.emitted_for_key = true;
-                    return Some(Ok(DynRowScanEntry::Row(composite, row)));
-                }
-                self.cursor = None;
+            if composite.timestamp() > self.read_ts {
                 continue;
             }
+
+            if let DynMutation::Delete(_) = mutation {
+                self.emitted_for_key = true;
+                return Some(Ok(DynRowScanEntry::Tombstone(composite)));
+            }
+            let loc = match mutation {
+                DynMutation::Upsert(loc) => *loc,
+                DynMutation::Delete(_) => unreachable!(),
+            };
+            let attachment = &self.batches[loc.batch_idx];
+            let batch = attachment.storage();
+            let row = match self
+                .projection
+                .project_row_raw(&self.dyn_schema, batch, loc.row_idx)
+            {
+                Ok(row) => row,
+                Err(err) => return Some(Err(err)),
+            };
+
+            self.emitted_for_key = true;
+            return Some(Ok(DynRowScanEntry::Row(composite, row)));
         }
-    }
-}
-
-fn convert_ranges(ranges: &RangeSet<KeyOwned>) -> ConvertedRanges {
-    let owned = ranges.clone();
-
-    let composite_ranges: Vec<KeyRange<KeyTsViewRaw>> = owned
-        .as_slice()
-        .iter()
-        .map(|range| {
-            KeyRange::new(
-                convert_lower_bound(&range.start),
-                convert_upper_bound(&range.end),
-            )
-        })
-        .collect();
-    let composite = RangeSet::from_ranges(composite_ranges);
-
-    ConvertedRanges { owned, composite }
-}
-
-fn convert_lower_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
-    match bound {
-        Bound::Unbounded => Bound::Unbounded,
-        Bound::Included(key) => Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MAX)),
-        Bound::Excluded(key) => Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MIN)),
-    }
-}
-
-fn convert_upper_bound(bound: &Bound<KeyOwned>) -> Bound<KeyTsViewRaw> {
-    match bound {
-        Bound::Unbounded => Bound::Unbounded,
-        Bound::Included(key) => Bound::Included(KeyTsViewRaw::from_owned(key, Timestamp::MIN)),
-        Bound::Excluded(key) => Bound::Excluded(KeyTsViewRaw::from_owned(key, Timestamp::MAX)),
+        None
     }
 }
 
@@ -763,25 +678,29 @@ mod tests {
         // approx_key_bytes for "a" and "b" is 1 + 1
         assert_eq!(s.approx_key_bytes, 2);
 
-        // Scan >= "b" -> rows where id >= "b" (latest per key)
-        use std::ops::Bound as B;
-        let rs = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyOwned::from("b")),
-            B::Unbounded,
-        )]);
+        // Scan rows and retain keys >= "b" (latest per key)
         let got: Vec<String> = m
-            .scan_rows(&rs, None)
+            .scan_visible(None, Timestamp::MAX)
             .expect("scan rows")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
-                entry
-                    .into_row()
-                    .map(|(_, row)| row.into_owned().expect("row"))
+                entry.into_row().map(|(key, row)| (key, row))
             })
-            .map(|row| match row.0[0].as_ref() {
-                Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
-                _ => unreachable!(),
+            .filter_map(|(key, row)| {
+                let key_str = key
+                    .key()
+                    .to_owned()
+                    .as_utf8()
+                    .map(str::to_string)
+                    .expect("utf8 key");
+                (key_str.as_str() >= "b").then_some((key_str, row))
             })
+            .map(
+                |(_k, row)| match row.into_owned().expect("row").0[0].as_ref() {
+                    Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
+                    _ => unreachable!(),
+                },
+            )
             .collect();
         assert_eq!(got, vec!["b".to_string()]);
 
@@ -861,11 +780,9 @@ mod tests {
         m.insert_batch(extractor.as_ref(), batch_v3, Timestamp::new(30))
             .expect("insert v3");
 
-        let ranges = RangeSet::all();
-
         // Before the first commit nothing should be visible
         let rows_before: Vec<DynRow> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(5))
+            .scan_visible(None, Timestamp::new(5))
             .expect("scan rows at")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -878,7 +795,7 @@ mod tests {
 
         // Between first and second commits the first value is visible
         let rows_after_first: Vec<i32> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(15))
+            .scan_visible(None, Timestamp::new(15))
             .expect("scan rows at")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -895,7 +812,7 @@ mod tests {
 
         // Between second and third commits the second value is visible
         let rows_after_second: Vec<i32> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(25))
+            .scan_visible(None, Timestamp::new(25))
             .expect("scan rows at")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -912,7 +829,7 @@ mod tests {
 
         // Between third and fourth commits the third value is visible
         let row_latest: Vec<i32> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(35))
+            .scan_visible(None, Timestamp::new(35))
             .expect("scan rows at")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -960,9 +877,8 @@ mod tests {
         m.insert_delete_batch(delete_projection.as_ref(), delete_batch)
             .expect("delete row");
 
-        let ranges = RangeSet::all();
         let visible_before_delete: Vec<_> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(15))
+            .scan_visible(None, Timestamp::new(15))
             .expect("scan before delete")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -974,7 +890,7 @@ mod tests {
         assert_eq!(visible_before_delete.len(), 1);
 
         let after_delete: Vec<_> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(25))
+            .scan_visible(None, Timestamp::new(25))
             .expect("scan after delete")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -1029,9 +945,8 @@ mod tests {
         m.insert_batch(extractor.as_ref(), reinserts_batch, Timestamp::new(30))
             .expect("reinsert");
 
-        let ranges = RangeSet::all();
         let after_delete: Vec<_> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(25))
+            .scan_visible(None, Timestamp::new(25))
             .expect("scan after delete")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -1043,7 +958,7 @@ mod tests {
         assert!(after_delete.is_empty());
 
         let after_reinsert: Vec<_> = m
-            .scan_rows_at(&ranges, None, Timestamp::new(35))
+            .scan_visible(None, Timestamp::new(35))
             .expect("scan after reinsert")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -1124,46 +1039,53 @@ mod tests {
             .expect("segment");
         assert_eq!(segment.len(), 4);
 
-        use std::ops::Bound as B;
-        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyOwned::from("k")),
-            B::Included(KeyOwned::from("k")),
-        )]);
         let row_after_first = segment
-            .scan_visible(&ranges, None, Timestamp::new(15))
+            .scan_visible(None, Timestamp::new(15))
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
-                entry
-                    .into_row()
-                    .map(|(_, row)| row.into_owned().expect("row"))
+                entry.into_row().and_then(|(key, row)| {
+                    if key.key().to_owned().as_utf8() == Some("k") {
+                        Some(row.into_owned().expect("row"))
+                    } else {
+                        None
+                    }
+                })
             })
             .next()
             .expect("row after first commit");
         let row_after_second = segment
-            .scan_visible(&ranges, None, Timestamp::new(25))
+            .scan_visible(None, Timestamp::new(25))
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
-                entry
-                    .into_row()
-                    .map(|(_, row)| row.into_owned().expect("row"))
+                entry.into_row().and_then(|(key, row)| {
+                    if key.key().to_owned().as_utf8() == Some("k") {
+                        Some(row.into_owned().expect("row"))
+                    } else {
+                        None
+                    }
+                })
             })
             .next()
             .expect("row after second commit");
         let row_after_third = segment
-            .scan_visible(&ranges, None, Timestamp::new(35))
+            .scan_visible(None, Timestamp::new(35))
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
-                entry
-                    .into_row()
-                    .map(|(_, row)| row.into_owned().expect("row"))
+                entry.into_row().and_then(|(key, row)| {
+                    if key.key().to_owned().as_utf8() == Some("k") {
+                        Some(row.into_owned().expect("row"))
+                    } else {
+                        None
+                    }
+                })
             })
             .next()
             .expect("row after third commit");
         let row_latest = segment
-            .scan_visible(&ranges, None, Timestamp::new(45))
+            .scan_visible(None, Timestamp::new(45))
             .expect("scan visible")
             .filter_map(|res| {
                 let entry = res.expect("row projection");
@@ -1211,13 +1133,12 @@ mod tests {
         m.insert_batch(extractor.as_ref(), batch, Timestamp::new(10))
             .expect("insert");
 
-        let ranges = RangeSet::<KeyOwned>::all();
         let projection_schema = Arc::new(Schema::new(vec![
             schema.field(0).clone(),
             schema.field(2).clone(),
         ]));
         let rows: Vec<DynRow> = m
-            .scan_rows(&ranges, Some(Arc::clone(&projection_schema)))
+            .scan_visible(Some(Arc::clone(&projection_schema)), Timestamp::MAX)
             .expect("scan rows")
             .filter_map(|res| {
                 let entry = res.expect("row projection");

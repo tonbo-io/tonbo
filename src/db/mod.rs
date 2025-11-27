@@ -28,7 +28,7 @@ pub use builder::{
     AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig,
 };
 pub use error::DBError;
-use predicate::{ColumnRef, Predicate};
+use predicate::Predicate;
 
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
@@ -50,7 +50,7 @@ use crate::{
         mutable::{MutableLayout, memtable::DynRowScanEntry},
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
-    key::{KeyOwned, RangeSet},
+    key::KeyOwned,
     manifest::{
         GcPlanState, GcSstRef, ManifestError, ManifestResult, SstEntry, TableId, TonboManifest,
         VersionEdit, VersionState, WalSegmentRef, init_in_memory_manifest,
@@ -798,38 +798,6 @@ where
     }
 
     /// Scan the dynamic mutable memtable over key ranges, yielding owned dynamic rows.
-    pub fn scan_mutable_rows<'a>(
-        &'a self,
-        ranges: &'a RangeSet<KeyOwned>,
-        projection_schema: Option<SchemaRef>,
-    ) -> Result<impl Iterator<Item = Result<DynRow, KeyExtractError>> + 'a, KeyExtractError> {
-        let rows = self.mem.scan_rows(ranges, projection_schema)?;
-        Ok(rows.filter_map(|item| match item {
-            Ok(DynRowScanEntry::Row(_, row)) => {
-                Some(row.into_owned().map_err(KeyExtractError::from))
-            }
-            Ok(DynRowScanEntry::Tombstone(_)) => None,
-            Err(err) => Some(Err(err.into())),
-        }))
-    }
-
-    /// Scan the dynamic mutable memtable with MVCC visibility at `read_ts`.
-    pub fn scan_mutable_rows_at<'a>(
-        &'a self,
-        ranges: &'a RangeSet<KeyOwned>,
-        projection_schema: Option<SchemaRef>,
-        read_ts: Timestamp,
-    ) -> Result<impl Iterator<Item = Result<DynRow, KeyExtractError>> + 'a, KeyExtractError> {
-        let rows = self.mem.scan_rows_at(ranges, projection_schema, read_ts)?;
-        Ok(rows.filter_map(|item| match item {
-            Ok(DynRowScanEntry::Row(_, row)) => {
-                Some(row.into_owned().map_err(KeyExtractError::from))
-            }
-            Ok(DynRowScanEntry::Tombstone(_)) => None,
-            Err(err) => Some(Err(err.into())),
-        }))
-    }
-
     /// Plan a scan over entire DB with MVCC visibility at `read_ts`.
     /// This will prune memtables, sst rows using metadata
     pub async fn plan_scan(
@@ -839,18 +807,16 @@ where
         limit: Option<usize>,
         read_ts: Timestamp,
     ) -> Result<ScanPlan, DBError> {
-        let key_columns = self.build_key_column_refs();
-        let (range_set, residual_predicate) =
-            crate::query::extract_key_ranges::<KeyOwned>(predicate, &key_columns);
         let projected_schema = projected_schema.cloned();
+        let residual_predicate = Some(predicate.clone());
         let scan_schema = if let Some(projection) = projected_schema.as_ref() {
             projection_with_predicate(&self.mode.schema, projection, residual_predicate.as_ref())?
         } else {
             Arc::clone(&self.mode.schema)
         };
-        let immutable_indexes = immutable::prune_segments::<DynMode>(&self.immutables, &range_set);
+        let immutable_indexes = immutable::prune_segments::<DynMode>(&self.immutables);
         Ok(ScanPlan {
-            range_set,
+            predicate: predicate.clone(),
             immutable_indexes,
             residual_predicate,
             projected_schema,
@@ -904,22 +870,6 @@ where
             >)
     }
 
-    fn build_key_column_refs(&self) -> Vec<ColumnRef> {
-        let schema = self.mode.schema.as_ref();
-        self.mode
-            .extractor
-            .key_indices()
-            .iter()
-            .map(|&idx| {
-                let field = schema
-                    .fields()
-                    .get(idx)
-                    .expect("extractor guaranteed key index within schema bounds");
-                ColumnRef::new(field.name().as_str(), None)
-            })
-            .collect()
-    }
-
     pub(crate) fn build_scan_streams<'a>(
         &'a self,
         plan: &ScanPlan,
@@ -931,22 +881,15 @@ where
         }
 
         let projection_schema = Arc::clone(&plan.scan_schema);
-        if !plan.range_set.is_empty() {
-            let scan = self.mem.scan_rows_at(
-                &plan.range_set,
-                Some(Arc::clone(&projection_schema)),
-                plan.read_ts,
-            )?;
-            streams.push(ScanStream::from(scan));
-        }
+        let scan = self
+            .mem
+            .scan_visible(Some(Arc::clone(&projection_schema)), plan.read_ts)?;
+        streams.push(ScanStream::from(scan));
 
         for &idx in &plan.immutable_indexes {
             if let Some(segment) = self.immutables.get(idx) {
-                let scan = segment.scan_visible(
-                    &plan.range_set,
-                    Some(Arc::clone(&projection_schema)),
-                    plan.read_ts,
-                )?;
+                let scan =
+                    segment.scan_visible(Some(Arc::clone(&projection_schema)), plan.read_ts)?;
                 streams.push(ScanStream::from(scan));
             }
         }
@@ -956,12 +899,11 @@ where
 
     pub(crate) fn scan_immutable_rows_at(
         &self,
-        ranges: &RangeSet<KeyOwned>,
         read_ts: Timestamp,
     ) -> Result<Vec<(KeyOwned, DynRow)>, KeyExtractError> {
         let mut rows = Vec::new();
         for segment in &self.immutables {
-            let scan = segment.scan_visible(ranges, None, read_ts)?;
+            let scan = segment.scan_visible(None, read_ts)?;
             for result in scan {
                 match result {
                     Ok(ImmutableVisibleEntry::Row(key_view, row_raw)) => {
@@ -974,6 +916,28 @@ where
                     Ok(ImmutableVisibleEntry::Tombstone(_)) => {}
                     Err(err) => return Err(KeyExtractError::from(err)),
                 }
+            }
+        }
+        Ok(rows)
+    }
+
+    pub(crate) fn scan_mutable_rows_at(
+        &self,
+        read_ts: Timestamp,
+    ) -> Result<Vec<(KeyOwned, DynRow)>, KeyExtractError> {
+        let mut rows = Vec::new();
+        let scan = self.mem.scan_visible(None, read_ts)?;
+        for entry in scan {
+            match entry {
+                Ok(DynRowScanEntry::Row(key_view, row_raw)) => {
+                    let row = row_raw.into_owned().map_err(|err| {
+                        KeyExtractError::Arrow(ArrowError::ComputeError(err.to_string()))
+                    })?;
+                    let (key_owned, _) = key_view.to_owned().into_parts();
+                    rows.push((key_owned, row));
+                }
+                Ok(DynRowScanEntry::Tombstone(_)) => {}
+                Err(err) => return Err(KeyExtractError::from(err)),
             }
         }
         Ok(rows)
@@ -2053,7 +2017,9 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use arrow_array::{ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt64Array};
+    use arrow_array::{
+        ArrayRef, BooleanArray, Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array,
+    };
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
@@ -2064,11 +2030,11 @@ mod tests {
         path::{Path, PathPart},
     };
     use futures::{
-        StreamExt,
+        StreamExt, TryStreamExt,
         channel::{mpsc, oneshot as futures_oneshot},
         executor::block_on,
     };
-    use predicate::{ColumnRef, PredicateBuilder, ScalarValue};
+    use predicate::{ColumnRef, Predicate, ScalarValue};
     use tokio::sync::{Mutex, oneshot};
     use typed_arrow_dyn::{DynCell, DynRow};
 
@@ -2076,7 +2042,6 @@ mod tests {
     use crate::{
         compaction::planner::{LeveledCompactionPlanner, LeveledPlannerConfig},
         inmem::{immutable::memtable::MVCC_TOMBSTONE_COL, policy::BatchesThreshold},
-        key::KeyRange,
         manifest::init_fs_manifest,
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
@@ -2154,16 +2119,22 @@ mod tests {
         assert_eq!(chain_k2.len(), 1);
         assert!(chain_k2[0].1);
 
-        let all: RangeSet<KeyOwned> = RangeSet::all();
-        let visible: Vec<String> = db
-            .scan_mutable_rows(&all, None)
-            .expect("scan rows")
-            .map(|row| {
-                let row = row.expect("row projection");
-                match row.0[0].as_ref() {
-                    Some(typed_arrow_dyn::DynCell::Str(s)) => s.clone(),
-                    _ => panic!("unexpected cell variant"),
-                }
+        let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+        let plan = block_on(db.plan_scan(&pred, None, None, Timestamp::MAX)).expect("plan");
+        let stream = block_on(db.execute_scan(plan)).expect("exec");
+        let visible: Vec<String> = block_on(stream.try_collect::<Vec<_>>())
+            .expect("collect")
+            .into_iter()
+            .flat_map(|batch| {
+                let col = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("utf8 col");
+                col.iter()
+                    .flatten()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
             })
             .collect();
         assert_eq!(visible, vec!["k1".to_string()]);
@@ -2406,22 +2377,27 @@ mod tests {
 
         assert_eq!(recovered.manifest_table_id(), manifest_table);
 
-        let ranges = RangeSet::<KeyOwned>::all();
-        let rows: Vec<(String, i32)> = recovered
-            .scan_mutable_rows(&ranges, None)
-            .expect("scan rows")
-            .map(|row| {
-                let row = row.expect("row projection");
-                let mut cells = row.0.into_iter();
-                let id = match cells.next().expect("id cell") {
-                    Some(DynCell::Str(value)) => value,
-                    other => panic!("unexpected id cell {other:?}"),
-                };
-                let value = match cells.next().expect("value cell") {
-                    Some(DynCell::I32(v)) => v,
-                    other => panic!("unexpected value cell {other:?}"),
-                };
-                (id, value)
+        let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+        let plan = block_on(recovered.plan_scan(&pred, None, None, Timestamp::MAX)).expect("plan");
+        let stream = block_on(recovered.execute_scan(plan)).expect("execute");
+        let rows: Vec<(String, i32)> = block_on(stream.try_collect::<Vec<_>>())
+            .expect("collect")
+            .into_iter()
+            .flat_map(|batch| {
+                let ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("id col");
+                let vals = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("v col");
+                ids.iter()
+                    .zip(vals.iter())
+                    .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                    .collect::<Vec<_>>()
             })
             .collect();
         assert_eq!(rows, vec![("user-1".into(), 7)]);
@@ -2432,49 +2408,33 @@ mod tests {
     #[test]
     fn plan_scan_filters_immutable_segments() {
         let db = db_with_immutable_keys(&["k1", "z1"]);
-        let predicate = PredicateBuilder::leaf()
-            .equals(ColumnRef::new("id", None), ScalarValue::Utf8("k1".into()))
-            .build();
+        let predicate = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
         let plan = block_on(db.plan_scan(&predicate, None, None, Timestamp::MAX)).expect("plan");
-        assert!(plan.range_set.contains(&KeyOwned::from("k1")));
-        assert_eq!(plan.immutable_indexes, vec![0]);
-        assert!(plan.residual_predicate.is_none());
+        // Pruning is currently disabled; expect to scan all immutables and retain the predicate
+        // for residual evaluation.
+        assert_eq!(plan.immutable_indexes, vec![0, 1]);
+        assert!(plan.residual_predicate.is_some());
     }
 
     #[test]
     fn plan_scan_preserves_residual_predicate() {
         let db = db_with_immutable_keys(&["k1"]);
-        let key_pred = PredicateBuilder::leaf()
-            .equals(ColumnRef::new("id", None), ScalarValue::Utf8("k1".into()))
-            .build();
-        let value_pred = PredicateBuilder::leaf()
-            .greater_than(ColumnRef::new("v", None), ScalarValue::Int64(5))
-            .build();
-        let predicate = PredicateBuilder::and()
-            .predicate(key_pred)
-            .predicate(value_pred)
-            .build();
+        let key_pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
+        let value_pred = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(5i64));
+        let predicate = Predicate::and(vec![key_pred, value_pred]);
         let plan = block_on(db.plan_scan(&predicate, None, None, Timestamp::MAX)).expect("plan");
-        assert!(plan.range_set.contains(&KeyOwned::from("k1")));
         assert!(plan.residual_predicate.is_some());
     }
 
     #[test]
     fn plan_scan_marks_empty_range() {
         let db = db_with_immutable_keys(&["k1"]);
-        let pred_a = PredicateBuilder::leaf()
-            .equals(ColumnRef::new("id", None), ScalarValue::Utf8("k1".into()))
-            .build();
-        let pred_b = PredicateBuilder::leaf()
-            .equals(ColumnRef::new("id", None), ScalarValue::Utf8("k2".into()))
-            .build();
-        let predicate = PredicateBuilder::and()
-            .predicate(pred_a)
-            .predicate(pred_b)
-            .build();
+        let pred_a = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
+        let pred_b = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k2"));
+        let predicate = Predicate::and(vec![pred_a, pred_b]);
         let plan = block_on(db.plan_scan(&predicate, None, None, Timestamp::MAX)).expect("plan");
-        assert!(plan.range_set.is_empty());
-        assert!(plan.immutable_indexes.is_empty());
+        // Pruning is currently disabled; even contradictory predicates scan all immutables.
+        assert_eq!(plan.immutable_indexes, vec![0]);
     }
 
     fn db_with_immutable_keys(keys: &[&str]) -> DB<DynMode, BlockingExecutor> {
@@ -2609,16 +2569,27 @@ mod tests {
         release_ack_tx.send(()).expect("release ack");
         ingest_future.await.expect("ingest after ack");
 
-        let ranges = RangeSet::<KeyOwned>::all();
-        let rows: Vec<_> = db
-            .scan_mutable_rows(&ranges, None)
-            .expect("scan rows")
-            .map(|row| {
-                let row = row.expect("row projection");
-                match row.0[0].as_ref() {
-                    Some(DynCell::Str(s)) => s.clone(),
-                    _ => panic!("unexpected row"),
-                }
+        let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+        let plan = db
+            .plan_scan(&pred, None, None, Timestamp::MAX)
+            .await
+            .expect("plan");
+        let stream = db.execute_scan(plan).await.expect("execute");
+        let rows: Vec<_> = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect")
+            .into_iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("id col")
+                    .iter()
+                    .flatten()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
             })
             .collect();
         assert_eq!(rows, vec!["k".to_string()]);
@@ -3876,22 +3847,41 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         db.ingest(batch).await.expect("insert batch");
 
-        use std::ops::Bound as B;
-        let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(5i64)]);
-        let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
-        let rs = RangeSet::from_ranges(vec![KeyRange::new(B::Included(lo), B::Included(hi))]);
-        let got: Vec<(String, i64)> = db
-            .scan_mutable_rows(&rs, None)
-            .expect("scan rows")
-            .map(|row| {
-                let row = row.expect("row projection");
-                match (row.0[0].as_ref(), row.0[1].as_ref()) {
-                    (
-                        Some(typed_arrow_dyn::DynCell::Str(s)),
-                        Some(typed_arrow_dyn::DynCell::I64(ts)),
-                    ) => (s.clone(), *ts),
-                    _ => panic!("unexpected row content"),
-                }
+        let pred = Predicate::and(vec![
+            Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("a")),
+            Predicate::and(vec![
+                Predicate::gte(ColumnRef::new("ts", None), ScalarValue::from(5i64)),
+                Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
+            ]),
+        ]);
+        let plan = db
+            .plan_scan(&pred, None, None, Timestamp::MAX)
+            .await
+            .expect("plan");
+        let batches = db
+            .execute_scan(plan)
+            .await
+            .expect("exec")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect");
+        let got: Vec<(String, i64)> = batches
+            .into_iter()
+            .flat_map(|batch| {
+                let ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("id col");
+                let ts = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("ts col");
+                ids.iter()
+                    .zip(ts.iter())
+                    .filter_map(|(id, t)| Some((id?.to_string(), t?)))
+                    .collect::<Vec<_>>()
             })
             .collect();
         assert_eq!(got, vec![("a".to_string(), 5), ("a".to_string(), 10)]);
@@ -3931,22 +3921,41 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
         db.ingest(batch).await.expect("insert batch");
 
-        use std::ops::Bound as B;
-        let lo = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(1i64)]);
-        let hi = KeyOwned::tuple(vec![KeyOwned::from("a"), KeyOwned::from(10i64)]);
-        let rs = RangeSet::from_ranges(vec![KeyRange::new(B::Included(lo), B::Included(hi))]);
-        let got: Vec<(String, i64)> = db
-            .scan_mutable_rows(&rs, None)
-            .expect("scan rows")
-            .map(|row| {
-                let row = row.expect("row projection");
-                match (row.0[0].as_ref(), row.0[1].as_ref()) {
-                    (
-                        Some(typed_arrow_dyn::DynCell::Str(s)),
-                        Some(typed_arrow_dyn::DynCell::I64(ts)),
-                    ) => (s.clone(), *ts),
-                    _ => panic!("unexpected row content"),
-                }
+        let pred = Predicate::and(vec![
+            Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("a")),
+            Predicate::and(vec![
+                Predicate::gte(ColumnRef::new("ts", None), ScalarValue::from(1i64)),
+                Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
+            ]),
+        ]);
+        let batches = db
+            .execute_scan(
+                db.plan_scan(&pred, None, None, Timestamp::MAX)
+                    .await
+                    .expect("plan"),
+            )
+            .await
+            .expect("exec")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect");
+        let got: Vec<(String, i64)> = batches
+            .into_iter()
+            .flat_map(|batch| {
+                let ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("id col");
+                let ts = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("ts col");
+                ids.iter()
+                    .zip(ts.iter())
+                    .filter_map(|(id, t)| Some((id?.to_string(), t?)))
+                    .collect::<Vec<_>>()
             })
             .collect();
         assert_eq!(got, vec![("a".to_string(), 5), ("a".to_string(), 10)]);
@@ -4038,17 +4047,22 @@ mod tests {
             .expect("chain");
         assert_eq!(chain, vec![(Timestamp::new(42), true)]);
 
-        use std::ops::Bound as B;
-        let ranges = RangeSet::from_ranges(vec![KeyRange::new(
-            B::Included(KeyOwned::from("k")),
-            B::Included(KeyOwned::from("k")),
-        )]);
-        let visible: Vec<_> = db
-            .scan_mutable_rows_at(&ranges, None, Timestamp::new(50))
-            .expect("scan rows")
-            .map(|row| row.expect("row projection"))
-            .collect();
-        assert!(visible.is_empty());
+        let pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k"));
+        let plan = db
+            .plan_scan(&pred, None, None, Timestamp::new(50))
+            .await
+            .expect("plan");
+        let visible_rows: usize = db
+            .execute_scan(plan)
+            .await
+            .expect("execute")
+            .try_fold(
+                0usize,
+                |acc, batch| async move { Ok(acc + batch.num_rows()) },
+            )
+            .await
+            .expect("fold");
+        assert_eq!(visible_rows, 0);
 
         // New ingest should advance to > 42 (next clock tick).
         let new_batch = build_batch(

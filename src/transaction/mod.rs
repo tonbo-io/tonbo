@@ -5,12 +5,7 @@
 //! patches will wire these pieces into `DB::begin_transaction`, WAL plumbing,
 //! and recovery.
 
-use std::{
-    collections::{BTreeMap, btree_map::Range as BTreeRange},
-    fmt,
-    ops::Bound,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, SchemaRef};
@@ -28,7 +23,7 @@ use typed_arrow_dyn::{
 use crate::{
     db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, TxnWalPublishContext, WalFrameRange},
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
-    key::{KeyOwned, KeyRange, KeyTsViewRaw, RangeSet},
+    key::{KeyOwned, KeyTsViewRaw},
     manifest::{ManifestError, TableHead, TableSnapshot, VersionEdit, VersionState, WalSegmentRef},
     mode::DynMode,
     mutation::DynMutation,
@@ -187,13 +182,11 @@ impl StagedMutations {
 /// Iterator-style scan over staged transaction mutations.
 pub(crate) struct TransactionScan<'a> {
     staged: &'a BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
-    ranges: RangeSet<KeyOwned>,
     input_schema: SchemaRef,
     input_dyn_schema: DynSchema,
     fields: Fields,
     visible_ts: Timestamp,
-    range_idx: usize,
-    cursor: Option<BTreeRange<'a, KeyOwned, DynMutation<DynRow, ()>>>,
+    iter: std::collections::btree_map::Iter<'a, KeyOwned, DynMutation<DynRow, ()>>,
     rows: Vec<DynRowOwned>,
     projection: Option<DynProjection>,
 }
@@ -202,7 +195,6 @@ impl<'a> fmt::Debug for TransactionScan<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TransactionScan")
             .field("staged_len", &self.staged.len())
-            .field("ranges", &self.ranges)
             .field("visible_ts", &self.visible_ts)
             .finish()
     }
@@ -217,7 +209,6 @@ pub(crate) enum TransactionScanEntry {
 impl<'a> TransactionScan<'a> {
     pub(crate) fn new(
         staged: &'a BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
-        ranges: RangeSet<KeyOwned>,
         schema: &SchemaRef,
         visible_ts: Timestamp,
         projection_schema: Option<&SchemaRef>,
@@ -240,13 +231,11 @@ impl<'a> TransactionScan<'a> {
         };
         Ok(Self {
             staged,
-            ranges,
             input_schema,
             input_dyn_schema,
             fields,
             visible_ts,
-            range_idx: 0,
-            cursor: None,
+            iter: staged.iter(),
             rows: Vec::new(),
             projection,
         })
@@ -283,55 +272,36 @@ impl<'a> Iterator for TransactionScan<'a> {
 
     #[allow(clippy::never_loop)]
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.cursor.is_none() {
-                if self.range_idx >= self.ranges.as_slice().len() {
-                    return None;
-                }
-                let (start, end) = self.ranges.as_slice()[self.range_idx].as_borrowed_bounds();
-                self.cursor = Some(self.staged.range((start, end)));
-                self.range_idx += 1;
-            }
-
-            if let Some(cursor) = &mut self.cursor {
-                loop {
-                    match cursor.next() {
-                        Some((key, mutation)) => match mutation {
-                            DynMutation::Upsert(row) => match self.materialize_row(row) {
-                                Ok(owned_row) => {
-                                    self.rows.push(owned_row);
-                                    let raw_row = match self.rows.last() {
-                                        Some(stored) => match stored.as_raw() {
-                                            Ok(raw) => raw,
-                                            Err(err) => return Some(Err(err)),
-                                        },
-                                        None => {
-                                            return Some(Err(DynViewError::Invalid {
-                                                column: 0,
-                                                path: "transaction_scan".to_string(),
-                                                message: "staged row buffer unexpectedly empty"
-                                                    .to_string(),
-                                            }));
-                                        }
-                                    };
-                                    let view = KeyTsViewRaw::from_owned(key, self.visible_ts);
-                                    return Some(Ok(TransactionScanEntry::Row((view, raw_row))));
-                                }
+        while let Some((key, mutation)) = self.iter.next() {
+            match mutation {
+                DynMutation::Upsert(row) => match self.materialize_row(row) {
+                    Ok(owned_row) => {
+                        self.rows.push(owned_row);
+                        let raw_row = match self.rows.last() {
+                            Some(stored) => match stored.as_raw() {
+                                Ok(raw) => raw,
                                 Err(err) => return Some(Err(err)),
                             },
-                            DynMutation::Delete(_) => {
-                                let view = KeyTsViewRaw::from_owned(key, self.visible_ts);
-                                return Some(Ok(TransactionScanEntry::Tombstone(view)));
+                            None => {
+                                return Some(Err(DynViewError::Invalid {
+                                    column: 0,
+                                    path: "transaction_scan".to_string(),
+                                    message: "staged row buffer unexpectedly empty".to_string(),
+                                }));
                             }
-                        },
-                        None => {
-                            self.cursor = None;
-                            break;
-                        }
+                        };
+                        let view = KeyTsViewRaw::from_owned(key, self.visible_ts);
+                        return Some(Ok(TransactionScanEntry::Row((view, raw_row))));
                     }
+                    Err(err) => return Some(Err(err)),
+                },
+                DynMutation::Delete(_) => {
+                    let view = KeyTsViewRaw::from_owned(key, self.visible_ts);
+                    return Some(Ok(TransactionScanEntry::Tombstone(view)));
                 }
             }
         }
+        None
     }
 }
 
@@ -451,12 +421,8 @@ impl Transaction {
                 DynMutation::Delete(_) => None,
             });
         }
-        let range = RangeSet::from_ranges(vec![KeyRange::new(
-            Bound::Included(key.clone()),
-            Bound::Included(key.clone()),
-        )]);
-        let rows = self.read_mutable_rows(db, &range)?;
-        Ok(rows.into_values().next())
+        let rows = self.read_mutable_rows(db)?;
+        Ok(rows.get(key).map(clone_dyn_row))
     }
 
     /// Scan rows matching `predicate`, returning values visible at the transaction snapshot with
@@ -476,14 +442,12 @@ impl Transaction {
             .plan_scan(predicate, projected_schema, limit, read_ts)
             .await
             .map_err(TransactionError::from)?;
-        let txn_ranges = plan.range_set.clone();
         let txn_scan = if self.staged.is_empty() {
             None
         } else {
             Some(
                 TransactionScan::new(
                     self.staged.entries(),
-                    txn_ranges,
                     &self.schema,
                     read_ts,
                     Some(&plan.scan_schema),
@@ -564,7 +528,6 @@ impl Transaction {
     fn read_mutable_rows<E>(
         &self,
         db: &DB<DynMode, E>,
-        ranges: &RangeSet<KeyOwned>,
     ) -> Result<BTreeMap<KeyOwned, DynRow>, TransactionError>
     where
         E: Executor + Timer,
@@ -572,15 +535,13 @@ impl Transaction {
         let read_ts = self.read_ts();
         let mut out = BTreeMap::new();
         let rows = db
-            .scan_mutable_rows_at(ranges, None, read_ts)
+            .scan_mutable_rows_at(read_ts)
             .map_err(TransactionError::KeyExtract)?;
-        for row in rows {
-            let row = row.map_err(TransactionError::KeyExtract)?;
-            let key = self.project_key(&row)?;
+        for (key, row) in rows {
             out.insert(key, row);
         }
         for (key, row) in db
-            .scan_immutable_rows_at(ranges, read_ts)
+            .scan_immutable_rows_at(read_ts)
             .map_err(TransactionError::KeyExtract)?
         {
             out.entry(key).or_insert(row);
@@ -776,10 +737,9 @@ mod tests {
     use super::*;
     use crate::{
         inmem::policy::BatchesThreshold,
-        key::RangeSet,
         mode::DynModeConfig,
         mvcc::Timestamp,
-        query::{ColumnRef, PredicateBuilder, ScalarValue},
+        query::{ColumnRef, Predicate, ScalarValue},
         test_util::build_batch,
     };
 
@@ -809,9 +769,7 @@ mod tests {
     }
 
     fn all_rows_predicate() -> Predicate {
-        PredicateBuilder::leaf()
-            .greater_than(ColumnRef::new("v", None), ScalarValue::Int64(i64::MIN))
-            .build()
+        Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(i64::MIN))
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1064,9 +1022,8 @@ mod tests {
                 Some(DynCell::I32(2)),
             ])),
         );
-        let ranges = RangeSet::all();
-        let mut scan = TransactionScan::new(&staged, ranges, &schema, Timestamp::new(1), None)
-            .expect("txn scan");
+        let mut scan =
+            TransactionScan::new(&staged, &schema, Timestamp::new(1), None).expect("txn scan");
         let mut seen = Vec::new();
         while let Some(entry) = scan.next() {
             match entry.expect("txn entry") {
@@ -1090,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn transaction_scan_respects_ranges() {
+    fn transaction_scan_yields_all_rows() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, true),
@@ -1118,18 +1075,8 @@ mod tests {
             ])),
         );
 
-        let range = KeyRange::new(
-            Bound::Included(KeyOwned::from("bb")),
-            Bound::Included(KeyOwned::from("cc")),
-        );
-        let scan = TransactionScan::new(
-            &staged,
-            RangeSet::from_ranges(vec![range]),
-            &schema,
-            Timestamp::new(5),
-            None,
-        )
-        .expect("txn scan");
+        let scan =
+            TransactionScan::new(&staged, &schema, Timestamp::new(5), None).expect("txn scan");
         let results: Vec<_> = scan
             .filter_map(|entry| match entry.expect("row") {
                 TransactionScanEntry::Row((key, row)) => {
@@ -1143,9 +1090,10 @@ mod tests {
                 TransactionScanEntry::Tombstone(_) => None,
             })
             .collect();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, KeyOwned::from("bb"));
-        assert_eq!(results[1].0, KeyOwned::from("cc"));
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, KeyOwned::from("aa"));
+        assert_eq!(results[1].0, KeyOwned::from("bb"));
+        assert_eq!(results[2].0, KeyOwned::from("cc"));
     }
 }
 

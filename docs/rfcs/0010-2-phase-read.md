@@ -115,7 +115,7 @@ The planning phase produces a `ScanPlan` that contains:
 - limit/order information, and
 - optional execution hints for query engine optimization.
 
-The plan can be cached for reuse across queries. Although the pruning/filtering steps below lean on Parquet details, the `ScanPlan` abstraction itself is storage agnostic.
+The plan can be cached for reuse across queries. The implementation is Arrow/Parquet-first (predicates, row filters, and record batches are all Arrow-native); if another format ever appeared, the plan surface would need revisiting.
 
 ### Prune
 
