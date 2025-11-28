@@ -1534,7 +1534,7 @@ where
     }
 
     /// Plan and flush immutable segments into a Parquet-backed SSTable.
-    pub async fn flush_immutables_with_descriptor(
+    pub(crate) async fn flush_immutables_with_descriptor(
         &mut self,
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,

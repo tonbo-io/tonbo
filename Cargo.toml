@@ -11,6 +11,7 @@ members = [".", "predicate"]
 default = []
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
+test-helpers = []
 
 [dependencies]
 arrow-array = "56.2.0"

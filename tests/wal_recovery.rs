@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 use std::{
     fs,
     path::PathBuf,
@@ -7,19 +9,24 @@ use std::{
 
 use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
-use fusio::{DynFs, Write, executor::tokio::TokioExecutor, path::Path as FusioPath};
+use fusio::{
+    DynFs, Write, disk::LocalFs, executor::tokio::TokioExecutor, fs::FsCas, path::Path as FusioPath,
+};
 use futures::TryStreamExt;
 use tonbo::{
-    DB,
+    BatchesThreshold, DB,
     db::WalConfig as BuilderWalConfig,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
+    ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     query::{ColumnRef, Predicate},
+    test_helpers::DbTestExt,
     wal::{
         DynBatchPayload, WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalRecoveryMode,
         WalSyncPolicy,
         frame::{INITIAL_FRAME_SEQ, WalEvent, encode_autocommit_frames, encode_command},
         replay::Replayer,
+        state::FsWalStateStore,
         storage::WalStorage,
     },
 };
@@ -47,7 +54,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let root_dir = workspace_temp_dir("tonbo-wal-e2e");
     let root_str = root_dir.to_string_lossy().into_owned();
 
-    let (schema, mode_config) = schema_and_config(
+    let (schema, build_config) = schema_and_config(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -56,7 +63,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     );
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
         .on_disk(root_str.clone())
         .create_dirs(true)
         .recover_or_init_with_executor(Arc::clone(&executor))
@@ -126,6 +133,133 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     drop(recovered);
     if let Err(err) = fs::remove_dir_all(&root_dir) {
         eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp_root = workspace_temp_dir("wal-manifest-restart");
+    let root_str = temp_root.to_string_lossy().into_owned();
+
+    let (schema, build_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
+    let executor = Arc::new(TokioExecutor::default());
+
+    // Configure WAL to persist state and ensure small segments for replay coverage.
+    let wal_dir = temp_root.join("wal");
+    fs::create_dir_all(&wal_dir)?;
+    let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
+    let wal_fs = Arc::new(LocalFs {});
+    let wal_backend: Arc<dyn DynFs> = wal_fs.clone();
+    let wal_cas: Arc<dyn FsCas> = wal_fs.clone();
+    let wal_state = Arc::new(FsWalStateStore::new(wal_cas));
+    let wal_builder_cfg = BuilderWalConfig::default()
+        .wal_dir(wal_path.clone())
+        .segment_backend(wal_backend)
+        .state_store(Some(wal_state))
+        .segment_max_bytes(512)
+        .flush_interval(Duration::from_millis(1))
+        .sync_policy(WalSyncPolicy::Disabled);
+
+    // SST config for the flush; reads are still served from WAL replay.
+    let sst_dir = temp_root.join("sst");
+    fs::create_dir_all(&sst_dir)?;
+    let sst_root = FusioPath::from_filesystem_path(&sst_dir)?;
+    let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
+
+    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
+        .on_disk(root_str.clone())
+        .create_dirs(true)
+        .wal_config(wal_builder_cfg.clone())
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
+    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+
+    let expected_rows = vec![
+        ("alpha".to_string(), 10),
+        ("bravo".to_string(), 20),
+        ("charlie".to_string(), 30),
+    ];
+    for (id, value) in &expected_rows {
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![id.clone()])) as _,
+                Arc::new(Int32Array::from(vec![*value])) as _,
+            ],
+        )?;
+        db.ingest(batch).await?;
+    }
+    assert!(
+        db.num_immutable_segments() >= 1,
+        "ingest should have sealed into immutables before flush"
+    );
+
+    let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
+    db.flush_immutables_with_descriptor_for_tests(Arc::clone(&sst_cfg), descriptor)
+        .await?;
+    db.prune_wal_segments_below_floor_for_tests().await;
+    drop(db);
+
+    // Restart: rely on manifest WAL floor to drive WAL replay back into memtables.
+    let (_, recover_config) = schema_and_config(
+        vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ],
+        &["id"],
+    );
+    let mut recovered: DB<DynMode, TokioExecutor> =
+        DB::<DynMode, TokioExecutor>::builder(recover_config)
+            .on_disk(root_str.clone())
+            .create_dirs(true)
+            .wal_config(wal_builder_cfg)
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
+
+    let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
+    let plan = recovered
+        .plan_scan(&predicate, None, None, Timestamp::MAX)
+        .await?;
+    let batches = recovered
+        .execute_scan(plan)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut rows: Vec<(String, i32)> = batches
+        .into_iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            ids.iter()
+                .zip(vals.iter())
+                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    rows.sort();
+    assert_eq!(rows, expected_rows);
+
+    recovered.disable_wal().await?;
+    if let Err(err) = fs::remove_dir_all(&temp_root) {
+        eprintln!("failed to clean test dir {:?}: {err}", &temp_root);
     }
 
     Ok(())

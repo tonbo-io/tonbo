@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -21,6 +23,7 @@ use tonbo::{
     mvcc::Timestamp,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     query::{ColumnRef, Predicate},
+    test_helpers::DbTestExt,
     wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
 };
 use typed_arrow_dyn::{DynCell, DynRow};
@@ -166,9 +169,9 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     );
 
     let descriptor_a = SsTableDescriptor::new(SsTableId::new(1), 0);
-    db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_a)
+    db.flush_immutables_with_descriptor_for_tests(Arc::clone(&sst_cfg), descriptor_a)
         .await?;
-    db.prune_wal_segments_below_floor().await;
+    db.prune_wal_segments_below_floor_for_tests().await;
 
     let after_flush = wal_segment_paths(&wal_dir_local);
     assert!(after_flush.len() <= before_flush.len());
@@ -208,9 +211,9 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
         "expected pending mutable to seal before final flush"
     );
     let descriptor_b = SsTableDescriptor::new(SsTableId::new(2), 0);
-    db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_b)
+    db.flush_immutables_with_descriptor_for_tests(Arc::clone(&sst_cfg), descriptor_b)
         .await?;
-    db.prune_wal_segments_below_floor().await;
+    db.prune_wal_segments_below_floor_for_tests().await;
     let after_final_gc = wal_segment_paths(&wal_dir_local);
     assert!(
         !after_final_gc.contains(&pinned_file),
@@ -257,7 +260,7 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
         .wal_floor_seq()
         .await
         .expect("transaction commit should publish wal floor");
-    db.prune_wal_segments_below_floor().await;
+    db.prune_wal_segments_below_floor_for_tests().await;
 
     let wal_dir_local = path_to_local(&db.wal_config().expect("wal").dir)?;
     let pinned = wal_file_for_seq(&wal_dir_local, floor);
@@ -304,6 +307,6 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
         sleep(Duration::from_millis(10)).await;
     }
 
-    db.prune_wal_segments_below_floor().await;
+    db.prune_wal_segments_below_floor_for_tests().await;
     Ok(())
 }

@@ -27,6 +27,9 @@ pub use crate::transaction::{
     CommitAckMode, Transaction, TransactionCommitError, TransactionError,
 };
 
+#[cfg(feature = "test-helpers")]
+pub mod test_helpers;
+
 #[cfg(test)]
 mod test_util;
 
