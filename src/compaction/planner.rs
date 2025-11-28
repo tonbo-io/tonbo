@@ -219,14 +219,23 @@ impl Default for LeveledPlannerConfig {
 }
 
 /// Description of a scheduled compaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompactionInput {
+    /// Level that currently owns the SST being compacted.
+    pub level: usize,
+    /// Identifier of the SST.
+    pub sst_id: SsTableId,
+}
+
+/// Description of a scheduled compaction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactionTask {
     /// Level from which input SSTs are being compacted.
     pub source_level: usize,
     /// Level that will receive the compacted output.
     pub target_level: usize,
-    /// Identifiers of SSTs that must be compacted together.
-    pub input: Vec<SsTableId>,
+    /// Identifiers of SSTs that must be compacted together, tagged with their owning level.
+    pub input: Vec<CompactionInput>,
     /// Aggregated key range covered by the selected SSTs (when stats are available).
     pub key_range: Option<(KeyOwned, KeyOwned)>,
 }
@@ -264,7 +273,13 @@ impl LeveledCompactionPlanner {
         let take = self.cfg.l0_max_inputs.min(level0.len()).max(1);
         let selected: Vec<&LevelFile> =
             select_compaction_run(level0.files(), take, self.cfg.max_task_bytes);
-        let input: Vec<SsTableId> = selected.iter().map(|file| file.sst_id.clone()).collect();
+        let input: Vec<CompactionInput> = selected
+            .iter()
+            .map(|file| CompactionInput {
+                level: 0,
+                sst_id: file.sst_id.clone(),
+            })
+            .collect();
         Some(CompactionTask {
             source_level: 0,
             target_level: 1,
@@ -291,8 +306,13 @@ impl LeveledCompactionPlanner {
             if selected.is_empty() {
                 continue;
             }
-            let mut input: Vec<SsTableId> =
-                selected.iter().map(|file| file.sst_id.clone()).collect();
+            let mut input: Vec<CompactionInput> = selected
+                .iter()
+                .map(|file| CompactionInput {
+                    level: level_info.level,
+                    sst_id: file.sst_id.clone(),
+                })
+                .collect();
             let mut key_range = aggregate_key_range(selected.iter().copied());
             // Pull overlapping SSTs from the next level to reduce post-compaction overlap.
             if let Some(next_level) = snapshot.level(level_info.level + 1)
@@ -308,7 +328,10 @@ impl LeveledCompactionPlanner {
                             if file_min <= max_key && file_max >= min_key =>
                         {
                             overlaps.push(file);
-                            input.push(file.sst_id.clone());
+                            input.push(CompactionInput {
+                                level: next_level.level,
+                                sst_id: file.sst_id.clone(),
+                            });
                         }
                         _ => {}
                     }
@@ -463,7 +486,19 @@ mod tests {
         let task = planner.plan(&snapshot).expect("plan");
         assert_eq!(task.source_level, 0);
         assert_eq!(task.target_level, 1);
-        assert_eq!(task.input, vec![SsTableId::new(1), SsTableId::new(2)]);
+        assert_eq!(
+            task.input,
+            vec![
+                CompactionInput {
+                    level: 0,
+                    sst_id: SsTableId::new(1),
+                },
+                CompactionInput {
+                    level: 0,
+                    sst_id: SsTableId::new(2),
+                },
+            ]
+        );
         let (min, max) = task.key_range.expect("key range");
         assert_eq!(min.as_utf8(), Some("a"));
         assert_eq!(max.as_utf8(), Some("d"));
@@ -494,8 +529,20 @@ mod tests {
         assert_eq!(task.source_level, 1);
         assert_eq!(task.target_level, 2);
         assert_eq!(task.input.len(), 2);
-        assert_eq!(task.input[0], SsTableId::new(10));
-        assert_eq!(task.input[1], SsTableId::new(11));
+        assert_eq!(
+            task.input[0],
+            CompactionInput {
+                level: 1,
+                sst_id: SsTableId::new(10)
+            }
+        );
+        assert_eq!(
+            task.input[1],
+            CompactionInput {
+                level: 1,
+                sst_id: SsTableId::new(11)
+            }
+        );
     }
 
     #[test]

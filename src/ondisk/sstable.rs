@@ -387,6 +387,12 @@ pub enum SsTableError {
     /// Key materialization failed while merging.
     #[error("key materialization failed: {0}")]
     KeyOwned(#[from] KeyOwnedError),
+    /// Merge exceeded the configured iteration budget.
+    #[error("merge iteration budget {budget} exceeded")]
+    MergeIterationBudgetExceeded {
+        /// Configured iteration budget that was exceeded.
+        budget: usize,
+    },
 }
 
 /// Scratchpad used while minor compaction plans an SST. Keeps provisional stats

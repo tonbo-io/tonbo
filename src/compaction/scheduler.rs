@@ -99,7 +99,7 @@ impl CompactionScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ondisk::sstable::SsTableId;
+    use crate::{compaction::planner::CompactionInput, ondisk::sstable::SsTableId};
 
     #[tokio::test]
     async fn enqueue_and_drain_with_budget() {
@@ -107,7 +107,10 @@ mod tests {
         let task = CompactionTask {
             source_level: 0,
             target_level: 1,
-            input: vec![SsTableId::new(1)],
+            input: vec![CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(1),
+            }],
             key_range: None,
         };
         scheduler

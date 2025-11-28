@@ -27,6 +27,8 @@ use crate::{
     },
 };
 
+const DEFAULT_MERGE_ITERATION_BUDGET: usize = 10_000_000;
+
 const MVCC_SEQUENCE_COL: &str = "_sequence";
 
 /// Combined row payload (data + MVCC + delete sidecar) yielded by an SST reader.
@@ -473,7 +475,85 @@ pub struct SsTableMerger<M: crate::mode::Mode> {
     max_output_rows: Option<usize>,
     max_output_bytes: Option<usize>,
     chunk_rows: usize,
+    max_iterations: usize,
     _mode: PhantomData<M>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, atomic::AtomicU64};
+
+    use arrow_schema::{DataType, Field, Schema};
+    use fusio::path::Path;
+    use tempfile::tempdir;
+    use typed_arrow_dyn::{DynCell, DynRow};
+
+    use super::*;
+    use crate::{
+        inmem::immutable::memtable::segment_from_batch_with_key_name,
+        mode::DynMode,
+        ondisk::sstable::{SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId},
+        schema::SchemaBuilder,
+        test_util::build_batch,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn iteration_budget_exceeded_returns_error() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let tmpdir = tempdir().expect("temp dir");
+        let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder");
+        let fs: Arc<dyn fusio::dynamic::DynFs> = Arc::new(fusio::disk::LocalFs {});
+        let cfg = Arc::new(
+            SsTableConfig::new(
+                Arc::clone(&mode_cfg.schema),
+                fs,
+                Path::from(tmpdir.path().to_string_lossy().to_string()),
+            )
+            .with_key_extractor(Arc::clone(&mode_cfg.extractor)),
+        );
+
+        let batch = build_batch(
+            Arc::clone(&schema),
+            vec![
+                DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+                DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            ],
+        )
+        .expect("batch");
+        let immutable =
+            segment_from_batch_with_key_name(batch, "id").expect("immutable segment from batch");
+        let mut builder = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&cfg),
+            SsTableDescriptor::new(SsTableId::new(1), 0),
+        );
+        builder.add_immutable(&immutable).expect("stage seg");
+        let input = builder.finish().await.expect("sst");
+
+        let target = SsTableDescriptor::new(SsTableId::new(10), 1);
+        let merger = SsTableMerger::<DynMode>::new(
+            Arc::clone(&cfg),
+            vec![input.descriptor().clone()],
+            target,
+        )
+        .with_output_id_allocator(Arc::new(AtomicU64::new(11)))
+        .with_iteration_budget(1);
+
+        match merger.execute().await {
+            Err(SsTableError::MergeIterationBudgetExceeded { budget }) => {
+                assert_eq!(budget, 1);
+            }
+            Ok(_) => panic!("expected iteration budget error"),
+            Err(other) => panic!("unexpected merge error: {other:?}"),
+        }
+        // Keep tmpdir alive until here.
+        drop(tmpdir);
+    }
 }
 
 impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> SsTableMerger<M> {
@@ -492,6 +572,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
             max_output_rows: None,
             max_output_bytes: None,
             chunk_rows: 1024,
+            max_iterations: DEFAULT_MERGE_ITERATION_BUDGET,
             _mode: PhantomData,
         }
     }
@@ -506,6 +587,12 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
     pub fn with_output_caps(mut self, max_rows: Option<usize>, max_bytes: Option<usize>) -> Self {
         self.max_output_rows = max_rows;
         self.max_output_bytes = max_bytes;
+        self
+    }
+
+    /// Configure an iteration budget for merge safety; returns an error when exceeded.
+    pub fn with_iteration_budget(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations.max(1);
         self
     }
 
@@ -553,7 +640,11 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
 
         while let Some(entry) = heap.pop() {
             iterations += 1;
-            debug_assert!(iterations < 100_000, "merge iteration budget exceeded");
+            if iterations > self.max_iterations {
+                return Err(SsTableError::MergeIterationBudgetExceeded {
+                    budget: self.max_iterations,
+                });
+            }
             let mut group = vec![entry];
             while let Some(next) = heap.peek() {
                 if next.key == group[0].key {

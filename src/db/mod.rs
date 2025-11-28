@@ -37,7 +37,7 @@ use crate::{
         executor::{
             CompactionError, CompactionExecutor, CompactionJob, CompactionLease, CompactionOutcome,
         },
-        planner::{CompactionPlanner, CompactionSnapshot},
+        planner::{CompactionInput, CompactionPlanner, CompactionSnapshot},
         scheduler::{CompactionScheduler, ScheduledCompaction},
     },
     extractor::KeyExtractError,
@@ -281,21 +281,12 @@ where
             let outcome = executor.execute(job).await?;
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
-            if let Some(filtered) = DB::<M, E>::wal_segments_after_compaction(
+            DB::<M, E>::reconcile_wal_segments(
                 version,
-                &outcome.remove_ssts,
-                &outcome.outputs,
-            ) {
-                if filtered != existing_wal_segments {
-                    outcome.wal_segments = Some(filtered.clone());
-                }
-                outcome.wal_floor = wal_floor.or_else(|| filtered.first().cloned());
-            } else {
-                outcome.wal_floor = wal_floor.or_else(|| existing_wal_segments.first().cloned());
-                if outcome.wal_segments.is_none() && !existing_wal_segments.is_empty() {
-                    outcome.wal_segments = Some(existing_wal_segments);
-                }
-            }
+                &mut outcome,
+                &existing_wal_segments,
+                wal_floor,
+            );
             let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
@@ -371,21 +362,12 @@ where
             let outcome = executor.execute(job).await?;
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
-            if let Some(filtered) = DB::<M, E>::wal_segments_after_compaction(
+            DB::<M, E>::reconcile_wal_segments(
                 version,
-                &outcome.remove_ssts,
-                &outcome.outputs,
-            ) {
-                if filtered != existing_wal_segments {
-                    outcome.wal_segments = Some(filtered.clone());
-                }
-                outcome.wal_floor = wal_floor.or_else(|| filtered.first().cloned());
-            } else {
-                outcome.wal_floor = wal_floor.or_else(|| existing_wal_segments.first().cloned());
-                if outcome.wal_segments.is_none() && !existing_wal_segments.is_empty() {
-                    outcome.wal_segments = Some(existing_wal_segments);
-                }
-            }
+                &mut outcome,
+                &existing_wal_segments,
+                wal_floor,
+            );
             let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
@@ -1059,6 +1041,111 @@ where
         Ok(planner.plan(&layout))
     }
 
+    fn wal_ids_for_remaining_ssts(
+        version: &VersionState,
+        removed: &HashSet<SsTableId>,
+        added: &[SsTableDescriptor],
+    ) -> Option<HashSet<FileId>> {
+        let mut wal_ids = HashSet::new();
+        for bucket in version.ssts() {
+            for entry in bucket {
+                if removed.contains(entry.sst_id()) {
+                    continue;
+                }
+                let Some(ids) = entry.wal_segments() else {
+                    // If any remaining SST lacks WAL metadata, keep the existing manifest set.
+                    return None;
+                };
+                wal_ids.extend(ids.iter().cloned());
+            }
+        }
+        for desc in added {
+            let Some(ids) = desc.wal_ids() else {
+                // Missing WAL metadata on new outputs: preserve manifest set.
+                return None;
+            };
+            wal_ids.extend(ids.iter().cloned());
+        }
+        Some(wal_ids)
+    }
+
+    fn reconcile_wal_segments(
+        version: &VersionState,
+        outcome: &mut CompactionOutcome,
+        existing_wal_segments: &[WalSegmentRef],
+        wal_floor: Option<WalSegmentRef>,
+    ) {
+        let wal_from_helper =
+            Self::wal_segments_after_compaction(version, &outcome.remove_ssts, &outcome.outputs);
+        let (final_wal_segments, obsolete_wal_segments) = match wal_from_helper {
+            Some(filtered) => {
+                outcome.wal_segments = Some(filtered.clone());
+                let obsolete = existing_wal_segments
+                    .iter()
+                    .filter(|seg| !filtered.iter().any(|s| s == *seg))
+                    .cloned()
+                    .collect();
+                (filtered, obsolete)
+            }
+            None => {
+                outcome.wal_segments = Some(existing_wal_segments.to_vec());
+                (existing_wal_segments.to_vec(), Vec::new())
+            }
+        };
+        outcome.wal_floor = if final_wal_segments.is_empty() {
+            wal_floor
+        } else {
+            wal_floor.or_else(|| final_wal_segments.first().cloned())
+        };
+        if outcome.wal_segments.is_none() && !final_wal_segments.is_empty() {
+            outcome.wal_segments = Some(final_wal_segments.clone());
+        }
+        outcome.obsolete_wal_segments = obsolete_wal_segments;
+    }
+
+    fn wal_segments_after_compaction(
+        version: &VersionState,
+        removed_ssts: &[SsTableDescriptor],
+        added_ssts: &[SsTableDescriptor],
+    ) -> Option<Vec<WalSegmentRef>> {
+        let removed_ids: HashSet<SsTableId> = removed_ssts.iter().map(|d| d.id().clone()).collect();
+        let wal_ids = Self::wal_ids_for_remaining_ssts(version, &removed_ids, added_ssts)?;
+        let existing = version.wal_segments();
+        if existing.is_empty() {
+            return None;
+        }
+        let mut filtered: Vec<WalSegmentRef> = existing
+            .iter()
+            .filter(|seg| wal_ids.contains(seg.file_id()))
+            .cloned()
+            .collect();
+        if filtered == existing {
+            return None;
+        }
+        if filtered.is_empty() {
+            return Some(Vec::new());
+        }
+        let has_seq_gaps = existing
+            .windows(2)
+            .any(|pair| pair[1].seq() > pair[0].seq().saturating_add(1));
+        if has_seq_gaps {
+            if let Some(first_retained) = filtered.first()
+                && let Some(first_idx) = existing
+                    .iter()
+                    .position(|seg| seg.file_id() == first_retained.file_id())
+                && first_idx > 0
+            {
+                let mut with_gap = existing[..first_idx].to_vec();
+                with_gap.append(&mut filtered);
+                Some(with_gap)
+            } else {
+                Some(existing.to_vec())
+            }
+        } else {
+            Some(filtered)
+        }
+    }
+
     /// Trigger a single compaction attempt using the provided planner and executor.
     /// Returns `Ok(None)` when no task is scheduled by the planner.
     #[allow(dead_code)]
@@ -1093,7 +1180,6 @@ where
             .run_compaction_task(planner, executor)
             .await
     }
-
     /// End-to-end compaction orchestrator with an optional lease token.
     #[allow(dead_code)]
     pub(crate) async fn run_compaction_task_with_lease<CE, P>(
@@ -1111,86 +1197,13 @@ where
             .await
     }
 
-    fn wal_ids_for_remaining_ssts(
-        version: &VersionState,
-        removed: &HashSet<SsTableId>,
-        added: &[SsTableDescriptor],
-    ) -> Option<HashSet<FileId>> {
-        let mut wal_ids = HashSet::new();
-        for bucket in version.ssts() {
-            for entry in bucket {
-                if removed.contains(entry.sst_id()) {
-                    continue;
-                }
-                let ids = entry.wal_segments()?;
-                wal_ids.extend(ids.iter().cloned());
-            }
-        }
-        for desc in added {
-            let ids = desc.wal_ids()?;
-            wal_ids.extend(ids.iter().cloned());
-        }
-        Some(wal_ids)
-    }
-
-    fn wal_segments_after_compaction(
-        version: &VersionState,
-        removed_ssts: &[SsTableDescriptor],
-        added_ssts: &[SsTableDescriptor],
-    ) -> Option<Vec<WalSegmentRef>> {
-        let removed_ids: HashSet<SsTableId> = removed_ssts.iter().map(|d| d.id().clone()).collect();
-        let wal_ids = Self::wal_ids_for_remaining_ssts(version, &removed_ids, added_ssts)?;
-        let existing = version.wal_segments();
-        if existing.is_empty() {
-            return None;
-        }
-        let filtered: Vec<WalSegmentRef> = existing
-            .iter()
-            .filter(|seg| wal_ids.contains(seg.file_id()))
-            .cloned()
-            .collect();
-        if filtered == existing {
-            return None;
-        }
-        if filtered.is_empty() {
-            // All WAL references were removed; explicitly clear the manifest WAL set so GC can
-            // advance.
-            return Some(Vec::new());
-        }
-        let has_seq_gaps = existing
-            .windows(2)
-            .any(|pair| pair[1].seq() > pair[0].seq().saturating_add(1));
-        if has_seq_gaps {
-            // Preserve any leading gap from the existing WAL set when the retained
-            // segments resume after a sequence jump. This avoids dropping earlier
-            // segments that may still be required for levels untouched by the
-            // current compaction (e.g., when manifest WAL segments contain known
-            // gaps).
-            let mut filtered = filtered;
-            if let Some(first_retained) = filtered.first()
-                && let Some(first_idx) = existing
-                    .iter()
-                    .position(|seg| seg.file_id() == first_retained.file_id())
-                && first_idx > 0
-            {
-                let mut with_gap = existing[..first_idx].to_vec();
-                with_gap.append(&mut filtered);
-                Some(with_gap)
-            } else {
-                Some(existing.to_vec())
-            }
-        } else {
-            Some(filtered)
-        }
-    }
-
     /// Spawn a current-thread compaction worker that calls `compact_once` every `interval`.
     /// Caller owns cancellation of the returned handle. This is a stopgap until a Send-friendly
     /// scheduler/lease lands.
     fn gc_plan_from_outcome(
         outcome: &CompactionOutcome,
     ) -> Result<Option<GcPlanState>, CompactionError> {
-        if outcome.remove_ssts.is_empty() {
+        if outcome.remove_ssts.is_empty() && outcome.obsolete_wal_segments.is_empty() {
             return Ok(None);
         }
         let mut obsolete_ssts = Vec::new();
@@ -1213,7 +1226,7 @@ where
         }
         Ok(Some(GcPlanState {
             obsolete_ssts,
-            obsolete_wal_segments: Vec::new(),
+            obsolete_wal_segments: outcome.obsolete_wal_segments.clone(),
         }))
     }
 
@@ -1221,21 +1234,20 @@ where
         version: &VersionState,
         task: &crate::compaction::planner::CompactionTask,
     ) -> Result<Vec<SsTableDescriptor>, CompactionError> {
-        let level_idx = task.source_level;
-        let Some(bucket) = version.ssts().get(level_idx) else {
-            return Err(CompactionError::Manifest(ManifestError::Invariant(
-                "planner selected level missing in manifest",
-            )));
-        };
-
         let mut descriptors = Vec::with_capacity(task.input.len());
-        for sst_id in &task.input {
+        for CompactionInput { level, sst_id } in &task.input {
+            let Some(bucket) = version.ssts().get(*level) else {
+                return Err(CompactionError::Manifest(ManifestError::Invariant(
+                    "planner selected level missing in manifest",
+                )));
+            };
+
             let Some(entry) = bucket.iter().find(|entry| entry.sst_id() == sst_id) else {
                 return Err(CompactionError::Manifest(ManifestError::Invariant(
                     "planner selected SST missing in manifest",
                 )));
             };
-            let mut descriptor = SsTableDescriptor::new(entry.sst_id().clone(), task.source_level);
+            let mut descriptor = SsTableDescriptor::new(entry.sst_id().clone(), *level);
             if let Some(stats) = entry.stats().cloned() {
                 descriptor = descriptor.with_stats(stats);
             }
@@ -2012,6 +2024,7 @@ fn take_full_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, 
 mod tests {
     use std::{
         fs,
+        future::Future,
         path::PathBuf,
         sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -2040,9 +2053,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        compaction::planner::{LeveledCompactionPlanner, LeveledPlannerConfig},
+        compaction::{
+            executor::LocalCompactionExecutor,
+            planner::{
+                CompactionInput, CompactionTask, LeveledCompactionPlanner, LeveledPlannerConfig,
+            },
+        },
         inmem::{immutable::memtable::MVCC_TOMBSTONE_COL, policy::BatchesThreshold},
-        manifest::init_fs_manifest,
+        manifest::{SstEntry, TableId, TonboManifest, VersionEdit, init_fs_manifest},
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
         test_util::build_batch,
@@ -3158,22 +3176,23 @@ mod tests {
     }
 
     #[test]
-    fn wal_segments_filter_to_remaining_ids() {
+    fn wal_segments_after_compaction_preserves_manifest_when_metadata_missing() {
         let generator = FileIdGenerator::default();
         let table_id = TableId::new(&generator);
         let mut version = VersionState::empty(table_id);
 
         let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
         let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
-        let entry_a = SstEntry::new(
+
+        let entry_missing_wal = SstEntry::new(
             SsTableId::new(1),
             None,
-            Some(vec![wal_a.file_id().clone()]),
+            None,
             Path::default(),
             Path::default(),
             None,
         );
-        let entry_b = SstEntry::new(
+        let entry_with_wal = SstEntry::new(
             SsTableId::new(2),
             None,
             Some(vec![wal_b.file_id().clone()]),
@@ -3186,7 +3205,7 @@ mod tests {
             .apply_edits(&[
                 VersionEdit::AddSsts {
                     level: 0,
-                    entries: vec![entry_a, entry_b],
+                    entries: vec![entry_missing_wal, entry_with_wal],
                 },
                 VersionEdit::SetWalSegments {
                     segments: vec![wal_a.clone(), wal_b.clone()],
@@ -3194,302 +3213,772 @@ mod tests {
             ])
             .expect("apply edits");
 
-        let removed = vec![SsTableDescriptor::new(SsTableId::new(1), 0)];
-        let added = vec![
-            SsTableDescriptor::new(SsTableId::new(3), 0)
-                .with_wal_ids(Some(vec![wal_b.file_id().clone()])),
-        ];
+        let wal_ids = DB::<DynMode, BlockingExecutor>::wal_ids_for_remaining_ssts(
+            &version,
+            &HashSet::new(),
+            &[],
+        );
+        assert!(
+            wal_ids.is_none(),
+            "missing wal metadata on a remaining SST should preserve the manifest wal set"
+        );
 
         let filtered =
-            DB::<DynMode, TokioExecutor>::wal_segments_after_compaction(&version, &removed, &added)
-                .expect("wal segment computation");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].seq(), wal_b.seq());
-        assert_eq!(filtered[0].file_id(), wal_b.file_id());
+            DB::<DynMode, BlockingExecutor>::wal_segments_after_compaction(&version, &[], &[]);
+        assert!(
+            filtered.is_none(),
+            "compaction should not rewrite wal segments when metadata is absent"
+        );
     }
 
     #[test]
-    fn wal_segments_drops_obsolete_leading_segment() {
+    fn wal_segments_after_compaction_filters_and_tracks_obsolete() {
         let generator = FileIdGenerator::default();
         let table_id = TableId::new(&generator);
         let mut version = VersionState::empty(table_id);
-        let wal1 = WalSegmentRef::new(1, generator.generate(), 0, 0);
-        let wal2 = WalSegmentRef::new(2, generator.generate(), 0, 0);
-        let wal3 = WalSegmentRef::new(3, generator.generate(), 0, 0);
-        let entry1 = SstEntry::new(
+
+        let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
+        let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
+        let wal_c = WalSegmentRef::new(3, generator.generate(), 0, 0);
+
+        let entry_a = SstEntry::new(
             SsTableId::new(1),
             None,
-            Some(vec![wal1.file_id().clone()]),
+            Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
             Path::default(),
             Path::default(),
             None,
         );
-        let entry2 = SstEntry::new(
+        let entry_b = SstEntry::new(
             SsTableId::new(2),
             None,
-            Some(vec![wal2.file_id().clone(), wal3.file_id().clone()]),
+            Some(vec![wal_c.file_id().clone()]),
             Path::default(),
             Path::default(),
             None,
         );
+
         version
             .apply_edits(&[
                 VersionEdit::AddSsts {
                     level: 0,
-                    entries: vec![entry1, entry2],
+                    entries: vec![entry_a, entry_b],
                 },
                 VersionEdit::SetWalSegments {
-                    segments: vec![wal1.clone(), wal2.clone(), wal3.clone()],
-                },
-            ])
-            .expect("apply edits");
-
-        let removed = vec![SsTableDescriptor::new(SsTableId::new(1), 0)];
-        let added = vec![
-            SsTableDescriptor::new(SsTableId::new(3), 0)
-                .with_wal_ids(Some(vec![wal2.file_id().clone(), wal3.file_id().clone()])),
-        ];
-
-        let filtered =
-            DB::<DynMode, TokioExecutor>::wal_segments_after_compaction(&version, &removed, &added)
-                .expect("wal segment computation");
-        assert_eq!(filtered, vec![wal2, wal3]);
-    }
-
-    #[test]
-    fn wal_segments_prune_l1_overlap() {
-        let generator = FileIdGenerator::default();
-        let table_id = TableId::new(&generator);
-        let mut version = VersionState::empty(table_id);
-        let wal3 = WalSegmentRef::new(3, generator.generate(), 0, 0);
-        let wal4 = WalSegmentRef::new(4, generator.generate(), 0, 0);
-        let wal5 = WalSegmentRef::new(5, generator.generate(), 0, 0);
-        let wal6 = WalSegmentRef::new(6, generator.generate(), 0, 0);
-        let l0_a = SstEntry::new(
-            SsTableId::new(10),
-            None,
-            Some(vec![wal5.file_id().clone()]),
-            Path::default(),
-            Path::default(),
-            None,
-        );
-        let l0_b = SstEntry::new(
-            SsTableId::new(11),
-            None,
-            Some(vec![wal6.file_id().clone()]),
-            Path::default(),
-            Path::default(),
-            None,
-        );
-        let l1_a = SstEntry::new(
-            SsTableId::new(20),
-            None,
-            Some(vec![wal3.file_id().clone()]),
-            Path::default(),
-            Path::default(),
-            None,
-        );
-        let l1_b = SstEntry::new(
-            SsTableId::new(21),
-            None,
-            Some(vec![wal4.file_id().clone()]),
-            Path::default(),
-            Path::default(),
-            None,
-        );
-        version
-            .apply_edits(&[
-                VersionEdit::AddSsts {
-                    level: 0,
-                    entries: vec![l0_a, l0_b],
-                },
-                VersionEdit::AddSsts {
-                    level: 1,
-                    entries: vec![l1_a, l1_b],
-                },
-                VersionEdit::SetWalSegments {
-                    segments: vec![wal3.clone(), wal4.clone(), wal5.clone(), wal6.clone()],
+                    segments: vec![wal_a.clone(), wal_b.clone(), wal_c.clone()],
                 },
             ])
             .expect("apply edits");
 
         let removed = vec![
-            SsTableDescriptor::new(SsTableId::new(10), 0),
-            SsTableDescriptor::new(SsTableId::new(11), 0),
-            SsTableDescriptor::new(SsTableId::new(20), 1),
-            SsTableDescriptor::new(SsTableId::new(21), 1),
+            SsTableDescriptor::new(SsTableId::new(1), 0).with_storage_paths(
+                Path::from("L0/1.parquet"),
+                Path::from("L0/1.mvcc.parquet"),
+                None,
+            ),
         ];
-        let added = vec![
-            SsTableDescriptor::new(SsTableId::new(30), 1)
-                .with_wal_ids(Some(vec![wal5.file_id().clone(), wal6.file_id().clone()])),
-        ];
+        let added = vec![SsTableDescriptor::new(SsTableId::new(3), 0)];
 
-        let filtered =
-            DB::<DynMode, TokioExecutor>::wal_segments_after_compaction(&version, &removed, &added)
-                .expect("wal segment computation");
-        assert_eq!(filtered, vec![wal5, wal6]);
-    }
-
-    #[test]
-    fn wal_segments_no_new_info_returns_none() {
-        let generator = FileIdGenerator::default();
-        let table_id = TableId::new(&generator);
-        let mut version = VersionState::empty(table_id);
-        let wal10 = WalSegmentRef::new(10, generator.generate(), 0, 0);
-        let wal11 = WalSegmentRef::new(11, generator.generate(), 0, 0);
-        let entry = SstEntry::new(
-            SsTableId::new(1),
-            None,
-            Some(vec![wal10.file_id().clone(), wal11.file_id().clone()]),
-            Path::default(),
-            Path::default(),
-            None,
-        );
-        version
-            .apply_edits(&[
-                VersionEdit::AddSsts {
-                    level: 0,
-                    entries: vec![entry],
-                },
-                VersionEdit::SetWalSegments {
-                    segments: vec![wal10.clone(), wal11.clone()],
-                },
-            ])
-            .expect("apply edits");
-
-        // No added outputs and no removal should return None (fall back to existing).
-        let filtered =
-            DB::<DynMode, TokioExecutor>::wal_segments_after_compaction(&version, &[], &[]);
-        assert!(filtered.is_none());
-    }
-
-    #[test]
-    fn wal_segments_clear_when_all_references_removed() {
-        let generator = FileIdGenerator::default();
-        let table_id = TableId::new(&generator);
-        let mut version = VersionState::empty(table_id);
-        let wal10 = WalSegmentRef::new(10, generator.generate(), 0, 0);
-        let wal11 = WalSegmentRef::new(11, generator.generate(), 0, 0);
-        let entry = SstEntry::new(
-            SsTableId::new(1),
-            None,
-            Some(vec![wal10.file_id().clone(), wal11.file_id().clone()]),
-            Path::default(),
-            Path::default(),
-            None,
-        );
-        version
-            .apply_edits(&[
-                VersionEdit::AddSsts {
-                    level: 0,
-                    entries: vec![entry],
-                },
-                VersionEdit::SetWalSegments {
-                    segments: vec![wal10.clone(), wal11.clone()],
-                },
-            ])
-            .expect("apply edits");
-
-        let removed = vec![SsTableDescriptor::new(SsTableId::new(1), 0)];
-        let added: Vec<SsTableDescriptor> = Vec::new();
-
-        let filtered =
-            DB::<DynMode, TokioExecutor>::wal_segments_after_compaction(&version, &removed, &added)
-                .expect("wal segment computation");
+        assert_eq!(version.wal_segments().len(), 3);
         assert!(
-            filtered.is_empty(),
-            "wal segments should be cleared when no SSTs retain references"
+            version.ssts()[0][0].wal_segments().is_some(),
+            "entry should carry wal segments"
         );
+        assert!(
+            version.ssts()[0][1].wal_segments().is_some(),
+            "second entry should carry wal segments"
+        );
+        let removed_ids: HashSet<SsTableId> = removed.iter().map(|d| d.id().clone()).collect();
+        let wal_ids = DB::<DynMode, BlockingExecutor>::wal_ids_for_remaining_ssts(
+            &version,
+            &removed_ids,
+            &added,
+        );
+        assert!(
+            wal_ids.is_none(),
+            "wal ids should be None when any SST lacks wal metadata"
+        );
+        let filtered = DB::<DynMode, BlockingExecutor>::wal_segments_after_compaction(
+            &version, &removed, &added,
+        );
+        assert!(
+            filtered.is_none(),
+            "filtered wal segments should be None when any SST lacks wal metadata"
+        );
+
+        let outcome = CompactionOutcome {
+            add_ssts: Vec::new(),
+            remove_ssts: removed,
+            target_level: 0,
+            wal_segments: None,
+            tombstone_watermark: None,
+            outputs: added.clone(),
+            obsolete_sst_ids: Vec::new(),
+            wal_floor: None,
+            obsolete_wal_segments: vec![wal_a.clone(), wal_b.clone()],
+        };
+        let plan = DB::<DynMode, BlockingExecutor>::gc_plan_from_outcome(&outcome)
+            .expect("gc plan")
+            .expect("plan present");
+        assert_eq!(plan.obsolete_wal_segments.len(), 2);
+        assert!(plan.obsolete_wal_segments.contains(&wal_a));
+        assert!(plan.obsolete_wal_segments.contains(&wal_b));
     }
 
-    #[test]
-    fn wal_segments_unchanged_set_returns_none() {
-        let generator = FileIdGenerator::default();
-        let table_id = TableId::new(&generator);
-        let mut version = VersionState::empty(table_id);
-        let wal10 = WalSegmentRef::new(10, generator.generate(), 0, 0);
-        let wal11 = WalSegmentRef::new(11, generator.generate(), 0, 0);
-        let entry = SstEntry::new(
-            SsTableId::new(1),
-            None,
-            Some(vec![wal10.file_id().clone(), wal11.file_id().clone()]),
-            Path::default(),
-            Path::default(),
-            None,
-        );
-        version
-            .apply_edits(&[
-                VersionEdit::AddSsts {
-                    level: 0,
-                    entries: vec![entry],
-                },
-                VersionEdit::SetWalSegments {
-                    segments: vec![wal10.clone(), wal11.clone()],
-                },
-            ])
-            .expect("apply edits");
-
-        // Removing/re-adding an SST that references the same WAL set should be a no-op.
-        let removed = vec![SsTableDescriptor::new(SsTableId::new(1), 0)];
-        let added = vec![
-            SsTableDescriptor::new(SsTableId::new(1), 0)
-                .with_wal_ids(Some(vec![wal10.file_id().clone(), wal11.file_id().clone()])),
-        ];
-
-        let filtered =
-            DB::<DynMode, TokioExecutor>::wal_segments_after_compaction(&version, &removed, &added);
-        assert!(filtered.is_none());
+    #[derive(Clone)]
+    struct StaticPlanner {
+        task: CompactionTask,
     }
 
-    #[test]
-    fn wal_segments_keep_gaps_when_other_levels_need_them() {
+    impl CompactionPlanner for StaticPlanner {
+        fn plan(&self, _snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
+            Some(self.task.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticExecutor {
+        outputs: Vec<SsTableDescriptor>,
+        wal_segments: Vec<WalSegmentRef>,
+        target_level: u32,
+    }
+
+    impl CompactionExecutor for StaticExecutor {
+        fn execute(
+            &self,
+            job: CompactionJob,
+        ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>>
+        {
+            let outputs = self.outputs.clone();
+            let wal_segments = self.wal_segments.clone();
+            let target_level = self.target_level;
+            Box::pin(async move {
+                let mut outcome = CompactionOutcome::from_outputs(
+                    outputs.clone(),
+                    job.inputs.clone(),
+                    target_level,
+                    Some(wal_segments),
+                )?;
+                outcome.outputs = outputs;
+                Ok(outcome)
+            })
+        }
+
+        fn cleanup_outputs<'a>(
+            &'a self,
+            _outputs: &'a [SsTableDescriptor],
+        ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compaction_updates_manifest_wal_and_records_gc_plan()
+    -> Result<(), Box<dyn std::error::Error>> {
         let generator = FileIdGenerator::default();
-        let table_id = TableId::new(&generator);
-        let mut version = VersionState::empty(table_id);
-        let wal20 = WalSegmentRef::new(20, generator.generate(), 0, 0);
-        let wal22 = WalSegmentRef::new(22, generator.generate(), 0, 0);
-        let entry_gap = SstEntry::new(
+        let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
+        let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
+
+        let entry_a = SstEntry::new(
             SsTableId::new(1),
             None,
-            Some(vec![wal20.file_id().clone()]),
-            Path::default(),
-            Path::default(),
+            Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
+            Path::from("L0/1.parquet"),
+            Path::from("L0/1.mvcc.parquet"),
             None,
         );
-        let entry_other = SstEntry::new(
+        let entry_b = SstEntry::new(
             SsTableId::new(2),
             None,
-            Some(vec![wal22.file_id().clone()]),
-            Path::default(),
-            Path::default(),
+            Some(vec![wal_b.file_id().clone()]),
+            Path::from("L0/2.parquet"),
+            Path::from("L0/2.mvcc.parquet"),
             None,
         );
-        version
-            .apply_edits(&[
-                VersionEdit::AddSsts {
-                    level: 0,
-                    entries: vec![entry_gap, entry_other],
-                },
-                VersionEdit::SetWalSegments {
-                    segments: vec![wal20.clone(), wal22.clone()],
-                },
-            ])
+
+        let db: DB<DynMode, BlockingExecutor> = DB::new(
+            crate::schema::SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, false),
+                Field::new("v", DataType::Int32, false),
+            ])))
+            .primary_key("id")
+            .build()
+            .expect("schema builder"),
+            Arc::new(BlockingExecutor),
+        )
+        .await
+        .expect("db init");
+
+        db.manifest
+            .apply_version_edits(
+                db.manifest_table,
+                &[
+                    VersionEdit::AddSsts {
+                        level: 0,
+                        entries: vec![entry_a, entry_b],
+                    },
+                    VersionEdit::SetWalSegments {
+                        segments: vec![wal_a.clone(), wal_b.clone()],
+                    },
+                ],
+            )
+            .await
             .expect("apply edits");
 
-        // Remove the SST referencing wal20 but keep wal22; another SST still needs wal20.
-        let removed = vec![SsTableDescriptor::new(SsTableId::new(1), 0)];
-        let added = vec![
-            SsTableDescriptor::new(SsTableId::new(3), 0)
-                .with_wal_ids(Some(vec![wal22.file_id().clone()])),
-        ];
+        let task = CompactionTask {
+            source_level: 0,
+            target_level: 1,
+            input: vec![
+                CompactionInput {
+                    level: 0,
+                    sst_id: SsTableId::new(1),
+                },
+                CompactionInput {
+                    level: 0,
+                    sst_id: SsTableId::new(2),
+                },
+            ],
+            key_range: None,
+        };
+        let planner = StaticPlanner { task };
 
-        let filtered =
-            DB::<DynMode, TokioExecutor>::wal_segments_after_compaction(&version, &removed, &added)
-                .expect("wal segment computation");
-        // Gap remains; both segments should be retained.
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().any(|seg| seg.seq() == wal20.seq()));
-        assert!(filtered.iter().any(|seg| seg.seq() == wal22.seq()));
+        let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
+            .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
+            .with_storage_paths(
+                Path::from("L1/3.parquet"),
+                Path::from("L1/3.mvcc.parquet"),
+                None,
+            );
+        let executor = StaticExecutor {
+            outputs: vec![output_desc],
+            wal_segments: vec![wal_b.clone()],
+            target_level: 1,
+        };
+
+        let outcome = db
+            .run_compaction_task(&planner, &executor)
+            .await?
+            .expect("compaction outcome");
+
+        let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
+        let latest = snapshot.latest_version.expect("latest version");
+        assert_eq!(latest.wal_segments().len(), 1);
+        assert_eq!(latest.wal_segments()[0].file_id(), wal_b.file_id());
+        assert_eq!(
+            outcome.obsolete_wal_segments,
+            vec![wal_a.clone()],
+            "should surface obsolete wal segments"
+        );
+
+        let plan = db
+            .manifest
+            .take_gc_plan(db.manifest_table)
+            .await?
+            .expect("gc plan recorded");
+        assert_eq!(plan.obsolete_wal_segments.len(), 1);
+        assert_eq!(plan.obsolete_wal_segments[0].file_id(), wal_a.file_id());
+        assert_eq!(plan.obsolete_ssts.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compaction_preserves_manifest_wal_when_metadata_missing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let generator = FileIdGenerator::default();
+        let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
+        let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
+
+        let entry_missing_wal = SstEntry::new(
+            SsTableId::new(1),
+            None,
+            None,
+            Path::from("L0/1.parquet"),
+            Path::from("L0/1.mvcc.parquet"),
+            None,
+        );
+        let entry_with_wal = SstEntry::new(
+            SsTableId::new(2),
+            None,
+            Some(vec![wal_b.file_id().clone()]),
+            Path::from("L0/2.parquet"),
+            Path::from("L0/2.mvcc.parquet"),
+            None,
+        );
+
+        let db: DB<DynMode, BlockingExecutor> = DB::new(
+            crate::schema::SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, false),
+                Field::new("v", DataType::Int32, false),
+            ])))
+            .primary_key("id")
+            .build()
+            .expect("schema builder"),
+            Arc::new(BlockingExecutor),
+        )
+        .await
+        .expect("db init");
+
+        db.manifest
+            .apply_version_edits(
+                db.manifest_table,
+                &[
+                    VersionEdit::AddSsts {
+                        level: 0,
+                        entries: vec![entry_missing_wal, entry_with_wal],
+                    },
+                    VersionEdit::SetWalSegments {
+                        segments: vec![wal_a.clone(), wal_b.clone()],
+                    },
+                ],
+            )
+            .await
+            .expect("apply edits");
+
+        let task = CompactionTask {
+            source_level: 0,
+            target_level: 1,
+            input: vec![CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(2),
+            }],
+            key_range: None,
+        };
+        let planner = StaticPlanner { task };
+
+        let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
+            .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
+            .with_storage_paths(
+                Path::from("L1/3.parquet"),
+                Path::from("L1/3.mvcc.parquet"),
+                None,
+            );
+        let executor = StaticExecutor {
+            outputs: vec![output_desc],
+            wal_segments: vec![wal_b.clone()],
+            target_level: 1,
+        };
+
+        let outcome = db
+            .run_compaction_task(&planner, &executor)
+            .await?
+            .expect("compaction outcome");
+
+        let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
+        let latest = snapshot.latest_version.expect("latest version");
+        assert_eq!(
+            latest.wal_segments(),
+            &[wal_a.clone(), wal_b.clone()],
+            "manifest wal set should remain unchanged when wal metadata is missing",
+        );
+        assert!(
+            outcome.obsolete_wal_segments.is_empty(),
+            "should not surface obsolete wal segments when manifest set is preserved"
+        );
+
+        let plan = db
+            .manifest
+            .take_gc_plan(db.manifest_table)
+            .await?
+            .expect("gc plan recorded");
+        assert!(
+            plan.obsolete_wal_segments.is_empty(),
+            "gc plan should not mark wal segments obsolete"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_root = workspace_temp_dir("compaction-e2e-wal");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let extractor =
+            crate::extractor::projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+        let mode_cfg = crate::schema::SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder");
+
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sst_root = temp_root.join("sst");
+        fs::create_dir_all(&sst_root)?;
+        let sst_root = Path::from_filesystem_path(&sst_root)?;
+        let sst_cfg = Arc::new(
+            SsTableConfig::new(Arc::clone(&schema), fs, sst_root)
+                .with_key_extractor(extractor.into()),
+        );
+
+        // Build two SSTs with WAL ids.
+        let wal_gen = FileIdGenerator::default();
+        let wal_a = WalSegmentRef::new(10, wal_gen.generate(), 0, 0);
+        let wal_b = WalSegmentRef::new(11, wal_gen.generate(), 0, 0);
+
+        let batch_a = build_batch(
+            Arc::clone(&schema),
+            vec![DynRow(vec![
+                Some(DynCell::Str("a".into())),
+                Some(DynCell::I32(1)),
+            ])],
+        )?;
+        let imm_a =
+            crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_a, "id")?;
+        let mut builder_a = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&sst_cfg),
+            SsTableDescriptor::new(SsTableId::new(1), 0),
+        );
+        builder_a.add_immutable(&imm_a)?;
+        let sst_a = builder_a.finish().await?;
+        let desc_a = sst_a
+            .descriptor()
+            .clone()
+            .with_wal_ids(Some(vec![wal_a.file_id().clone()]));
+
+        let batch_b = build_batch(
+            Arc::clone(&schema),
+            vec![DynRow(vec![
+                Some(DynCell::Str("b".into())),
+                Some(DynCell::I32(2)),
+            ])],
+        )?;
+        let imm_b =
+            crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_b, "id")?;
+        let mut builder_b = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&sst_cfg),
+            SsTableDescriptor::new(SsTableId::new(2), 0),
+        );
+        builder_b.add_immutable(&imm_b)?;
+        let sst_b = builder_b.finish().await?;
+        let desc_b = sst_b
+            .descriptor()
+            .clone()
+            .with_wal_ids(Some(vec![wal_b.file_id().clone()]));
+
+        // Seed manifest with the two inputs and WAL set.
+        let db: DB<DynMode, BlockingExecutor> =
+            DB::new(mode_cfg, Arc::new(BlockingExecutor)).await?;
+        let entry_a = SstEntry::new(
+            desc_a.id().clone(),
+            desc_a.stats().cloned(),
+            desc_a.wal_ids().map(|ids| ids.to_vec()),
+            desc_a.data_path().unwrap().clone(),
+            desc_a.mvcc_path().unwrap().clone(),
+            desc_a.delete_path().cloned(),
+        );
+        let entry_b = SstEntry::new(
+            desc_b.id().clone(),
+            desc_b.stats().cloned(),
+            desc_b.wal_ids().map(|ids| ids.to_vec()),
+            desc_b.data_path().unwrap().clone(),
+            desc_b.mvcc_path().unwrap().clone(),
+            desc_b.delete_path().cloned(),
+        );
+        db.manifest
+            .apply_version_edits(
+                db.manifest_table,
+                &[
+                    VersionEdit::AddSsts {
+                        level: 0,
+                        entries: vec![entry_a, entry_b],
+                    },
+                    VersionEdit::SetWalSegments {
+                        segments: vec![wal_a.clone(), wal_b.clone()],
+                    },
+                ],
+            )
+            .await?;
+
+        let task = CompactionTask {
+            source_level: 0,
+            target_level: 1,
+            input: vec![
+                CompactionInput {
+                    level: 0,
+                    sst_id: desc_a.id().clone(),
+                },
+                CompactionInput {
+                    level: 0,
+                    sst_id: desc_b.id().clone(),
+                },
+            ],
+            key_range: None,
+        };
+        let planner = StaticPlanner { task };
+        let executor = LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100)
+            .with_max_output_bytes(8 * 1024 * 1024);
+
+        let outcome = db
+            .run_compaction_task(&planner, &executor)
+            .await?
+            .expect("compaction outcome");
+        assert_eq!(outcome.remove_ssts.len(), 2);
+        assert_eq!(outcome.add_ssts.len(), 1);
+        assert_eq!(
+            outcome
+                .add_ssts
+                .first()
+                .and_then(|e| e.wal_segments())
+                .map(|ids| ids.len()),
+            Some(2),
+            "output should aggregate wal ids"
+        );
+        assert_eq!(
+            outcome.wal_segments.as_ref().map(|segments| segments.len()),
+            Some(2),
+            "manifest wal set should retain gap when inputs have discontinuity"
+        );
+        assert_eq!(
+            outcome.wal_floor.as_ref().map(|w| w.seq()),
+            Some(wal_a.seq()),
+            "wal floor should reflect first retained segment when gaps exist"
+        );
+        assert_eq!(
+            outcome.obsolete_wal_segments.len(),
+            0,
+            "no wal segments should be obsolete when gaps are retained"
+        );
+
+        let snapshot = db.manifest.snapshot_latest(db.manifest_table).await?;
+        let latest = snapshot.latest_version.expect("latest version");
+        assert_eq!(latest.wal_segments().len(), 2);
+        let wal_ids: HashSet<_> = latest
+            .wal_segments()
+            .iter()
+            .map(|seg| seg.file_id().clone())
+            .collect();
+        assert!(wal_ids.contains(wal_a.file_id()));
+        assert!(wal_ids.contains(wal_b.file_id()));
+        assert_eq!(
+            latest.wal_floor().as_ref().map(|w| w.file_id()),
+            Some(wal_a.file_id()),
+            "wal floor should align to first retained segment"
+        );
+
+        let plan = db
+            .manifest
+            .take_gc_plan(db.manifest_table)
+            .await?
+            .expect("gc plan recorded");
+        assert_eq!(plan.obsolete_wal_segments.len(), 0);
+        assert!(
+            plan.obsolete_ssts.len() >= 1,
+            "gc plan should record obsolete ssts"
+        );
+
+        fs::remove_dir_all(&temp_root)?;
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct ConflictingExecutor {
+        inner: LocalCompactionExecutor,
+        manifest: TonboManifest,
+        table: TableId,
+        outputs: Arc<Mutex<Vec<SsTableDescriptor>>>,
+    }
+
+    impl ConflictingExecutor {
+        fn new(
+            inner: LocalCompactionExecutor,
+            manifest: TonboManifest,
+            table: TableId,
+            outputs: Arc<Mutex<Vec<SsTableDescriptor>>>,
+        ) -> Self {
+            Self {
+                inner,
+                manifest,
+                table,
+                outputs,
+            }
+        }
+    }
+
+    impl CompactionExecutor for ConflictingExecutor {
+        fn execute(
+            &self,
+            job: CompactionJob,
+        ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>>
+        {
+            let inner = self.inner.clone();
+            let manifest = self.manifest.clone();
+            let table = self.table;
+            let outputs = Arc::clone(&self.outputs);
+            Box::pin(async move {
+                let outcome = inner.execute(job).await?;
+                {
+                    let mut guard = outputs.lock().await;
+                    guard.clear();
+                    guard.extend(outcome.outputs.iter().cloned());
+                }
+                manifest
+                    .apply_version_edits(
+                        table,
+                        &[VersionEdit::SetWalSegments {
+                            segments: Vec::new(),
+                        }],
+                    )
+                    .await
+                    .map_err(CompactionError::Manifest)?;
+                Ok(outcome)
+            })
+        }
+
+        fn cleanup_outputs<'a>(
+            &'a self,
+            outputs: &'a [SsTableDescriptor],
+        ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
+            self.inner.cleanup_outputs(outputs)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compaction_cas_conflict_cleans_outputs() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_root = workspace_temp_dir("compaction-cas-cleanup");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let mode_cfg = crate::schema::SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder");
+        let extractor = Arc::clone(&mode_cfg.extractor);
+        let schema = Arc::clone(&mode_cfg.schema);
+        let executor = Arc::new(TokioExecutor::default());
+        let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_cfg, Arc::clone(&executor)).await?;
+        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+
+        let sst_root = temp_root.join("sst");
+        fs::create_dir_all(&sst_root)?;
+        let sst_root = Path::from_filesystem_path(&sst_root)?;
+        let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let sst_cfg = Arc::new(
+            SsTableConfig::new(Arc::clone(&schema), sst_fs.clone(), sst_root)
+                .with_key_extractor(extractor),
+        );
+
+        for idx in 0..2 {
+            let rows = vec![vec![
+                Some(DynCell::Str(format!("ck-{idx}").into())),
+                Some(DynCell::I32(idx as i32)),
+            ]];
+            let batch = build_batch(Arc::clone(&schema), rows)?;
+            db.ingest(batch).await?;
+            let descriptor = SsTableDescriptor::new(SsTableId::new(idx as u64 + 1), 0);
+            db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor)
+                .await?;
+        }
+
+        let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
+            l0_trigger: 1,
+            l0_max_inputs: 2,
+            l0_max_bytes: None,
+            level_thresholds: vec![usize::MAX],
+            level_max_bytes: Vec::new(),
+            max_inputs_per_task: 2,
+            max_task_bytes: None,
+        });
+        let recorded_outputs = Arc::new(Mutex::new(Vec::new()));
+        let executor = ConflictingExecutor::new(
+            LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100),
+            db.manifest.clone(),
+            db.manifest_table,
+            Arc::clone(&recorded_outputs),
+        );
+
+        let result = db.run_compaction_task(&planner, &executor).await;
+        match result {
+            Err(CompactionError::Manifest(ManifestError::CasConflict(_)))
+            | Err(CompactionError::CasConflict) => {}
+            other => panic!("expected CAS conflict, got {other:?}"),
+        }
+
+        let outputs = recorded_outputs.lock().await.clone();
+        assert!(
+            !outputs.is_empty(),
+            "compaction should have produced outputs before CAS conflict"
+        );
+        for desc in outputs {
+            if let Some(path) = desc.data_path() {
+                assert!(
+                    sst_fs.open(path).await.is_err(),
+                    "data file should be cleaned up"
+                );
+            }
+            if let Some(path) = desc.mvcc_path() {
+                assert!(
+                    sst_fs.open(path).await.is_err(),
+                    "mvcc file should be cleaned up"
+                );
+            }
+            if let Some(path) = desc.delete_path() {
+                assert!(
+                    sst_fs.open(path).await.is_err(),
+                    "delete file should be cleaned up"
+                );
+            }
+        }
+
+        fs::remove_dir_all(&temp_root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_compaction_inputs_keeps_levels() {
+        let file_ids = FileIdGenerator::default();
+        let table_id = TableId::new(&file_ids);
+        let mut version = VersionState::empty(table_id);
+        let l0_id = SsTableId::new(1);
+        let l1_id = SsTableId::new(2);
+        let edits = vec![
+            VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![SstEntry::new(
+                    l0_id.clone(),
+                    None,
+                    None,
+                    Path::from("L0/000.parquet"),
+                    Path::from("L0/000.mvcc.parquet"),
+                    None,
+                )],
+            },
+            VersionEdit::AddSsts {
+                level: 1,
+                entries: vec![SstEntry::new(
+                    l1_id.clone(),
+                    None,
+                    None,
+                    Path::from("L1/001.parquet"),
+                    Path::from("L1/001.mvcc.parquet"),
+                    None,
+                )],
+            },
+        ];
+        version.apply_edits(&edits).expect("apply edits");
+
+        let task = CompactionTask {
+            source_level: 0,
+            target_level: 1,
+            input: vec![
+                CompactionInput {
+                    level: 0,
+                    sst_id: l0_id,
+                },
+                CompactionInput {
+                    level: 1,
+                    sst_id: l1_id,
+                },
+            ],
+            key_range: None,
+        };
+
+        let resolved = DB::<DynMode, BlockingExecutor>::resolve_compaction_inputs(&version, &task)
+            .expect("resolve");
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].level(), 0);
+        assert_eq!(resolved[1].level(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

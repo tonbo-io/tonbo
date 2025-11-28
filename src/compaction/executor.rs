@@ -8,7 +8,7 @@
 //! descriptors; the executor decides how to materialize new SSTs and report edits.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::{
@@ -92,6 +92,8 @@ pub(crate) struct CompactionOutcome {
     pub(crate) obsolete_sst_ids: Vec<SsTableId>,
     /// Optional WAL floor advancement hint (last visible segment).
     pub(crate) wal_floor: Option<WalSegmentRef>,
+    /// WAL segments made obsolete by this compaction (for GC hints).
+    pub(crate) obsolete_wal_segments: Vec<WalSegmentRef>,
 }
 
 impl CompactionOutcome {
@@ -99,19 +101,33 @@ impl CompactionOutcome {
     #[allow(dead_code)]
     pub(crate) fn to_version_edits(&self) -> Vec<VersionEdit> {
         let mut edits = Vec::new();
-        let mut remove_ids: HashSet<SsTableId> = self
-            .remove_ssts
-            .iter()
-            .map(|desc| desc.id().clone())
-            .collect();
-        remove_ids.extend(self.obsolete_sst_ids.iter().cloned());
-        if let Some(level) = self.remove_ssts.first().map(|desc| desc.level() as u32)
-            && !remove_ids.is_empty()
-        {
-            edits.push(VersionEdit::RemoveSsts {
-                level,
-                sst_ids: remove_ids.into_iter().collect(),
-            });
+        let mut level_for_sst: HashMap<SsTableId, u32> = HashMap::new();
+        for desc in &self.remove_ssts {
+            level_for_sst.insert(desc.id().clone(), desc.level() as u32);
+        }
+
+        let mut remove_by_level: HashMap<u32, Vec<SsTableId>> = HashMap::new();
+        for desc in &self.remove_ssts {
+            remove_by_level
+                .entry(desc.level() as u32)
+                .or_default()
+                .push(desc.id().clone());
+        }
+        for sst_id in &self.obsolete_sst_ids {
+            if let Some(level) = level_for_sst.get(sst_id).copied() {
+                remove_by_level
+                    .entry(level)
+                    .or_default()
+                    .push(sst_id.clone());
+            }
+        }
+
+        for (level, mut sst_ids) in remove_by_level {
+            sst_ids.sort_by_key(SsTableId::raw);
+            sst_ids.dedup();
+            if !sst_ids.is_empty() {
+                edits.push(VersionEdit::RemoveSsts { level, sst_ids });
+            }
         }
         if !self.add_ssts.is_empty() {
             edits.push(VersionEdit::AddSsts {
@@ -179,6 +195,7 @@ impl CompactionOutcome {
             obsolete_sst_ids: Vec::new(),
             wal_floor: None,
             tombstone_watermark: max_commit.map(|ts| ts.get()),
+            obsolete_wal_segments: Vec::new(),
         })
     }
 }
@@ -247,6 +264,10 @@ pub(crate) struct LocalCompactionExecutor {
     max_output_bytes: Option<usize>,
 }
 
+const DEFAULT_BASE_OUTPUT_BYTES: usize = 128 * 1024 * 1024; // 128 MiB
+const DEFAULT_LEVEL_MULTIPLIER: usize = 10;
+const DEFAULT_OUTPUT_HARD_CAP_BYTES: usize = 512 * 1024 * 1024; // 512 MiB safety cap
+
 impl LocalCompactionExecutor {
     /// Build a local executor that will use `config` for outputs and allocate SST ids starting at
     /// `start_id`.
@@ -275,6 +296,26 @@ impl LocalCompactionExecutor {
         self
     }
 
+    fn default_output_bytes_for_level(level: usize) -> usize {
+        let mut size = DEFAULT_BASE_OUTPUT_BYTES;
+        for _ in 0..level {
+            size = size.saturating_mul(DEFAULT_LEVEL_MULTIPLIER);
+            if size >= DEFAULT_OUTPUT_HARD_CAP_BYTES {
+                return DEFAULT_OUTPUT_HARD_CAP_BYTES;
+            }
+        }
+        size.min(DEFAULT_OUTPUT_HARD_CAP_BYTES)
+    }
+
+    fn output_caps_for_level(&self, level: usize) -> (Option<usize>, Option<usize>) {
+        let rows_cap = self.max_output_rows;
+        let bytes_cap = self
+            .max_output_bytes
+            .or_else(|| Some(Self::default_output_bytes_for_level(level)))
+            .map(|cap| cap.min(DEFAULT_OUTPUT_HARD_CAP_BYTES));
+        (rows_cap, bytes_cap)
+    }
+
     fn alloc_descriptor(&self, level: usize) -> SsTableDescriptor {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         SsTableDescriptor::new(SsTableId::new(id), level)
@@ -291,10 +332,11 @@ impl CompactionExecutor for LocalCompactionExecutor {
                 return Err(CompactionError::NoInputs);
             }
             let target = self.alloc_descriptor(job.task.target_level);
+            let (max_rows, max_bytes) = self.output_caps_for_level(job.task.target_level);
             let merger =
                 SsTableMerger::<DynMode>::new(Arc::clone(&self.config), job.inputs.clone(), target)
                     .with_output_id_allocator(Arc::clone(&self.next_id))
-                    .with_output_caps(self.max_output_rows, self.max_output_bytes);
+                    .with_output_caps(max_rows, max_bytes);
             let merged = merger.execute().await?;
             let descriptors: Vec<_> = merged.iter().map(|sst| sst.descriptor().clone()).collect();
             CompactionOutcome::from_outputs(
@@ -340,6 +382,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        compaction::planner::CompactionInput,
         id::FileIdGenerator,
         inmem::immutable::memtable::segment_from_batch_with_key_name,
         ondisk::sstable::{
@@ -369,25 +412,26 @@ mod tests {
             outputs: vec![],
             obsolete_sst_ids: vec![],
             wal_floor: None,
+            obsolete_wal_segments: Vec::new(),
         };
         let edits = outcome.to_version_edits();
         assert_eq!(edits.len(), 4);
-        assert!(matches!(
-            &edits[0],
+        assert!(edits.iter().any(|edit| matches!(
+            edit,
             VersionEdit::RemoveSsts { sst_ids, .. } if sst_ids.contains(remove.id())
-        ));
-        assert!(matches!(
-            &edits[1],
+        )));
+        assert!(edits.iter().any(|edit| matches!(
+            edit,
             VersionEdit::AddSsts { level, entries } if *level == 1 && entries.first().map(|e| e.sst_id()) == Some(add.sst_id())
-        ));
-        assert!(matches!(
-            &edits[2],
+        )));
+        assert!(edits.iter().any(|edit| matches!(
+            edit,
             VersionEdit::SetWalSegments { segments } if segments.len() == 1
-        ));
-        assert!(matches!(
-            &edits[3],
+        )));
+        assert!(edits.iter().any(|edit| matches!(
+            edit,
             VersionEdit::SetTombstoneWatermark { watermark } if *watermark == 42
-        ));
+        )));
     }
 
     #[test]
@@ -441,6 +485,64 @@ mod tests {
     }
 
     #[test]
+    fn default_output_caps_are_applied() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let tmpdir = tempfile::tempdir().expect("temp dir");
+        let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder");
+        let fs: Arc<dyn DynFs> = Arc::new(fusio::disk::LocalFs {});
+        let cfg = Arc::new(
+            SsTableConfig::new(
+                Arc::clone(&mode_cfg.schema),
+                fs,
+                Path::from(tmpdir.path().to_string_lossy().to_string()),
+            )
+            .with_key_extractor(Arc::clone(&mode_cfg.extractor)),
+        );
+        let exec = LocalCompactionExecutor::new(cfg, 0);
+        let (rows_cap, bytes_cap) = exec.output_caps_for_level(1);
+        assert!(rows_cap.is_none());
+        let bytes = bytes_cap.expect("default bytes cap");
+        assert!(bytes <= DEFAULT_OUTPUT_HARD_CAP_BYTES);
+        // Keep tmpdir alive for the duration of the test.
+        drop(tmpdir);
+    }
+
+    #[test]
+    fn outcome_emits_per_level_removals() {
+        let remove_l1 = SsTableDescriptor::new(SsTableId::new(1), 1);
+        let remove_l2 = SsTableDescriptor::new(SsTableId::new(2), 2);
+        let outcome = CompactionOutcome {
+            add_ssts: Vec::new(),
+            remove_ssts: vec![remove_l1.clone(), remove_l2.clone()],
+            target_level: 2,
+            wal_segments: None,
+            tombstone_watermark: None,
+            outputs: vec![],
+            obsolete_sst_ids: vec![remove_l2.id().clone()],
+            wal_floor: None,
+            obsolete_wal_segments: Vec::new(),
+        };
+
+        let edits = outcome.to_version_edits();
+        let mut levels: Vec<u32> = Vec::new();
+        let mut remove_ids: Vec<Vec<SsTableId>> = Vec::new();
+        for edit in edits {
+            if let VersionEdit::RemoveSsts { level, sst_ids } = edit {
+                levels.push(level);
+                remove_ids.push(sst_ids);
+            }
+        }
+        assert_eq!(levels.len(), 2);
+        assert!(levels.contains(&1));
+        assert!(levels.contains(&2));
+        assert!(remove_ids.iter().any(|ids| ids.contains(remove_l1.id())));
+        assert!(remove_ids.iter().any(|ids| ids.contains(remove_l2.id())));
+    }
+
+    #[test]
     fn to_version_edits_dedups_remove_and_falls_back_to_floor() {
         let wal_id = FileIdGenerator::default().generate();
         let wal_floor = WalSegmentRef::new(7, wal_id, 0, 10);
@@ -454,6 +556,7 @@ mod tests {
             outputs: Vec::new(),
             obsolete_sst_ids: vec![remove.id().clone()],
             wal_floor: Some(wal_floor.clone()),
+            obsolete_wal_segments: Vec::new(),
         };
         let edits = outcome.to_version_edits();
         assert_eq!(edits.len(), 2);
@@ -510,7 +613,10 @@ mod tests {
             task: CompactionTask {
                 source_level: 0,
                 target_level: 1,
-                input: vec![SsTableId::new(1)],
+                input: vec![CompactionInput {
+                    level: 0,
+                    sst_id: SsTableId::new(1),
+                }],
                 key_range: None,
             },
             inputs: vec![input],

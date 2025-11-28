@@ -160,8 +160,6 @@ impl TonboManifest {
     ) -> ManifestResult<Timestamp> {
         self.version.apply_version_edits(table, edits).await
     }
-
-    #[allow(dead_code)]
     pub(crate) async fn apply_version_edits_cas(
         &self,
         table: TableId,
