@@ -6,7 +6,7 @@ use fusio::{
     executor::{Executor, Timer, tokio::TokioExecutor},
     fs::FsCas as FusioCas,
     mem::fs::InMemoryFs,
-    path::{Path, PathPart},
+    path::{Path, PathPart, path_to_local},
 };
 use thiserror::Error;
 
@@ -16,11 +16,12 @@ use crate::{
         executor::LocalCompactionExecutor,
         planner::{CompactionStrategy, PlannerInitError},
     },
-    extractor::KeyExtractError,
+    extractor::{KeyExtractError, projection_for_columns},
     id::FileIdGenerator,
     manifest::{ManifestError, TonboManifest, init_fs_manifest},
-    mode::CatalogDescribe,
+    mode::{CatalogDescribe, DynModeConfig},
     ondisk::sstable::SsTableConfig,
+    transaction::CommitAckMode,
     wal::{
         WalConfig as RuntimeWalConfig, WalError, WalExt, WalRecoveryMode, WalSyncPolicy,
         state::{FsWalStateStore, WalStateStore},
@@ -208,7 +209,7 @@ pub struct InMemoryState {
 }
 
 pub struct DiskDurableState {
-    root: String,
+    root: Path,
     table_name: Option<String>,
     wal_config: WalConfig,
     create_dirs: bool,
@@ -221,23 +222,27 @@ pub struct ObjectDurableState {
 }
 
 impl DiskDurableState {
-    fn new(root: impl Into<String>) -> Self {
+    fn new(root: Path) -> Self {
         Self {
-            root: root.into(),
+            root,
             table_name: None,
             wal_config: WalConfig::default(),
-            create_dirs: false,
+            create_dirs: true,
         }
     }
 }
 
-fn ensure_disk_layout(root: &str) -> Result<(), DbBuildError> {
-    if root.is_empty() {
+fn ensure_disk_layout(root: &Path) -> Result<(), DbBuildError> {
+    if root.as_ref().is_empty() {
         return Err(DbBuildError::InvalidPath {
             path: root.to_string(),
             reason: "root cannot be empty".into(),
         });
     }
+    let base = path_to_local(root).map_err(|err| DbBuildError::InvalidPath {
+        path: root.to_string(),
+        reason: err.to_string(),
+    })?;
     const REQUIRED_PATHS: &[&str] = &[
         "wal",
         "sst",
@@ -250,7 +255,7 @@ fn ensure_disk_layout(root: &str) -> Result<(), DbBuildError> {
         "manifest/version/checkpoints",
         "manifest/version/leases",
     ];
-    let base = StdPath::new(root);
+    let base = base.as_path();
     for suffix in REQUIRED_PATHS {
         let path = base.join(suffix);
         if let Err(source) = fs::create_dir_all(&path) {
@@ -497,7 +502,7 @@ pub enum DbBuildError {
 #[derive(Debug, Clone)]
 pub enum StorageBackendSpec {
     InMemory { label: String },
-    Disk { root: String },
+    Disk { root: Path },
     ObjectStore(ObjectSpec),
 }
 
@@ -749,24 +754,19 @@ impl StorageBackend {
                 })
             }
             StorageBackendSpec::Disk { root } => {
-                if root.is_empty() {
+                if root.as_ref().is_empty() {
                     return Err(DbBuildError::InvalidPath {
-                        path: root,
+                        path: root.to_string(),
                         reason: "root cannot be empty".into(),
                     });
                 }
                 let raw_fs = Arc::new(LocalFs {});
                 let dyn_fs: Arc<dyn DynFs> = raw_fs.clone();
                 let cas_fs: Arc<dyn FusioCas> = raw_fs.clone();
-                let root_path =
-                    Path::from_filesystem_path(&root).map_err(|err| DbBuildError::InvalidPath {
-                        path: root,
-                        reason: err.to_string(),
-                    })?;
                 Ok(Self {
                     dyn_fs,
                     cas: Some(cas_fs),
-                    root: root_path,
+                    root,
                     kind: StorageBackendKind::Disk { fs: raw_fs },
                 })
             }
@@ -916,15 +916,24 @@ where
     }
 
     /// Select a local filesystem backend rooted at `root`.
-    #[must_use]
-    pub fn on_disk(self, root: impl Into<String>) -> DbBuilder<M, DiskDurableState> {
-        DbBuilder {
+    #[must_use = "use the returned DbBuilder to continue configuration"]
+    pub fn on_disk(
+        self,
+        root: impl AsRef<std::path::Path>,
+    ) -> Result<DbBuilder<M, DiskDurableState>, DbBuildError> {
+        let root_ref = root.as_ref();
+        let path =
+            Path::from_filesystem_path(root_ref).map_err(|err| DbBuildError::InvalidPath {
+                path: root_ref.display().to_string(),
+                reason: err.to_string(),
+            })?;
+        Ok(DbBuilder {
             mode_config: self.mode_config,
-            state: DiskDurableState::new(root),
+            state: DiskDurableState::new(path),
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
-        }
+        })
     }
 
     /// Select an object-store backend using the provided specification.
@@ -937,6 +946,36 @@ where
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
         }
+    }
+}
+
+// Convenience constructors for dynamic mode: build configs from schema + key in one step.
+impl DbBuilder<DynMode, Unconfigured> {
+    /// Create a dynamic-mode builder from an Arrow schema and single key column name.
+    pub fn from_schema_key_name(
+        schema: arrow_schema::SchemaRef,
+        key_name: impl Into<String>,
+    ) -> Result<Self, DbBuildError> {
+        let key = key_name.into();
+        let cfg = DynModeConfig::from_key_name(schema, key.as_str()).map_err(DbBuildError::Mode)?;
+        Ok(Self::new(cfg))
+    }
+
+    /// Create a dynamic-mode builder from an Arrow schema and explicit key column indices.
+    pub fn from_schema_key_indices(
+        schema: arrow_schema::SchemaRef,
+        key_indices: Vec<usize>,
+    ) -> Result<Self, DbBuildError> {
+        let extractor =
+            projection_for_columns(schema.clone(), key_indices).map_err(DbBuildError::Mode)?;
+        let cfg = DynModeConfig::new(schema, extractor).map_err(DbBuildError::Mode)?;
+        Ok(Self::new(cfg))
+    }
+
+    /// Create a dynamic-mode builder by reading key metadata from the schema.
+    pub fn from_schema_metadata(schema: arrow_schema::SchemaRef) -> Result<Self, DbBuildError> {
+        let cfg = DynModeConfig::from_metadata(schema).map_err(DbBuildError::Mode)?;
+        Ok(Self::new(cfg))
     }
 }
 
@@ -1060,6 +1099,15 @@ where
     }
 }
 
+impl<S> DbBuilder<DynMode, S> {
+    /// Override the commit acknowledgement mode for transactional writes.
+    #[must_use]
+    pub fn with_commit_ack_mode(mut self, mode: CommitAckMode) -> Self {
+        self.mode_config.commit_ack_mode = mode;
+        self
+    }
+}
+
 impl<S> DbBuilder<DynMode, S>
 where
     S: StorageState,
@@ -1134,7 +1182,7 @@ where
     ///     .segment_max_bytes(8 * 1024 * 1024)
     ///     .sync_policy(WalSyncPolicy::Always);
     /// let _db = DB::<DynMode, TokioExecutor>::builder(config)
-    ///     .on_disk("/data/tonbo".to_string())
+    ///     .on_disk("/data/tonbo".to_string())?
     ///     .wal_config(overrides)
     ///     .build()
     ///     .await?;
@@ -1174,7 +1222,13 @@ where
         self.state.wal_config_mut().retention_bytes = Some(retention);
         self
     }
+}
 
+impl<M, S> DbBuilder<M, S>
+where
+    M: Mode + CatalogDescribe + 'static,
+    S: TableNameConfigurable,
+{
     /// Attempt to recover from WAL state if present, otherwise build a fresh durable DB.
     pub async fn recover_or_init(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
         let executor = Arc::new(TokioExecutor::default());

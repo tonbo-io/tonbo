@@ -5,8 +5,7 @@ use std::sync::Arc;
 use fusio::executor::tokio::TokioExecutor;
 use futures::TryStreamExt;
 use tonbo::{
-    db::{DB, DynMode},
-    mode::DynModeConfig,
+    db::{DB, DbBuilder, DynMode},
     mvcc::Timestamp,
     query::{ColumnRef, Predicate, ScalarValue},
 };
@@ -50,8 +49,8 @@ async fn main() {
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
     // Create a dynamic DB by specifying the key field name
-    let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key col");
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(config)
+    let mut db: DB<DynMode, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")
+        .expect("key col")
         .in_memory("dynamic-basic")
         .build()
         .await

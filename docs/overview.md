@@ -178,11 +178,11 @@ Tonbo’s WAL ensures durability before data enters the in-memory structures. Wr
 By default, durable builders create a `WalConfig` using layout-derived defaults (directory, filesystem bindings, state store). Most deployments don’t need additional tuning:
 
 ```rust,no_run
-use tonbo::{db::{DB, DbBuildError, DynMode}, mode::DynModeConfig};
+use tonbo::db::{DB, DbBuildError, DbBuilder, DynMode};
 
-async fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
-    let _db = DB::<DynMode, _>::builder(config)
-        .on_disk("/srv/tonbo".to_string())
+async fn bootstrap(schema: arrow_schema::SchemaRef) -> Result<(), DbBuildError> {
+    let _db: DB<DynMode, _> = DbBuilder::from_schema_key_name(schema, "id")?
+        .on_disk("/srv/tonbo")
         .build()
         .await?;
     Ok(())
@@ -194,17 +194,16 @@ When low-level tweaks are required (e.g., forcing synchronous fsyncs for benchma
 ```rust,no_run
 use std::time::Duration;
 use tonbo::{
-    db::{DB, DbBuildError, DynMode, WalConfig},
-    mode::DynModeConfig,
+    db::{DB, DbBuildError, DbBuilder, DynMode, WalConfig},
     wal::WalSyncPolicy,
 };
 
-async fn bootstrap(config: DynModeConfig) -> Result<(), DbBuildError> {
+async fn bootstrap(schema: arrow_schema::SchemaRef) -> Result<(), DbBuildError> {
     let overrides = WalConfig::default()
         .sync_policy(WalSyncPolicy::Always)
         .flush_interval(Duration::from_millis(1));
-    let _db = DB::<DynMode, _>::builder(config)
-        .on_disk("/srv/tonbo".to_string())
+    let _db: DB<DynMode, _> = DbBuilder::from_schema_key_name(schema, "id")?
+        .on_disk("/srv/tonbo")
         .wal_config(overrides)
         .build()
         .await?;
@@ -385,17 +384,17 @@ Public API (dynamic mode today):
 ```rust,no_run
 use std::sync::Arc;
 use fusio::executor::BlockingExecutor;
-use tonbo::{CommitAckMode, DB, DynModeConfig, Transaction};
-use tonbo::extractor;
+use tonbo::{CommitAckMode, DB, DbBuilder, DynMode, Transaction};
 use tonbo::key::KeyOwned;
 
 async fn run_transaction() -> Result<(), Box<dyn std::error::Error>> {
     let schema = Arc::new(build_arrow_schema()); // application-defined helper
-    let key_projection = extractor::projection_for_field(schema.clone(), 0)?;
-    let config = DynModeConfig::new(schema.clone(), key_projection)?
-        .with_commit_ack_mode(CommitAckMode::Fast); // optional: trade durability for latency
     let executor = Arc::new(BlockingExecutor);
-    let mut db = DB::new(config, executor).await?;
+    let mut db: DB<DynMode, _> = DbBuilder::from_schema_key_name(schema.clone(), "id")?
+        .with_commit_ack_mode(CommitAckMode::Fast) // optional: trade durability for latency
+        .in_memory("txn")
+        .build_with_executor(executor.clone())
+        .await?;
 
     let mut tx: Transaction = db.begin_transaction().await?;
     let incoming_batch = build_record_batch(); // supply your Arrow RecordBatch

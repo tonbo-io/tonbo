@@ -64,7 +64,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
@@ -90,7 +90,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     );
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
@@ -177,7 +177,7 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
 
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_config(wal_builder_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
@@ -220,7 +220,7 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     );
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(recover_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_builder_cfg)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -281,7 +281,7 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
@@ -302,7 +302,7 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     let mode_config_recover = DynModeConfig::from_metadata(schema.clone())?;
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
@@ -490,7 +490,7 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
     );
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
@@ -525,7 +525,7 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
     );
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(recover_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
@@ -616,7 +616,7 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
 
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
@@ -729,7 +729,7 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
 
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(
                 BuilderWalConfig::default().recovery_mode(WalRecoveryMode::TolerateCorruptedTail),
@@ -841,7 +841,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
 
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
@@ -902,7 +902,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     );
     let mut recovered_again: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(final_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;
@@ -1028,7 +1028,7 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
     drop(segment);
 
     let recovered: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
@@ -1086,7 +1086,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_segment_bytes(1)
         .wal_flush_interval(Duration::from_millis(0))
@@ -1122,7 +1122,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     );
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_segment_bytes(1)
             .wal_flush_interval(Duration::from_millis(0))
@@ -1195,7 +1195,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     );
     let mut recovered_again: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config_final)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_segment_bytes(1)
             .wal_flush_interval(Duration::from_millis(0))
@@ -1264,7 +1264,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
@@ -1290,7 +1290,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     );
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(mode_config_recover)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
             .await?;

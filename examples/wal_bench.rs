@@ -12,8 +12,7 @@ use arrow_select::take::take;
 use clap::{Parser, ValueEnum};
 use fusio::executor::tokio::TokioExecutor;
 use tonbo::{
-    db::DB,
-    mode::{DynMode, DynModeConfig},
+    db::{DB, DbBuilder, DynMode},
     mvcc::{MVCC_COMMIT_COL, Timestamp},
     wal::{WalExt, WalSyncPolicy},
 };
@@ -155,12 +154,13 @@ async fn bench_wal_append(cfg: &Config, schema: Arc<Schema>) -> (Duration, usize
 }
 
 async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, TokioExecutor> {
-    let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let label = format!("wal-bench-{}", Ulid::new());
     let root = std::env::temp_dir().join(&label);
     fs::create_dir_all(&root).expect("wal bench dir");
-    let db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(config)
-        .on_disk(root.to_string_lossy().into_owned())
+    let db: DB<DynMode, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")
+        .expect("config")
+        .on_disk(&root)
+        .expect("on_disk")
         .wal_sync_policy(sync)
         .build()
         .await

@@ -68,4 +68,6 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "time",
 ] }
-typed-arrow = { version = "0.4.1", features = ["ext-hooks"] }
+typed-arrow = { git = "https://github.com/tonbo-io/typed-arrow.git", features = [
+    "ext-hooks",
+] }

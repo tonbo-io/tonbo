@@ -109,7 +109,7 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
 
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
@@ -152,7 +152,7 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     );
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(recover_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -189,7 +189,7 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
     let wal_cfg = wal_cfg_with_backend(&wal_dir, true)?;
 
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
@@ -220,7 +220,7 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
     );
     let mut recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(recover_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -264,7 +264,7 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
 
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
@@ -314,7 +314,7 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
     );
     let recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(recover_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -362,7 +362,7 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
         );
         let mut db: DB<DynMode, TokioExecutor> =
             DB::<DynMode, TokioExecutor>::builder(reopen_config)
-                .on_disk(root.to_string())
+                .on_disk(root.to_string())?
                 .create_dirs(true)
                 .wal_config(wal_cfg.clone())
                 .recover_or_init_with_executor(Arc::clone(&executor))
@@ -443,7 +443,7 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
     let wal_cfg = wal_cfg_with_backend(&wal_dir, false)?;
 
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())
+        .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
@@ -472,7 +472,7 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
     );
     let recovered: DB<DynMode, TokioExecutor> =
         DB::<DynMode, TokioExecutor>::builder(recover_config)
-            .on_disk(root_str.clone())
+            .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)
             .recover_or_init_with_executor(Arc::clone(&executor))
