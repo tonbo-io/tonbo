@@ -10,6 +10,26 @@ use crate::{
     key::{KeyRow, KeyRowError},
 };
 
+fn schemas_compatible(expected: &Schema, actual: &Schema) -> bool {
+    if expected == actual {
+        return true;
+    }
+    // Allow actual to have one extra trailing `_commit_ts` column (UInt64, non-nullable)
+    if actual.fields().len() == expected.fields().len() + 1 {
+        let (head_actual, tail_actual) = actual.fields().split_at(expected.fields().len());
+        let heads_match = head_actual
+            .iter()
+            .zip(expected.fields().iter())
+            .all(|(a, b)| a.as_ref() == b.as_ref());
+        if heads_match && let Some(last) = tail_actual.first() {
+            return last.name() == MVCC_COMMIT_COL
+                && last.data_type() == &DataType::UInt64
+                && !last.is_nullable();
+        }
+    }
+    false
+}
+
 /// Build a boxed key projection for a single column.
 pub fn projection_for_field(
     schema: SchemaRef,
@@ -64,13 +84,14 @@ impl DynKeyProjection {
     }
 
     fn ensure_batch_schema(&self, batch_schema: &SchemaRef) -> Result<(), KeyExtractError> {
-        if batch_schema.as_ref() != self.schema.as_ref() {
-            return Err(KeyExtractError::SchemaMismatch {
+        if schemas_compatible(self.schema.as_ref(), batch_schema.as_ref()) {
+            Ok(())
+        } else {
+            Err(KeyExtractError::SchemaMismatch {
                 expected: self.schema.clone(),
                 actual: batch_schema.clone(),
-            });
+            })
         }
-        Ok(())
     }
 }
 
@@ -93,11 +114,20 @@ impl KeyProjection for DynKeyProjection {
         rows: &[usize],
     ) -> Result<Vec<KeyRow>, KeyExtractError> {
         self.ensure_batch_schema(&batch.schema())?;
+        let use_fresh = batch.schema().as_ref() != self.schema.as_ref();
+        let (dyn_schema, projection) = if use_fresh {
+            let dyn_schema = DynSchema::from_ref(batch.schema().clone());
+            let proj =
+                DynProjection::from_indices(batch.schema().as_ref(), self.key_columns.to_vec())
+                    .map_err(map_view_err)?;
+            (dyn_schema, proj)
+        } else {
+            (self.dyn_schema.clone(), self.projection.clone())
+        };
         let mut out = Vec::with_capacity(rows.len());
         for &row in rows {
-            let raw = self
-                .projection
-                .project_row_raw(&self.dyn_schema, batch, row)
+            let raw = projection
+                .project_row_raw(&dyn_schema, batch, row)
                 .map_err(map_view_err)?;
             let fields = raw.fields().clone();
             let key = KeyRow::from_dyn(raw).map_err(|err| map_key_row_err(err, row, &fields))?;

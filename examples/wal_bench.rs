@@ -1,5 +1,3 @@
-#![allow(clippy::missing_panics_doc)]
-
 use std::{
     fmt, fs,
     sync::Arc,

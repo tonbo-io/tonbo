@@ -559,7 +559,13 @@ mod tests {
             )
             .expect("package stream"),
         );
-        let err = block_on(async { stream.next().await.unwrap().unwrap_err() });
+        let err = block_on(async {
+            stream
+                .next()
+                .await
+                .expect("stream should yield error")
+                .expect_err("expected error")
+        });
         match err {
             StreamError::Predicate(ResidualError::MissingColumn(column)) => {
                 assert_eq!(column.as_ref(), "missing");

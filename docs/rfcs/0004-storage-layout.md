@@ -7,7 +7,7 @@
 
 ## Summary
 
-Define the on-disk directory hierarchy for a Tonbo database instance so that write-ahead logging, future SSTables (data files plus MVCC sidecars), and catalog metadata share a consistent root. The layout is expressed in terms of `fusio::path::Path` so it maps across local filesystems, remote object stores, or any custom `DynFs` implementation.
+Define the on-disk directory hierarchy for a Tonbo database instance so that write-ahead logging, future SSTables (data files plus delete sidecars), and catalog metadata share a consistent root. The layout is expressed in terms of `fusio::path::Path` so it maps across local filesystems, remote object stores, or any custom `DynFs` implementation.
 
 ## Goals
 q
@@ -32,8 +32,8 @@ root/
     state.json                // optional small manifest: last_seq, last_commit_ts
   sst/
     L0/                       // reserved for future levelled SST layout
-      ...<id>.parquet         // user data file
-      ...<id>.mvcc.parquet    // MVCC sidecar (commit_ts + tombstone)
+      ...<id>.parquet         // user data file (includes _commit_ts column)
+      ...<id>.delete.parquet  // key-only delete sidecar (optional)
     staging/                  // scratch for builds/compactions
   manifest/
     catalog/                  // fusio-manifest catalog namespace
@@ -61,7 +61,7 @@ All paths are created through `fusio` APIs; the layout makes no assumptions abou
 ### SST directory (`root.join("sst")`)
 
 - Placeholder for immutable runs once SSTables land. Subdirectories `L0/` (ingest), `L1/`..`Ln/` (compacted levels), and `staging/` (writer scratch) keep compaction bookkeeping localized. The RFC reserves the names; concrete formats arrive in future SST RFCs.
-- Each SSTable ID resolves to a pair of objects under its level: `<id>.parquet` for user rows and `<id>.mvcc.parquet` for the aligned MVCC sidecar defined in RFC 0006. Both paths are published atomically via the manifest.
+- Each SSTable ID resolves to one required object under its level: `<id>.parquet` for user rows (with `_commit_ts` embedded). When tombstones exist, an optional `<id>.delete.parquet` sidecar holds key + `_commit_ts` rows. Paths are published atomically via the manifest.
 
 ### Manifest directory (`root.join("manifest")`)
 
@@ -102,4 +102,4 @@ The same flow applies to typed modes once they return; only the ingest adapter c
 - Implement `DbPaths` helper in code and update constructors to accept `root: Arc<Path>` alongside `WalConfig`.
 - Update `WalStorage::ensure_dir` to create `state.json` and expose helpers for listing existing segments.
 - Extend the builder-driven recovery flow to leverage the state file once available.
-- Document operational guidance in AGENTS.md after the hierarchy lands in code, including the dual-file SST (data + MVCC sidecar) convention.
+- Document operational guidance in AGENTS.md after the hierarchy lands in code, including the dual-file SST (data with `_commit_ts` + optional delete sidecar) convention.

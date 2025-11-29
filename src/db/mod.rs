@@ -1212,15 +1212,10 @@ where
                 .data_path()
                 .cloned()
                 .ok_or(CompactionError::MissingPath("data"))?;
-            let mvcc_path = desc
-                .mvcc_path()
-                .cloned()
-                .ok_or(CompactionError::MissingPath("mvcc"))?;
             obsolete_ssts.push(GcSstRef {
                 id: desc.id().clone(),
                 level: desc.level() as u32,
                 data_path,
-                mvcc_path,
                 delete_path: desc.delete_path().cloned(),
             });
         }
@@ -1252,11 +1247,8 @@ where
                 descriptor = descriptor.with_stats(stats);
             }
             descriptor = descriptor.with_wal_ids(entry.wal_segments().map(|ids| ids.to_vec()));
-            descriptor = descriptor.with_storage_paths(
-                entry.data_path().clone(),
-                entry.mvcc_path().clone(),
-                entry.delete_path().cloned(),
-            );
+            descriptor = descriptor
+                .with_storage_paths(entry.data_path().clone(), entry.delete_path().cloned());
             descriptors.push(descriptor);
         }
         Ok(descriptors)
@@ -1585,11 +1577,6 @@ where
                         "sst descriptor missing data path",
                     ))
                 })?;
-                let mvcc_path = descriptor_ref.mvcc_path().cloned().ok_or_else(|| {
-                    SsTableError::Manifest(ManifestError::Invariant(
-                        "sst descriptor missing mvcc path",
-                    ))
-                })?;
                 let delete_path = descriptor_ref.delete_path().cloned();
                 let stats = descriptor_ref.stats().cloned();
                 let sst_entry = SstEntry::new(
@@ -1597,7 +1584,6 @@ where
                     stats,
                     wal_ids.clone(),
                     data_path,
-                    mvcc_path,
                     delete_path,
                 );
                 let mut edits = vec![VersionEdit::AddSsts {
@@ -3184,19 +3170,11 @@ mod tests {
         let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
         let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
 
-        let entry_missing_wal = SstEntry::new(
-            SsTableId::new(1),
-            None,
-            None,
-            Path::default(),
-            Path::default(),
-            None,
-        );
+        let entry_missing_wal = SstEntry::new(SsTableId::new(1), None, None, Path::default(), None);
         let entry_with_wal = SstEntry::new(
             SsTableId::new(2),
             None,
             Some(vec![wal_b.file_id().clone()]),
-            Path::default(),
             Path::default(),
             None,
         );
@@ -3246,14 +3224,12 @@ mod tests {
             None,
             Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
             Path::default(),
-            Path::default(),
             None,
         );
         let entry_b = SstEntry::new(
             SsTableId::new(2),
             None,
             Some(vec![wal_c.file_id().clone()]),
-            Path::default(),
             Path::default(),
             None,
         );
@@ -3271,11 +3247,8 @@ mod tests {
             .expect("apply edits");
 
         let removed = vec![
-            SsTableDescriptor::new(SsTableId::new(1), 0).with_storage_paths(
-                Path::from("L0/1.parquet"),
-                Path::from("L0/1.mvcc.parquet"),
-                None,
-            ),
+            SsTableDescriptor::new(SsTableId::new(1), 0)
+                .with_storage_paths(Path::from("L0/1.parquet"), None),
         ];
         let added = vec![SsTableDescriptor::new(SsTableId::new(3), 0)];
 
@@ -3384,7 +3357,6 @@ mod tests {
             None,
             Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
             Path::from("L0/1.parquet"),
-            Path::from("L0/1.mvcc.parquet"),
             None,
         );
         let entry_b = SstEntry::new(
@@ -3392,7 +3364,6 @@ mod tests {
             None,
             Some(vec![wal_b.file_id().clone()]),
             Path::from("L0/2.parquet"),
-            Path::from("L0/2.mvcc.parquet"),
             None,
         );
 
@@ -3444,11 +3415,7 @@ mod tests {
 
         let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
             .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
-            .with_storage_paths(
-                Path::from("L1/3.parquet"),
-                Path::from("L1/3.mvcc.parquet"),
-                None,
-            );
+            .with_storage_paths(Path::from("L1/3.parquet"), None);
         let executor = StaticExecutor {
             outputs: vec![output_desc],
             wal_segments: vec![wal_b.clone()],
@@ -3493,7 +3460,6 @@ mod tests {
             None,
             None,
             Path::from("L0/1.parquet"),
-            Path::from("L0/1.mvcc.parquet"),
             None,
         );
         let entry_with_wal = SstEntry::new(
@@ -3501,7 +3467,6 @@ mod tests {
             None,
             Some(vec![wal_b.file_id().clone()]),
             Path::from("L0/2.parquet"),
-            Path::from("L0/2.mvcc.parquet"),
             None,
         );
 
@@ -3547,11 +3512,7 @@ mod tests {
 
         let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
             .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
-            .with_storage_paths(
-                Path::from("L1/3.parquet"),
-                Path::from("L1/3.mvcc.parquet"),
-                None,
-            );
+            .with_storage_paths(Path::from("L1/3.parquet"), None);
         let executor = StaticExecutor {
             outputs: vec![output_desc],
             wal_segments: vec![wal_b.clone()],
@@ -3663,16 +3624,20 @@ mod tests {
             desc_a.id().clone(),
             desc_a.stats().cloned(),
             desc_a.wal_ids().map(|ids| ids.to_vec()),
-            desc_a.data_path().unwrap().clone(),
-            desc_a.mvcc_path().unwrap().clone(),
+            desc_a
+                .data_path()
+                .expect("input descriptor missing data path")
+                .clone(),
             desc_a.delete_path().cloned(),
         );
         let entry_b = SstEntry::new(
             desc_b.id().clone(),
             desc_b.stats().cloned(),
             desc_b.wal_ids().map(|ids| ids.to_vec()),
-            desc_b.data_path().unwrap().clone(),
-            desc_b.mvcc_path().unwrap().clone(),
+            desc_b
+                .data_path()
+                .expect("input descriptor missing data path")
+                .clone(),
             desc_b.delete_path().cloned(),
         );
         db.manifest
@@ -3907,12 +3872,6 @@ mod tests {
                     "data file should be cleaned up"
                 );
             }
-            if let Some(path) = desc.mvcc_path() {
-                assert!(
-                    sst_fs.open(path).await.is_err(),
-                    "mvcc file should be cleaned up"
-                );
-            }
             if let Some(path) = desc.delete_path() {
                 assert!(
                     sst_fs.open(path).await.is_err(),
@@ -3940,7 +3899,6 @@ mod tests {
                     None,
                     None,
                     Path::from("L0/000.parquet"),
-                    Path::from("L0/000.mvcc.parquet"),
                     None,
                 )],
             },
@@ -3951,7 +3909,6 @@ mod tests {
                     None,
                     None,
                     Path::from("L1/001.parquet"),
-                    Path::from("L1/001.mvcc.parquet"),
                     None,
                 )],
             },

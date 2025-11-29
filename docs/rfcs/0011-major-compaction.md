@@ -77,16 +77,15 @@ Compaction is single-tenant for now: the worker loop in `compaction::spawn_compa
 - Outputs use level-scoped paths: `L{level}/{id}.parquet`, `L{level}/{id}.mvcc.parquet`, and `L{level}/{id}.delete.parquet` (delete sidecar written only when rows exist).
 - Files are always write-new (+create/truncate) with no renames; manifest CAS publishes visibility.
 - Output batches carry:
-  - Data Parquet (user schema).
-  - MVCC sidecar Parquet (`_commit_ts`).
+  - Data Parquet (user schema + `_commit_ts` column).
   - Optional delete sidecar Parquet (key-only + `_commit_ts`).
 
 ### Interfaces with other components
 
 - **Manifest:** CompactionOutcome emits `VersionEdit`s; `VersionState` stores WAL segments, WAL floor, and tombstone watermark derived from merged outputs. Manifest head advances monotonically; DB prunes WAL below manifest floor after apply.
 - **WAL:** Executor may surface a new segment set; DB falls back to existing manifest WAL segments or floor to keep retention safe even if executor omits WAL info.
-- **Read path:** Readers consume the same SST format; merged outputs already encode latest-wins/tombstones in Parquet + MVCC/delete sidecars to keep visibility rules consistent for merge-scans.
-- **Write path:** Minor compaction and flush continue to emit SSTs with data/MVCC/delete sidecars; major compaction rewrites them without changing ingest semantics.
+- **Read path:** Readers consume the same SST format; merged outputs already encode latest-wins/tombstones in data Parquet (with `_commit_ts`) plus delete sidecars to keep visibility rules consistent for merge-scans.
+- **Write path:** Minor compaction and flush emit SSTs with data `_commit_ts` plus optional delete sidecars; major compaction rewrites them without changing ingest semantics.
 - **GC:** Obsolete SST ids (inputs + already-removed ids) are surfaced as hints; actual deletion/GC worker remains future work.
 
 **Concrete interface map**
@@ -98,7 +97,7 @@ Compaction is single-tenant for now: the worker loop in `compaction::spawn_compa
 | Execution | `CompactionExecutor`, `LocalCompactionExecutor`, `SsTableMerger` | Executor allocates targets, merges via latest-wins; returns `CompactionOutcome`. |
 | Manifest apply | `CompactionOutcome::to_version_edits`, `DB::run_compaction_task` | Builds `AddSsts` / `RemoveSsts` / `SetWalSegments` / `SetTombstoneWatermark`; applies via manifest CAS. |
 | WAL retention | `CompactionOutcome.wal_segments|wal_floor`, `DB::prune_wal_segments_below_floor` | Uses executor-provided segments or manifest floor fallback to keep WAL GC safe. |
-| Read path | `SsTableReader::into_stream` (Parquet + mvcc + delete) | Readers keep consuming merged outputs with same sidecar schema. |
+| Read path | `SsTableReader::into_stream` (data with `_commit_ts` + delete) | Readers keep consuming merged outputs with same schema. |
 | GC hints | `CompactionOutcome.obsolete_sst_ids` | Inputs surfaced as GC candidates; actual delete worker TBD. |
 
 ### Modules and files touched

@@ -1,10 +1,11 @@
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
-use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
-use arrow_schema::SchemaRef;
+use arrow_array::{Array, RecordBatch, UInt64Array};
+use arrow_schema::{Field, Schema, SchemaRef};
 use futures::{Stream, ready};
 use parquet::{
     arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStream},
@@ -16,7 +17,7 @@ use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
-    inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
+    inmem::immutable::memtable::{MVCC_COMMIT_COL, MvccColumns},
     key::KeyTsViewRaw,
     mvcc::Timestamp,
     query::stream::Order,
@@ -37,16 +38,14 @@ pub enum SstableScanError {
 }
 
 pin_project! {
-    pub(crate) struct SstableScan<'t> {
-        #[pin]
-        data_stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
-        #[pin]
-        mvcc_stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
-        iter: Option<RecordBatchIterator<'t>>,
-        dyn_schema: DynSchema,
-        projection: DynProjection,
-        extractor: &'t dyn KeyProjection,
-        order: Option<Order>,
+pub(crate) struct SstableScan<'t> {
+    #[pin]
+    data_stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
+    iter: Option<RecordBatchIterator<'t>>,
+    dyn_schema: DynSchema,
+    projection: DynProjection,
+    extractor: &'t dyn KeyProjection,
+    order: Option<Order>,
     }
 }
 
@@ -54,19 +53,26 @@ impl<'t> SstableScan<'t> {
     #[allow(dead_code)]
     pub fn new(
         data_stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
-        mvcc_stream: ParquetRecordBatchStream<Box<dyn AsyncFileReader>>,
         schema: SchemaRef,
         extractor: &'t dyn KeyProjection,
         projection_indices: Vec<usize>,
         order: Option<Order>,
     ) -> Result<Self, SstableScanError> {
-        let dyn_schema = DynSchema::from_ref(schema.clone());
-        let projection = DynProjection::from_indices(schema.as_ref(), projection_indices)
+        let has_commit = schema.fields().iter().any(|f| f.name() == MVCC_COMMIT_COL);
+        let physical_schema = if has_commit {
+            schema
+        } else {
+            let mut fields = schema.fields().to_vec();
+            fields.push(Field::new(MVCC_COMMIT_COL, arrow_schema::DataType::UInt64, false).into());
+            Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+        };
+
+        let dyn_schema = DynSchema::from_ref(physical_schema.clone());
+        let projection = DynProjection::from_indices(physical_schema.as_ref(), projection_indices)
             .map_err(crate::extractor::map_view_err)?;
 
         Ok(Self {
             data_stream,
-            mvcc_stream,
             iter: None,
             dyn_schema,
             projection,
@@ -93,12 +99,11 @@ impl<'t> Stream for SstableScan<'t> {
                 }
             } else {
                 let data = ready!(this.data_stream.as_mut().poll_next(cx)).transpose()?;
-                let mvcc = ready!(this.mvcc_stream.as_mut().poll_next(cx)).transpose()?;
-                let (data, mvcc) = match (data, mvcc) {
-                    (Some(d), Some(m)) => (d, m),
-                    _ => return Poll::Ready(None),
+                let data = match data {
+                    Some(d) => d,
+                    None => return Poll::Ready(None),
                 };
-                let mvcc = decode_mvcc_batch(&mvcc)?;
+                let mvcc = decode_mvcc_from_data(&data)?;
                 let dyn_schema = this.dyn_schema.clone();
                 let projection = this.projection.clone();
                 let extractor = *this.extractor;
@@ -220,46 +225,25 @@ impl<'t> Iterator for RecordBatchIterator<'t> {
     }
 }
 
-fn decode_mvcc_batch(batch: &RecordBatch) -> Result<MvccColumns, SstableScanError> {
-    let schema = batch.schema();
-    if schema.fields().len() != 2
-        || schema.field(0).name() != MVCC_COMMIT_COL
-        || schema.field(1).name() != MVCC_TOMBSTONE_COL
-    {
-        return Err(SstableScanError::Parquet(ParquetError::ArrowError(
-            "mvcc sidecar columns malformed".into(),
-        )));
-    }
-    let commit = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
+fn decode_mvcc_from_data(batch: &RecordBatch) -> Result<MvccColumns, SstableScanError> {
+    let commit_binding = batch.column_by_name(MVCC_COMMIT_COL);
+    let commit = commit_binding
+        .as_ref()
+        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
         .ok_or_else(|| {
             SstableScanError::Parquet(ParquetError::ArrowError(
-                "mvcc commit column not UInt64".into(),
+                "commit_ts column missing or not UInt64".into(),
             ))
         })?;
-    let tombstone = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| {
-            SstableScanError::Parquet(ParquetError::ArrowError(
-                "mvcc tombstone column not Boolean".into(),
-            ))
-        })?;
-    if commit.null_count() > 0 || tombstone.null_count() > 0 {
+    if commit.null_count() > 0 {
         return Err(SstableScanError::Parquet(ParquetError::ArrowError(
-            "mvcc sidecar contains nulls".into(),
+            "commit_ts column contains nulls".into(),
         )));
     }
     let mut commit_ts = Vec::with_capacity(commit.len());
     for i in 0..commit.len() {
         commit_ts.push(Timestamp::new(commit.value(i)));
     }
-    let mut tombstones = Vec::with_capacity(tombstone.len());
-    for i in 0..tombstone.len() {
-        tombstones.push(tombstone.value(i));
-    }
+    let tombstones = vec![false; commit.len()];
     Ok(MvccColumns::new(commit_ts, tombstones))
 }

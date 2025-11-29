@@ -89,6 +89,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
         .wal_sync_policy(WalSyncPolicy::Always)
         .wal_retention_bytes(Some(1 << 20))
         .build()
+        .await
         .map_err(|err| format!("failed to build S3-backed DB: {err}"))?;
 
     let wal_cfg: WalConfig = db
@@ -123,7 +124,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
                 let expected_rows = payload.batch.num_rows();
 
                 if let Some(hint) = payload.commit_ts_hint {
-                    assert!(hint.get() >= 0, "commit ts hint should be non-negative");
+                    assert!(hint.get() > 0, "commit ts hint should be positive");
                 }
 
                 let commit_column = payload

@@ -1,15 +1,13 @@
-# RFC: MVCC Sidecar Storage for Immutable Segments
+# RFC: MVCC Sidecar Storage for Immutable Segments (superseded)
 
-- Status: Draft
+- Status: Superseded by lean layout (data embeds `_commit_ts`; delete sidecar only)
 - Authors: Tonbo storage team
 - Created: 2025-10-28
 - Area: Storage engine, MVCC, WAL, SSTable, Arrow interoperability
 
 ## Summary
 
-- Keep `_commit_ts` alongside row payloads (as they already travel in `MvccColumns`) but move delete intent tracking into a dedicated, key-only sidecar so we never fabricate placeholder rows.
-- Introduce explicit delete sidecar objects (Arrow/Parquet) that travel with each immutable segment and SST, referenced by the manifest.
-- Refactor ingestion, WAL encoding, and read path to operate on `(RecordBatch, MvccColumns)` for upserts plus `DeleteBatch` sidecars for tombstones, preserving MVCC semantics (latest-wins, snapshot visibility).
+This RFC is superseded by the lean SST layout now implemented in-code: `_commit_ts` is stored as a column in the data Parquet, and only a key-only delete sidecar (`.delete.parquet`) is emitted when tombstones exist. The separate MVCC sidecar (`.mvcc.parquet`) described below is no longer used. The historical content is retained for context.
 
 ## Motivation
 

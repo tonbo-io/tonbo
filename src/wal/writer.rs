@@ -139,14 +139,16 @@ where
     let queue_depth = Arc::new(AtomicUsize::new(0));
 
     let fut = run_writer_loop::<E>(
-        Arc::clone(&exec),
-        storage,
-        cfg,
-        metrics,
+        WriterLoopInit {
+            exec: Arc::clone(&exec),
+            storage,
+            cfg,
+            metrics,
+            queue_depth: Arc::clone(&queue_depth),
+            initial_segment_seq,
+            initial_frame_seq,
+        },
         receiver,
-        Arc::clone(&queue_depth),
-        initial_segment_seq,
-        initial_frame_seq,
     );
 
     let join = exec.spawn(fut);
@@ -158,20 +160,32 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_writer_loop<E>(
+struct WriterLoopInit<E: Executor> {
     exec: Arc<E>,
     storage: WalStorage,
     cfg: WalConfig,
     metrics: Arc<E::RwLock<WalMetrics>>,
-    mut receiver: mpsc::Receiver<WriterMsg>,
     queue_depth: Arc<AtomicUsize>,
     initial_segment_seq: u64,
     initial_frame_seq: u64,
+}
+
+async fn run_writer_loop<E>(
+    init: WriterLoopInit<E>,
+    mut receiver: mpsc::Receiver<WriterMsg>,
 ) -> WalResult<()>
 where
     E: Executor + Timer,
 {
+    let WriterLoopInit {
+        exec,
+        storage,
+        cfg,
+        metrics,
+        queue_depth,
+        initial_segment_seq,
+        initial_frame_seq,
+    } = init;
     let mut ctx: WriterContext<E> = WriterContext::new(
         exec,
         storage,
@@ -1269,14 +1283,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1368,14 +1384,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1457,14 +1475,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1585,14 +1605,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1656,14 +1678,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1761,14 +1785,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1832,14 +1858,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1916,14 +1944,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage_writer,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage: storage_writer,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -1977,12 +2007,11 @@ mod tests {
             .expect("ack ok");
         assert_eq!(ack.last_seq, frame::INITIAL_FRAME_SEQ + 1);
 
-        let rotate_result = rotate_cell
+        rotate_cell
             .borrow()
             .clone()
             .expect("rotate result")
             .expect("rotate ok");
-        assert_eq!(rotate_result, ());
 
         let writer_result = result_cell.borrow().clone().expect("writer result");
         assert!(writer_result.is_ok());
@@ -2042,14 +2071,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage_writer,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage: storage_writer,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);
@@ -2137,14 +2168,16 @@ mod tests {
         spawner
             .spawn_local(async move {
                 let result = run_writer_loop::<BlockingExecutor>(
-                    Arc::new(BlockingExecutor::default()),
-                    storage_writer,
-                    cfg,
-                    Arc::clone(&metrics),
+                    WriterLoopInit {
+                        exec: Arc::new(BlockingExecutor::default()),
+                        storage: storage_writer,
+                        cfg,
+                        metrics: Arc::clone(&metrics),
+                        queue_depth: queue_depth_writer,
+                        initial_segment_seq: 0,
+                        initial_frame_seq: frame::INITIAL_FRAME_SEQ,
+                    },
                     receiver,
-                    queue_depth_writer,
-                    0,
-                    frame::INITIAL_FRAME_SEQ,
                 )
                 .await;
                 *result_cell_clone.borrow_mut() = Some(result);

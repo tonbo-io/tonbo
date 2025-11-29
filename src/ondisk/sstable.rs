@@ -10,9 +10,9 @@
 //! `docs/overview.md`/RFC 0005/0006. Readers will stream via Parquet async
 //! reader with projection + page/index pruning; no eager whole-file loads.
 
-use std::{collections::HashMap, convert::TryFrom, fmt, marker::PhantomData, sync::Arc};
+use std::{convert::TryFrom, fmt, marker::PhantomData, sync::Arc};
 
-use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt32Array, UInt64Array};
+use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::take::take as arrow_take;
 use fusio::{
@@ -23,7 +23,6 @@ use fusio::{
 };
 use fusio_parquet::{reader::AsyncReader, writer::AsyncWriter};
 use futures::stream::{self, BoxStream, StreamExt};
-use once_cell::sync::Lazy;
 use parquet::{
     arrow::{
         ProjectionMask,
@@ -42,60 +41,15 @@ use crate::{
     id::FileId,
     inmem::immutable::{
         Immutable,
-        memtable::{DeleteSidecar, MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
+        memtable::{DeleteSidecar, MVCC_COMMIT_COL, MvccColumns},
     },
     key::{KeyOwned, KeyOwnedError},
     manifest::ManifestError,
     mode::Mode,
     mvcc::Timestamp,
-    ondisk::merge::{
-        decode_delete_sidecar, extract_delete_key_at, extract_key_at, parse_mvcc_columns,
-    },
+    ondisk::merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
     query::Predicate,
 };
-
-const MVCC_SCHEMA_VERSION_KEY: &str = "tonbo.mvcc.version";
-const MVCC_SCHEMA_VERSION_V1: &str = "1";
-
-pub(crate) static MVCC_SIDECAR_SCHEMA_V1: Lazy<SchemaRef> = Lazy::new(|| {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MVCC_SCHEMA_VERSION_KEY.to_string(),
-        MVCC_SCHEMA_VERSION_V1.to_string(),
-    );
-    Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
-            Field::new(MVCC_TOMBSTONE_COL, DataType::Boolean, false),
-        ],
-        metadata,
-    ))
-});
-
-fn encode_mvcc_sidecar(mvcc: &MvccColumns) -> Result<RecordBatch, SsTableError> {
-    let commit_values = UInt64Array::from_iter_values(mvcc.commit_ts.iter().map(|ts| ts.get()));
-    let tombstone_values = BooleanArray::from(mvcc.tombstone.clone());
-    RecordBatch::try_new(
-        Arc::clone(&MVCC_SIDECAR_SCHEMA_V1),
-        vec![
-            Arc::new(commit_values) as ArrayRef,
-            Arc::new(tombstone_values) as ArrayRef,
-        ],
-    )
-    .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))
-}
-
-fn validate_mvcc_schema(schema: &Schema) -> Result<(), SsTableError> {
-    match schema.metadata().get(MVCC_SCHEMA_VERSION_KEY) {
-        Some(version) if version == MVCC_SCHEMA_VERSION_V1 => Ok(()),
-        Some(other) => Err(SsTableError::Parquet(ParquetError::ArrowError(format!(
-            "unsupported mvcc sidecar schema version {other}"
-        )))),
-        None => Err(SsTableError::Parquet(ParquetError::ArrowError(
-            "mvcc sidecar schema missing version metadata".to_string(),
-        ))),
-    }
-}
 
 /// Identifier for an SSTable stored on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -238,7 +192,6 @@ pub struct SsTableDescriptor {
     stats: Option<SsTableStats>,
     wal_ids: Option<Vec<FileId>>,
     data_path: Option<Path>,
-    mvcc_path: Option<Path>,
     delete_path: Option<Path>,
 }
 
@@ -251,7 +204,6 @@ impl SsTableDescriptor {
             stats: None,
             wal_ids: None,
             data_path: None,
-            mvcc_path: None,
             delete_path: None,
         }
     }
@@ -269,14 +221,8 @@ impl SsTableDescriptor {
     }
 
     /// Attach the storage paths for the data and MVCC sidecar files.
-    pub fn with_storage_paths(
-        mut self,
-        data_path: Path,
-        mvcc_path: Path,
-        delete_path: Option<Path>,
-    ) -> Self {
+    pub fn with_storage_paths(mut self, data_path: Path, delete_path: Option<Path>) -> Self {
         self.data_path = Some(data_path);
-        self.mvcc_path = Some(mvcc_path);
         self.delete_path = delete_path;
         self
     }
@@ -304,11 +250,6 @@ impl SsTableDescriptor {
     /// Relative path to the SSTable payload file.
     pub fn data_path(&self) -> Option<&Path> {
         self.data_path.as_ref()
-    }
-
-    /// Relative path to the MVCC sidecar file.
-    pub fn mvcc_path(&self) -> Option<&Path> {
-        self.mvcc_path.as_ref()
     }
 
     /// Relative path to the delete sidecar file, when present.
@@ -476,8 +417,7 @@ impl SsTableStats {
 /// Parquet writer facade that streams staged immutables into an SST file.
 #[derive(Clone, Debug)]
 struct StagedSegment {
-    data: RecordBatch,
-    mvcc: MvccColumns,
+    data_with_commit: RecordBatch,
     deletes: DeleteSidecar,
 }
 
@@ -548,9 +488,10 @@ where
         self.staged.segments += 1;
         self.staged.rows += data_rows;
         self.staged.tombstones += segment_tombstones;
+        let mvcc = segment.mvcc_columns().clone();
+        let data_with_commit = append_commit_column(segment.storage().clone(), &mvcc)?;
         let staged_segment = StagedSegment {
-            data: segment.storage().clone(),
-            mvcc: segment.mvcc_columns().clone(),
+            data_with_commit,
             deletes: segment.delete_sidecar().clone(),
         };
         self.segments.push(staged_segment);
@@ -576,13 +517,7 @@ where
             let first = extract_key_at(&batch.data, extractor, 0)?;
             let last = extract_key_at(&batch.data, extractor, data_rows - 1)?;
             self.staged.update_key_bounds(&first, &last);
-            let commits = batch
-                .mvcc
-                .column_by_name(MVCC_COMMIT_COL)
-                .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
-                .ok_or(SsTableError::SidecarMismatch(
-                    "mvcc commit_ts column missing",
-                ))?;
+            let commits = commit_ts_column(&batch.data)?;
             for idx in 0..data_rows {
                 let ts = Timestamp::new(commits.value(idx));
                 seg_min_ts = Some(seg_min_ts.map(|t| std::cmp::min(t, ts)).unwrap_or(ts));
@@ -619,16 +554,16 @@ where
         self.staged.rows += data_rows;
         self.staged.tombstones += segment_tombstones;
 
-        let mvcc = parse_mvcc_columns(&batch.mvcc)?;
+        parse_mvcc_columns_from_data(&batch.data)?;
         let deletes = if let Some(delete_batch) = &batch.delete {
             decode_delete_sidecar(delete_batch, extractor)?
         } else {
             DeleteSidecar::empty(&extractor.key_schema())
         };
 
+        // Data already carries the `_commit_ts` column when coming from an SST stream.
         let staged_segment = StagedSegment {
-            data: batch.data.clone(),
-            mvcc,
+            data_with_commit: batch.data.clone(),
             deletes,
         };
         self.segments.push(staged_segment);
@@ -644,7 +579,7 @@ where
         for segment in &self.segments {
             ctx.write_segment(segment).await?;
         }
-        let (data_path, mvcc_path, delete_path, data_bytes) = ctx.finish().await?;
+        let (data_path, delete_path, data_bytes) = ctx.finish().await?;
         let stats = SsTableStats::from_staged(
             self.staged,
             usize::try_from(data_bytes).unwrap_or(usize::MAX),
@@ -652,7 +587,7 @@ where
         Ok(SsTable::new(
             self.descriptor
                 .with_stats(stats)
-                .with_storage_paths(data_path, mvcc_path, delete_path)
+                .with_storage_paths(data_path, delete_path)
                 .with_wal_ids(self.wal_ids),
         ))
     }
@@ -675,13 +610,59 @@ fn writer_properties(compression: SsTableCompression) -> WriterProperties {
     builder.build()
 }
 
+/// Append the `_commit_ts` column to a record batch for persistence.
+fn append_commit_column(
+    batch: RecordBatch,
+    mvcc: &MvccColumns,
+) -> Result<RecordBatch, SsTableError> {
+    if mvcc.commit_ts.len() != batch.num_rows() {
+        return Err(SsTableError::SidecarMismatch(
+            "commit_ts length mismatch data rows",
+        ));
+    }
+    let commit_values = UInt64Array::from_iter_values(mvcc.commit_ts.iter().map(|ts| ts.get()));
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(commit_values) as ArrayRef);
+    let new_schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        batch.schema().metadata().clone(),
+    ));
+    RecordBatch::try_new(new_schema, columns)
+        .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))
+}
+
+fn commit_ts_column(batch: &RecordBatch) -> Result<Arc<UInt64Array>, SsTableError> {
+    batch
+        .column_by_name(MVCC_COMMIT_COL)
+        .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
+        .map(|col| Arc::new(col.clone()))
+        .ok_or(SsTableError::SidecarMismatch(
+            "commit_ts column missing or wrong type",
+        ))
+}
+
+/// Reconstruct MVCC metadata from a data batch that already carries `_commit_ts`.
+fn parse_mvcc_columns_from_data(batch: &RecordBatch) -> Result<MvccColumns, SsTableError> {
+    let commit_col = commit_ts_column(batch)?;
+    if commit_col.null_count() > 0 {
+        return Err(SsTableError::SidecarMismatch("commit_ts contains nulls"));
+    }
+    let commits: Vec<Timestamp> = commit_col
+        .values()
+        .iter()
+        .map(|v| Timestamp::new(*v))
+        .collect();
+    let tombstone = vec![false; commits.len()];
+    Ok(MvccColumns::new(commits, tombstone))
+}
+
 struct WriteContext {
     fs: Arc<dyn DynFs>,
     data_path: Path,
-    mvcc_path: Path,
     delete_path: Path,
     data_writer: Option<AsyncArrowWriter<AsyncWriter>>,
-    mvcc_writer: Option<AsyncArrowWriter<AsyncWriter>>,
     delete_writer: Option<AsyncArrowWriter<AsyncWriter>>,
     delete_written: bool,
     compression: SsTableCompression,
@@ -703,11 +684,6 @@ impl WriteContext {
             .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
         let data_path = dir_path.child(data_part);
 
-        let mvcc_file_name = format!("{:020}.mvcc.parquet", descriptor.id().raw());
-        let mvcc_part = PathPart::parse(&mvcc_file_name)
-            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
-        let mvcc_path = dir_path.child(mvcc_part);
-
         let delete_file_name = format!("{:020}.delete.parquet", descriptor.id().raw());
         let delete_part = PathPart::parse(&delete_file_name)
             .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
@@ -717,31 +693,26 @@ impl WriteContext {
             .create(true)
             .write(true)
             .truncate(true);
-        let mvcc_options = OpenOptions::default()
-            .create(true)
-            .write(true)
-            .truncate(true);
         let data_file = fs.open_options(&data_path, data_options).await?;
-        let mvcc_file = fs.open_options(&mvcc_path, mvcc_options).await?;
+
+        // Extend user schema with commit_ts for on-disk persistence, preserving metadata.
+        let mut fields = config.schema().fields().to_vec();
+        fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
+        let data_schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            config.schema().metadata().clone(),
+        ));
 
         let data_writer = AsyncArrowWriter::try_new(
             AsyncWriter::new(data_file),
-            config.schema().clone(),
-            Some(writer_properties(config.compression())),
-        )?;
-
-        let mvcc_writer = AsyncArrowWriter::try_new(
-            AsyncWriter::new(mvcc_file),
-            Arc::clone(&MVCC_SIDECAR_SCHEMA_V1),
+            data_schema,
             Some(writer_properties(config.compression())),
         )?;
 
         Ok(Self {
             fs,
             data_path,
-            mvcc_path,
             data_writer: Some(data_writer),
-            mvcc_writer: Some(mvcc_writer),
             delete_path,
             delete_writer: None,
             delete_written: false,
@@ -751,16 +722,7 @@ impl WriteContext {
 
     async fn write_segment(&mut self, segment: &StagedSegment) -> Result<(), SsTableError> {
         if let Some(writer) = self.data_writer.as_mut() {
-            writer.write(&segment.data).await?;
-        } else {
-            return Err(SsTableError::WriterClosed);
-        }
-
-        let sidecar_batch = encode_mvcc_sidecar(&segment.mvcc)?;
-        validate_mvcc_schema(sidecar_batch.schema().as_ref())?;
-
-        if let Some(writer) = self.mvcc_writer.as_mut() {
-            writer.write(&sidecar_batch).await?;
+            writer.write(&segment.data_with_commit).await?;
         } else {
             return Err(SsTableError::WriterClosed);
         }
@@ -797,16 +759,12 @@ impl WriteContext {
         }
     }
 
-    async fn finish(mut self) -> Result<(Path, Path, Option<Path>, u64), SsTableError> {
+    async fn finish(mut self) -> Result<(Path, Option<Path>, u64), SsTableError> {
         if let Some(writer) = self.data_writer.take() {
-            writer.close().await?;
-        }
-        if let Some(writer) = self.mvcc_writer.take() {
             writer.close().await?;
         }
 
         let data_path = self.data_path.clone();
-        let mvcc_path = self.mvcc_path.clone();
         if let Some(writer) = self.delete_writer.take() {
             writer.close().await?;
         }
@@ -823,16 +781,14 @@ impl WriteContext {
             None
         };
 
-        Ok((data_path, mvcc_path, delete_path, data_bytes))
+        Ok((data_path, delete_path, data_bytes))
     }
 }
 
 impl Drop for WriteContext {
     fn drop(&mut self) {
         debug_assert!(
-            self.data_writer.is_none()
-                && self.mvcc_writer.is_none()
-                && self.delete_writer.is_none(),
+            self.data_writer.is_none() && self.delete_writer.is_none(),
             "WriteContext dropped without closing writers"
         );
     }
@@ -914,13 +870,7 @@ impl<M: Mode> SsTableReader<M> {
             self.descriptor.data_path().cloned().ok_or_else(|| {
                 SsTableError::InvalidPath("missing data path on descriptor".into())
             })?;
-        let mvcc_path =
-            self.descriptor.mvcc_path().cloned().ok_or_else(|| {
-                SsTableError::InvalidPath("missing mvcc path on descriptor".into())
-            })?;
-
         let data_stream = Box::pin(open_parquet_stream(fs.clone(), data_path, None).await?);
-        let mvcc_stream = Box::pin(open_parquet_stream(fs.clone(), mvcc_path, None).await?);
         let delete_stream = if let Some(path) = self.descriptor.delete_path() {
             Some(Box::pin(open_parquet_stream(fs, path.clone(), None).await?))
         } else {
@@ -929,17 +879,11 @@ impl<M: Mode> SsTableReader<M> {
 
         let schema = self.config.schema().clone();
         let stream = stream::try_unfold(
-            (data_stream, mvcc_stream, delete_stream),
-            move |(mut data_stream, mut mvcc_stream, mut delete_stream)| {
+            (data_stream, delete_stream),
+            move |(mut data_stream, mut delete_stream)| {
                 let schema = schema.clone();
                 async move {
                     let data_batch = data_stream
-                        .as_mut()
-                        .next()
-                        .await
-                        .transpose()
-                        .map_err(SsTableError::Parquet)?;
-                    let mvcc_batch = mvcc_stream
                         .as_mut()
                         .next()
                         .await
@@ -956,35 +900,23 @@ impl<M: Mode> SsTableReader<M> {
                         None
                     };
 
-                    match (data_batch, mvcc_batch, delete_batch) {
-                        (None, None, None) => Ok(None),
-                        (Some(data), Some(mvcc), delete) => {
-                            if data.num_rows() != mvcc.num_rows() {
-                                return Err(SsTableError::SidecarMismatch(
-                                    "mvcc/data row count mismatch",
-                                ));
-                            }
-                            let next_state = (data_stream, mvcc_stream, delete_stream);
-                            Ok(Some((
-                                SsTableStreamBatch { data, mvcc, delete },
-                                next_state,
-                            )))
+                    match (data_batch, delete_batch) {
+                        (None, None) => Ok(None),
+                        (Some(data), delete) => {
+                            let next_state = (data_stream, delete_stream);
+                            Ok(Some((SsTableStreamBatch { data, delete }, next_state)))
                         }
-                        (None, None, Some(delete)) => {
+                        (None, Some(delete)) => {
                             let empty_data = RecordBatch::new_empty(schema.clone());
-                            let empty_mvcc =
-                                RecordBatch::new_empty(Arc::clone(&MVCC_SIDECAR_SCHEMA_V1));
-                            let next_state = (data_stream, mvcc_stream, delete_stream);
+                            let next_state = (data_stream, delete_stream);
                             Ok(Some((
                                 SsTableStreamBatch {
                                     data: empty_data,
-                                    mvcc: empty_mvcc,
                                     delete: Some(delete),
                                 },
                                 next_state,
                             )))
                         }
-                        _ => Err(SsTableError::SidecarMismatch("mvcc/data batch count")),
                     }
                 }
             },
@@ -1072,15 +1004,18 @@ mod tests {
         )
         .expect("batch2");
 
+        let mvcc1 = MvccColumns::new(vec![Timestamp::MIN], vec![false]);
+        let mvcc2 = MvccColumns::new(vec![Timestamp::MIN], vec![false]);
+        let batch1 = append_commit_column(batch1, &mvcc1).expect("commit");
+        let batch2 = append_commit_column(batch2, &mvcc2).expect("commit");
+
         let mut source = SsTableMergeSource::<DynMode>::with_batches(vec![
             SsTableStreamBatch {
                 data: batch1.clone(),
-                mvcc: RecordBatch::new_empty(Arc::clone(&MVCC_SIDECAR_SCHEMA_V1)),
                 delete: None,
             },
             SsTableStreamBatch {
                 data: batch2.clone(),
-                mvcc: RecordBatch::new_empty(Arc::clone(&MVCC_SIDECAR_SCHEMA_V1)),
                 delete: None,
             },
         ]);
@@ -1161,11 +1096,17 @@ mod tests {
         assert_eq!(merged_stats.rows, 3);
         assert_eq!(merged_stats.tombstones, 1);
         assert_eq!(
-            merged_stats.min_key.as_ref().map(|k| k.as_utf8().unwrap()),
+            merged_stats
+                .min_key
+                .as_ref()
+                .map(|k| k.as_utf8().expect("min key utf8")),
             Some("a")
         );
         assert_eq!(
-            merged_stats.max_key.as_ref().map(|k| k.as_utf8().unwrap()),
+            merged_stats
+                .max_key
+                .as_ref()
+                .map(|k| k.as_utf8().expect("max key utf8")),
             Some("d")
         );
         assert_eq!(merged_stats.min_commit_ts, Some(Timestamp::new(1)));
@@ -1241,8 +1182,14 @@ mod tests {
         let stats = descriptor.stats().expect("stats");
         assert_eq!(stats.rows, 1);
         assert_eq!(stats.tombstones, 1);
-        assert_eq!(stats.min_key.as_ref().unwrap().as_utf8(), Some("k1"));
-        assert_eq!(stats.max_key.as_ref().unwrap().as_utf8(), Some("k2"));
+        assert_eq!(
+            stats.min_key.as_ref().expect("min key").as_utf8(),
+            Some("k1")
+        );
+        assert_eq!(
+            stats.max_key.as_ref().expect("max key").as_utf8(),
+            Some("k2")
+        );
 
         // Read merged output and validate visible rows/tombstones.
         let reader = SsTableReader::<DynMode>::open(config, descriptor.clone())
@@ -1544,10 +1491,7 @@ mod tests {
         let table = writer.finish().await.expect("finish table");
         let descriptor = table.descriptor();
         let data_path = descriptor.data_path().expect("data path present");
-        let mvcc_path = descriptor.mvcc_path().expect("mvcc path present");
         assert!(data_path.as_ref().ends_with(".parquet"));
-        assert!(mvcc_path.as_ref().ends_with(".mvcc.parquet"));
-        assert_ne!(data_path.as_ref(), mvcc_path.as_ref());
         assert!(descriptor.delete_path().is_none());
     }
 

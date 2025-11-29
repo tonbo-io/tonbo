@@ -603,11 +603,9 @@ mod tests {
         Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
     }
 
-    fn test_paths(id: u64) -> (Path, Path) {
+    fn test_paths(id: u64) -> Path {
         let base = format!("sst/L0/{id:020}");
-        let data = Path::parse(format!("{base}.parquet")).expect("parse data path");
-        let mvcc = Path::parse(format!("{base}.mvcc.parquet")).expect("parse mvcc path");
-        (data, mvcc)
+        Path::parse(format!("{base}.parquet")).expect("parse data path")
     }
 
     #[tokio::test]
@@ -620,31 +618,28 @@ mod tests {
         let wal_segment_a = WalSegmentRef::new(40, file_ids.generate(), 0, 10);
         let wal_segment_b = WalSegmentRef::new(42, file_ids.generate(), 5, 20);
         let first_wal_segments = vec![wal_segment_b.clone(), wal_segment_a.clone()];
-        let (data0a, mvcc0a) = test_paths(7);
+        let data0a = test_paths(7);
         let sst_level0_a = SstEntry::new(
             SsTableId::new(7),
             Some(SsTableStats::default()),
             Some(vec![wal_segment_b.file_id().clone()]),
             data0a.clone(),
-            mvcc0a.clone(),
             None,
         );
-        let (data0b, mvcc0b) = test_paths(8);
+        let data0b = test_paths(8);
         let sst_level0_b = SstEntry::new(
             SsTableId::new(8),
             Some(SsTableStats::default()),
             Some(vec![file_ids.generate()]),
             data0b.clone(),
-            mvcc0b.clone(),
             None,
         );
-        let (data1, mvcc1) = test_paths(21);
+        let data1 = test_paths(21);
         let sst_level1 = SstEntry::new(
             SsTableId::new(21),
             Some(SsTableStats::default()),
             Some(vec![file_ids.generate()]),
             data1.clone(),
-            mvcc1.clone(),
             None,
         );
 
@@ -705,13 +700,11 @@ mod tests {
             .find(|entry| entry.sst_id() == sst_level0_a.sst_id())
             .expect("level 0 should contain first sst");
         assert_eq!(persisted_a.data_path(), &data0a);
-        assert_eq!(persisted_a.mvcc_path(), &mvcc0a);
         let persisted_b = persisted_level0
             .iter()
             .find(|entry| entry.sst_id() == sst_level0_b.sst_id())
             .expect("level 0 should contain second sst");
         assert_eq!(persisted_b.data_path(), &data0b);
-        assert_eq!(persisted_b.mvcc_path(), &mvcc0b);
         assert_eq!(
             latest_version.tombstone_watermark(),
             Some(99),
@@ -800,7 +793,6 @@ mod tests {
             .find(|entry| entry.sst_id() == sst_level1.sst_id())
             .expect("level 1 entry present");
         assert_eq!(persisted_level1.data_path(), &data1);
-        assert_eq!(persisted_level1.mvcc_path(), &mvcc1);
         assert_eq!(
             updated_version.wal_floor(),
             Some(&expected_new_floor),
@@ -990,7 +982,7 @@ mod tests {
         let manifest = bare_manifest();
         let file_ids = FileIdGenerator::default();
         let table_id = TableId::new(&file_ids);
-        let (failure_data_path, failure_mvcc_path) = test_paths(11);
+        let failure_data_path = test_paths(11);
         let err = manifest
             .apply_version_edits(
                 table_id,
@@ -1001,7 +993,6 @@ mod tests {
                         Some(SsTableStats::default()),
                         Some(vec![file_ids.generate()]),
                         failure_data_path.clone(),
-                        failure_mvcc_path.clone(),
                         None,
                     )],
                 }],
@@ -1045,17 +1036,10 @@ mod tests {
             .await
             .expect("manifest should initialize");
 
-        let (data0, mvcc0) = test_paths(30);
+        let data0 = test_paths(30);
         let edits = vec![VersionEdit::AddSsts {
             level: 0,
-            entries: vec![SstEntry::new(
-                SsTableId::new(30),
-                None,
-                None,
-                data0,
-                mvcc0,
-                None,
-            )],
+            entries: vec![SstEntry::new(SsTableId::new(30), None, None, data0, None)],
         }];
 
         manifest

@@ -93,7 +93,7 @@ pub(crate) async fn compaction_loop<M, E, CE, P>(
 /// This is a stopgap to keep compaction running until a proper scheduler/lease lands.
 /// Callers are responsible for choosing an interval and handling cancellation via the returned
 /// handle.
-#[allow(dead_code, private_bounds)]
+#[allow(dead_code)]
 pub(crate) fn spawn_compaction_loop_local<M, E, CE, P>(
     db: Weak<impl CompactionHost<M, E> + 'static>,
     planner: P,

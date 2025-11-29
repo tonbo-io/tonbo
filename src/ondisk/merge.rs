@@ -10,8 +10,8 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
 };
 
-use arrow_array::{BooleanArray, RecordBatch, UInt64Array};
-use arrow_schema::{Schema, SchemaRef};
+use arrow_array::{RecordBatch, UInt64Array};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::{StreamExt, stream};
 use parquet::errors::ParquetError;
 
@@ -19,7 +19,7 @@ use super::sstable::{SsTableReader, take_record_batch};
 use crate::{
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileId,
-    inmem::immutable::memtable::{DeleteSidecar, MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL, MvccColumns},
+    inmem::immutable::memtable::{DeleteSidecar, MVCC_COMMIT_COL},
     key::KeyOwned,
     mvcc::Timestamp,
     ondisk::sstable::{
@@ -33,10 +33,8 @@ const MVCC_SEQUENCE_COL: &str = "_sequence";
 
 /// Combined row payload (data + MVCC + delete sidecar) yielded by an SST reader.
 pub struct SsTableStreamBatch<M: crate::mode::Mode> {
-    /// User data batch for this SST slice.
+    /// User data batch for this SST slice (includes `_commit_ts` column).
     pub data: M::ImmLayout,
-    /// MVCC sidecar batch aligned with `data`.
-    pub mvcc: RecordBatch,
     /// Optional delete sidecar batch for tombstones.
     pub delete: Option<RecordBatch>,
 }
@@ -204,8 +202,8 @@ where
                         self.advance(kind);
                         continue;
                     }
-                    let commit_ts = commit_ts_at(&batch.mvcc, self.data_idx)?;
-                    let seq = sequence_at(&batch.mvcc, self.data_idx)?;
+                    let commit_ts = commit_ts_at(&batch.data, self.data_idx)?;
+                    let seq = sequence_at(&batch.data, self.data_idx)?;
                     heap.push(HeapEntry {
                         key,
                         commit_ts,
@@ -278,8 +276,7 @@ where
         };
         let index = [row_idx as u32];
         let data = take_record_batch(&batch.data, &index)?;
-        let mvcc = take_record_batch(&batch.mvcc, &index)?;
-        output.push_data(data, mvcc);
+        output.push_data(data);
         Ok(())
     }
 
@@ -304,7 +301,6 @@ where
 struct OutputState<M: crate::mode::Mode> {
     batches: Vec<SsTableStreamBatch<M>>,
     data_parts: Vec<RecordBatch>,
-    mvcc_parts: Vec<RecordBatch>,
     delete_parts: Vec<RecordBatch>,
     pending_rows: usize,
     rows: usize,
@@ -324,7 +320,6 @@ where
         Self {
             batches: Vec::new(),
             data_parts: Vec::new(),
-            mvcc_parts: Vec::new(),
             delete_parts: Vec::new(),
             pending_rows: 0,
             rows: 0,
@@ -337,12 +332,11 @@ where
         }
     }
 
-    fn push_data(&mut self, data: RecordBatch, mvcc: RecordBatch) {
+    fn push_data(&mut self, data: RecordBatch) {
         self.pending_rows += data.num_rows();
         self.rows += data.num_rows();
-        self.bytes += data.get_array_memory_size() + mvcc.get_array_memory_size();
+        self.bytes += data.get_array_memory_size();
         self.data_parts.push(data);
-        self.mvcc_parts.push(mvcc);
     }
 
     fn push_delete(&mut self, delete: RecordBatch) {
@@ -382,16 +376,17 @@ where
         if self.data_parts.is_empty() && self.delete_parts.is_empty() {
             return Ok(());
         }
-        let data_batch = if self.data_parts.is_empty() {
-            RecordBatch::new_empty(schema.clone())
+        let data_schema = if let Some(first) = self.data_parts.first() {
+            first.schema().clone()
         } else {
-            concat_batches(schema, &self.data_parts).map_err(SsTableError::Parquet)?
+            let mut fields = schema.fields().to_vec();
+            fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false).into());
+            Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
         };
-        let mvcc_batch = if self.mvcc_parts.is_empty() {
-            RecordBatch::new_empty(Arc::clone(&super::sstable::MVCC_SIDECAR_SCHEMA_V1))
+        let data_batch = if self.data_parts.is_empty() {
+            RecordBatch::new_empty(data_schema.clone())
         } else {
-            concat_batches(&super::sstable::MVCC_SIDECAR_SCHEMA_V1, &self.mvcc_parts)
-                .map_err(SsTableError::Parquet)?
+            concat_batches(&data_schema, &self.data_parts).map_err(SsTableError::Parquet)?
         };
         let delete_batch = if self.delete_parts.is_empty() {
             None
@@ -401,11 +396,9 @@ where
         };
         self.batches.push(SsTableStreamBatch {
             data: data_batch,
-            mvcc: mvcc_batch,
             delete: delete_batch,
         });
         self.data_parts.clear();
-        self.mvcc_parts.clear();
         self.delete_parts.clear();
         self.pending_rows = 0;
         Ok(())
@@ -414,7 +407,6 @@ where
     fn has_pending(&self) -> bool {
         !self.batches.is_empty()
             || !self.data_parts.is_empty()
-            || !self.mvcc_parts.is_empty()
             || !self.delete_parts.is_empty()
             || self.rows > 0
             || self.tombstones > 0
@@ -453,7 +445,6 @@ where
     fn reset_for_next(&mut self) {
         self.batches.clear();
         self.data_parts.clear();
-        self.mvcc_parts.clear();
         self.delete_parts.clear();
         self.pending_rows = 0;
         self.rows = 0;
@@ -759,13 +750,11 @@ pub(crate) fn extract_delete_key_at(
     KeyOwned::from_key_row(&key_row).map_err(SsTableError::KeyOwned)
 }
 
-pub(crate) fn commit_ts_at(mvcc: &RecordBatch, row: usize) -> Result<Timestamp, SsTableError> {
-    let commit_col = mvcc
+pub(crate) fn commit_ts_at(batch: &RecordBatch, row: usize) -> Result<Timestamp, SsTableError> {
+    let commit_col = batch
         .column_by_name(MVCC_COMMIT_COL)
         .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
-        .ok_or(SsTableError::SidecarMismatch(
-            "mvcc commit_ts column missing",
-        ))?;
+        .ok_or(SsTableError::SidecarMismatch("commit_ts column missing"))?;
     if row >= commit_col.len() {
         return Err(SsTableError::KeyExtract(KeyExtractError::RowOutOfBounds(
             row,
@@ -794,8 +783,8 @@ pub(crate) fn commit_ts_at_delete(
     Ok(Timestamp::new(commit_col.value(row)))
 }
 
-pub(crate) fn sequence_at(mvcc: &RecordBatch, row: usize) -> Result<u64, SsTableError> {
-    if let Some(seq_col) = mvcc
+pub(crate) fn sequence_at(batch: &RecordBatch, row: usize) -> Result<u64, SsTableError> {
+    if let Some(seq_col) = batch
         .column_by_name(MVCC_SEQUENCE_COL)
         .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
     {
@@ -824,29 +813,6 @@ pub(crate) fn sequence_at_delete(batch: &RecordBatch, row: usize) -> Result<u64,
         return Ok(seq_col.value(row));
     }
     Ok(row as u64)
-}
-
-pub(crate) fn parse_mvcc_columns(batch: &RecordBatch) -> Result<MvccColumns, SsTableError> {
-    let commit_col = batch
-        .column_by_name(MVCC_COMMIT_COL)
-        .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
-        .ok_or(SsTableError::SidecarMismatch(
-            "mvcc commit_ts column missing",
-        ))?;
-    let tombstone_col = batch
-        .column_by_name(MVCC_TOMBSTONE_COL)
-        .and_then(|arr| arr.as_any().downcast_ref::<BooleanArray>())
-        .ok_or(SsTableError::SidecarMismatch(
-            "mvcc tombstone column missing",
-        ))?;
-
-    let commit_ts: Vec<Timestamp> = (0..commit_col.len())
-        .map(|idx| Timestamp::new(commit_col.value(idx)))
-        .collect();
-    let tombstone: Vec<bool> = (0..tombstone_col.len())
-        .map(|idx| tombstone_col.value(idx))
-        .collect();
-    Ok(MvccColumns::new(commit_ts, tombstone))
 }
 
 pub(crate) fn decode_delete_sidecar(

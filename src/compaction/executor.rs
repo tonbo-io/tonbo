@@ -163,10 +163,6 @@ impl CompactionOutcome {
                 .data_path()
                 .cloned()
                 .ok_or(CompactionError::MissingPath("data"))?;
-            let mvcc_path = desc
-                .mvcc_path()
-                .cloned()
-                .ok_or(CompactionError::MissingPath("mvcc"))?;
             let delete_path = desc.delete_path().cloned();
             if let Some(stats) = desc.stats()
                 && let Some(ts) = stats.max_commit_ts
@@ -181,7 +177,6 @@ impl CompactionOutcome {
                 desc.stats().cloned(),
                 desc.wal_ids().map(|ids| ids.to_vec()),
                 data_path,
-                mvcc_path,
                 delete_path,
             );
             add_ssts.push(entry);
@@ -358,11 +353,7 @@ impl CompactionExecutor for LocalCompactionExecutor {
                 let data_path = desc
                     .data_path()
                     .ok_or(CompactionError::MissingPath("data"))?;
-                let mvcc_path = desc
-                    .mvcc_path()
-                    .ok_or(CompactionError::MissingPath("mvcc"))?;
                 fs.remove(data_path).await.map_err(SsTableError::from)?;
-                fs.remove(mvcc_path).await.map_err(SsTableError::from)?;
                 if let Some(delete_path) = desc.delete_path() {
                     fs.remove(delete_path).await.map_err(SsTableError::from)?;
                 }
@@ -400,7 +391,6 @@ mod tests {
             Some(SsTableStats::default()),
             Some(vec![wal_id]),
             Path::from("L1/000000000000000009.parquet"),
-            Path::from("L1/000000000000000009.mvcc.parquet"),
             None,
         );
         let outcome = CompactionOutcome {
@@ -451,7 +441,6 @@ mod tests {
             .with_wal_ids(Some(vec![wal_id]))
             .with_storage_paths(
                 Path::from("L1/000000000000000011.parquet"),
-                Path::from("L1/000000000000000011.mvcc.parquet"),
                 Some(Path::from("L1/000000000000000011.delete.parquet")),
             );
         let remove = SsTableDescriptor::new(SsTableId::new(5), 0);

@@ -936,50 +936,46 @@ where
     M::Key: Eq + Hash + Clone,
     E: Executor + Timer,
 {
-    #[allow(clippy::manual_async_fn)]
-    fn enable_wal(&mut self, cfg: WalConfig) -> impl Future<Output = WalResult<WalHandle<E>>> + '_ {
-        async move {
-            let storage =
-                storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
-            let wal_state_handle = storage.load_state_handle(cfg.state_store.as_ref()).await?;
-            let wal_state_hint = wal_state_handle
-                .as_ref()
-                .and_then(|handle| handle.state().last_segment_seq);
+    async fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
+        let storage = storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());
+        let wal_state_handle = storage.load_state_handle(cfg.state_store.as_ref()).await?;
+        let wal_state_hint = wal_state_handle
+            .as_ref()
+            .and_then(|handle| handle.state().last_segment_seq);
 
-            let tail_metadata = storage.tail_metadata_with_hint(wal_state_hint).await?;
-            let next_payload_seq = tail_metadata
-                .as_ref()
-                .and_then(|meta| meta.last_provisional_id)
-                .map(|last| last.saturating_add(1))
-                .unwrap_or(frame::INITIAL_FRAME_SEQ);
-            let initial_frame_seq = tail_metadata
-                .as_ref()
-                .and_then(|meta| meta.last_frame_seq)
-                .map(|seq| seq.saturating_add(1))
-                .unwrap_or(frame::INITIAL_FRAME_SEQ);
+        let tail_metadata = storage.tail_metadata_with_hint(wal_state_hint).await?;
+        let next_payload_seq = tail_metadata
+            .as_ref()
+            .and_then(|meta| meta.last_provisional_id)
+            .map(|last| last.saturating_add(1))
+            .unwrap_or(frame::INITIAL_FRAME_SEQ);
+        let initial_frame_seq = tail_metadata
+            .as_ref()
+            .and_then(|meta| meta.last_frame_seq)
+            .map(|seq| seq.saturating_add(1))
+            .unwrap_or(frame::INITIAL_FRAME_SEQ);
 
-            let metrics = Arc::new(E::rw_lock(WalMetrics::default()));
-            let writer = writer::spawn_writer(
-                Arc::clone(self.executor()),
-                storage,
-                cfg.clone(),
-                Arc::clone(&metrics),
-                0,
-                initial_frame_seq,
-            );
-            let (sender, queue_depth, join) = writer.into_parts();
-            let handle = WalHandle::from_parts(
-                sender,
-                queue_depth,
-                join,
-                next_payload_seq,
-                Arc::clone(&metrics),
-            );
+        let metrics = Arc::new(E::rw_lock(WalMetrics::default()));
+        let writer = writer::spawn_writer(
+            Arc::clone(self.executor()),
+            storage,
+            cfg.clone(),
+            Arc::clone(&metrics),
+            0,
+            initial_frame_seq,
+        );
+        let (sender, queue_depth, join) = writer.into_parts();
+        let handle = WalHandle::from_parts(
+            sender,
+            queue_depth,
+            join,
+            next_payload_seq,
+            Arc::clone(&metrics),
+        );
 
-            self.set_wal_config(Some(cfg.clone()));
-            self.set_wal_handle(Some(handle.clone()));
-            Ok(handle)
-        }
+        self.set_wal_config(Some(cfg.clone()));
+        self.set_wal_handle(Some(handle.clone()));
+        Ok(handle)
     }
 
     fn disable_wal(&mut self) -> impl Future<Output = WalResult<()>> + '_ {

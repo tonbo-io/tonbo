@@ -270,9 +270,8 @@ impl<'a> TransactionScan<'a> {
 impl<'a> Iterator for TransactionScan<'a> {
     type Item = Result<TransactionScanEntry, DynViewError>;
 
-    #[allow(clippy::never_loop)]
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((key, mutation)) = self.iter.next() {
+        if let Some((key, mutation)) = self.iter.next() {
             match mutation {
                 DynMutation::Upsert(row) => match self.materialize_row(row) {
                     Ok(owned_row) => {

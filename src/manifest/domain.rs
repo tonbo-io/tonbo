@@ -414,8 +414,6 @@ impl VersionState {
 pub(crate) struct SstEntry {
     #[serde(with = "path_serde")]
     data_path: Path,
-    #[serde(with = "path_serde")]
-    mvcc_path: Path,
     #[serde(with = "path_serde_option")]
     delete_path: Option<Path>,
     sst_id: SsTableId,
@@ -435,12 +433,10 @@ impl SstEntry {
         stats: Option<SsTableStats>,
         wal_segments: Option<Vec<FileId>>,
         data_path: Path,
-        mvcc_path: Path,
         delete_path: Option<Path>,
     ) -> Self {
         Self {
             data_path,
-            mvcc_path,
             delete_path,
             sst_id,
             stats,
@@ -462,10 +458,6 @@ impl SstEntry {
 
     pub(crate) fn data_path(&self) -> &Path {
         &self.data_path
-    }
-
-    pub(crate) fn mvcc_path(&self) -> &Path {
-        &self.mvcc_path
     }
 
     pub(crate) fn delete_path(&self) -> Option<&Path> {
@@ -544,9 +536,6 @@ pub(crate) struct GcSstRef {
     /// Data path for the SST.
     #[serde(with = "path_serde")]
     pub data_path: Path,
-    /// MVCC sidecar path for the SST.
-    #[serde(with = "path_serde")]
-    pub mvcc_path: Path,
     /// Optional delete sidecar path for the SST.
     #[serde(with = "path_serde_option")]
     pub delete_path: Option<Path>,
