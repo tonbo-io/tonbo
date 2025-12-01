@@ -24,7 +24,7 @@ jobs:
           - macos-latest
           - windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install latest
         uses: actions-rs/toolchain@v1
         with:
@@ -74,7 +74,7 @@ jobs:
     name: Rust fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -95,7 +95,7 @@ jobs:
     name: Rust exmaples
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Rust example cache
         uses: Swatinem/rust-cache@v2
       # - name: Run datafusion example
@@ -119,7 +119,7 @@ jobs:
   #     repository-projects: write
   #   if: github.event_name == 'pull_request'
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v6
   #     - name: Install latest nightly
   #       uses: actions-rs/toolchain@v1
   #       with:
@@ -145,7 +145,7 @@ jobs:
     name: Code coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Rust
         run: rustup update stable
       - name: Rust coverage cache
