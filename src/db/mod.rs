@@ -65,7 +65,8 @@ use crate::{
         stream::{Order, ScanStream, merge::MergeStream, package::PackageStream},
     },
     transaction::{
-        Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionError, TransactionScan,
+        Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionDurability,
+        TransactionError, TransactionScan,
     },
     wal::{
         WalConfig as RuntimeWalConfig, WalError, WalHandle, WalResult,
@@ -663,12 +664,18 @@ where
     /// and key-only deletes before calling [`Transaction::commit`].
     pub async fn begin_transaction(&self) -> Result<Transaction, TransactionError> {
         let snapshot = self.begin_snapshot().await?;
+        let durability = if self.wal_handle().is_some() {
+            TransactionDurability::Durable
+        } else {
+            TransactionDurability::Volatile
+        };
         Ok(Transaction::new(
             self.mode.schema.clone(),
             self.mode.delete_schema.clone(),
             Arc::clone(&self.mode.extractor),
             snapshot,
             self.mode.commit_ack_mode,
+            durability,
         ))
     }
 

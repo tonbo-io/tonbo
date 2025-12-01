@@ -42,6 +42,15 @@ pub enum CommitAckMode {
     Fast,
 }
 
+/// Durability class for a transaction based on WAL availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionDurability {
+    /// WAL is configured; commit is crash-durable (subject to sync policy).
+    Durable,
+    /// WAL is disabled; commit mutates in-memory state only and is lost on crash/restart.
+    Volatile,
+}
+
 /// Errors surfaced while constructing a read-only snapshot.
 #[derive(Debug, Error)]
 #[allow(dead_code)]
@@ -325,6 +334,7 @@ pub struct Transaction {
     _snapshot: Snapshot,
     staged: StagedMutations,
     commit_ack_mode: CommitAckMode,
+    durability: TransactionDurability,
 }
 
 impl Transaction {
@@ -334,6 +344,7 @@ impl Transaction {
         extractor: Arc<dyn KeyProjection>,
         snapshot: Snapshot,
         commit_ack_mode: CommitAckMode,
+        durability: TransactionDurability,
     ) -> Self {
         let snapshot_ts = snapshot.read_view().read_ts();
         let key_components = extractor.key_indices().len();
@@ -345,6 +356,7 @@ impl Transaction {
             staged: StagedMutations::new(snapshot_ts),
             _snapshot: snapshot,
             commit_ack_mode,
+            durability,
         }
     }
 
@@ -361,6 +373,16 @@ impl Transaction {
     /// Number of staged mutations.
     pub fn len(&self) -> usize {
         self.staged.len()
+    }
+
+    /// Durability class for this transaction.
+    pub fn durability(&self) -> TransactionDurability {
+        self.durability
+    }
+
+    /// Returns `true` when the transaction will write through the WAL.
+    pub fn is_durable(&self) -> bool {
+        matches!(self.durability, TransactionDurability::Durable)
     }
 
     /// Abort the transaction, discarding any staged mutations without touching the database.
@@ -579,6 +601,7 @@ impl Transaction {
             staged,
             _snapshot,
             commit_ack_mode,
+            durability,
         } = self;
 
         if staged.is_empty() {
@@ -604,15 +627,7 @@ impl Transaction {
             }
         }
 
-        let wal = db
-            .wal_handle()
-            .cloned()
-            .ok_or(TransactionCommitError::WalDisabled)?;
-
         let commit_ts = db.next_commit_ts();
-        let provisional_id = wal.next_provisional_id();
-        let prev_live_floor = db.wal_live_frame_floor();
-
         let (rows, delete_keys) = staged.into_mutations();
         let mut upsert_payload = if rows.is_empty() {
             None
@@ -632,24 +647,52 @@ impl Transaction {
             )?)
         };
 
-        let upsert_refs = upsert_payload.as_ref();
-        let delete_ref = delete_payload.as_ref();
-        let tickets =
-            write_wal_transaction(&wal, provisional_id, upsert_refs, delete_ref, commit_ts).await?;
+        if let Some(wal) = db.wal_handle().cloned() {
+            let provisional_id = wal.next_provisional_id();
+            let prev_live_floor = db.wal_live_frame_floor();
+            let upsert_refs = upsert_payload.as_ref();
+            let delete_ref = delete_payload.as_ref();
+            let tickets =
+                write_wal_transaction(&wal, provisional_id, upsert_refs, delete_ref, commit_ts)
+                    .await?;
 
-        match commit_ack_mode {
-            CommitAckMode::Strict => {
-                let publish_ctx = db.txn_publish_context(prev_live_floor);
-                let wal_range = tickets.await_range().await?;
-                apply_staged_payloads(db, upsert_payload.take(), delete_payload.take(), commit_ts)?;
-                publish_ctx.finalize(wal_range).await?;
+            match commit_ack_mode {
+                CommitAckMode::Strict => {
+                    let publish_ctx = db.txn_publish_context(prev_live_floor);
+                    let wal_range = tickets.await_range().await?;
+                    apply_staged_payloads(
+                        db,
+                        upsert_payload.take(),
+                        delete_payload.take(),
+                        commit_ts,
+                    )?;
+                    publish_ctx.finalize(wal_range).await?;
+                }
+                CommitAckMode::Fast => {
+                    apply_staged_payloads(
+                        db,
+                        upsert_payload.take(),
+                        delete_payload.take(),
+                        commit_ts,
+                    )?;
+                    let publish_ctx = db.txn_publish_context(prev_live_floor);
+                    let executor = Arc::clone(db.executor());
+                    spawn_publish_task(executor, publish_ctx, tickets);
+                }
             }
-            CommitAckMode::Fast => {
-                apply_staged_payloads(db, upsert_payload.take(), delete_payload.take(), commit_ts)?;
-                let publish_ctx = db.txn_publish_context(prev_live_floor);
-                let executor = Arc::clone(db.executor());
-                spawn_publish_task(executor, publish_ctx, tickets);
+        } else {
+            if matches!(durability, TransactionDurability::Durable) {
+                eprintln!(
+                    "wal unavailable during commit; proceeding with volatile apply (data not \
+                     crash safe)"
+                );
+            } else {
+                eprintln!(
+                    "transaction commit applied without WAL; changes are volatile until process \
+                     exits"
+                );
             }
+            apply_staged_payloads(db, upsert_payload.take(), delete_payload.take(), commit_ts)?;
         }
 
         drop(key_guards);
@@ -728,9 +771,10 @@ fn clone_dyn_row(row: &DynRow) -> DynRow {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::UInt64Array;
+    use arrow_array::{Int32Array, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use fusio::executor::BlockingExecutor;
+    use futures::TryStreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
@@ -997,6 +1041,57 @@ mod tests {
             }
             other => panic!("unexpected error {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_without_wal_is_volatile_but_applies() {
+        let (mut db, _schema) = make_db().await;
+
+        let mut tx = db.begin_transaction().await.expect("tx");
+        assert_eq!(tx.durability(), TransactionDurability::Volatile);
+
+        tx.upsert(DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ]))
+        .expect("stage row");
+
+        tx.commit(&mut db)
+            .await
+            .expect("commit should succeed without wal");
+
+        let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
+        let plan = db
+            .plan_scan(&predicate, None, None, Timestamp::MAX)
+            .await
+            .expect("plan");
+        let batches = db
+            .execute_scan(plan)
+            .await
+            .expect("execute")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("collect");
+
+        let mut rows = Vec::new();
+        for batch in batches {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value col");
+            for (id, v) in ids.iter().zip(vals.iter()) {
+                if let (Some(id), Some(v)) = (id, v) {
+                    rows.push((id.to_string(), v));
+                }
+            }
+        }
+        assert_eq!(rows, vec![("k".to_string(), 1)]);
     }
 
     #[test]

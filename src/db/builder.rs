@@ -994,7 +994,7 @@ where
 impl<M, S> DbBuilder<M, S>
 where
     M: Mode + CatalogDescribe + 'static,
-    S: StorageState,
+    S: StorageState + TableNameConfigurable,
 {
     /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
     #[must_use]
@@ -1006,6 +1006,10 @@ where
     /// Materialise a [`DB`] using the accumulated builder state.
     pub async fn build(self) -> Result<DB<M, TokioExecutor>, DbBuildError> {
         let executor = Arc::new(TokioExecutor::default());
+        if S::CLASS.is_durable() {
+            // Default to recovering existing state (manifest + WAL) when present.
+            return self.recover_or_init_with_executor(executor).await;
+        }
         self.build_with_executor(executor).await
     }
 
@@ -1014,6 +1018,10 @@ where
     where
         E: Executor + Timer + Send + Sync + 'static,
     {
+        if S::CLASS.is_durable() {
+            // Durable backends should reuse existing on-disk state when available.
+            return self.recover_or_init_with_executor(executor).await;
+        }
         self.state.prepare_layout()?;
         let layout = StorageLayout::new(self.state.storage_spec())?;
         self.build_with_layout(executor, layout).await
