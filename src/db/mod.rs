@@ -10,13 +10,14 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard},
     time::{Duration, Instant},
 };
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
+#[allow(unused_imports)]
 use fusio::executor::{Executor, RwLock, Timer};
 use futures::{Stream, StreamExt, stream};
 use lockable::LockableHashMap;
@@ -47,10 +48,10 @@ use crate::{
             self, Immutable,
             memtable::{ImmutableVisibleEntry, MVCC_COMMIT_COL},
         },
-        mutable::{MutableLayout, memtable::DynRowScanEntry},
+        mutable::{DynMem, MutableLayout, memtable::DynRowScanEntry},
         policy::{SealDecision, SealPolicy, StatsProvider},
     },
-    key::KeyOwned,
+    key::{KeyOwned, KeyRow},
     manifest::{
         GcPlanState, GcSstRef, ManifestError, ManifestResult, SstEntry, TableId, TonboManifest,
         VersionEdit, VersionState, WalSegmentRef, init_in_memory_manifest,
@@ -62,7 +63,10 @@ use crate::{
     },
     query::{
         scan::{ScanPlan, projection_with_predicate},
-        stream::{Order, ScanStream, merge::MergeStream, package::PackageStream},
+        stream::{
+            Order, OwnedImmutableScan, OwnedMutableScan, ScanStream, merge::MergeStream,
+            package::PackageStream,
+        },
     },
     transaction::{
         Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionDurability,
@@ -76,6 +80,95 @@ use crate::{
         state::WalStateHandle,
     },
 };
+
+impl TxSnapshot {
+    /// Plan a scan using this snapshot for MVCC visibility and manifest pinning.
+    pub async fn plan_scan<E>(
+        &self,
+        db: &DB<DynMode, E>,
+        predicate: &Predicate,
+        projected_schema: Option<&SchemaRef>,
+        limit: Option<usize>,
+    ) -> Result<ScanPlan, DBError>
+    where
+        E: Executor + Timer,
+    {
+        let projected_schema = projected_schema.cloned();
+        let residual_predicate = Some(predicate.clone());
+        let scan_schema = if let Some(projection) = projected_schema.as_ref() {
+            projection_with_predicate(&db.mode.schema, projection, residual_predicate.as_ref())?
+        } else {
+            Arc::clone(&db.mode.schema)
+        };
+        let seal = db.seal_state_lock();
+        let prune_input: Vec<&Immutable<DynMode>> =
+            seal.immutables.iter().map(|arc| arc.as_ref()).collect();
+        let immutable_indexes = immutable::prune_segments::<DynMode>(&prune_input);
+        let read_ts = self.read_view().read_ts();
+        Ok(ScanPlan {
+            predicate: predicate.clone(),
+            immutable_indexes,
+            residual_predicate,
+            projected_schema,
+            scan_schema,
+            limit,
+            read_ts,
+            _snapshot: self.table_snapshot().clone(),
+        })
+    }
+}
+
+/// Shared handle for the dynamic mode database backed by an `Arc`.
+pub type DynDbHandle<E> = Arc<DB<DynMode, E>>;
+/// Extension methods on dynamic DB handles.
+pub trait DynDbHandleExt<E>
+where
+    E: Executor + Timer,
+{
+    /// Clone the underlying `Arc`.
+    fn clone_handle(&self) -> DynDbHandle<E>;
+
+    /// Begin a transaction using the shared handle.
+    fn begin_transaction(
+        &self,
+    ) -> impl Future<Output = Result<Transaction<E>, TransactionError>> + Send;
+}
+
+impl<E> DynDbHandleExt<E> for DynDbHandle<E>
+where
+    E: Executor + Timer,
+{
+    fn clone_handle(&self) -> DynDbHandle<E> {
+        Arc::clone(self)
+    }
+
+    fn begin_transaction(
+        &self,
+    ) -> impl Future<Output = Result<Transaction<E>, TransactionError>> + Send {
+        let handle = Arc::clone(self);
+        async move {
+            let snapshot = handle.begin_snapshot().await?;
+            let durability = if handle.wal_handle().is_some() {
+                TransactionDurability::Durable
+            } else {
+                TransactionDurability::Volatile
+            };
+            let schema = handle.mode.schema.clone();
+            let delete_schema = handle.mode.delete_schema.clone();
+            let extractor = Arc::clone(&handle.mode.extractor);
+            let commit_ack_mode = handle.mode.commit_ack_mode;
+            Ok(Transaction::new(
+                handle,
+                schema,
+                delete_schema,
+                extractor,
+                snapshot,
+                commit_ack_mode,
+                durability,
+            ))
+        }
+    }
+}
 
 type PendingWalTxns = HashMap<u64, PendingWalTxn>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
@@ -606,6 +699,22 @@ pub(crate) struct TxnWalPublishContext {
     pub(crate) prev_live_floor: Option<u64>,
 }
 
+struct SealState<M: Mode> {
+    immutables: Vec<Arc<Immutable<M>>>,
+    immutable_wal_ranges: Vec<Option<WalFrameRange>>,
+    last_seal_at: Option<Instant>,
+}
+
+impl<M: Mode> Default for SealState<M> {
+    fn default() -> Self {
+        Self {
+            immutables: Vec::new(),
+            immutable_wal_ranges: Vec::new(),
+            last_seal_at: None,
+        }
+    }
+}
+
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
@@ -618,14 +727,11 @@ where
     E: Executor + Timer + Send + Sync,
 {
     mode: M,
-    mem: M::Mutable,
-    // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest)
-    immutables: Vec<Immutable<M>>,
-    /// WAL frame bounds covering each immutable segment (aligned with `immutables`).
-    immutable_wal_ranges: Vec<Option<WalFrameRange>>,
-    // Sealing policy and last seal timestamp
-    policy: Box<dyn SealPolicy + Send + Sync>,
-    last_seal_at: Option<Instant>,
+    mem: Arc<StdRwLock<M::Mutable>>,
+    // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest) plus metadata.
+    seal_state: Mutex<SealState<M>>,
+    // Sealing policy (pure/lock-free) and last seal timestamp (held inside seal_state)
+    policy: Arc<dyn SealPolicy + Send + Sync>,
     // Executor powering async subsystems such as the WAL.
     executor: Arc<E>,
     // Optional WAL handle when durability is enabled.
@@ -649,6 +755,27 @@ where
     compaction_worker: Option<CompactionLoopHandle<M, E>>,
 }
 
+// SAFETY: DB shares internal state behind explicit synchronization. The mode key and executor
+// bounds ensure the constituent types are safe to send/share across threads when guarded.
+unsafe impl<M, E> Send for DB<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone + Send + Sync,
+    M::Mutable: Send + Sync,
+    E: Executor + Timer + Send + Sync,
+{
+}
+
+// SAFETY: See rationale above for `Send`; read access is synchronized via external locks.
+unsafe impl<M, E> Sync for DB<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone + Send + Sync,
+    M::Mutable: Send + Sync,
+    E: Executor + Timer + Send + Sync,
+{
+}
+
 impl<E> DB<DynMode, E>
 where
     E: Executor + Timer,
@@ -657,35 +784,19 @@ where
         &self.mode.schema
     }
 
-    /// Begin a writable transaction that stages mutations against the current schema.
-    ///
-    /// Captures a manifest/MVCC snapshot so reads observe a stable view and returns a
-    /// [`Transaction`] handle that supports staging `DynRow` values, `RecordBatch`es,
-    /// and key-only deletes before calling [`Transaction::commit`].
-    pub async fn begin_transaction(&self) -> Result<Transaction, TransactionError> {
-        let snapshot = self.begin_snapshot().await?;
-        let durability = if self.wal_handle().is_some() {
-            TransactionDurability::Durable
-        } else {
-            TransactionDurability::Volatile
-        };
-        Ok(Transaction::new(
-            self.mode.schema.clone(),
-            self.mode.delete_schema.clone(),
-            Arc::clone(&self.mode.extractor),
-            snapshot,
-            self.mode.commit_ack_mode,
-            durability,
-        ))
+    /// Wrap this database in an executor-provided read-write lock for shared transactional use.
+    pub fn into_shared(self) -> DynDbHandle<E> {
+        Arc::new(self)
     }
 
     pub(crate) fn insert_into_mutable(
-        &mut self,
+        &self,
         batch: RecordBatch,
         commit_ts: Timestamp,
     ) -> Result<(), KeyExtractError> {
-        self.mem
-            .insert_batch(self.mode.extractor.as_ref(), batch, commit_ts)
+        self.insert_with_seal_retry(|mem| {
+            mem.insert_batch(self.mode.extractor.as_ref(), batch.clone(), commit_ts)
+        })
     }
 
     pub(crate) fn replay_wal_events(
@@ -786,33 +897,36 @@ where
         Ok(last_commit_ts)
     }
 
-    /// Scan the dynamic mutable memtable over key ranges, yielding owned dynamic rows.
-    /// Plan a scan over entire DB with MVCC visibility at `read_ts`.
-    /// This will prune memtables, sst rows using metadata
-    pub async fn plan_scan(
-        &self,
-        predicate: &Predicate,
-        projected_schema: Option<&SchemaRef>,
-        limit: Option<usize>,
-        read_ts: Timestamp,
-    ) -> Result<ScanPlan, DBError> {
-        let projected_schema = projected_schema.cloned();
-        let residual_predicate = Some(predicate.clone());
-        let scan_schema = if let Some(projection) = projected_schema.as_ref() {
-            projection_with_predicate(&self.mode.schema, projection, residual_predicate.as_ref())?
-        } else {
-            Arc::clone(&self.mode.schema)
+    fn insert_with_seal_retry<F>(&self, mut op: F) -> Result<(), KeyExtractError>
+    where
+        F: FnMut(&mut DynMem) -> Result<(), KeyExtractError>,
+    {
+        loop {
+            let mut mem = self.mem_write();
+            match op(&mut mem) {
+                Ok(()) => return Ok(()),
+                Err(KeyExtractError::MemtableFull { .. }) => {
+                    drop(mem);
+                    self.seal_mutable_now()?;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn seal_mutable_now(&self) -> Result<(), KeyExtractError> {
+        let seg_opt = {
+            let mut mem = self.mem_write();
+            mem.seal_into_immutable(&self.mode.schema, self.mode.extractor.as_ref())?
         };
-        let immutable_indexes = immutable::prune_segments::<DynMode>(&self.immutables);
-        Ok(ScanPlan {
-            predicate: predicate.clone(),
-            immutable_indexes,
-            residual_predicate,
-            projected_schema,
-            scan_schema,
-            limit,
-            read_ts,
-        })
+        if let Some(seg) = seg_opt {
+            let wal_range = self.take_mutable_wal_range();
+            self.add_immutable(seg, wal_range);
+            let mut seal = self.seal_state_lock();
+            seal.last_seal_at = Some(Instant::now());
+        }
+        Ok(())
     }
 
     /// Execute the scan plan with MVCC visibility
@@ -870,17 +984,27 @@ where
         }
 
         let projection_schema = Arc::clone(&plan.scan_schema);
-        let scan = self
-            .mem
-            .scan_visible(Some(Arc::clone(&projection_schema)), plan.read_ts)?;
-        streams.push(ScanStream::from(scan));
+        let mutable_scan = OwnedMutableScan::from_guard(
+            self.mem_read(),
+            Some(Arc::clone(&projection_schema)),
+            plan.read_ts,
+        )?;
+        streams.push(ScanStream::from(mutable_scan));
 
-        for &idx in &plan.immutable_indexes {
-            if let Some(segment) = self.immutables.get(idx) {
-                let scan =
-                    segment.scan_visible(Some(Arc::clone(&projection_schema)), plan.read_ts)?;
-                streams.push(ScanStream::from(scan));
-            }
+        let seal = self.seal_state_lock();
+        let immutables: Vec<Arc<Immutable<DynMode>>> = plan
+            .immutable_indexes
+            .iter()
+            .filter_map(|idx| seal.immutables.get(*idx).cloned())
+            .collect();
+        drop(seal);
+        for segment in immutables {
+            let owned = OwnedImmutableScan::from_arc(
+                Arc::clone(&segment),
+                Some(Arc::clone(&projection_schema)),
+                plan.read_ts,
+            )?;
+            streams.push(ScanStream::from(owned));
         }
 
         Ok(streams)
@@ -889,9 +1013,10 @@ where
     pub(crate) fn scan_immutable_rows_at(
         &self,
         read_ts: Timestamp,
-    ) -> Result<Vec<(KeyOwned, DynRow)>, KeyExtractError> {
+    ) -> Result<Vec<(KeyRow, DynRow)>, KeyExtractError> {
         let mut rows = Vec::new();
-        for segment in &self.immutables {
+        let segments = self.seal_state_lock().immutables.clone();
+        for segment in segments {
             let scan = segment.scan_visible(None, read_ts)?;
             for result in scan {
                 match result {
@@ -899,8 +1024,8 @@ where
                         let row = row_raw.into_owned().map_err(|err| {
                             KeyExtractError::Arrow(ArrowError::ComputeError(err.to_string()))
                         })?;
-                        let (key_owned, _) = key_view.to_owned().into_parts();
-                        rows.push((key_owned, row));
+                        let (key_row, _) = key_view.into_parts();
+                        rows.push((key_row, row));
                     }
                     Ok(ImmutableVisibleEntry::Tombstone(_)) => {}
                     Err(err) => return Err(KeyExtractError::from(err)),
@@ -913,17 +1038,18 @@ where
     pub(crate) fn scan_mutable_rows_at(
         &self,
         read_ts: Timestamp,
-    ) -> Result<Vec<(KeyOwned, DynRow)>, KeyExtractError> {
+    ) -> Result<Vec<(KeyRow, DynRow)>, KeyExtractError> {
         let mut rows = Vec::new();
-        let scan = self.mem.scan_visible(None, read_ts)?;
+        let mem = self.mem_read();
+        let scan = mem.scan_visible(None, read_ts)?;
         for entry in scan {
             match entry {
                 Ok(DynRowScanEntry::Row(key_view, row_raw)) => {
                     let row = row_raw.into_owned().map_err(|err| {
                         KeyExtractError::Arrow(ArrowError::ComputeError(err.to_string()))
                     })?;
-                    let (key_owned, _) = key_view.to_owned().into_parts();
-                    rows.push((key_owned, row));
+                    let (key_row, _) = key_view.into_parts();
+                    rows.push((key_row, row));
                 }
                 Ok(DynRowScanEntry::Tombstone(_)) => {}
                 Err(err) => return Err(KeyExtractError::from(err)),
@@ -934,7 +1060,7 @@ where
 
     /// Apply a WAL-durable batch directly into the mutable table.
     pub(crate) fn apply_committed_batch(
-        &mut self,
+        &self,
         batch: RecordBatch,
         commit_ts: Timestamp,
     ) -> Result<(), KeyExtractError> {
@@ -945,43 +1071,39 @@ where
 
     /// Apply a WAL-durable key-only delete batch directly into the mutable table.
     pub(crate) fn apply_committed_deletes(
-        &mut self,
+        &self,
         batch: RecordBatch,
     ) -> Result<(), KeyExtractError> {
-        self.mem
-            .insert_delete_batch(self.mode.delete_projection.as_ref(), batch)
+        let mut mem = self.mem_write();
+        mem.insert_delete_batch(self.mode.delete_projection.as_ref(), batch)
     }
 
     /// Check whether a newer committed version exists for `key` relative to `snapshot_ts`.
     pub(crate) fn mutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
-        self.mem.has_conflict(key, snapshot_ts)
+        self.mem_read().has_conflict(key, snapshot_ts)
     }
 
     pub(crate) fn immutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
-        self.immutables
+        self.seal_state_lock()
+            .immutables
             .iter()
             .any(|segment| segment.has_conflict(key, snapshot_ts))
     }
 
-    pub(crate) fn maybe_seal_after_insert(&mut self) -> Result<(), KeyExtractError> {
-        let since = self.last_seal_at.map(|t| t.elapsed());
-        let stats = self.mem.build_stats(since);
+    pub(crate) fn maybe_seal_after_insert(&self) -> Result<(), KeyExtractError> {
+        let last_seal = { self.seal_state_lock().last_seal_at };
+        let since = last_seal.map(|t| t.elapsed());
+        let stats = { self.mem_read().build_stats(since) };
+
         if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
-            if let Some(seg) = self
-                .mem
-                .seal_into_immutable(&self.mode.schema, self.mode.extractor.as_ref())?
-            {
-                let wal_range = self.take_mutable_wal_range();
-                self.add_immutable(seg, wal_range);
-            }
-            self.last_seal_at = Some(Instant::now());
+            self.seal_mutable_now()?;
         }
         Ok(())
     }
 
     /// Ingest a batch along with its tombstone bitmap, routing through the WAL when enabled.
     pub async fn ingest_with_tombstones(
-        &mut self,
+        &self,
         batch: RecordBatch,
         tombstones: Vec<bool>,
     ) -> Result<(), KeyExtractError> {
@@ -990,7 +1112,7 @@ where
 
     /// Ingest multiple batches, each paired with a tombstone bitmap.
     pub async fn ingest_many_with_tombstones(
-        &mut self,
+        &self,
         batches: Vec<(RecordBatch, Vec<bool>)>,
     ) -> Result<(), KeyExtractError> {
         insert_dyn_wal_batches(self, batches).await
@@ -1004,6 +1126,21 @@ where
     M::Key: Eq + Hash + Clone,
     E: Executor + Timer,
 {
+    #[inline]
+    fn mem_read(&self) -> RwLockReadGuard<'_, M::Mutable> {
+        self.mem.read().expect("mutable mem rwlock poisoned")
+    }
+
+    #[inline]
+    fn mem_write(&self) -> RwLockWriteGuard<'_, M::Mutable> {
+        self.mem.write().expect("mutable mem rwlock poisoned")
+    }
+
+    #[inline]
+    fn seal_state_lock(&self) -> MutexGuard<'_, SealState<M>> {
+        self.seal_state.lock().expect("seal_state mutex poisoned")
+    }
+
     /// Begin constructing a DB in mode `M` through the fluent builder API.
     pub fn builder(config: M::Config) -> DbBuilder<M>
     where
@@ -1276,11 +1413,9 @@ where
     {
         Self {
             mode,
-            mem,
-            immutables: Vec::new(),
-            immutable_wal_ranges: Vec::new(),
+            mem: Arc::new(StdRwLock::new(mem)),
+            seal_state: Mutex::new(SealState::default()),
             policy: crate::inmem::policy::default_policy(),
-            last_seal_at: None,
             executor,
             wal: None,
             wal_config,
@@ -1404,7 +1539,7 @@ where
     }
 
     /// Unified ingestion entry point using the mode's insertion contract.
-    pub async fn ingest(&mut self, input: M::InsertInput) -> Result<(), KeyExtractError>
+    pub async fn ingest(&self, input: M::InsertInput) -> Result<(), KeyExtractError>
     where
         M: Sized,
     {
@@ -1412,7 +1547,7 @@ where
     }
 
     /// Ingest many inputs sequentially.
-    pub async fn ingest_many<I>(&mut self, inputs: I) -> Result<(), KeyExtractError>
+    pub async fn ingest_many<I>(&self, inputs: I) -> Result<(), KeyExtractError>
     where
         I: IntoIterator<Item = M::InsertInput>,
         M: Sized,
@@ -1425,7 +1560,7 @@ where
 
     /// Approximate bytes used by keys in the mutable memtable.
     pub fn approx_mutable_bytes(&self) -> usize {
-        <M::Mutable as MutableLayout<M::Key>>::approx_bytes(&self.mem)
+        <M::Mutable as MutableLayout<M::Key>>::approx_bytes(&self.mem_read())
     }
 
     /// Attach WAL configuration prior to enabling durability.
@@ -1451,7 +1586,7 @@ where
 
     /// Open a read-only snapshot pinned to the current manifest head.
     #[allow(dead_code)]
-    pub(crate) async fn begin_snapshot(&self) -> Result<TxSnapshot, SnapshotError> {
+    pub async fn begin_snapshot(&self) -> Result<TxSnapshot, SnapshotError> {
         let manifest_snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
         let next_ts = self.commit_clock.peek();
         let read_ts = next_ts.saturating_sub(1);
@@ -1462,8 +1597,31 @@ where
         ))
     }
 
+    /// Open a read-only snapshot pinned to the current manifest head at an explicit read timestamp.
+    #[allow(dead_code)]
+    pub(crate) async fn begin_snapshot_at(
+        &self,
+        read_ts: Timestamp,
+    ) -> Result<TxSnapshot, SnapshotError> {
+        let manifest_snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
+        let read_view = ReadView::new(read_ts);
+        Ok(TxSnapshot::from_table_snapshot(
+            read_view,
+            manifest_snapshot,
+        ))
+    }
+
+    /// Test-only helper to capture a snapshot at an explicit timestamp.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn begin_snapshot_at_for_tests(
+        &self,
+        read_ts: Timestamp,
+    ) -> Result<TxSnapshot, SnapshotError> {
+        self.begin_snapshot_at(read_ts).await
+    }
+
     /// Allocate the next commit timestamp for WAL/autocommit flows.
-    pub(crate) fn next_commit_ts(&mut self) -> Timestamp {
+    pub(crate) fn next_commit_ts(&self) -> Timestamp {
         self.commit_clock.alloc()
     }
 
@@ -1513,7 +1671,8 @@ where
 
     pub(crate) fn wal_live_frame_floor(&self) -> Option<u64> {
         let mutable_floor = self.mutable_wal_range_snapshot().map(|range| range.first);
-        let immutable_floor = self
+        let seal = self.seal_state_lock();
+        let immutable_floor = seal
             .immutable_wal_ranges
             .iter()
             .filter_map(|range| range.as_ref().map(|r| r.first))
@@ -1529,7 +1688,7 @@ where
 
     /// Number of immutable segments attached to this DB (oldest..newest).
     pub fn num_immutable_segments(&self) -> usize {
-        self.immutables.len()
+        self.seal_state_lock().immutables.len()
     }
 
     /// Plan and flush immutable segments into a Parquet-backed SSTable.
@@ -1541,11 +1700,15 @@ where
     where
         M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
     {
-        if self.immutables.is_empty() {
-            return Err(SsTableError::NoImmutableSegments);
-        }
+        let immutables_snapshot = {
+            let seal_read = self.seal_state_lock();
+            if seal_read.immutables.is_empty() {
+                return Err(SsTableError::NoImmutableSegments);
+            }
+            seal_read.immutables.clone()
+        };
         let mut builder = SsTableBuilder::<M>::new(config, descriptor);
-        for seg in &self.immutables {
+        for seg in &immutables_snapshot {
             builder.add_immutable(seg)?;
         }
         let existing_floor = self.manifest_wal_floor().await;
@@ -1575,6 +1738,7 @@ where
             builder.set_wal_ids(None);
             (None, None)
         };
+
         match builder.finish().await {
             Ok(table) => {
                 // Persist Sst change into manifest
@@ -1616,8 +1780,10 @@ where
                 self.prune_wal_segments_below_floor().await;
 
                 // Cleanup immutable memtable
-                self.immutables.clear();
-                self.immutable_wal_ranges.clear();
+                let mut seal = self.seal_state_lock();
+                seal.immutables = Vec::new();
+                seal.immutable_wal_ranges.clear();
+                seal.last_seal_at = Some(Instant::now());
                 Ok(table)
             }
             Err(err) => Err(err),
@@ -1635,9 +1801,10 @@ where
     E: Executor + Timer,
 {
     #[allow(dead_code)]
-    fn add_immutable(&mut self, seg: Immutable<M>, wal_range: Option<WalFrameRange>) {
-        self.immutables.push(seg);
-        self.immutable_wal_ranges.push(wal_range);
+    fn add_immutable(&self, seg: Immutable<M>, wal_range: Option<WalFrameRange>) {
+        let mut seal = self.seal_state_lock();
+        seal.immutables.push(Arc::new(seg));
+        seal.immutable_wal_ranges.push(wal_range);
     }
 
     fn record_mutable_wal_range(&self, range: WalFrameRange) {
@@ -1682,7 +1849,7 @@ where
         }
     }
 
-    pub(crate) fn observe_mutable_wal_span(&mut self, first_seq: u64, last_seq: u64) {
+    pub(crate) fn observe_mutable_wal_span(&self, first_seq: u64, last_seq: u64) {
         let (first, last) = if first_seq <= last_seq {
             (first_seq, last_seq)
         } else {
@@ -1692,7 +1859,7 @@ where
     }
 
     /// Set or replace the sealing policy used by this DB.
-    pub fn set_seal_policy(&mut self, policy: Box<dyn SealPolicy + Send + Sync>) {
+    pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
 
@@ -1704,7 +1871,7 @@ where
 }
 
 async fn insert_dyn_wal_batch<E>(
-    db: &mut DB<DynMode, E>,
+    db: &DB<DynMode, E>,
     batch: RecordBatch,
     tombstones: Vec<bool>,
 ) -> Result<(), KeyExtractError>
@@ -1720,7 +1887,7 @@ where
 
     let commit_ts = db.next_commit_ts();
 
-    let (mut upsert_batch, mut delete_batch) =
+    let (upsert_batch, delete_batch) =
         partition_batch_for_mutations(&db.mode, batch, &tombstones, commit_ts)?;
 
     if upsert_batch.is_none() && delete_batch.is_none() {
@@ -1762,18 +1929,17 @@ where
         wal_range = tracker.into_range();
     }
 
-    let mut mutated = false;
-    if let Some(batch) = upsert_batch.take() {
-        mutated = true;
-        db.mem
-            .insert_batch(db.mode.extractor.as_ref(), batch, commit_ts)?;
-    }
-    if let Some(batch) = delete_batch.take() {
-        mutated = true;
-        db.mem
-            .insert_delete_batch(db.mode.delete_projection.as_ref(), batch)?;
-    }
+    let mutated = upsert_batch.is_some() || delete_batch.is_some();
     if mutated {
+        db.insert_with_seal_retry(|mem| {
+            if let Some(ref batch) = upsert_batch {
+                mem.insert_batch(db.mode.extractor.as_ref(), batch.clone(), commit_ts)?;
+            }
+            if let Some(ref batch) = delete_batch {
+                mem.insert_delete_batch(db.mode.delete_projection.as_ref(), batch.clone())?;
+            }
+            Ok(())
+        })?;
         if let Some(range) = wal_range {
             db.record_mutable_wal_range(range);
         }
@@ -1783,7 +1949,7 @@ where
 }
 
 async fn insert_dyn_wal_batches<E>(
-    db: &mut DB<DynMode, E>,
+    db: &DB<DynMode, E>,
     batches: Vec<(RecordBatch, Vec<bool>)>,
 ) -> Result<(), KeyExtractError>
 where
@@ -1796,7 +1962,7 @@ where
 }
 
 fn apply_dyn_wal_batch<E>(
-    db: &mut DB<DynMode, E>,
+    db: &DB<DynMode, E>,
     batch: RecordBatch,
     commit_ts_column: ArrayRef,
     commit_ts: Timestamp,
@@ -1840,13 +2006,18 @@ where
         )));
     }
 
-    db.mem
-        .insert_batch_with_mvcc(db.mode.extractor.as_ref(), batch, commit_array)?;
+    db.insert_with_seal_retry(|mem| {
+        mem.insert_batch_with_mvcc(
+            db.mode.extractor.as_ref(),
+            batch.clone(),
+            commit_array.clone(),
+        )
+    })?;
     Ok(())
 }
 
 fn apply_dyn_delete_wal_batch<E>(
-    db: &mut DB<DynMode, E>,
+    db: &DB<DynMode, E>,
     batch: RecordBatch,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
@@ -1855,8 +2026,10 @@ where
 {
     validate_delete_batch_schema(db, &batch)?;
     validate_delete_commit_ts(&batch, commit_ts)?;
-    db.mem
-        .insert_delete_batch(db.mode.delete_projection.as_ref(), batch)?;
+    {
+        let mut mem = db.mem_write();
+        mem.insert_delete_batch(db.mode.delete_projection.as_ref(), batch)?;
+    }
     Ok(())
 }
 
@@ -2052,7 +2225,12 @@ mod tests {
                 CompactionInput, CompactionTask, LeveledCompactionPlanner, LeveledPlannerConfig,
             },
         },
-        inmem::{immutable::memtable::MVCC_TOMBSTONE_COL, policy::BatchesThreshold},
+        extractor::{KeyProjection, projection_for_columns},
+        inmem::{
+            immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
+            mutable::memtable::DynMem,
+            policy::{BatchesThreshold, NeverSeal},
+        },
         manifest::{SstEntry, TableId, TonboManifest, VersionEdit, init_fs_manifest},
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
@@ -2064,6 +2242,39 @@ mod tests {
             state::FsWalStateStore,
         },
     };
+
+    fn build_dyn_components(config: DynModeConfig) -> Result<(DynMode, DynMem), KeyExtractError> {
+        let DynModeConfig {
+            schema,
+            extractor,
+            commit_ack_mode,
+        } = config;
+        extractor.validate_schema(&schema)?;
+
+        let key_schema = extractor.key_schema();
+        let mut delete_fields = key_schema
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect::<Vec<_>>();
+        delete_fields.push(Field::new(MVCC_COMMIT_COL, DataType::UInt64, false));
+        let delete_schema = Arc::new(Schema::new(delete_fields));
+
+        let key_columns = key_schema.fields().len();
+        let delete_projection =
+            projection_for_columns(delete_schema.clone(), (0..key_columns).collect())?;
+        let delete_projection: Arc<dyn KeyProjection> = delete_projection.into();
+
+        let mutable = DynMem::new(schema.clone());
+        let mode = DynMode {
+            schema,
+            delete_schema,
+            extractor,
+            delete_projection,
+            commit_ack_mode,
+        };
+        Ok((mode, mutable))
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn ingest_tombstone_length_mismatch() {
@@ -2079,7 +2290,7 @@ mod tests {
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
         let executor = Arc::new(BlockingExecutor);
-        let mut db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let err = db
@@ -2105,7 +2316,7 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let mut db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let rows = vec![
@@ -2117,21 +2328,22 @@ mod tests {
         result.expect("ingest");
 
         let chain_k1 = db
-            .mem
+            .mem_read()
             .inspect_versions(&KeyOwned::from("k1"))
             .expect("chain k1");
         assert_eq!(chain_k1.len(), 1);
         assert!(!chain_k1[0].1);
 
         let chain_k2 = db
-            .mem
+            .mem_read()
             .inspect_versions(&KeyOwned::from("k2"))
             .expect("chain k2");
         assert_eq!(chain_k2.len(), 1);
         assert!(chain_k2[0].1);
 
         let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-        let plan = block_on(db.plan_scan(&pred, None, None, Timestamp::MAX)).expect("plan");
+        let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
+        let plan = block_on(snapshot.plan_scan(&db, &pred, None, None)).expect("plan");
         let stream = block_on(db.execute_scan(plan)).expect("exec");
         let visible: Vec<String> = block_on(stream.try_collect::<Vec<_>>())
             .expect("collect")
@@ -2159,7 +2371,7 @@ mod tests {
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
         let executor = Arc::new(BlockingExecutor);
-        let mut db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let batch = RecordBatch::try_new(
@@ -2173,16 +2385,16 @@ mod tests {
         let commit_ts = Timestamp::new(5);
         let commit_array: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get(); 2]));
 
-        apply_dyn_wal_batch(&mut db, batch, commit_array, commit_ts).expect("apply");
+        apply_dyn_wal_batch(&db, batch, commit_array, commit_ts).expect("apply");
 
         let live = db
-            .mem
+            .mem_read()
             .inspect_versions(&KeyOwned::from("k1"))
             .expect("live key");
         assert_eq!(live, vec![(commit_ts, false)]);
 
         let deleted = db
-            .mem
+            .mem_read()
             .inspect_versions(&KeyOwned::from("k2"))
             .expect("second key");
         assert_eq!(deleted, vec![(commit_ts, false)]);
@@ -2196,7 +2408,7 @@ mod tests {
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
         let executor = Arc::new(BlockingExecutor);
-        let mut db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let wal_schema = Arc::new(Schema::new(vec![
@@ -2216,7 +2428,7 @@ mod tests {
         let commit_ts = Timestamp::new(22);
         let commit_array: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get()]));
 
-        let err = apply_dyn_wal_batch(&mut db, wal_batch, commit_array, commit_ts)
+        let err = apply_dyn_wal_batch(&db, wal_batch, commit_array, commit_ts)
             .expect_err("apply should fail");
         match err {
             KeyExtractError::SchemaMismatch { .. } | KeyExtractError::Wal(_) => {}
@@ -2233,7 +2445,7 @@ mod tests {
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
         let executor = Arc::new(BlockingExecutor);
-        let mut db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let batch = RecordBatch::try_new(
@@ -2248,10 +2460,10 @@ mod tests {
         let commit_ts = Timestamp::new(30);
         let commit_array: ArrayRef = Arc::new(UInt64Array::from(vec![commit_ts.get()]));
 
-        apply_dyn_wal_batch(&mut db, batch, commit_array, commit_ts).expect("apply");
+        apply_dyn_wal_batch(&db, batch, commit_array, commit_ts).expect("apply");
 
         let versions = db
-            .mem
+            .mem_read()
             .inspect_versions(&KeyOwned::from("k"))
             .expect("versions");
         assert_eq!(versions, vec![(commit_ts, false)]);
@@ -2267,7 +2479,7 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let executor = Arc::new(BlockingExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let mut db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let snapshot = db.begin_snapshot().await.expect("snapshot");
@@ -2308,10 +2520,49 @@ mod tests {
         let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
             .await
             .expect("schema ok");
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
         assert_eq!(db.num_immutable_segments(), 0);
         db.ingest(batch).await.expect("insert batch");
         assert_eq!(db.num_immutable_segments(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_seals_when_memtable_hits_capacity() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name");
+        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+            .await
+            .expect("schema ok");
+
+        // Force minimal capacity and disable policy-based sealing to exercise MemtableFull
+        // recovery.
+        {
+            let mut mem = db.mem_write();
+            *mem = DynMem::with_capacity(db.mode.schema.clone(), 1);
+        }
+        db.set_seal_policy(Arc::new(NeverSeal));
+
+        let make_batch = |val: i32| {
+            build_batch(
+                schema.clone(),
+                vec![DynRow(vec![
+                    Some(DynCell::Str("k".into())),
+                    Some(DynCell::I32(val)),
+                ])],
+            )
+            .expect("batch")
+        };
+
+        db.ingest(make_batch(1)).await.expect("ingest 1");
+        db.ingest(make_batch(2)).await.expect("ingest 2");
+        db.ingest(make_batch(3)).await.expect("ingest 3");
+
+        // Each time capacity is hit we should seal and continue inserting.
+        assert_eq!(db.num_immutable_segments(), 2);
+        assert_eq!(db.mem_read().batch_count(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2346,7 +2597,7 @@ mod tests {
             .expect("register table")
             .table_id;
 
-        let (mode, mem) = DynMode::build(build_config)?;
+        let (mode, mem) = build_dyn_components(build_config)?;
         let mut db = DB::from_components(
             mode,
             mem,
@@ -2389,7 +2640,8 @@ mod tests {
         assert_eq!(recovered.manifest_table_id(), manifest_table);
 
         let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-        let plan = block_on(recovered.plan_scan(&pred, None, None, Timestamp::MAX)).expect("plan");
+        let snapshot = block_on(recovered.begin_snapshot()).expect("snapshot");
+        let plan = block_on(snapshot.plan_scan(&recovered, &pred, None, None)).expect("plan");
         let stream = block_on(recovered.execute_scan(plan)).expect("execute");
         let rows: Vec<(String, i32)> = block_on(stream.try_collect::<Vec<_>>())
             .expect("collect")
@@ -2420,7 +2672,8 @@ mod tests {
     fn plan_scan_filters_immutable_segments() {
         let db = db_with_immutable_keys(&["k1", "z1"]);
         let predicate = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
-        let plan = block_on(db.plan_scan(&predicate, None, None, Timestamp::MAX)).expect("plan");
+        let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
+        let plan = block_on(snapshot.plan_scan(&db, &predicate, None, None)).expect("plan");
         // Pruning is currently disabled; expect to scan all immutables and retain the predicate
         // for residual evaluation.
         assert_eq!(plan.immutable_indexes, vec![0, 1]);
@@ -2433,7 +2686,8 @@ mod tests {
         let key_pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
         let value_pred = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(5i64));
         let predicate = Predicate::and(vec![key_pred, value_pred]);
-        let plan = block_on(db.plan_scan(&predicate, None, None, Timestamp::MAX)).expect("plan");
+        let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
+        let plan = block_on(snapshot.plan_scan(&db, &predicate, None, None)).expect("plan");
         assert!(plan.residual_predicate.is_some());
     }
 
@@ -2443,7 +2697,8 @@ mod tests {
         let pred_a = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
         let pred_b = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k2"));
         let predicate = Predicate::and(vec![pred_a, pred_b]);
-        let plan = block_on(db.plan_scan(&predicate, None, None, Timestamp::MAX)).expect("plan");
+        let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
+        let plan = block_on(snapshot.plan_scan(&db, &predicate, None, None)).expect("plan");
         // Pruning is currently disabled; even contradictory predicates scan all immutables.
         assert_eq!(plan.immutable_indexes, vec![0]);
     }
@@ -2459,7 +2714,7 @@ mod tests {
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
             block_on(DB::new(config, Arc::clone(&executor))).expect("db");
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
         for (idx, key) in keys.iter().enumerate() {
             let rows = vec![DynRow(vec![
                 Some(DynCell::Str((*key).into())),
@@ -2581,8 +2836,9 @@ mod tests {
         ingest_future.await.expect("ingest after ack");
 
         let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-        let plan = db
-            .plan_scan(&pred, None, None, Timestamp::MAX)
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
+        let plan = snapshot
+            .plan_scan(&db, &pred, None, None)
             .await
             .expect("plan");
         let stream = db.execute_scan(plan).await.expect("execute");
@@ -2684,18 +2940,25 @@ mod tests {
 
         let observed_range = db
             .mutable_wal_range_snapshot()
-            .or_else(|| db.immutable_wal_ranges.first().copied().flatten())
+            .or_else(|| {
+                db.seal_state_lock()
+                    .immutable_wal_ranges
+                    .first()
+                    .copied()
+                    .flatten()
+            })
             .expect("wal range populated after ingest");
         assert_eq!(observed_range.first, frame::INITIAL_FRAME_SEQ);
         assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
         if db.mutable_wal_range_snapshot().is_some() {
-            let sealed = db
-                .mem
-                .seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
-                .expect("seal mutable")
-                .expect("mutable contained rows");
+            let sealed = {
+                let mut mem = db.mem_write();
+                mem.seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
+                    .expect("seal mutable")
+                    .expect("mutable contained rows")
+            };
             let wal_range = db.take_mutable_wal_range();
             db.add_immutable(sealed, wal_range);
         }
@@ -2703,8 +2966,11 @@ mod tests {
         assert!(db.mutable_wal_range_snapshot().is_none());
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
-        db.immutables.clear();
-        db.immutable_wal_ranges.clear();
+        {
+            let mut seal = db.seal_state_lock();
+            seal.immutables.clear();
+            seal.immutable_wal_ranges.clear();
+        }
         assert_eq!(db.wal_live_frame_floor(), None);
     }
 
@@ -2784,18 +3050,25 @@ mod tests {
 
         let observed_range = db
             .mutable_wal_range_snapshot()
-            .or_else(|| db.immutable_wal_ranges.first().copied().flatten())
+            .or_else(|| {
+                db.seal_state_lock()
+                    .immutable_wal_ranges
+                    .first()
+                    .copied()
+                    .flatten()
+            })
             .expect("wal range populated after ingest");
         assert_eq!(observed_range.first, frame::INITIAL_FRAME_SEQ);
         assert_eq!(observed_range.last, frame::INITIAL_FRAME_SEQ + 2);
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
         if db.mutable_wal_range_snapshot().is_some() {
-            let sealed = db
-                .mem
-                .seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
-                .expect("seal mutable")
-                .expect("mutable contained rows");
+            let sealed = {
+                let mut mem = db.mem_write();
+                mem.seal_into_immutable(&db.mode.schema, db.mode.extractor.as_ref())
+                    .expect("seal mutable")
+                    .expect("mutable contained rows")
+            };
             let wal_range = db.take_mutable_wal_range();
             db.add_immutable(sealed, wal_range);
         }
@@ -2803,8 +3076,11 @@ mod tests {
         assert!(db.mutable_wal_range_snapshot().is_none());
         assert_eq!(db.wal_live_frame_floor(), Some(frame::INITIAL_FRAME_SEQ));
 
-        db.immutables.clear();
-        db.immutable_wal_ranges.clear();
+        {
+            let mut seal = db.seal_state_lock();
+            seal.immutables.clear();
+            seal.immutable_wal_ranges.clear();
+        }
         assert_eq!(db.wal_live_frame_floor(), None);
     }
 
@@ -2943,7 +3219,7 @@ mod tests {
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata key config");
-        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
             .await
             .expect("metadata key");
 
@@ -2966,7 +3242,7 @@ mod tests {
         sm.insert("tonbo.keys".to_string(), "id".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]).with_metadata(sm));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("schema metadata config");
-        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
             .await
             .expect("schema metadata key");
 
@@ -3038,7 +3314,7 @@ mod tests {
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let mut db: DB<DynMode, BlockingExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
@@ -3108,7 +3384,7 @@ mod tests {
         let schema = Arc::clone(&config.schema);
         let executor = Arc::new(TokioExecutor::default());
         let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
         let sst_cfg = Arc::new(SsTableConfig::new(
@@ -3820,7 +4096,7 @@ mod tests {
         let schema = Arc::clone(&mode_cfg.schema);
         let executor = Arc::new(TokioExecutor::default());
         let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_cfg, Arc::clone(&executor)).await?;
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
         let sst_root = temp_root.join("sst");
         fs::create_dir_all(&sst_root)?;
@@ -3983,7 +4259,7 @@ mod tests {
         wal_cfg.sync = WalSyncPolicy::Disabled;
 
         db.enable_wal(wal_cfg.clone()).await?;
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
         let sst_dir = temp_root.join("sst");
         fs::create_dir_all(&sst_dir)?;
@@ -4113,7 +4389,7 @@ mod tests {
         wal_cfg.prune_dry_run = true;
 
         db.enable_wal(wal_cfg.clone()).await?;
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
         let sst_dir = temp_root.join("sst");
         fs::create_dir_all(&sst_dir)?;
@@ -4205,7 +4481,7 @@ mod tests {
         wal_cfg.sync = WalSyncPolicy::Disabled;
 
         db.enable_wal(wal_cfg.clone()).await?;
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
         let rows = vec![
             vec![Some(DynCell::Str("alpha".into())), Some(DynCell::I32(7))],
@@ -4276,7 +4552,7 @@ mod tests {
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
             .await
             .expect("composite field metadata");
 
@@ -4307,8 +4583,9 @@ mod tests {
                 Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
             ]),
         ]);
-        let plan = db
-            .plan_scan(&pred, None, None, Timestamp::MAX)
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
+        let plan = snapshot
+            .plan_scan(&db, &pred, None, None)
             .await
             .expect("plan");
         let batches = db
@@ -4350,7 +4627,7 @@ mod tests {
         sm.insert("tonbo.keys".to_string(), "[\"id\", \"ts\"]".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]).with_metadata(sm));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
             .await
             .expect("composite schema metadata");
 
@@ -4381,9 +4658,11 @@ mod tests {
                 Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
             ]),
         ]);
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
         let batches = db
             .execute_scan(
-                db.plan_scan(&pred, None, None, Timestamp::MAX)
+                snapshot
+                    .plan_scan(&db, &pred, None, None)
                     .await
                     .expect("plan"),
             )
@@ -4482,7 +4761,7 @@ mod tests {
             .await
             .expect("register table")
             .table_id;
-        let mut db: DB<DynMode, BlockingExecutor> = DB::recover_with_wal_with_manifest(
+        let db: DB<DynMode, BlockingExecutor> = DB::recover_with_wal_with_manifest(
             config,
             executor.clone(),
             cfg,
@@ -4495,14 +4774,18 @@ mod tests {
 
         // Replayed version retains commit_ts 42 and tombstone state.
         let chain = db
-            .mem
+            .mem_read()
             .inspect_versions(&KeyOwned::from("k"))
             .expect("chain");
         assert_eq!(chain, vec![(Timestamp::new(42), true)]);
 
         let pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k"));
-        let plan = db
-            .plan_scan(&pred, None, None, Timestamp::new(50))
+        let snapshot = db
+            .begin_snapshot_at(Timestamp::new(50))
+            .await
+            .expect("snapshot");
+        let plan = snapshot
+            .plan_scan(&db, &pred, None, None)
             .await
             .expect("plan");
         let visible_rows: usize = db
@@ -4529,7 +4812,7 @@ mod tests {
         db.ingest(new_batch).await.expect("ingest new");
 
         let chain = db
-            .mem
+            .mem_read()
             .inspect_versions(&KeyOwned::from("k"))
             .expect("chain");
         assert_eq!(

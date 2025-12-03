@@ -1,144 +1,129 @@
-# RFC: MVCC Sidecar Storage for Immutable Segments (superseded)
+# RFC: MVCC Storage Layout for Immutable Segments
 
-- Status: Superseded by lean layout (data embeds `_commit_ts`; delete sidecar only)
+- Status: Accepted
 - Authors: Tonbo storage team
 - Created: 2025-10-28
-- Area: Storage engine, MVCC, WAL, SSTable, Arrow interoperability
+- Updated: 2025-11
+- Area: Storage engine, MVCC, SSTable
 
 ## Summary
 
-This RFC is superseded by the lean SST layout now implemented in-code: `_commit_ts` is stored as a column in the data Parquet, and only a key-only delete sidecar (`.delete.parquet`) is emitted when tombstones exist. The separate MVCC sidecar (`.mvcc.parquet`) described below is no longer used. The historical content is retained for context.
+Define the on-disk layout for MVCC metadata in immutable segments and SSTables. Data files embed `_commit_ts` as an appended column, while tombstones are stored in a separate key-only delete sidecar.
 
 ## Motivation
 
-- Current implementation appends `_commit_ts`/`_tombstone` columns into user batches (`attach_mvcc_columns`), forcing schemas to allow nulls and leaking system metadata into user-visible Parquet.
-- Tombstoned rows are materialized as all-null payloads (or, after the mutable refactor, synthesized only during sealing) solely to satisfy the existing immutable/SST layout.
-- `docs/overview.md` describes immutable snapshots as Arrow-native reflections of user data; aligning with that contract reduces friction for external tooling and keeps MVCC metadata implementation-specific.
-- Separating MVCC state opens the door to richer metadata (per-row audit info, CDC) without further schema churn.
+- Keep user schema columns cleanly separated from MVCC system columns
+- Avoid materializing tombstoned rows as null-filled payloads in the data file
+- Enable efficient column pruning—scans that don't need visibility checks can skip `_commit_ts`
+- Support delete-heavy workloads without bloating data files
 
 ## Goals
 
-- Immutable segments and SST files expose exactly the user schema; delete metadata is carried alongside in a key-only sidecar, while `_commit_ts` stays in `MvccColumns` for upserts.
-- WAL payloads stay Arrow-native and replayable without schema mutation beyond the existing `_commit_ts` columns.
-- Compaction, recovery, and GC continue to operate over append-only objects via Fusio.
-- Minimal runtime overhead for scans and range lookups relative to the current implementation.
+- Immutable segments and SST files store `_commit_ts` alongside user data for upserts
+- Tombstones live in a dedicated key-only sidecar, not in the data file
+- WAL payloads remain Arrow-native and replayable
+- Compaction, recovery, and GC operate over append-only objects via Fusio
+- Minimal read amplification for scans and range lookups
 
 ## Non-Goals
 
-- Changing timestamp assignment strategy (still monotonic per commit).
-- Introducing new transaction semantics or cross-table coordination.
-- Redesigning compaction algorithms beyond consuming the new layout.
-- Typed/compile-time ingestion pathways (still future work per RFC 0001).
+- Changing timestamp assignment strategy (remains monotonic per commit)
+- Introducing new transaction semantics or cross-table coordination
+- Typed/compile-time ingestion pathways (future work per RFC 0001)
 
-## Background
+## Design
 
-- `DynMem::seal_into_immutable` currently synthesizes null rows for tombstones and calls `attach_mvcc_columns`, which appends hidden columns to the batch (`src/inmem/mutable/memtable.rs`).
-- WAL appends rely on `append_commit_column`/`split_commit_column` to shuttle the hidden column through Arrow IPC (`src/wal/mod.rs`, `src/wal/frame.rs`).
-- SST flushes stream the widened batch into Parquet, so user readers see `_commit_ts`/`_tombstone`, conflicting with schema guarantees outlined in `docs/overview.md` §Data Model/MVCC.
+### Storage Layout
 
-## Proposal
-
-### 1. Immutable representation
-
-- Keep `bundle_mvcc_sidecar(batch, commit_ts, tombstone)` for upserts so `_commit_ts` continues to travel outside the user schema, but stop duplicating tombstones in the row batch. The data batch stays untouched and MVCC vectors carry timestamps only.
-- Track delete intents as dedicated `DeleteBatch { keys: RecordBatch (primary-key schema), commit_ts: UInt64Array }` values. `ImmutableMemTable` stores both the upsert `(RecordBatch, MvccColumns)` pair and a list of delete batches.
-
-### 2. Delete sidecar format
-
-- Define `DeleteSidecar` schema: `<primary-key columns>, _commit_ts: UInt64 (non-null)`.
-- Persist deletes as Arrow/Parquet artifacts, one per immutable segment (and later per SST), aligned 1:1 with the segment. Upsert MVCC columns continue to mirror the existing `_commit_ts` sidecar.
-
-### 3. WAL changes
-
-- WAL row payloads stay as they are today: `RowPayload` batches still carry `_commit_ts` in their MVCC columns; delete batches use the new `KeyDelete` row mode (already implemented) and never fabricate value columns.
-- Replay produces `(RecordBatch, MvccColumns)` for upserts and `DeleteBatch` for tombstones, matching the in-memory layout.
-
-### 4. Flush & manifest
-
-- `ParquetTableWriter::stage_immutable` writes two (eventually three) artifacts per segment:
-  - `…/segment.data.parquet` (user schema),
-  - `…/segment.mvcc.parquet` (unchanged `_commit_ts` sidecar for upserts),
-  - `…/segment.delete.parquet` (new key-only delete sidecar).
-- Extend `SsTableDescriptor` and manifest entries with a `delete_uri` alongside the existing `data_uri`/`mvcc_uri`.
-- Fusio uploads all artifacts before committing the manifest edit; GC treats them atomically.
-
-### 5. Read path & compaction
-
-- Load both the MVCC sidecar (timestamps) and the delete sidecar when materializing immutables/SSTs. Range scans consult the delete sidecar to suppress tombstoned versions without ever seeing placeholder rows.
-- Compaction merges delete sidecars the same way it merges data files, applying the latest-wins rule based on `_commit_ts`.
-
-### 5. Read path & compaction
-
-- Load both files when materializing immutable segments for scans or compaction.
-- `ImmutableMemTable::from_storage` reconstructs the in-memory `(RecordBatch, MvccColumns)` pair.
-- Range and visibility scans continue to use `MvccColumns`; callers never see `_commit_ts`/`_tombstone` columns.
-
-### 6. Recovery & GC
-
-- WAL replay already yields `(RecordBatch, Vec<bool>)` and `DeleteBatch`; apply logic remains identical to the mutable implementation.
-- Manifest-driven GC marks `data_uri`, `mvcc_uri`, and `delete_uri` for retention/removal atomically.
-
-### 7. API & observability
-
-- Update public ingestion APIs to remove any mention of `_tombstone` columns; tombstone vectors stay explicit parameters.
-- Metrics (e.g., tombstone counts) now derive from sidecar stats; adjust exporters accordingly.
-
-## Storage layout updates
+Each SSTable consists of up to two files:
 
 ```
-/sst/L0/000000000000000123.parquet        # user data
-/sst/L0/000000000000000123.mvcc.parquet   # sidecar
+/sst/L{level}/{id}.parquet          # data + _commit_ts column
+/sst/L{level}/{id}.delete.parquet   # key-only delete sidecar (when tombstones exist)
 ```
 
-Manifest entry:
+### Data File
 
-```
-{ id: 123, level: 0, data_uri: "...123.parquet", mvcc_uri: "...123.mvcc.parquet",
-  stats: { rows, bytes, tombstones, min_commit_ts, max_commit_ts } }
-```
+The data Parquet contains user schema columns with `_commit_ts: UInt64` appended as the last column. This enables:
 
-Sidecar Parquet uses `SNAPPY` compression by default (configurable alongside data compression).
+- Column pruning to skip `_commit_ts` when visibility filtering is not needed
+- Single-file I/O for upsert-only segments
+- Alignment with WAL frame layout
 
-## Compatibility & migration
+### Delete Sidecar
 
-- New segments written after the rollout use the sidecar layout.
-- For existing SSTs (with embedded MVCC columns), provide a background migrator:
-  1. Load the legacy batch.
-  2. Split hidden columns into `MvccColumns`.
-  3. Rewrite to data + sidecar files.
-  4. Publish manifest edit removing `_commit_ts`/`_tombstone`.
-- During transition, readers detect legacy files by schema inspection and fall back to the old path until migration completes.
+Schema: `<primary-key columns>, _commit_ts: UInt64 (non-null)`
 
-## Alternatives considered
+- Only emitted when the segment contains tombstones
+- Key-only format avoids storing null value columns for deleted rows
+- Enables efficient tombstone lookup during scans without polluting the data file
 
-1. **Keep hidden columns**: simplest but fails schema-compatibility goal and forces nullability.
-2. **Store MVCC in Parquet metadata/row group stats**: metadata lacks per-row fidelity, complicates streaming reads.
-3. **Embed tombstone in WAL only**: makes SST reconstruction expensive and breaks crash recovery invariants.
+### WAL Integration
 
-## Open questions
+- Upsert frames carry batches with `_commit_ts` column
+- Delete frames carry key-only batches for tombstones
+- Replay reconstructs both upsert data and tombstone metadata
 
-- Should the sidecar support future fields (e.g., `_write_id`, `_op_type`)? Proposal reserves extension slots but defers schema evolution rules.
-- Do we enforce identical compression codecs for data and sidecar to simplify deployment?
-- What retention policy should GC apply to orphaned sidecars if a manifest edit references one file but not the other (corruption handling)?
+### Read Path
 
-## Implementation plan
+1. Load data Parquet, extracting `_commit_ts` for visibility checks
+2. Load delete sidecar if present
+3. Range scans consult both for MVCC filtering
+4. Callers never see `_commit_ts` in query results—projection excludes it
 
-1. (Done) Refactor mutable/WAL code paths to keep deletes key-only while leaving `_commit_ts` handling unchanged.
-2. Introduce delete sidecar writer/reader utilities and update `SsTableBuilder` + manifest descriptors with `delete_uri`.
-3. Teach `ImmutableMemTable`/SST readers to load delete sidecars and merge them with upsert batches during scans.
-4. Update docs (overview, storage layout RFC) and unit/integration tests to reflect the tombstone sidecar.
-5. Ship a migrator that rewrites existing SSTs by extracting tombstones from their data batches into delete sidecars.
-6. Flip the feature flag once compatibility tests pass, then remove the legacy placeholder-row shim.
+### Compaction
 
-## Testing strategy
+- Merge data files with latest-wins semantics based on `_commit_ts`
+- Merge delete sidecars alongside data
+- Tombstones may be pruned when `commit_ts <= tombstone_watermark` and no live versions exist
 
-- Extend property tests to ensure sidecar length equals batch rows.
-- WAL round-trip tests verifying new IPC encoding.
-- SST flush/replay integration tests that write/read both files and assert schema purity.
-- Migration tests covering legacy -> sidecar conversions.
+### GC
 
-## Rollout
+Manifest-driven GC treats data and delete files atomically—both are retained or removed together based on version visibility.
 
-- Phase 0: land refactors behind crate-private feature.
-- Phase 1: enable in staging, run dual-read validation comparing legacy vs sidecar scans.
-- Phase 2: migrate production data, remove feature flag, deprecate `_commit_ts`/`_tombstone` columns.
+## Alternatives Considered
+
+1. **Three-file layout** (data + mvcc sidecar + delete sidecar): More files increase I/O; Parquet column pruning already handles skipping `_commit_ts`.
+
+2. **Embed tombstones in data file as null rows**: Wastes space, forces nullable schemas, complicates scans.
+
+3. **Store MVCC in Parquet metadata**: Lacks per-row fidelity, complicates streaming reads.
+
+4. **Tombstones in WAL only**: Makes SST reconstruction expensive and breaks crash recovery.
+
+## Comparison with Other Systems
+
+### Apache Iceberg
+
+Iceberg has three delete mechanisms:
+
+| Type | How it works | Pros | Cons |
+|------|--------------|------|------|
+| Position deletes | file_path + row position | Fast read (exact location) | Requires knowing physical position; deprecated in v3 |
+| Equality deletes | Column values that identify rows | Write-friendly (no position needed) | Query penalty—must scan and filter |
+| Deletion vectors (v3) | Bitmap per data file | Compact, fast read | Requires file-level tracking |
+
+Tonbo's key-only delete sidecar is similar to Iceberg's **equality deletes**—identifying rows by key values rather than physical position. Iceberg's experience shows equality deletes accumulate and hurt read performance until merged, which informed our decision to track tombstone watermarks for pruning.
+
+### RocksDB
+
+RocksDB takes a different approach:
+
+- **Point tombstones**: Stored inline with data in SST files (key + sequence number)
+- **Range tombstones**: Dedicated meta-block within each SST file
+- **Compaction**: Tombstones drop only at bottom level when no snapshot references them
+- **Trigger heuristics**: Compaction triggered when tombstone ratio exceeds 50%
+
+RocksDB's inline storage avoids extra files but complicates the data format. Their range tombstone support is something Tonbo currently lacks.
+
+### Design Trade-offs
+
+Tonbo's current design optimizes for:
+- **Simplicity**: Separate file is easier to reason about than inline storage
+- **Write path**: No need to know physical row positions (unlike position deletes)
+- **Schema purity**: User data files remain uncontaminated by tombstone markers
+
+Known limitations for future consideration:
+- **File proliferation**: Every segment with tombstones creates an extra file; deletion vectors (bitmaps) would be more compact
+- **No range deletes**: Point-delete-only; range tombstone support may be needed for bulk delete workloads
+- **Watermark semantics**: Tombstone retention must coordinate with snapshot/reader registry to avoid premature pruning

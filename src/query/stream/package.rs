@@ -25,6 +25,8 @@ use crate::{
 pin_project! {
     /// Stream adapter that batches merged rows into `RecordBatch` chunks.
     pub struct PackageStream<'t, S>
+    where
+        S: RecordBatchStorage,
     {
         row_count: usize,
         batch_size: usize,
@@ -393,7 +395,7 @@ mod tests {
             Field::new("v", DataType::Int64, true),
         ]));
         let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
-        let mut mutable = DynMem::new(schema.clone());
+        let mutable = DynMem::new(schema.clone());
 
         let rows = (0..5)
             .map(|idx| {
@@ -458,7 +460,7 @@ mod tests {
             Field::new("v", DataType::Int64, true),
         ]));
         let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
-        let mut mutable = DynMem::new(schema.clone());
+        let mutable = DynMem::new(schema.clone());
 
         let rows = vec![
             DynRow(vec![
@@ -524,7 +526,7 @@ mod tests {
             Field::new("v", DataType::Int64, true),
         ]));
         let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
-        let mut mutable = DynMem::new(schema.clone());
+        let mutable = DynMem::new(schema.clone());
 
         let rows = vec![DynRow(vec![
             Some(DynCell::Str("only".into())),

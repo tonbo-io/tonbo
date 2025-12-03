@@ -9,8 +9,15 @@
 
 Define the on-disk directory hierarchy for a Tonbo database instance so that write-ahead logging, future SSTables (data files plus delete sidecars), and catalog metadata share a consistent root. The layout is expressed in terms of `fusio::path::Path` so it maps across local filesystems, remote object stores, or any custom `DynFs` implementation.
 
+## Motivation
+
+- Recovery and initialization require predictable paths for WAL segments, SSTables, and manifests
+- Object storage backends lack directory semantics; a clear path schema ensures portability across local filesystems and remote stores
+- Reserving paths upfront avoids churn when new features (SST levels, manifests, spill files) land
+- Separating concerns (WAL vs SST vs manifest) simplifies retention, compaction, and GC logic
+
 ## Goals
-q
+
 - Provide a stable directory/filename schema that `DB` can rely on during initialization and recovery.
 - Ensure WAL recovery happens automatically when the DB is pointed at an existing root.
 - Reserve locations for forthcoming SSTables, manifests, and mutable spill checkpoints so later features do not churn path semantics.

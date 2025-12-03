@@ -7,7 +7,7 @@
 //! The policy layer is mode-agnostic and uses a unified `MemStats` struct which
 //! carries common counters and optional, mode-specific hints.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// A unified snapshot of mutable memtable statistics used by sealing policies.
 #[derive(Clone, Debug, Default)]
@@ -68,7 +68,7 @@ pub enum SealReason {
 /// A pluggable sealing policy evaluated after ingest.
 pub trait SealPolicy {
     /// Evaluate the current statistics and decide whether to seal.
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision;
+    fn evaluate(&self, stats: &MemStats) -> SealDecision;
 }
 
 /// A policy that never seals.
@@ -80,7 +80,7 @@ pub trait SealPolicy {
 pub struct NeverSeal;
 
 impl SealPolicy for NeverSeal {
-    fn evaluate(&mut self, _stats: &MemStats) -> SealDecision {
+    fn evaluate(&self, _stats: &MemStats) -> SealDecision {
         SealDecision::NoOp
     }
 }
@@ -96,17 +96,17 @@ impl SealPolicy for NeverSeal {
 /// These values aim to provide sensible out-of-the-box behavior while avoiding
 /// overly aggressive sealing for small workloads. Callers can override this
 /// policy via `DB::set_seal_policy`.
-pub fn default_policy() -> Box<dyn SealPolicy + Send + Sync> {
+pub fn default_policy() -> Arc<dyn SealPolicy + Send + Sync> {
     use std::time::Duration;
-    Box::new(AnyOf::new(vec![
-        Box::new(BytesThreshold {
+    Arc::new(AnyOf::new(vec![
+        Arc::new(BytesThreshold {
             limit: 64 * 1024 * 1024, // ~64 MiB
         }),
-        Box::new(TimeElapsedPolicy {
+        Arc::new(TimeElapsedPolicy {
             min_interval: Duration::from_secs(30),
         }),
-        Box::new(OpenRowsThreshold { rows: 16_384 }),
-        Box::new(BatchesThreshold { batches: 64 }),
+        Arc::new(OpenRowsThreshold { rows: 16_384 }),
+        Arc::new(BatchesThreshold { batches: 64 }),
     ]))
 }
 
@@ -118,7 +118,7 @@ pub struct BytesThreshold {
 }
 
 impl SealPolicy for BytesThreshold {
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision {
+    fn evaluate(&self, stats: &MemStats) -> SealDecision {
         if stats.approx_key_bytes + stats.entries * stats.entry_overhead >= self.limit {
             SealDecision::Seal(SealReason::ApproxBytesReached {
                 approx: stats.approx_key_bytes + stats.entries * stats.entry_overhead,
@@ -138,7 +138,7 @@ pub struct OpenRowsThreshold {
 }
 
 impl SealPolicy for OpenRowsThreshold {
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision {
+    fn evaluate(&self, stats: &MemStats) -> SealDecision {
         match stats.typed_open_rows {
             Some(cnt) if cnt >= self.rows => SealDecision::Seal(SealReason::OpenRowsReached {
                 count: cnt,
@@ -157,7 +157,7 @@ pub struct BatchesThreshold {
 }
 
 impl SealPolicy for BatchesThreshold {
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision {
+    fn evaluate(&self, stats: &MemStats) -> SealDecision {
         match stats.dyn_batches {
             Some(cnt) if cnt >= self.batches => SealDecision::Seal(SealReason::BatchesReached {
                 count: cnt,
@@ -176,7 +176,7 @@ pub struct TimeElapsedPolicy {
 }
 
 impl SealPolicy for TimeElapsedPolicy {
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision {
+    fn evaluate(&self, stats: &MemStats) -> SealDecision {
         match stats.since_last_seal {
             Some(elapsed) if elapsed >= self.min_interval => {
                 SealDecision::Seal(SealReason::TimeElapsed {
@@ -200,7 +200,7 @@ pub struct ReplaceRatioPolicy {
 }
 
 impl SealPolicy for ReplaceRatioPolicy {
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision {
+    fn evaluate(&self, stats: &MemStats) -> SealDecision {
         if stats.inserts >= self.min_inserts && stats.inserts > 0 {
             let ratio = stats.replaces as f64 / stats.inserts as f64;
             if ratio >= self.min_ratio {
@@ -218,19 +218,19 @@ impl SealPolicy for ReplaceRatioPolicy {
 /// Composite policy that triggers if any inner policy triggers.
 #[derive(Default)]
 pub struct AnyOf {
-    inner: Vec<Box<dyn SealPolicy + Send + Sync>>,
+    inner: Vec<Arc<dyn SealPolicy + Send + Sync>>,
 }
 
 impl AnyOf {
     /// Create a composite policy from a list of inner policies.
-    pub fn new(inner: Vec<Box<dyn SealPolicy + Send + Sync>>) -> Self {
+    pub fn new(inner: Vec<Arc<dyn SealPolicy + Send + Sync>>) -> Self {
         Self { inner }
     }
 }
 
 impl SealPolicy for AnyOf {
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision {
-        for p in self.inner.iter_mut() {
+    fn evaluate(&self, stats: &MemStats) -> SealDecision {
+        for p in self.inner.iter() {
             if let SealDecision::Seal(reason) = p.evaluate(stats) {
                 return SealDecision::Seal(reason);
             }
@@ -243,21 +243,21 @@ impl SealPolicy for AnyOf {
 #[derive(Default)]
 #[allow(unused)]
 pub struct AllOf {
-    inner: Vec<Box<dyn SealPolicy + Send + Sync>>,
+    inner: Vec<Arc<dyn SealPolicy + Send + Sync>>,
 }
 
 impl AllOf {
     /// Create a composite policy from a list of inner policies.
     #[allow(unused)]
-    pub fn new(inner: Vec<Box<dyn SealPolicy + Send + Sync>>) -> Self {
+    pub fn new(inner: Vec<Arc<dyn SealPolicy + Send + Sync>>) -> Self {
         Self { inner }
     }
 }
 
 impl SealPolicy for AllOf {
-    fn evaluate(&mut self, stats: &MemStats) -> SealDecision {
+    fn evaluate(&self, stats: &MemStats) -> SealDecision {
         let mut last_reason: Option<SealReason> = None;
-        for p in self.inner.iter_mut() {
+        for p in self.inner.iter() {
             match p.evaluate(stats) {
                 SealDecision::Seal(r) => last_reason = Some(r),
                 SealDecision::NoOp => return SealDecision::NoOp,
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn time_elapsed_policy_triggers_correctly() {
-        let mut p = TimeElapsedPolicy {
+        let p = TimeElapsedPolicy {
             min_interval: Duration::from_millis(50),
         };
         let s_short = MemStats {
@@ -305,9 +305,9 @@ mod tests {
 
     #[test]
     fn anyof_triggers_on_any_inner() {
-        let mut any = AnyOf::new(vec![
-            Box::new(OpenRowsThreshold { rows: 5 }),
-            Box::new(BytesThreshold { limit: 10_000 }),
+        let any = AnyOf::new(vec![
+            Arc::new(OpenRowsThreshold { rows: 5 }),
+            Arc::new(BytesThreshold { limit: 10_000 }),
         ]);
         let s1 = MemStats {
             typed_open_rows: Some(5),
@@ -321,9 +321,9 @@ mod tests {
 
     #[test]
     fn allof_requires_all_inners() {
-        let mut all = AllOf::new(vec![
-            Box::new(OpenRowsThreshold { rows: 2 }),
-            Box::new(BytesThreshold { limit: 10 }),
+        let all = AllOf::new(vec![
+            Arc::new(OpenRowsThreshold { rows: 2 }),
+            Arc::new(BytesThreshold { limit: 10 }),
         ]);
         // Only rows threshold met -> NoOp
         let s_only_rows = MemStats {

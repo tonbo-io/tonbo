@@ -9,7 +9,6 @@ use tonbo::{
     compaction::MinorCompactor,
     db::WalConfig as BuilderWalConfig,
     mode::DynMode,
-    mvcc::Timestamp,
     ondisk::sstable::SsTableConfig,
     query::{ColumnRef, Predicate},
     wal::{WalExt, WalSyncPolicy, state::FsWalStateStore},
@@ -17,7 +16,7 @@ use tonbo::{
 
 #[path = "common/mod.rs"]
 mod common;
-use common::schema_and_config;
+use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -58,7 +57,8 @@ async fn rows_from_db(
     db: &DB<DynMode, TokioExecutor>,
 ) -> Result<Vec<(String, i32)>, Box<dyn std::error::Error>> {
     let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = db.plan_scan(&predicate, None, None, Timestamp::MAX).await?;
+    let snapshot = db.begin_snapshot().await?;
+    let plan = snapshot.plan_scan(db, &predicate, None, None).await?;
     let batches = db.execute_scan(plan).await?.try_collect::<Vec<_>>().await?;
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()
@@ -88,13 +88,14 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     let temp_root = workspace_temp_dir("durability-public");
     let root_str = temp_root.to_string_lossy().into_owned();
 
-    let (schema, build_config) = schema_and_config(
+    let build_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = build_config.schema();
     let executor = Arc::new(TokioExecutor::default());
 
     // WAL config with local fs backend and state store.
@@ -114,7 +115,7 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let expected_rows = vec![
         ("alpha".to_string(), 10),
@@ -143,7 +144,7 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     drop(db);
 
     // Restart and rely on manifest+WAL replay only through public builder.
-    let (_, recover_config) = schema_and_config(
+    let recover_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -175,13 +176,14 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
     let temp_root = workspace_temp_dir("durability-wal-only");
     let root_str = temp_root.to_string_lossy().into_owned();
 
-    let (schema, build_config) = schema_and_config(
+    let build_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = build_config.schema();
     let executor = Arc::new(TokioExecutor::default());
 
     // WAL config with local fs backend and state store.
@@ -194,7 +196,7 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let expected_rows = vec![("delta".to_string(), 100), ("echo".to_string(), 200)];
     for (id, value) in &expected_rows {
@@ -211,7 +213,7 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
     // Do not flush; rely solely on WAL replay.
     drop(db);
 
-    let (_, recover_config) = schema_and_config(
+    let recover_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -243,13 +245,14 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
     let temp_root = workspace_temp_dir("durability-mixed");
     let root_str = temp_root.to_string_lossy().into_owned();
 
-    let (schema, build_config) = schema_and_config(
+    let build_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = build_config.schema();
     let executor = Arc::new(TokioExecutor::default());
 
     // WAL config with state store.
@@ -269,7 +272,7 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     // First batch: will be sealed + flushed.
     let flushed_rows = vec![("f1".to_string(), 1), ("f2".to_string(), 2)];
@@ -291,7 +294,7 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
 
     // Second batch: stays mutable/WAL only.
     let wal_only_rows = vec![("w1".to_string(), 100), ("w2".to_string(), 200)];
-    db.set_seal_policy(Box::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal::default()));
     for (id, value) in &wal_only_rows {
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -305,7 +308,7 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
 
     drop(db);
 
-    let (_, recover_config) = schema_and_config(
+    let recover_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -337,13 +340,14 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
     let root_str = temp_root.to_string_lossy().into_owned();
     let wal_dir = temp_root.join("wal");
     let wal_cfg = wal_cfg_with_backend(&wal_dir, true)?;
-    let (schema, _build_config) = schema_and_config(
+    let build_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = build_config.schema();
     let executor = Arc::new(TokioExecutor::default());
 
     async fn reopen_once(
@@ -353,7 +357,7 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
         schema: Arc<Schema>,
         rows: Vec<(String, i32)>,
     ) -> Result<DB<DynMode, TokioExecutor>, Box<dyn std::error::Error>> {
-        let (_, reopen_config) = schema_and_config(
+        let reopen_config = config_with_pk(
             vec![
                 Field::new("id", DataType::Utf8, false),
                 Field::new("value", DataType::Int32, false),
@@ -367,7 +371,7 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
                 .wal_config(wal_cfg.clone())
                 .recover_or_init_with_executor(Arc::clone(&executor))
                 .await?;
-        db.set_seal_policy(Box::new(NeverSeal::default()));
+        db.set_seal_policy(Arc::new(NeverSeal::default()));
         for (id, value) in rows {
             let batch = RecordBatch::try_new(
                 schema.clone(),
@@ -430,13 +434,14 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
 async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::Error>> {
     let temp_root = workspace_temp_dir("durability-wal-no-state");
     let root_str = temp_root.to_string_lossy().into_owned();
-    let (schema, build_config) = schema_and_config(
+    let build_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = build_config.schema();
     let executor = Arc::new(TokioExecutor::default());
 
     let wal_dir = temp_root.join("wal");
@@ -448,7 +453,7 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
         .wal_config(wal_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
-    db.set_seal_policy(Box::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal::default()));
 
     let expected_rows = vec![("ns1".to_string(), 7), ("ns2".to_string(), 8)];
     for (id, value) in &expected_rows {
@@ -463,7 +468,7 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
     }
     drop(db);
 
-    let (_, recover_config) = schema_and_config(
+    let recover_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),

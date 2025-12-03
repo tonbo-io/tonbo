@@ -6,7 +6,6 @@ use fusio::executor::tokio::TokioExecutor;
 use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DbBuilder, DynMode},
-    mvcc::Timestamp,
     query::{ColumnRef, Predicate, ScalarValue},
 };
 use typed_arrow::{
@@ -49,7 +48,7 @@ async fn main() {
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
     // Create a dynamic DB by specifying the key field name
-    let mut db: DB<DynMode, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")
+    let db: DB<DynMode, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")
         .expect("key col")
         .in_memory("dynamic-basic")
         .build()
@@ -76,8 +75,9 @@ async fn main() {
 }
 
 async fn scan_pairs(db: &DB<DynMode, TokioExecutor>, predicate: &Predicate) -> Vec<(String, i32)> {
-    let plan = db
-        .plan_scan(predicate, None, None, Timestamp::MAX)
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(db, predicate, None, None)
         .await
         .expect("plan");
     let batches = db

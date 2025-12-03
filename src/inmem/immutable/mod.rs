@@ -11,6 +11,6 @@ pub(crate) type Immutable<M> = memtable::ImmutableMemTable<<M as crate::mode::Mo
 use crate::mode::Mode;
 
 /// Lightweight pruning helper; currently returns all segment indexes.
-pub(crate) fn prune_segments<M: Mode>(segments: &[Immutable<M>]) -> Vec<usize> {
+pub(crate) fn prune_segments<M: Mode>(segments: &[&Immutable<M>]) -> Vec<usize> {
     (0..segments.len()).collect()
 }

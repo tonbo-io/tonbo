@@ -61,4 +61,10 @@ pub enum KeyExtractError {
     /// Error when viewing the data.
     #[error("dyn view error: {0}")]
     DynView(#[from] DynViewError),
+    /// Mutable memtable has reached capacity and must be sealed.
+    #[error("memtable full: capacity {capacity} exhausted")]
+    MemtableFull {
+        /// Maximum number of batches the memtable can hold.
+        capacity: usize,
+    },
 }

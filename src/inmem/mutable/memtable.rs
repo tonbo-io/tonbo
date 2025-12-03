@@ -1,8 +1,18 @@
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration, vec};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+    vec,
+};
 
 use arrow_array::{Array, RecordBatch, UInt64Array};
 use arrow_schema::{ArrowError, Schema, SchemaRef};
 use arrow_select::concat::concat_batches;
+use crossbeam_skiplist::SkipMap;
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
 use super::{MutableLayout, MutableMemTableMetrics};
@@ -15,7 +25,7 @@ use crate::{
         },
         policy::{MemStats, StatsProvider},
     },
-    key::{KeyOwned, KeyRow, KeyTsViewRaw},
+    key::{KeyOwned, KeyRow, KeyTsOwned, KeyTsViewRaw},
     mutation::DynMutation,
     mvcc::Timestamp,
 };
@@ -88,15 +98,22 @@ impl BatchRowLoc {
     }
 }
 
+/// Default capacity for batch slots when not specified.
+pub const DEFAULT_BATCH_CAPACITY: usize = 1024;
+
 /// Columnar-style mutable table for dynamic mode.
 ///
 /// - Accepts `RecordBatch` inserts; each batch is stored as a sealed chunk.
 /// - Maintains per-key version chains ordered by commit timestamp.
+/// - Uses lock-free batch slot reservation for high-throughput inserts.
 pub struct DynMem {
     /// MVCC index keyed by `(key, commit_ts)` (timestamp descending per key).
-    index: BTreeMap<KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
-    /// Attached batches held until compaction.
-    batches_attached: Vec<BatchAttachment>,
+    index: SkipMap<KeyTsOwned, DynMutation<BatchRowLoc, DeleteRowLoc>>,
+    /// Pre-allocated batch slots using write-once semantics.
+    /// Each slot is written exactly once during insert, then read during scans.
+    batch_slots: Box<[OnceLock<BatchAttachment>]>,
+    /// Atomic cursor for reserving the next available batch slot.
+    batch_cursor: AtomicUsize,
     /// Key-only delete batches tracked separately from value payloads.
     delete_batches: Vec<DeleteAttachment>,
     metrics: MutableMemTableMetrics,
@@ -104,23 +121,43 @@ pub struct DynMem {
 }
 
 impl DynMem {
-    /// Create an empty columnar mutable table for dynamic batches.
+    /// Create an empty columnar mutable table for dynamic batches with default capacity.
     pub(crate) fn new(schema: SchemaRef) -> Self {
+        Self::with_capacity(schema, DEFAULT_BATCH_CAPACITY)
+    }
+
+    /// Create an empty columnar mutable table with the specified batch slot capacity.
+    ///
+    /// When the capacity is exhausted, [`insert_batch`] returns
+    /// [`KeyExtractError::MemtableFull`], signaling that the memtable should be sealed.
+    pub(crate) fn with_capacity(schema: SchemaRef, capacity: usize) -> Self {
+        let batch_slots: Vec<OnceLock<BatchAttachment>> =
+            (0..capacity).map(|_| OnceLock::new()).collect();
         Self {
-            index: BTreeMap::new(),
-            batches_attached: Vec::new(),
+            index: SkipMap::new(),
+            batch_slots: batch_slots.into_boxed_slice(),
+            batch_cursor: AtomicUsize::new(0),
             delete_batches: Vec::new(),
-            metrics: MutableMemTableMetrics {
-                entry_overhead: 32,
-                ..Default::default()
-            },
+            metrics: MutableMemTableMetrics::new(32),
             schema,
         }
     }
 
+    /// Returns the maximum number of batches this memtable can hold.
+    #[allow(dead_code)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.batch_slots.len()
+    }
+
+    /// Returns the number of batches currently stored.
+    #[allow(dead_code)]
+    pub(crate) fn batch_count(&self) -> usize {
+        self.batch_cursor.load(Ordering::Relaxed)
+    }
+
     /// Insert a dynamic batch by indexing each row's key.
     pub(crate) fn insert_batch(
-        &mut self,
+        &self,
         extractor: &dyn KeyProjection,
         batch: RecordBatch,
         commit_ts: Timestamp,
@@ -131,8 +168,11 @@ impl DynMem {
     }
 
     /// Insert a batch using explicit MVCC metadata columns.
+    ///
+    /// Returns [`KeyExtractError::MemtableFull`] when no batch slots remain,
+    /// signaling the caller to seal and retry.
     pub(crate) fn insert_batch_with_mvcc(
-        &mut self,
+        &self,
         extractor: &dyn KeyProjection,
         batch: RecordBatch,
         commit_ts_column: UInt64Array,
@@ -154,36 +194,45 @@ impl DynMem {
             ));
         }
 
-        let batch_id = self.batches_attached.len();
+        // Reserve a slot atomically - no global lock needed.
+        let batch_id = self.batch_cursor.fetch_add(1, Ordering::SeqCst);
+        if batch_id >= self.batch_slots.len() {
+            return Err(crate::extractor::KeyExtractError::MemtableFull {
+                capacity: self.batch_slots.len(),
+            });
+        }
+
+        // Write to our exclusively reserved slot using OnceLock.
+        // This is guaranteed to succeed since we own this slot index.
+        self.batch_slots[batch_id]
+            .set(BatchAttachment::new(
+                batch.clone(),
+                commit_ts_column.clone(),
+            ))
+            .expect("batch slot already initialized - invariant violated");
+
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
         let key_rows = extractor.project_view(&batch, &row_indices)?;
         for (row_idx, key_row) in key_rows.into_iter().enumerate() {
             let key_size = key_row.heap_size();
+            let key_owned = key_row.to_owned();
             let has_existing = self
                 .index
                 .range(
-                    KeyTsViewRaw::new(key_row.clone(), Timestamp::MAX)
-                        ..=KeyTsViewRaw::new(key_row.clone(), Timestamp::MIN),
+                    KeyTsOwned::new(key_owned.clone(), Timestamp::MAX)
+                        ..=KeyTsOwned::new(key_owned.clone(), Timestamp::MIN),
                 )
                 .next()
                 .is_some();
-            self.metrics.inserts += 1;
-            if has_existing {
-                self.metrics.replaces += 1;
-            } else {
-                self.metrics.entries += 1;
-                self.metrics.approx_key_bytes += key_size;
-            }
+            self.metrics.record_write(has_existing, key_size);
 
             let commit_ts = Timestamp::new(commit_ts_column.value(row_idx));
-            let composite = KeyTsViewRaw::new(key_row, commit_ts);
+            let composite = KeyTsOwned::new(key_owned.clone(), commit_ts);
             self.index.insert(
                 composite,
                 DynMutation::Upsert(BatchRowLoc::new(batch_id, row_idx)),
             );
         }
-        self.batches_attached
-            .push(BatchAttachment::new(batch, commit_ts_column));
         Ok(())
     }
 
@@ -246,24 +295,19 @@ impl DynMem {
 
         for (row_idx, key_row) in key_rows.into_iter().enumerate() {
             let key_size = key_row.heap_size();
+            let key_owned = key_row.to_owned();
             let has_existing = self
                 .index
                 .range(
-                    KeyTsViewRaw::new(key_row.clone(), Timestamp::MAX)
-                        ..=KeyTsViewRaw::new(key_row.clone(), Timestamp::MIN),
+                    KeyTsOwned::new(key_owned.clone(), Timestamp::MAX)
+                        ..=KeyTsOwned::new(key_owned.clone(), Timestamp::MIN),
                 )
                 .next()
                 .is_some();
-            self.metrics.inserts += 1;
-            if has_existing {
-                self.metrics.replaces += 1;
-            } else {
-                self.metrics.entries += 1;
-                self.metrics.approx_key_bytes += key_size;
-            }
+            self.metrics.record_write(has_existing, key_size);
 
             let commit_ts = Timestamp::new(commit_array.value(row_idx));
-            let composite = KeyTsViewRaw::new(key_row, commit_ts);
+            let composite = KeyTsOwned::new(key_owned.clone(), commit_ts);
             self.index.insert(
                 composite,
                 DynMutation::Delete(DeleteRowLoc::new(batch_idx, row_idx)),
@@ -274,14 +318,15 @@ impl DynMem {
 
     #[cfg(test)]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
-        let key_row =
-            KeyRow::from_owned(key).expect("test keys should only contain supported components");
+        let key_owned = key.clone();
         let mut out = Vec::new();
-        for (composite, mutation) in self.index.range(
-            KeyTsViewRaw::new(key_row.clone(), Timestamp::MAX)
-                ..=KeyTsViewRaw::new(key_row.clone(), Timestamp::MIN),
+        for entry in self.index.range(
+            KeyTsOwned::new(key_owned.clone(), Timestamp::MAX)
+                ..=KeyTsOwned::new(key_owned.clone(), Timestamp::MIN),
         ) {
-            if composite.key() != &key_row {
+            let composite = entry.key();
+            let mutation = entry.value();
+            if composite.key() != &key_owned {
                 break;
             }
             let tombstone = matches!(mutation, DynMutation::Delete(_));
@@ -302,15 +347,16 @@ impl DynMem {
         read_ts: Timestamp,
     ) -> Result<DynRowScan<'t>, KeyExtractError> {
         let base_schema = self
-            .batches_attached
-            .first()
+            .batch_slots
+            .iter()
+            .find_map(|slot| slot.get())
             .map(|batch| batch.storage().schema())
             .unwrap_or_else(|| self.schema.clone());
         let dyn_schema = DynSchema::from_ref(base_schema.clone());
         let projection = build_projection(&base_schema, projection_schema.as_ref())?;
         Ok(DynRowScan::new(
             &self.index,
-            &self.batches_attached,
+            &self.batch_slots,
             read_ts,
             dyn_schema,
             projection,
@@ -319,18 +365,18 @@ impl DynMem {
 
     /// Return `true` if there is any committed version for `key` newer than `snapshot_ts`.
     pub(crate) fn has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
-        let upper = KeyTsViewRaw::from_owned(key, Timestamp::MAX);
-        let lower = KeyTsViewRaw::from_owned(key, Timestamp::MIN);
+        let lower = KeyTsOwned::new(key.clone(), Timestamp::MAX);
+        let upper = KeyTsOwned::new(key.clone(), Timestamp::MIN);
         self.index
-            .range(upper..=lower)
+            .range(lower..=upper)
             .next()
-            .map(|(composite, _)| composite.timestamp() > snapshot_ts)
+            .map(|entry| entry.key().timestamp() > snapshot_ts)
             .unwrap_or(false)
     }
 
     /// Approximate memory usage for keys stored in the mutable table.
     pub(crate) fn approx_bytes(&self) -> usize {
-        self.metrics.approx_key_bytes + self.metrics.entries * self.metrics.entry_overhead
+        self.metrics.approx_bytes()
     }
 
     /// Consume the memtable and return any batches that were still pinned.
@@ -339,8 +385,10 @@ impl DynMem {
     /// the same time the batches are released.
     #[cfg(test)]
     pub(crate) fn into_attached_batches(self) -> Vec<RecordBatch> {
-        self.batches_attached
+        self.batch_slots
+            .into_vec()
             .into_iter()
+            .filter_map(|slot| slot.into_inner())
             .map(BatchAttachment::into_storage)
             .collect()
     }
@@ -373,17 +421,18 @@ impl DynMem {
             Delete(DeleteRowLoc),
         }
 
-        let index = std::mem::take(&mut self.index);
-        let mut entries: Vec<(KeyOwned, Timestamp, EntryKind)> = index
+        let index = std::mem::replace(&mut self.index, SkipMap::new());
+        let mut entries: Vec<(KeyRow, Timestamp, EntryKind)> = index
             .into_iter()
             .map(|(view, mutation)| {
-                let key_owned = view.key().to_owned();
+                let key_row = KeyRow::from_owned(view.key())
+                    .expect("stored keys should contain supported components");
                 let ts = view.timestamp();
                 let kind = match mutation {
                     DynMutation::Upsert(loc) => EntryKind::Upsert(loc),
                     DynMutation::Delete(loc) => EntryKind::Delete(loc),
                 };
-                (key_owned, ts, kind)
+                (key_row, ts, kind)
             })
             .collect();
         entries.sort_by(
@@ -396,7 +445,9 @@ impl DynMem {
         for (_key, commit, kind) in entries.iter() {
             match kind {
                 EntryKind::Upsert(loc) => {
-                    let attachment = &self.batches_attached[loc.batch_idx];
+                    let attachment = self.batch_slots[loc.batch_idx]
+                        .get()
+                        .expect("batch slot must be initialized for indexed entry");
                     let batch = attachment.storage();
                     let row_batch = batch.slice(loc.row_idx, 1);
                     slices.push(row_batch);
@@ -416,12 +467,14 @@ impl DynMem {
             }
         }
 
-        self.batches_attached.clear();
+        // Reset batch slots by replacing with fresh OnceLocks.
+        let capacity = self.batch_slots.len();
+        let fresh_slots: Vec<OnceLock<BatchAttachment>> =
+            (0..capacity).map(|_| OnceLock::new()).collect();
+        self.batch_slots = fresh_slots.into_boxed_slice();
+        self.batch_cursor.store(0, Ordering::SeqCst);
         self.delete_batches.clear();
-        self.metrics = MutableMemTableMetrics {
-            entry_overhead: self.metrics.entry_overhead,
-            ..Default::default()
-        };
+        self.metrics.reset_counters();
 
         let batch = if slices.is_empty() {
             RecordBatch::new_empty(schema.clone())
@@ -457,7 +510,7 @@ impl DynMem {
         let mut composite_index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry> = BTreeMap::new();
         let mut upsert_row = 0u32;
         let mut delete_row = 0u32;
-        for (_key_owned, commit, kind) in entries.into_iter() {
+        for (_key_row, commit, kind) in entries.into_iter() {
             match kind {
                 EntryKind::Upsert(_) => {
                     let key_row = upsert_key_rows
@@ -523,14 +576,16 @@ impl MutableLayout<KeyOwned> for DynMem {
 
 impl StatsProvider for DynMem {
     fn build_stats(&self, since_last_seal: Option<Duration>) -> MemStats {
+        let metrics = self.metrics.snapshot();
+        let batch_count = self.batch_cursor.load(Ordering::Relaxed);
         MemStats {
-            entries: self.metrics.entries,
-            inserts: self.metrics.inserts,
-            replaces: self.metrics.replaces,
-            approx_key_bytes: self.metrics.approx_key_bytes,
-            entry_overhead: self.metrics.entry_overhead,
+            entries: metrics.entries,
+            inserts: metrics.inserts,
+            replaces: metrics.replaces,
+            approx_key_bytes: metrics.approx_key_bytes,
+            entry_overhead: metrics.entry_overhead,
             typed_open_rows: None,
-            dyn_batches: Some(self.batches_attached.len() + self.delete_batches.len()),
+            dyn_batches: Some(batch_count + self.delete_batches.len()),
             dyn_approx_batch_bytes: None,
             since_last_seal,
         }
@@ -539,24 +594,23 @@ impl StatsProvider for DynMem {
 
 /// Iterator over dynamic rows, materializing from `RecordBatch`es and filtering by MVCC visibility.
 pub(crate) struct DynRowScan<'t> {
-    batches: &'t [BatchAttachment],
-    cursor:
-        std::collections::btree_map::Iter<'t, KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
+    batch_slots: &'t [OnceLock<BatchAttachment>],
+    cursor: crossbeam_skiplist::map::Iter<'t, KeyTsOwned, DynMutation<BatchRowLoc, DeleteRowLoc>>,
     read_ts: Timestamp,
-    current_key: Option<KeyRow>,
+    current_key: Option<KeyOwned>,
     emitted_for_key: bool,
     dyn_schema: DynSchema,
     projection: DynProjection,
 }
 
-pub(crate) enum DynRowScanEntry<'t> {
-    Row(&'t KeyTsViewRaw, DynRowRaw),
-    Tombstone(&'t KeyTsViewRaw),
+pub(crate) enum DynRowScanEntry {
+    Row(KeyTsViewRaw, DynRowRaw),
+    Tombstone(KeyTsViewRaw),
 }
 
-impl<'t> DynRowScanEntry<'t> {
+impl DynRowScanEntry {
     #[allow(dead_code)]
-    pub(crate) fn into_row(self) -> Option<(&'t KeyTsViewRaw, DynRowRaw)> {
+    pub(crate) fn into_row(self) -> Option<(KeyTsViewRaw, DynRowRaw)> {
         match self {
             DynRowScanEntry::Row(key, row) => Some((key, row)),
             DynRowScanEntry::Tombstone(_) => None,
@@ -575,14 +629,14 @@ impl<'t> fmt::Debug for DynRowScan<'t> {
 
 impl<'t> DynRowScan<'t> {
     fn new(
-        index: &'t BTreeMap<KeyTsViewRaw, DynMutation<BatchRowLoc, DeleteRowLoc>>,
-        batches: &'t [BatchAttachment],
+        index: &'t SkipMap<KeyTsOwned, DynMutation<BatchRowLoc, DeleteRowLoc>>,
+        batch_slots: &'t [OnceLock<BatchAttachment>],
         read_ts: Timestamp,
         dyn_schema: DynSchema,
         projection: DynProjection,
     ) -> Self {
         Self {
-            batches,
+            batch_slots,
             cursor: index.iter(),
             read_ts,
             current_key: None,
@@ -594,21 +648,23 @@ impl<'t> DynRowScan<'t> {
 }
 
 impl<'t> Iterator for DynRowScan<'t> {
-    type Item = Result<DynRowScanEntry<'t>, DynViewError>;
+    type Item = Result<DynRowScanEntry, DynViewError>;
     fn next(&mut self) -> Option<Self::Item> {
-        for (composite, mutation) in self.cursor.by_ref() {
-            let key_raw = composite.key();
+        for entry in self.cursor.by_ref() {
+            let composite = entry.key();
+            let mutation = entry.value();
+            let key_owned = composite.key().clone();
             if self
                 .current_key
                 .as_ref()
-                .map(|k| k == key_raw)
+                .map(|k| k == &key_owned)
                 .unwrap_or(false)
             {
                 if self.emitted_for_key {
                     continue;
                 }
             } else {
-                self.current_key = Some(key_raw.clone());
+                self.current_key = Some(key_owned.clone());
                 self.emitted_for_key = false;
             }
 
@@ -618,13 +674,15 @@ impl<'t> Iterator for DynRowScan<'t> {
 
             if let DynMutation::Delete(_) = mutation {
                 self.emitted_for_key = true;
-                return Some(Ok(DynRowScanEntry::Tombstone(composite)));
+                return Some(Ok(DynRowScanEntry::Tombstone(composite.as_raw_view())));
             }
             let loc = match mutation {
                 DynMutation::Upsert(loc) => *loc,
                 DynMutation::Delete(_) => unreachable!(),
             };
-            let attachment = &self.batches[loc.batch_idx];
+            let attachment = self.batch_slots[loc.batch_idx]
+                .get()
+                .expect("batch slot must be initialized for indexed entry");
             let batch = attachment.storage();
             let row = match self
                 .projection
@@ -635,7 +693,7 @@ impl<'t> Iterator for DynRowScan<'t> {
             };
 
             self.emitted_for_key = true;
-            return Some(Ok(DynRowScanEntry::Row(composite, row)));
+            return Some(Ok(DynRowScanEntry::Row(composite.as_raw_view(), row)));
         }
         None
     }
@@ -658,7 +716,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let mut m = DynMem::new(schema.clone());
+        let m = DynMem::new(schema.clone());
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
             DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
@@ -717,7 +775,7 @@ mod tests {
         ]));
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let mut mem = DynMem::new(schema.clone());
+        let mem = DynMem::new(schema.clone());
 
         let rows_v1 = vec![DynRow(vec![
             Some(DynCell::Str("k".into())),
@@ -749,7 +807,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let mut m = DynMem::new(schema.clone());
+        let m = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
@@ -1116,7 +1174,7 @@ mod tests {
         ]));
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let mut m = DynMem::new(schema.clone());
+        let m = DynMem::new(schema.clone());
         let rows = vec![
             DynRow(vec![
                 Some(DynCell::I64(1)),
@@ -1229,7 +1287,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let mut layout = DynMem::new(schema.clone());
+        let layout = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 

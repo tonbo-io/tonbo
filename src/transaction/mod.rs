@@ -21,7 +21,7 @@ use typed_arrow_dyn::{
 };
 
 use crate::{
-    db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, TxnWalPublishContext, WalFrameRange},
+    db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, DynDbHandle, TxnWalPublishContext, WalFrameRange},
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
     key::{KeyOwned, KeyTsViewRaw},
     manifest::{ManifestError, TableHead, TableSnapshot, VersionEdit, VersionState, WalSegmentRef},
@@ -63,7 +63,7 @@ pub enum SnapshotError {
 /// Immutable read-only view bound to a manifest lease and MVCC snapshot timestamp.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     read_view: ReadView,
     manifest: TableSnapshot,
 }
@@ -326,7 +326,11 @@ impl From<DBError> for TransactionError {
 }
 
 /// Builder-style transaction used by the dynamic mode.
-pub struct Transaction {
+pub struct Transaction<E>
+where
+    E: Executor + Timer,
+{
+    handle: DynDbHandle<E>,
     schema: SchemaRef,
     delete_schema: SchemaRef,
     extractor: Arc<dyn KeyProjection>,
@@ -337,8 +341,12 @@ pub struct Transaction {
     durability: TransactionDurability,
 }
 
-impl Transaction {
+impl<E> Transaction<E>
+where
+    E: Executor + Timer,
+{
     pub(crate) fn new(
+        handle: DynDbHandle<E>,
         schema: SchemaRef,
         delete_schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
@@ -349,6 +357,7 @@ impl Transaction {
         let snapshot_ts = snapshot.read_view().read_ts();
         let key_components = extractor.key_indices().len();
         Self {
+            handle,
             schema,
             delete_schema,
             extractor,
@@ -428,39 +437,28 @@ impl Transaction {
     }
 
     /// Fetch the latest visible row for `key`, overlaying staged mutations.
-    pub fn get<E>(
-        &self,
-        db: &DB<DynMode, E>,
-        key: &KeyOwned,
-    ) -> Result<Option<DynRow>, TransactionError>
-    where
-        E: Executor + Timer,
-    {
+    pub async fn get(&self, key: &KeyOwned) -> Result<Option<DynRow>, TransactionError> {
         if let Some(mutation) = self.staged.get(key) {
             return Ok(match mutation {
                 DynMutation::Upsert(row) => Some(clone_dyn_row(row)),
                 DynMutation::Delete(_) => None,
             });
         }
-        let rows = self.read_mutable_rows(db)?;
+        let rows = self.read_mutable_rows(&self.handle)?;
         Ok(rows.get(key).map(clone_dyn_row))
     }
 
     /// Scan rows matching `predicate`, returning values visible at the transaction snapshot with
     /// staged overlays.
-    pub async fn scan<E>(
+    pub async fn scan(
         &self,
-        db: &DB<DynMode, E>,
         predicate: &Predicate,
         projected_schema: Option<&SchemaRef>,
         limit: Option<usize>,
-    ) -> Result<Vec<DynRow>, TransactionError>
-    where
-        E: Executor + Timer,
-    {
-        let read_ts = self.read_ts();
-        let plan = db
-            .plan_scan(predicate, projected_schema, limit, read_ts)
+    ) -> Result<Vec<DynRow>, TransactionError> {
+        let plan = self
+            ._snapshot
+            .plan_scan(&self.handle, predicate, projected_schema, limit)
             .await
             .map_err(TransactionError::from)?;
         let txn_scan = if self.staged.is_empty() {
@@ -470,13 +468,14 @@ impl Transaction {
                 TransactionScan::new(
                     self.staged.entries(),
                     &self.schema,
-                    read_ts,
+                    plan.read_ts,
                     Some(&plan.scan_schema),
                 )
                 .map_err(TransactionError::DynKey)?,
             )
         };
-        let streams = db
+        let streams = self
+            .handle
             .build_scan_streams(&plan, txn_scan)
             .map_err(TransactionError::from)?;
         if streams.is_empty() {
@@ -487,7 +486,7 @@ impl Transaction {
         let result_schema = plan
             .projected_schema
             .clone()
-            .unwrap_or_else(|| Arc::clone(db.schema()));
+            .unwrap_or_else(|| Arc::clone(&self.schema));
         let package = PackageStream::new(
             DEFAULT_SCAN_BATCH_ROWS,
             merge,
@@ -546,26 +545,23 @@ impl Transaction {
         Ok(())
     }
 
-    fn read_mutable_rows<E>(
+    fn read_mutable_rows(
         &self,
         db: &DB<DynMode, E>,
-    ) -> Result<BTreeMap<KeyOwned, DynRow>, TransactionError>
-    where
-        E: Executor + Timer,
-    {
+    ) -> Result<BTreeMap<KeyOwned, DynRow>, TransactionError> {
         let read_ts = self.read_ts();
         let mut out = BTreeMap::new();
         let rows = db
             .scan_mutable_rows_at(read_ts)
             .map_err(TransactionError::KeyExtract)?;
-        for (key, row) in rows {
-            out.insert(key, row);
+        for (key_row, row) in rows {
+            out.insert(key_row.to_owned(), row);
         }
         for (key, row) in db
             .scan_immutable_rows_at(read_ts)
             .map_err(TransactionError::KeyExtract)?
         {
-            out.entry(key).or_insert(row);
+            out.entry(key.to_owned()).or_insert(row);
         }
         Ok(out)
     }
@@ -589,11 +585,12 @@ impl Transaction {
     }
 
     /// Commit the staged mutations into the supplied DB, ensuring WAL durability first.
-    pub async fn commit<E>(self, db: &mut DB<DynMode, E>) -> Result<(), TransactionCommitError>
+    pub async fn commit(self) -> Result<(), TransactionCommitError>
     where
         E: Executor + Timer + 'static,
     {
         let Transaction {
+            handle,
             schema,
             delete_schema,
             extractor: _,
@@ -609,6 +606,7 @@ impl Transaction {
         }
 
         let snapshot_ts = staged.snapshot_ts();
+        let db = handle;
         let lock_map = db.key_locks().clone();
         let mut key_guards = Vec::with_capacity(staged.len());
         for (key, _) in staged.iter() {
@@ -661,7 +659,7 @@ impl Transaction {
                     let publish_ctx = db.txn_publish_context(prev_live_floor);
                     let wal_range = tickets.await_range().await?;
                     apply_staged_payloads(
-                        db,
+                        &db,
                         upsert_payload.take(),
                         delete_payload.take(),
                         commit_ts,
@@ -670,7 +668,7 @@ impl Transaction {
                 }
                 CommitAckMode::Fast => {
                     apply_staged_payloads(
-                        db,
+                        &db,
                         upsert_payload.take(),
                         delete_payload.take(),
                         commit_ts,
@@ -692,7 +690,7 @@ impl Transaction {
                      exits"
                 );
             }
-            apply_staged_payloads(db, upsert_payload.take(), delete_payload.take(), commit_ts)?;
+            apply_staged_payloads(&db, upsert_payload.take(), delete_payload.take(), commit_ts)?;
         }
 
         drop(key_guards);
@@ -744,7 +742,7 @@ fn build_delete_batch(
 }
 
 fn apply_staged_payloads<E>(
-    db: &mut DB<DynMode, E>,
+    db: &DB<DynMode, E>,
     upserts: Option<RecordBatch>,
     deletes: Option<RecordBatch>,
     commit_ts: Timestamp,
@@ -779,6 +777,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        db::{DynDbHandle, DynDbHandleExt},
         inmem::policy::BatchesThreshold,
         mode::DynModeConfig,
         mvcc::Timestamp,
@@ -786,7 +785,15 @@ mod tests {
         test_util::build_batch,
     };
 
-    async fn make_db() -> (DB<DynMode, BlockingExecutor>, SchemaRef) {
+    type TestTx = Transaction<BlockingExecutor>;
+
+    async fn make_db() -> (DynDbHandle<BlockingExecutor>, SchemaRef) {
+        make_db_with_policy(None).await
+    }
+
+    async fn make_db_with_policy(
+        policy: Option<Arc<dyn crate::inmem::policy::SealPolicy + Send + Sync>>,
+    ) -> (DynDbHandle<BlockingExecutor>, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -795,12 +802,15 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let executor = Arc::new(BlockingExecutor);
-        let db = DB::new(config, executor).await.expect("db");
-        (db, schema)
+        let mut db = DB::new(config, executor).await.expect("db");
+        if let Some(policy) = policy {
+            db.set_seal_policy(policy);
+        }
+        (db.into_shared(), schema)
     }
 
     async fn ingest_rows(
-        db: &mut DB<DynMode, BlockingExecutor>,
+        db: &DynDbHandle<BlockingExecutor>,
         schema: &SchemaRef,
         rows: Vec<DynRow>,
     ) {
@@ -818,7 +828,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn upsert_batch_stages_rows() {
         let (db, schema) = make_db().await;
-        let mut tx = db.begin_transaction().await.expect("tx");
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
 
         let rows = vec![
             DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
@@ -829,7 +839,8 @@ mod tests {
         assert_eq!(tx.len(), 2);
 
         let fetched = tx
-            .get(&db, &KeyOwned::from("k1"))
+            .get(&KeyOwned::from("k1"))
+            .await
             .expect("get")
             .expect("row");
         match &fetched.0[1] {
@@ -840,9 +851,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn get_prefers_staged_rows() {
-        let (mut db, schema) = make_db().await;
+        let (db, schema) = make_db().await;
         ingest_rows(
-            &mut db,
+            &db,
             &schema,
             vec![DynRow(vec![
                 Some(DynCell::Str("k1".into())),
@@ -850,7 +861,7 @@ mod tests {
             ])],
         )
         .await;
-        let mut tx = db.begin_transaction().await.expect("tx");
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
         tx.upsert(DynRow(vec![
             Some(DynCell::Str("k1".into())),
             Some(DynCell::I32(42)),
@@ -858,7 +869,8 @@ mod tests {
         .expect("stage");
 
         let value = tx
-            .get(&db, &KeyOwned::from("k1"))
+            .get(&KeyOwned::from("k1"))
+            .await
             .expect("get")
             .expect("row");
         match &value.0[1] {
@@ -869,9 +881,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn scan_merges_staged_and_deleted_rows() {
-        let (mut db, schema) = make_db().await;
+        let (db, schema) = make_db().await;
         ingest_rows(
-            &mut db,
+            &db,
             &schema,
             vec![
                 DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
@@ -879,7 +891,7 @@ mod tests {
             ],
         )
         .await;
-        let mut tx = db.begin_transaction().await.expect("tx");
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
         tx.upsert(DynRow(vec![
             Some(DynCell::Str("k1".into())),
             Some(DynCell::I32(11)),
@@ -893,10 +905,7 @@ mod tests {
         .expect("stage insert");
 
         let predicate = all_rows_predicate();
-        let rows = tx
-            .scan(&db, &predicate, None, None)
-            .await
-            .expect("scan rows");
+        let rows = tx.scan(&predicate, None, None).await.expect("scan rows");
         let keys: Vec<String> = rows
             .iter()
             .map(|row| match &row.0[0] {
@@ -914,9 +923,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn delete_hides_rows_from_reads() {
-        let (mut db, schema) = make_db().await;
+        let (db, schema) = make_db().await;
         ingest_rows(
-            &mut db,
+            &db,
             &schema,
             vec![DynRow(vec![
                 Some(DynCell::Str("k_del".into())),
@@ -924,17 +933,18 @@ mod tests {
             ])],
         )
         .await;
-        let mut tx = db.begin_transaction().await.expect("tx");
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
         tx.delete(KeyOwned::from("k_del")).expect("delete");
 
         assert!(
-            tx.get(&db, &KeyOwned::from("k_del"))
+            tx.get(&KeyOwned::from("k_del"))
+                .await
                 .expect("get")
                 .is_none()
         );
         let predicate = all_rows_predicate();
         assert!(
-            tx.scan(&db, &predicate, None, None)
+            tx.scan(&predicate, None, None)
                 .await
                 .expect("scan")
                 .is_empty()
@@ -944,7 +954,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn build_delete_batch_writes_commit_ts() {
         let (db, _schema) = make_db().await;
-        let tx = db.begin_transaction().await.expect("tx");
+        let tx: TestTx = db.begin_transaction().await.expect("tx");
         let key = KeyOwned::from("delete-me");
         let commit_ts = Timestamp::new(777);
         let batch = build_delete_batch(&tx.delete_schema, tx.key_components, vec![key], commit_ts)
@@ -962,7 +972,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn delete_rejects_wrong_key_shape() {
         let (db, _schema) = make_db().await;
-        let mut tx = db.begin_transaction().await.expect("tx");
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
         let key = KeyOwned::tuple(vec![KeyOwned::from("k1"), KeyOwned::from("k2")]);
         let err = tx.delete(key).expect_err("delete should fail");
         match err {
@@ -976,10 +986,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_reads_sealed_immutable_rows() {
-        let (mut db, schema) = make_db().await;
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        let (db, schema) =
+            make_db_with_policy(Some(Arc::new(BatchesThreshold { batches: 1 }))).await;
         ingest_rows(
-            &mut db,
+            &db,
             &schema,
             vec![DynRow(vec![
                 Some(DynCell::Str("sealed".into())),
@@ -989,10 +999,10 @@ mod tests {
         .await;
         assert!(db.num_immutable_segments() >= 1);
 
-        let tx = db.begin_transaction().await.expect("tx");
+        let tx: TestTx = db.begin_transaction().await.expect("tx");
         let predicate = all_rows_predicate();
         let rows = tx
-            .scan(&db, &predicate, None, None)
+            .scan(&predicate, None, None)
             .await
             .expect("scan immutables");
         assert_eq!(rows.len(), 1);
@@ -1004,11 +1014,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn commit_conflict_checks_immutables() {
-        let (mut db, schema) = make_db().await;
-        db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+        let (db, schema) =
+            make_db_with_policy(Some(Arc::new(BatchesThreshold { batches: 1 }))).await;
 
         ingest_rows(
-            &mut db,
+            &db,
             &schema,
             vec![DynRow(vec![
                 Some(DynCell::Str("user".into())),
@@ -1016,10 +1026,10 @@ mod tests {
             ])],
         )
         .await;
-        let mut tx = db.begin_transaction().await.expect("tx");
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
 
         ingest_rows(
-            &mut db,
+            &db,
             &schema,
             vec![DynRow(vec![
                 Some(DynCell::Str("user".into())),
@@ -1034,7 +1044,7 @@ mod tests {
         ]))
         .expect("stage conflicting update");
 
-        let err = tx.commit(&mut db).await.expect_err("conflict expected");
+        let err = tx.commit().await.expect_err("conflict expected");
         match err {
             TransactionCommitError::WriteConflict(key) => {
                 assert_eq!(key, KeyOwned::from("user"));
@@ -1045,9 +1055,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn commit_without_wal_is_volatile_but_applies() {
-        let (mut db, _schema) = make_db().await;
+        let (db, _schema) = make_db().await;
 
-        let mut tx = db.begin_transaction().await.expect("tx");
+        let mut tx: TestTx = db.begin_transaction().await.expect("tx");
         assert_eq!(tx.durability(), TransactionDurability::Volatile);
 
         tx.upsert(DynRow(vec![
@@ -1056,13 +1066,14 @@ mod tests {
         ]))
         .expect("stage row");
 
-        tx.commit(&mut db)
+        tx.commit()
             .await
             .expect("commit should succeed without wal");
 
         let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
-        let plan = db
-            .plan_scan(&predicate, None, None, Timestamp::MAX)
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
+        let plan = snapshot
+            .plan_scan(&db, &predicate, None, None)
             .await
             .expect("plan");
         let batches = db

@@ -27,11 +27,12 @@ Major compaction is now wired end-to-end on this branch: the planner emits a tas
 - Keep the flow object-storage friendly: write-new-only, CAS manifest, no in-place mutation.
 - Emit GC hints (obsolete SST ids, WAL floor) for a follow-on GC worker.
 
-## Non-Goals (MVP)
+## Non-Goals
 
-- Advanced planner heuristics (size-tiering, overlap-aware LSM tuning).
-- Compaction leasing/coordination across processes.
-- GC worker implementation; this RFC only emits hints.
+- Advanced planner heuristics (size-tiering, overlap-aware LSM tuning)
+- Compaction leasing/coordination across processes
+- GC worker implementation; this RFC only emits hints
+- Remote/distributed executor implementation
 
 ## Design
 

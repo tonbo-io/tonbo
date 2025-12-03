@@ -21,62 +21,66 @@ The implementation now splits responsibilities across **two fusio-manifest insta
 4. Support fast crash recovery by loading the manifest HEAD and replaying WAL only above the recorded floor, adopting orphan segments via fusio-manifest.
 5. Remain runtime- and backend-agnostic by reusing Fusio traits (`DynFs`, `Executor`, `Timer`) exactly as fusio-manifest expects.
 
-## Non-goals
+## Non-Goals
 
-- Deliver full multi-tenant catalog features beyond a single namespace.
-- Redesign Tonbo’s WAL frame format; the RFC only integrates WAL metadata with the manifest.
+- Full multi-tenant catalog features beyond a single namespace
+- Redesigning Tonbo's WAL frame format; this RFC only integrates WAL metadata with the manifest
 
 ## Background
 
-- Tonbo’s dev branch has Arrow-first mutable/immutable layers and SST writer scaffolding, but `src/lib.rs:9-41` shows no manifest module.
-- The WAL writes durable `wal-*.tonwal` segments yet lacks id allocation or reclamation logic beyond rotation (`src/wal/storage.rs`, `src/wal/writer.rs`).
-- `docs/overview.md` repeatedly references manifest-driven CAS updates, snapshot visibility, and GC, none of which exist in code.
-- `fusio-manifest` implements a backend-agnostic manifest with CAS HEAD objects, append-only segments, checkpoints, snapshot leases, and retention/GC (see `/Users/xing/Idea/fusio/fusio-manifest/src/manifest.rs`, `session.rs`, `compactor.rs` and the RFD in `docs/fusio-manifest-rfd.md`).
+Tonbo's dev branch has Arrow-first mutable/immutable layers and SST writer scaffolding, but lacks manifest modules. The WAL writes durable segments yet has no id allocation or reclamation logic. The architecture overview references manifest-driven CAS updates, snapshot visibility, and GC—none of which exist in code.
 
-## Design Overview
+This RFC builds on `fusio-manifest`, which provides backend-agnostic CAS HEAD objects, append-only segments, checkpoints, snapshot leases, and retention/GC.
+
+## Design
 
 ### Key Space
 
-Each manifest instance defines its own ordered key space (all keys still satisfy fusio-manifest’s `Serialize + PartialOrd + Eq + Hash` traits):
+The manifest uses two separate key spaces to isolate catalog metadata from high-churn version edits:
 
-```
-CatalogManifestKey =
-  CatalogRoot |
-  TableMeta { table_id }
+**Catalog manifest keys:**
 
-VersionManifestKey =
-  TableHead { table_id } |
-  TableVersion { table_id, manifest_ts } |
-  WalFloor { table_id }
+| Key | Purpose |
+|-----|---------|
+| CatalogRoot | Global catalog state (known tables, ID allocator) |
+| TableMeta | Per-table metadata (name, schema fingerprint, PK layout, retention) |
 
-GcPlanKey = Table { table_id }   // reserved for GC plans in a future iteration
-```
+**Version manifest keys:**
 
-Catalog keys are never mixed into the version manifest’s segments, which keeps hot version edits compact while allowing the catalog to evolve independently.
+| Key | Purpose |
+|-----|---------|
+| TableHead | Current head pointer per table (latest version, WAL floor) |
+| TableVersion | Versioned state snapshots keyed by `(table_id, manifest_ts)` |
+| WalFloor | Lowest retained WAL segment reference per table |
+
+This separation allows catalog replication/evolution without touching high-frequency version commits.
 
 ### Values
 
-Values remain serde-serializable structs but are split the same way:
+**Catalog manifest values:**
+- `CatalogState`: Known tables plus allocator state
+- `TableMeta`: Table name, schema fingerprint, PK layout, retention settings, schema version
 
-- **Catalog manifest values**
-  - `CatalogState`: known tables plus allocator state.
-  - `TableMeta`: table name, schema fingerprint, PK layout, retention settings, schema version.
-- **Version manifest values**
-  - `TableHead`: schema version, latest `wal_floor`, `last_manifest_txn` (monotonic commit timestamp).
-  - `VersionState`: version metadata keyed by commit timestamp—lists of `SstEntry { id, level, descriptor }`, referenced `WalSegmentRef { seq, file_id, first_frame, last_frame }`, tombstone watermark, aggregated stats.
-  - `WalFloor`: serialized `WalSegmentRef` capturing the lowest WAL fragment retained for a table.
+**Version manifest values:**
+- `TableHead`: Schema version, latest WAL floor, last manifest transaction timestamp
+- `VersionState`: SST entries, WAL segment references, tombstone watermark, aggregated stats
+- `WalFloor`: Lowest WAL segment still referenced by any retained version
 
-Each version commit stores a full `VersionState` under `TableVersion { table_id, manifest_ts }`, where `manifest_ts` is the timestamp returned by `apply_version_edits`. Catalog entries never appear in that log, but both manifests benefit from fusio-manifest’s append-only segments and checkpoint/lease machinery.
+Each version commit stores a full `VersionState` under its `TableVersion` key. The manifest timestamp defines global ordering.
 
-`SstEntry` embeds an `SsTableDescriptor` capturing fields required by every compaction strategy:
+### SST Entry Metadata
 
-- `level`: target level when the SST was published.
-- `min_key` / `max_key`: lexicographic primary-key bounds.
-- `min_commit_ts` / `max_commit_ts`: earliest and latest MVCC timestamps present.
-- `rows`, `bytes`, `tombstones`: sizing metrics collected at flush time.
-- `wal_segments`: the WAL fragment identifiers (`wal-*.tonwal`) that produced the SST (mirrors `SsTableDescriptor::wal_ids` in `src/ondisk/sstable.rs`).
+Each SST entry in `VersionState` captures fields required for compaction and read-path pruning:
 
-Additional strategy-specific metadata can ride in an extensible `extra` map, but these core fields must be present so leveled/tiered compaction and read-path pruning can reason about the file without inspecting Parquet contents.
+| Field | Purpose |
+|-------|---------|
+| level | Target level when SST was published |
+| min_key / max_key | Lexicographic primary-key bounds |
+| min_commit_ts / max_commit_ts | MVCC timestamp range |
+| rows, bytes, tombstones | Sizing metrics for compaction planning |
+| wal_segments | WAL fragment IDs that produced this SST |
+
+These fields allow compaction and read-path pruning without inspecting Parquet contents.
 
 ### Catalog Registration and Table Definitions
 
@@ -108,39 +112,32 @@ This split lets us replicate catalog metadata (e.g., to serve discovery APIs) at
 
 ### API Surface
 
-The manifest module exposes:
+The manifest module exposes operations for table lifecycle and version management:
 
-```rust
-pub struct TonboManifest {
-    version: Manifest<VersionCodec, ...>,
-    catalog: Manifest<CatalogCodec, ...>,
-}
+| Operation | Purpose |
+|-----------|---------|
+| `open` | Initialize manifest from existing catalog and version stores |
+| `init_catalog` | Bootstrap empty catalog if none exists |
+| `register_table` | Register a new table or validate existing table matches definition |
+| `table_meta` | Fetch logical metadata (name, schema, retention) for a table |
+| `apply_version_edits` | Atomically publish SST adds/removes and WAL floor updates |
+| `snapshot_latest` | Get current version state for read planning |
+| `list_versions` | Enumerate retained versions for debugging or time-travel |
+| `recover_orphans` | Adopt orphaned segments after crash recovery |
+| `compactor` | Access GC/compaction planning APIs |
 
-impl TonboManifest {
-    pub async fn open(version: Manifest<VersionCodec, ...>, catalog: Manifest<CatalogCodec, ...>) -> Result<Self>;
-    pub async fn init_catalog(&self) -> Result<()>;
-    pub async fn register_table(&self, file_ids: &FileIdGenerator, definition: &TableDefinition) -> Result<TableMeta>;
-    pub async fn table_meta(&self, table: TableId) -> Result<TableMeta>;
-    pub async fn apply_version_edits(&self, table: TableId, edits: &[VersionEdit]) -> Result<Timestamp>;
-    pub async fn snapshot_latest(&self, table: TableId) -> Result<TableSnapshot>;
-    pub async fn list_versions(&self, table: TableId, limit: usize) -> Result<Vec<VersionState>>;
-    pub async fn recover_orphans(&self) -> Result<usize>;
-    pub fn compactor(&self) -> TonboCompactor;
-}
-```
-
-`VersionEdit` carries `adds`, `removes`, `wal_segments`, `table_stats`, and `tombstone_watermark`. Callers (flush/compaction) populate it from `SsTableDescriptor` and WAL metadata.
+**Version edits** carry: SST additions, SST removals, WAL segment references, table stats, and tombstone watermark. Callers (flush/compaction) populate edits from SST descriptors and WAL metadata.
 
 ### Storage Layout
 
-Manifest data follows RFC 0004 (`docs/rfcs/0004-storage-layout.md`) with two prefixes:
+Manifest data follows RFC 0004 with two prefixes under `root/manifest/`:
 
-```
-root/manifest/catalog/{head.json, segments/, checkpoints/, leases/}
-root/manifest/version/{head.json, segments/, checkpoints/, leases/}
-```
+| Prefix | Contents |
+|--------|----------|
+| `catalog/` | HEAD pointer, segments, checkpoints, leases for table metadata |
+| `version/` | HEAD pointer, segments, checkpoints, leases for version history |
 
-Both directories are created through `fusio::fs::Fs::create_dir_all` and passed into separate fusio-manifest store sets. This makes it trivial to replicate or checkpoint catalog metadata without touching the heavier version log, and vice versa.
+This separation allows catalog replication/checkpointing without touching the heavier version log, and vice versa. Both prefixes use fusio-manifest's standard directory structure.
 
 ## Initial Integration Step
 

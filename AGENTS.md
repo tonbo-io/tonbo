@@ -17,6 +17,7 @@
 **YOU MUST CHECK OVERVIEW AND RETHINK-SUMMARY IF YOU DO NOT READ IT BEFORE**
 
 - Start with `docs/overview.md` for architecture and component context.
+- See `docs/rfcs/0000-rfc-style-guide.md` for RFC style guide.
   - Key sections for quick lookup:
     - [I/O](docs/overview.md#io) - Fusio runtime abstraction and durability contract.
     - [First-class Object Storage](docs/overview.md#first-class-object-storage) - object-store centric design.
@@ -39,6 +40,10 @@
   - `docs/rfcs/0005-sstable-sketch.md` — SSTable skeleton for dynamic mode.
   - `docs/rfcs/0006-mvcc-sidecar.md` — MVCC sidecar storage for immutable segments.
   - `docs/rfcs/0007-manifest.md` — manifest module on top of fusio-manifest.
+  - `docs/rfcs/0008-zero-copy-key-view.md` — zero-copy key view strategy.
+  - `docs/rfcs/0009-declarative-schema-init.md` — declarative schema initialization.
+  - `docs/rfcs/0010-2-phase-read.md` — two-phase read path.
+  - `docs/rfcs/0011-major-compaction.md` — major compaction design.
 - Migration overview: we are in the middle of the refactor; read `docs/rethink-summary.md` before diving in to stay aligned with the goals, execution plan, and live status table.
 
 ## Build, Test, and Development Commands

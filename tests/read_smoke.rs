@@ -10,7 +10,8 @@ use fusio::{
 };
 use futures::StreamExt;
 use tonbo::{
-    BatchesThreshold, DB,
+    BatchesThreshold, DB, Transaction,
+    db::{DynDbHandle, DynDbHandleExt},
     key::KeyOwned,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
@@ -39,7 +40,7 @@ fn build_batch_owned(schema: Arc<Schema>, ids: Vec<String>, values: Vec<i32>) ->
     RecordBatch::try_new(schema, columns).expect("record batch")
 }
 
-async fn make_db() -> (DB<DynMode, BlockingExecutor>, Arc<Schema>) {
+async fn make_db() -> (DynDbHandle<BlockingExecutor>, Arc<Schema>) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
@@ -48,13 +49,16 @@ async fn make_db() -> (DB<DynMode, BlockingExecutor>, Arc<Schema>) {
     let mut db = DB::new(config, Arc::new(BlockingExecutor))
         .await
         .expect("db");
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
-    (db, schema)
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
+    (db.into_shared(), schema)
 }
+
+type BlockingTx = Transaction<BlockingExecutor>;
+type TokioTx = Transaction<TokioExecutor>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_streams_mutable_and_immutable() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
 
     let batch = build_batch(schema.clone(), &[("immutable-a", 10), ("immutable-b", 20)]);
     db.ingest(batch).await.expect("ingest first batch");
@@ -63,8 +67,9 @@ async fn read_smoke_streams_mutable_and_immutable() {
     db.ingest(batch).await.expect("ingest second batch");
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
-    let plan = db
-        .plan_scan(&predicate, None, None, Timestamp::MAX)
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
         .await
         .expect("plan");
     let mut stream = db.execute_scan(plan).await.expect("execute");
@@ -94,15 +99,13 @@ async fn read_smoke_streams_mutable_and_immutable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_snapshot_honors_tombstones() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let initially_visible = build_batch(schema.clone(), &[("user-a", 10), ("user-b", 20)]);
     db.ingest_with_tombstones(initially_visible, vec![false, false])
         .await
         .expect("ingest initial rows");
 
-    let txn = db.begin_transaction().await.expect("snapshot transaction");
-    let snapshot_ts = txn.read_ts();
-    drop(txn);
+    let txn: BlockingTx = db.begin_transaction().await.expect("snapshot transaction");
 
     let after_delete = build_batch(schema.clone(), &[("user-a", 99), ("user-b", 0)]);
     db.ingest_with_tombstones(after_delete, vec![false, true])
@@ -111,7 +114,24 @@ async fn read_smoke_snapshot_honors_tombstones() {
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(-1i64));
 
-    let snapshot_rows = collect_rows_for_predicate(&db, &predicate, snapshot_ts).await;
+    let snapshot_rows = txn
+        .scan(&predicate, None, None)
+        .await
+        .expect("txn snapshot scan");
+    let snapshot_rows: Vec<(String, i32)> = snapshot_rows
+        .iter()
+        .map(|row| {
+            let id = match &row.0[0] {
+                Some(DynCell::Str(s)) => s.clone(),
+                other => panic!("unexpected id cell {other:?}"),
+            };
+            let v = match &row.0[1] {
+                Some(DynCell::I32(v)) => *v,
+                other => panic!("unexpected value cell {other:?}"),
+            };
+            (id, v)
+        })
+        .collect();
     assert_eq!(
         snapshot_rows,
         vec![("user-a".to_string(), 10), ("user-b".to_string(), 20)],
@@ -128,7 +148,7 @@ async fn read_smoke_snapshot_honors_tombstones() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_streams_large_packages() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let total_rows = PACKAGE_ROWS * 3 + PACKAGE_ROWS / 2;
     let mut ids = Vec::with_capacity(total_rows);
     let mut values = Vec::with_capacity(total_rows);
@@ -141,8 +161,9 @@ async fn read_smoke_streams_large_packages() {
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(-1i64));
 
-    let plan = db
-        .plan_scan(&predicate, None, None, Timestamp::MAX)
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, None)
         .await
         .expect("plan");
     let mut stream = db.execute_scan(plan).await.expect("execute");
@@ -168,7 +189,7 @@ async fn read_smoke_streams_large_packages() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_residual_predicate_filters_rows() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let batch = build_batch(schema.clone(), &[("keep", 10), ("drop", -5)]);
     db.ingest(batch).await.expect("ingest rows");
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
@@ -178,7 +199,7 @@ async fn read_smoke_residual_predicate_filters_rows() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_projection_retains_predicate_columns() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let batch = build_batch(
         schema.clone(),
         &[("keep", 10), ("drop", -5), ("also-drop", -1)],
@@ -187,8 +208,9 @@ async fn read_smoke_projection_retains_predicate_columns() {
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
     let projected_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
-    let plan = db
-        .plan_scan(&predicate, Some(&projected_schema), None, Timestamp::MAX)
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, Some(&projected_schema), None)
         .await
         .expect("plan");
     let mut stream = db.execute_scan(plan).await.expect("execute");
@@ -223,7 +245,7 @@ async fn read_smoke_transaction_scan() {
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::new(config, executor).await.expect("db");
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let mem_fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
     let mut wal_cfg = RuntimeWalConfig::default();
@@ -234,7 +256,9 @@ async fn read_smoke_transaction_scan() {
     wal_cfg.sync = WalSyncPolicy::Disabled;
     db.enable_wal(wal_cfg).await.expect("enable wal");
 
-    let mut base_tx = db.begin_transaction().await.expect("base tx");
+    let db = db.into_shared();
+
+    let mut base_tx: TokioTx = db.begin_transaction().await.expect("base tx");
     base_tx
         .upsert(DynRow(vec![
             Some(DynCell::Str("base-a".into())),
@@ -253,9 +277,9 @@ async fn read_smoke_transaction_scan() {
             Some(DynCell::I32(3)),
         ]))
         .expect("stage delete target");
-    base_tx.commit(&mut db).await.expect("commit base rows");
+    base_tx.commit().await.expect("commit base rows");
 
-    let mut tx = db.begin_transaction().await.expect("overlay tx");
+    let mut tx: TokioTx = db.begin_transaction().await.expect("overlay tx");
     tx.upsert(DynRow(vec![
         Some(DynCell::Str("base-a".into())),
         Some(DynCell::I32(999)),
@@ -270,7 +294,7 @@ async fn read_smoke_transaction_scan() {
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(-1i64));
     let rows = tx
-        .scan(&db, &predicate, None, None)
+        .scan(&predicate, None, None)
         .await
         .expect("transaction scan overlays staged rows");
     let mut entries: Vec<_> = rows
@@ -300,11 +324,11 @@ async fn read_smoke_transaction_scan() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_transaction_scan_projection() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let batch = build_batch(schema.clone(), &[("base", 1), ("neg-base", -5)]);
     db.ingest(batch).await.expect("ingest base row");
 
-    let mut tx = db.begin_transaction().await.expect("tx");
+    let mut tx: BlockingTx = db.begin_transaction().await.expect("tx");
     tx.upsert(DynRow(vec![
         Some(DynCell::Str("base".into())),
         Some(DynCell::I32(5)),
@@ -324,7 +348,7 @@ async fn read_smoke_transaction_scan_projection() {
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
     let projected_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
     let rows = tx
-        .scan(&db, &predicate, Some(&projected_schema), None)
+        .scan(&predicate, Some(&projected_schema), None)
         .await
         .expect("transaction scan projects columns");
     assert_eq!(rows.len(), 2);
@@ -342,19 +366,15 @@ async fn read_smoke_transaction_scan_projection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_projects_value_column_only() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let batch = build_batch(schema.clone(), &[("p1", 10), ("p2", 20)]);
     db.ingest(batch).await.expect("ingest rows");
 
     let predicate = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("p1"));
     let projection = Schema::new(vec![Field::new("v", DataType::Int32, false)]);
-    let plan = db
-        .plan_scan(
-            &predicate,
-            Some(&Arc::new(projection)),
-            None,
-            Timestamp::MAX,
-        )
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, Some(&Arc::new(projection)), None)
         .await
         .expect("plan projection");
     let mut stream = db.execute_scan(plan).await.expect("execute");
@@ -381,7 +401,7 @@ async fn read_smoke_projects_value_column_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_key_range_predicate_filters_rows() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let batch = build_batch(
         schema.clone(),
         &[("k1", 1), ("k2", 2), ("k3", 3), ("k4", 4)],
@@ -402,13 +422,14 @@ async fn read_smoke_key_range_predicate_filters_rows() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_plan_scan_applies_limit() {
-    let (mut db, schema) = make_db().await;
+    let (db, schema) = make_db().await;
     let batch = build_batch(schema.clone(), &[("l1", 1), ("l2", 2), ("l3", 3)]);
     db.ingest(batch).await.expect("ingest rows");
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(-1i64));
-    let plan = db
-        .plan_scan(&predicate, None, Some(2), Timestamp::MAX)
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &predicate, None, Some(2))
         .await
         .expect("plan with limit");
     let mut stream = db.execute_scan(plan).await.expect("execute");
@@ -428,12 +449,13 @@ async fn read_smoke_plan_scan_applies_limit() {
 }
 
 async fn collect_rows_for_predicate(
-    db: &DB<DynMode, BlockingExecutor>,
+    db: &DynDbHandle<BlockingExecutor>,
     predicate: &tonbo::query::Predicate,
-    read_ts: Timestamp,
+    _read_ts: Timestamp,
 ) -> Vec<(String, i32)> {
-    let plan = db
-        .plan_scan(predicate, None, None, read_ts)
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(db, predicate, None, None)
         .await
         .expect("plan");
     let mut stream = db.execute_scan(plan).await.expect("execute");

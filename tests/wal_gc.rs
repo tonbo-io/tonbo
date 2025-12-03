@@ -76,8 +76,9 @@ fn single_row_batch(schema: Arc<Schema>, id: &str, value: i32) -> RecordBatch {
 
 fn rows_from_db(db: &DB<DynMode, TokioExecutor>) -> Vec<(String, i32)> {
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let snapshot = futures::executor::block_on(db.begin_snapshot()).expect("snapshot");
     let plan =
-        futures::executor::block_on(db.plan_scan(&pred, None, None, Timestamp::MAX)).expect("plan");
+        futures::executor::block_on(snapshot.plan_scan(db, &pred, None, None)).expect("plan");
     let stream = futures::executor::block_on(db.execute_scan(plan)).expect("execute");
     let batches =
         futures::executor::block_on(stream.try_collect::<Vec<_>>()).expect("collect batches");
@@ -138,7 +139,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
 
     let wal_dir_local = path_to_local(&db.wal_config().expect("wal").dir).expect("local wal dir");
 
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let mut ingested_rows: Vec<(String, i32)> = Vec::new();
     for idx in 0..2 {
@@ -153,7 +154,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
         "expected initial seal to create immutables"
     );
 
-    db.set_seal_policy(Box::new(NeverSeal::default()));
+    db.set_seal_policy(Arc::new(NeverSeal::default()));
     for idx in 0..4 {
         let id = format!("pinned-{idx}");
         let value = 100 + idx as i32;
@@ -201,7 +202,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     });
     drop(recovered);
 
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
     let final_id = "flushed".to_string();
     ingested_rows.push((final_id.clone(), 999));
     db.ingest(single_row_batch(schema.clone(), &final_id, 999))
@@ -247,6 +248,7 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
 
     let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
     db.enable_wal(wal_cfg.clone()).await?;
+    let db = db.into_shared();
     assert!(db.wal_floor_seq().await.is_none());
 
     let mut tx = db.begin_transaction().await?;
@@ -254,7 +256,7 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
         Some(DynCell::Str("strict".into())),
         Some(DynCell::I32(1)),
     ]))?;
-    tx.commit(&mut db).await?;
+    tx.commit().await?;
 
     let floor = db
         .wal_floor_seq()
@@ -262,7 +264,7 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
         .expect("transaction commit should publish wal floor");
     db.prune_wal_segments_below_floor_for_tests().await;
 
-    let wal_dir_local = path_to_local(&db.wal_config().expect("wal").dir)?;
+    let wal_dir_local = { path_to_local(&db.wal_config().expect("wal").dir)? };
     let pinned = wal_file_for_seq(&wal_dir_local, floor);
     assert!(pinned.exists(), "floor segment must remain on disk");
     Ok(())
@@ -290,13 +292,14 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
 
     let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
     db.enable_wal(wal_cfg.clone()).await?;
+    let db = db.into_shared();
 
     let mut tx = db.begin_transaction().await?;
     tx.upsert(DynRow(vec![
         Some(DynCell::Str("fast".into())),
         Some(DynCell::I32(7)),
     ]))?;
-    tx.commit(&mut db).await?;
+    tx.commit().await?;
 
     let start = Instant::now();
     let timeout = Duration::from_secs(5);

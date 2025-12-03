@@ -34,7 +34,7 @@ use tonbo::{
 #[path = "common/mod.rs"]
 mod common;
 
-use common::schema_and_config;
+use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -54,13 +54,14 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let root_dir = workspace_temp_dir("tonbo-wal-e2e");
     let root_str = root_dir.to_string_lossy().into_owned();
 
-    let (schema, build_config) = schema_and_config(
+    let build_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = build_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
@@ -81,7 +82,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     db.disable_wal().await?;
     drop(db);
 
-    let (_, mode_config_recover) = schema_and_config(
+    let mode_config_recover = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -96,8 +97,9 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
             .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
+    let snapshot = recovered.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&recovered, &pred, None, None)
         .await
         .expect("plan");
     let batches = recovered
@@ -144,13 +146,14 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     let temp_root = workspace_temp_dir("wal-manifest-restart");
     let root_str = temp_root.to_string_lossy().into_owned();
 
-    let (schema, build_config) = schema_and_config(
+    let build_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = build_config.schema();
     let executor = Arc::new(TokioExecutor::default());
 
     // Configure WAL to persist state and ensure small segments for replay coverage.
@@ -182,7 +185,7 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
         .wal_config(wal_builder_cfg.clone())
         .recover_or_init_with_executor(Arc::clone(&executor))
         .await?;
-    db.set_seal_policy(Box::new(BatchesThreshold { batches: 1 }));
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let expected_rows = vec![
         ("alpha".to_string(), 10),
@@ -211,7 +214,7 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     drop(db);
 
     // Restart: rely on manifest WAL floor to drive WAL replay back into memtables.
-    let (_, recover_config) = schema_and_config(
+    let recover_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -227,8 +230,9 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
             .await?;
 
     let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&predicate, None, None, Timestamp::MAX)
+    let snapshot = recovered.begin_snapshot().await?;
+    let plan = snapshot
+        .plan_scan(&recovered, &predicate, None, None)
         .await?;
     let batches = recovered
         .execute_scan(plan)
@@ -270,7 +274,7 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     let root_dir = workspace_temp_dir("tonbo-wal-composite");
     let root_str = root_dir.to_string_lossy().into_owned();
 
-    let (schema, mode_config) = schema_and_config(
+    let mode_config = config_with_pk(
         vec![
             Field::new("tenant", DataType::Utf8, false),
             Field::new("bucket", DataType::Int64, false),
@@ -278,6 +282,7 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
         ],
         &["tenant", "bucket"],
     );
+    let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
@@ -308,9 +313,8 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
             .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("tenant", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
-        .await?;
+    let snapshot = recovered.begin_snapshot().await?;
+    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
     let batches = recovered
         .execute_scan(plan)
         .await?
@@ -481,13 +485,14 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
     let root_dir = workspace_temp_dir("tonbo-wal-delete-recovery");
     let root_str = root_dir.to_string_lossy().into_owned();
 
-    let (schema, mode_config) = schema_and_config(
+    let mode_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, true),
         ],
         &["id"],
     );
+    let schema = mode_config.schema();
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
         .on_disk(root_str.clone())?
@@ -516,7 +521,7 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
     db.disable_wal().await?;
     drop(db);
 
-    let (_, recover_config) = schema_and_config(
+    let recover_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, true),
@@ -531,9 +536,8 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
             .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
-        .await?;
+    let snapshot = recovered.begin_snapshot().await?;
+    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
     let batches = recovered
         .execute_scan(plan)
         .await?
@@ -557,13 +561,14 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
     let root_str = root_dir.to_string_lossy().into_owned();
     let wal_dir = root_dir.join("wal");
 
-    let (schema, mode_config) = schema_and_config(
+    let mode_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
 
@@ -622,8 +627,9 @@ async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::erro
             .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
+    let snapshot = recovered.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&recovered, &pred, None, None)
         .await
         .expect("plan");
     let batches = recovered
@@ -670,13 +676,14 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
     let root_str = root_dir.to_string_lossy().into_owned();
     let wal_dir = root_dir.join("wal");
 
-    let (schema, mode_config) = schema_and_config(
+    let mode_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
 
@@ -738,9 +745,8 @@ async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::erro
             .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
-        .await?;
+    let snapshot = recovered.begin_snapshot().await?;
+    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
     let batches = recovered
         .execute_scan(plan)
         .await?
@@ -783,13 +789,14 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     let root_str = root_dir.to_string_lossy().into_owned();
     let wal_dir = root_dir.join("wal");
 
-    let (schema, mode_config) = schema_and_config(
+    let mode_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
 
@@ -847,9 +854,8 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
-        .await?;
+    let snapshot = recovered.begin_snapshot().await?;
+    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
     let batches = recovered
         .execute_scan(plan)
         .await?
@@ -893,7 +899,7 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
     recovered.disable_wal().await?;
     drop(recovered);
 
-    let (_, final_config) = schema_and_config(
+    let final_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -908,8 +914,9 @@ async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::
             .await?;
 
     let pred_after = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan_after = recovered_again
-        .plan_scan(&pred_after, None, None, Timestamp::MAX)
+    let snapshot_after = recovered_again.begin_snapshot().await.expect("snapshot");
+    let plan_after = snapshot_after
+        .plan_scan(&recovered_again, &pred_after, None, None)
         .await
         .expect("plan");
     let batches_after = recovered_again
@@ -1034,9 +1041,8 @@ async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::
         .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
-        .await?;
+    let snapshot = recovered.begin_snapshot().await?;
+    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
     let batches = recovered
         .execute_scan(plan)
         .await?
@@ -1076,13 +1082,14 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     let root_dir = workspace_temp_dir("tonbo-wal-rotate");
     let root_str = root_dir.to_string_lossy().into_owned();
 
-    let (schema, mode_config) = schema_and_config(
+    let mode_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
@@ -1113,7 +1120,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     db.disable_wal().await?;
     drop(db);
 
-    let (_, mode_config_recover) = schema_and_config(
+    let mode_config_recover = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -1131,9 +1138,8 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             .await?;
 
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = recovered
-        .plan_scan(&pred, None, None, Timestamp::MAX)
-        .await?;
+    let snapshot = recovered.begin_snapshot().await?;
+    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
     let batches = recovered
         .execute_scan(plan)
         .await?
@@ -1186,7 +1192,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     recovered.disable_wal().await?;
     drop(recovered);
 
-    let (_, mode_config_final) = schema_and_config(
+    let mode_config_final = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
@@ -1204,8 +1210,9 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             .await?;
 
     let pred_final = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan_final = recovered_again
-        .plan_scan(&pred_final, None, None, Timestamp::MAX)
+    let snapshot_final = recovered_again.begin_snapshot().await.expect("snapshot");
+    let plan_final = snapshot_final
+        .plan_scan(&recovered_again, &pred_final, None, None)
         .await
         .expect("plan");
     let batches_final = recovered_again
@@ -1254,13 +1261,14 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     let root_dir = workspace_temp_dir("tonbo-wal-seq");
     let root_str = root_dir.to_string_lossy().into_owned();
 
-    let (schema, mode_config) = schema_and_config(
+    let mode_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),
         ],
         &["id"],
     );
+    let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
     let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
@@ -1281,7 +1289,7 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     db.disable_wal().await?;
     drop(db);
 
-    let (_, mode_config_recover) = schema_and_config(
+    let mode_config_recover = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, false),

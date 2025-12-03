@@ -6,10 +6,11 @@ use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
 pub(crate) use crate::mvcc::MVCC_COMMIT_COL;
 use crate::{
-    extractor::{KeyExtractError, KeyProjection, map_view_err, projection_for_field},
+    extractor::{KeyExtractError, map_view_err},
     key::{KeyOwned, KeyRow, KeyTsViewRaw},
     mvcc::Timestamp,
 };
+
 pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 
 /// Read-only immutable memtable backed by Arrow storage and MVCC metadata.
@@ -163,72 +164,6 @@ impl<S> ImmutableMemTable<S> {
     }
 }
 
-/// Build a dynamic immutable segment from a batch using a provided extractor.
-#[allow(unused)]
-pub(crate) fn segment_from_batch_with_extractor(
-    batch: RecordBatch,
-    extractor: &dyn KeyProjection,
-) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
-    extractor.validate_schema(&batch.schema())?;
-    let len = batch.num_rows();
-    let commit_ts = vec![Timestamp::MIN; len];
-    let tombstone = vec![false; len];
-    let (batch, mvcc) =
-        bundle_mvcc_sidecar(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
-
-    let mut index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry> = BTreeMap::new();
-    let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
-    let key_rows = extractor.project_view(&batch, &row_indices)?;
-    for (row, key_row) in key_rows.into_iter().enumerate() {
-        index.insert(
-            KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]),
-            ImmutableIndexEntry::Row(row as u32),
-        );
-    }
-
-    Ok(ImmutableMemTable::new(
-        batch,
-        index,
-        mvcc,
-        DeleteSidecar::empty(&extractor.key_schema()),
-    ))
-}
-
-/// Build a dynamic immutable segment given a key column index.
-#[allow(unused)]
-pub(crate) fn segment_from_batch_with_key_col(
-    batch: RecordBatch,
-    key_col: usize,
-) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
-    let schema = batch.schema();
-    let fields = schema.fields();
-    if key_col >= fields.len() {
-        return Err(KeyExtractError::ColumnOutOfBounds(key_col, fields.len()));
-    }
-    let extractor = projection_for_field(schema.clone(), key_col)?;
-    segment_from_batch_with_extractor(batch, extractor.as_ref())
-}
-
-/// Build a dynamic immutable segment given a key field name.
-#[allow(unused)]
-pub(crate) fn segment_from_batch_with_key_name(
-    batch: RecordBatch,
-    key_field: &str,
-) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
-    let schema = batch.schema();
-    let fields = schema.fields();
-    let Some((idx, _)) = fields
-        .iter()
-        .enumerate()
-        .find(|(_, f)| f.name() == key_field)
-    else {
-        return Err(KeyExtractError::NoSuchField {
-            name: key_field.to_string(),
-        });
-    };
-    segment_from_batch_with_key_col(batch, idx)
-}
-
 pub(crate) fn bundle_mvcc_sidecar(
     batch: RecordBatch,
     commit_ts: Vec<Timestamp>,
@@ -261,14 +196,14 @@ pub(crate) struct ImmutableVisibleScan<'t, S> {
     projection: DynProjection,
 }
 
-pub(crate) enum ImmutableVisibleEntry<'t> {
-    Row(&'t KeyTsViewRaw, DynRowRaw),
-    Tombstone(&'t KeyTsViewRaw),
+pub(crate) enum ImmutableVisibleEntry {
+    Row(KeyTsViewRaw, DynRowRaw),
+    Tombstone(KeyTsViewRaw),
 }
 
-impl<'t> ImmutableVisibleEntry<'t> {
+impl ImmutableVisibleEntry {
     #[allow(dead_code)]
-    pub(crate) fn into_row(self) -> Option<(&'t KeyTsViewRaw, DynRowRaw)> {
+    pub(crate) fn into_row(self) -> Option<(KeyTsViewRaw, DynRowRaw)> {
         match self {
             ImmutableVisibleEntry::Row(key, row) => Some((key, row)),
             ImmutableVisibleEntry::Tombstone(_) => None,
@@ -313,7 +248,8 @@ impl<'t, S> Iterator for ImmutableVisibleScan<'t, S>
 where
     S: RecordBatchStorage,
 {
-    type Item = Result<ImmutableVisibleEntry<'t>, DynViewError>;
+    type Item = Result<ImmutableVisibleEntry, DynViewError>;
+
     fn next(&mut self) -> Option<Self::Item> {
         for (view, entry) in self.iter.by_ref() {
             let key_view = view.key();
@@ -339,7 +275,7 @@ where
             match entry {
                 ImmutableIndexEntry::Delete => {
                     self.emitted_for_key = true;
-                    return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
+                    return Some(Ok(ImmutableVisibleEntry::Tombstone(view.clone())));
                 }
                 ImmutableIndexEntry::Row(row_idx) => {
                     let (commit_ts, tombstone) = self.table.mvcc_row(*row_idx);
@@ -348,7 +284,7 @@ where
                     }
                     if tombstone {
                         self.emitted_for_key = true;
-                        return Some(Ok(ImmutableVisibleEntry::Tombstone(view)));
+                        return Some(Ok(ImmutableVisibleEntry::Tombstone(view.clone())));
                     }
                     let batch = self.table.storage.as_record_batch();
                     let row_idx = *row_idx as usize;
@@ -361,7 +297,7 @@ where
                             Err(err) => return Some(Err(err)),
                         };
                     self.emitted_for_key = true;
-                    return Some(Ok(ImmutableVisibleEntry::Row(view, row)));
+                    return Some(Ok(ImmutableVisibleEntry::Row(view.clone(), row)));
                 }
             }
         }
@@ -465,16 +401,86 @@ impl MvccColumns {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use tests::{
+    segment_from_batch_with_extractor, segment_from_batch_with_key_col,
+    segment_from_batch_with_key_name,
+};
+
+#[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        extractor::{projection_for_columns, projection_for_field},
+        extractor::{KeyProjection, projection_for_columns, projection_for_field},
         inmem::mutable::memtable::DynMem,
         test_util::build_batch,
     };
+
+    /// Build a dynamic immutable segment from a batch using a provided extractor.
+    pub(crate) fn segment_from_batch_with_extractor(
+        batch: RecordBatch,
+        extractor: &dyn KeyProjection,
+    ) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
+        extractor.validate_schema(&batch.schema())?;
+        let len = batch.num_rows();
+        let commit_ts = vec![Timestamp::MIN; len];
+        let tombstone = vec![false; len];
+        let (batch, mvcc) =
+            bundle_mvcc_sidecar(batch, commit_ts, tombstone).map_err(KeyExtractError::from)?;
+
+        let mut index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry> = BTreeMap::new();
+        let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
+        let key_rows = extractor.project_view(&batch, &row_indices)?;
+        for (row, key_row) in key_rows.into_iter().enumerate() {
+            index.insert(
+                KeyTsViewRaw::new(key_row, mvcc.commit_ts[row]),
+                ImmutableIndexEntry::Row(row as u32),
+            );
+        }
+
+        Ok(ImmutableMemTable::new(
+            batch,
+            index,
+            mvcc,
+            DeleteSidecar::empty(&extractor.key_schema()),
+        ))
+    }
+
+    /// Build a dynamic immutable segment given a key column index.
+    pub(crate) fn segment_from_batch_with_key_col(
+        batch: RecordBatch,
+        key_col: usize,
+    ) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
+        let schema = batch.schema();
+        let fields = schema.fields();
+        if key_col >= fields.len() {
+            return Err(KeyExtractError::ColumnOutOfBounds(key_col, fields.len()));
+        }
+        let extractor = projection_for_field(schema.clone(), key_col)?;
+        segment_from_batch_with_extractor(batch, extractor.as_ref())
+    }
+
+    /// Build a dynamic immutable segment given a key field name.
+    pub(crate) fn segment_from_batch_with_key_name(
+        batch: RecordBatch,
+        key_field: &str,
+    ) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
+        let schema = batch.schema();
+        let fields = schema.fields();
+        let Some((idx, _)) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == key_field)
+        else {
+            return Err(KeyExtractError::NoSuchField {
+                name: key_field.to_string(),
+            });
+        };
+        segment_from_batch_with_key_col(batch, idx)
+    }
 
     fn push_view(storage: &mut Vec<KeyOwned>, key: &str, ts: Timestamp) -> KeyTsViewRaw {
         storage.push(KeyOwned::from(key));

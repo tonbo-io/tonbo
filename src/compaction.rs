@@ -235,7 +235,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn threshold_met_invokes_flush() {
         let (cfg, mut db) = build_db().await;
-        db.set_seal_policy(Box::new(crate::inmem::policy::BatchesThreshold {
+        db.set_seal_policy(Arc::new(crate::inmem::policy::BatchesThreshold {
             batches: 1,
         }));
         let rows = vec![DynRow(vec![

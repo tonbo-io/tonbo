@@ -67,39 +67,53 @@ impl fmt::Debug for Timestamp {
 }
 
 /// Tracks the next commit timestamp to allocate.
-#[derive(Debug, Clone, Copy)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic allocator for MVCC commit timestamps backed by atomics.
+#[derive(Debug)]
 pub struct CommitClock {
-    next: Timestamp,
+    next: AtomicU64,
 }
 
 impl CommitClock {
     /// Create a new clock that will hand out timestamps starting from `start`.
     #[inline]
     pub const fn new(start: Timestamp) -> Self {
-        Self { next: start }
+        Self {
+            next: AtomicU64::new(start.get()),
+        }
     }
 
     /// Allocate and return the next commit timestamp.
     #[inline]
-    pub fn alloc(&mut self) -> Timestamp {
-        let current = self.next;
-        self.next = current.next();
-        current
+    pub fn alloc(&self) -> Timestamp {
+        let current = self.next.fetch_add(1, Ordering::Relaxed);
+        Timestamp::new(current)
     }
 
     /// Return the timestamp that will be handed out next.
     #[inline]
-    pub const fn peek(&self) -> Timestamp {
-        self.next
+    pub fn peek(&self) -> Timestamp {
+        Timestamp::new(self.next.load(Ordering::Relaxed))
     }
 
     /// Advance the clock so that it will hand out at least `candidate`.
     ///
     /// Useful after recovery where the highest observed commit is already known.
     #[inline]
-    pub fn advance_to_at_least(&mut self, candidate: Timestamp) {
-        if candidate > self.next {
-            self.next = candidate;
+    pub fn advance_to_at_least(&self, candidate: Timestamp) {
+        // Use a loop with compare_exchange to avoid losing larger candidates.
+        let mut current = self.next.load(Ordering::Relaxed);
+        while candidate.get() > current {
+            match self.next.compare_exchange(
+                current,
+                candidate.get(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
     }
 }

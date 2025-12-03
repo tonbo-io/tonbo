@@ -2,14 +2,12 @@
 
 use fusio::executor::tokio::TokioExecutor;
 use futures::StreamExt;
-use tempfile::tempdir;
 use tonbo::{
-    db::{DB, DbBuilder, DynMode},
-    mvcc::Timestamp,
+    db::{DbBuilder, DynDbHandle, DynDbHandleExt},
     query::{ColumnRef, Predicate, ScalarValue},
-    transaction::CommitAckMode,
+    transaction::{CommitAckMode, Transaction},
 };
-use typed_arrow::{Record, prelude::*, schema::SchemaMeta};
+use typed_arrow::{Record, schema::SchemaMeta};
 use typed_arrow_dyn::DynCell;
 
 #[derive(Record)]
@@ -25,41 +23,40 @@ async fn main() {
 
     // Configure dynamic mode with strict (durable) commit acknowledgements.
     // Use a temporary on-disk layout to enable WAL-backed transactions.
-    let temp = tempdir().expect("tempdir");
-    let root = temp.path().to_str().expect("utf8 path").to_string();
-    let mut db = DbBuilder::from_schema_key_name(schema.clone(), "id")
+    let db = DbBuilder::from_schema_key_name(schema.clone(), "id")
         .expect("config")
         .with_commit_ack_mode(CommitAckMode::Strict)
-        .on_disk(root)
+        .on_disk("/tmp/tonbo")
         .expect("on_disk")
         .create_dirs(true)
-        .build()
+        .recover_or_init()
         .await
-        .expect("build db");
+        .expect("build db")
+        .into_shared();
 
-    // Build a RecordBatch using typed-arrow row builders.
-    let rows = vec![
-        UserRow {
-            id: "user-1".into(),
-            v: Some(10),
-        },
-        UserRow {
-            id: "user-2".into(),
-            v: None, // demonstrate nullable value
-        },
-    ];
-    let mut builders = <UserRow as BuildRows>::new_builders(rows.len());
-    builders.append_rows(rows);
-    let batch = builders.finish().into_record_batch();
+    // // Build a RecordBatch using typed-arrow row builders.
+    // let rows = vec![
+    //     UserRow {
+    //         id: "user-1".into(),
+    //         v: Some(10),
+    //     },
+    //     UserRow {
+    //         id: "user-2".into(),
+    //         v: None, // demonstrate nullable value
+    //     },
+    // ];
+    // let mut builders = <UserRow as BuildRows>::new_builders(rows.len());
+    // builders.append_rows(rows);
+    // let batch = builders.finish().into_record_batch();
 
-    // Begin a transaction and stage mutations.
-    let mut tx = db.begin_transaction().await.expect("begin tx");
-    tx.upsert_batch(&batch).expect("stage batch");
-    tx.delete("ghost").expect("stage delete");
+    // // Begin a transaction and stage mutations.
+    let tx: Transaction<TokioExecutor> = db.begin_transaction().await.expect("begin tx");
+    // tx.upsert_batch(&batch).expect("stage batch");
+    // tx.delete("ghost").expect("stage delete");
 
     // Read-your-writes inside the transaction.
     let pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("user-1"));
-    let preview = tx.scan(&db, &pred, None, None).await.expect("preview");
+    let preview = tx.scan(&pred, None, None).await.expect("preview");
     println!(
         "preview rows: {:?}",
         preview
@@ -79,7 +76,7 @@ async fn main() {
     );
 
     // Commit with strict WAL durability.
-    tx.commit(&mut db).await.expect("commit");
+    tx.commit().await.expect("commit");
 
     // Post-commit read via the public scan path.
     let all_pred = Predicate::is_not_null(ColumnRef::new("id", None));
@@ -87,9 +84,10 @@ async fn main() {
     println!("committed rows: {:?}", committed);
 }
 
-async fn scan_pairs(db: &DB<DynMode, TokioExecutor>, predicate: &Predicate) -> Vec<(String, i32)> {
-    let plan = db
-        .plan_scan(predicate, None, None, Timestamp::MAX)
+async fn scan_pairs(db: &DynDbHandle<TokioExecutor>, predicate: &Predicate) -> Vec<(String, i32)> {
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(db, predicate, None, None)
         .await
         .expect("plan");
     let mut stream = db.execute_scan(plan).await.expect("exec");

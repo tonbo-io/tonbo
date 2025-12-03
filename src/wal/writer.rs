@@ -224,18 +224,72 @@ where
                         Some(WriterMsg::Enqueue { _submission_seq: _, command, enqueued_at, ack_tx }) => {
                             ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                             ctx.update_queue_depth_metric().await;
-                            match ctx.handle_enqueue(command, enqueued_at).await {
-                                Ok(HandleOutcome { ack, sync_performed, timer_directive }) => {
+
+                            let mut batch = Vec::with_capacity(8);
+                            batch.push((command, enqueued_at, ack_tx));
+                            let mut deferred: Option<WriterMsg> = None;
+                            while let Ok(Some(next)) = receiver.try_next() {
+                                match next {
+                                    WriterMsg::Enqueue { _submission_seq: _, command, enqueued_at, ack_tx } => {
+                                        ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
+                                        batch.push((command, enqueued_at, ack_tx));
+                                        if batch.len() >= 64 {
+                                            break;
+                                        }
+                                    }
+                                    other => {
+                                        deferred = Some(other);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            match ctx.handle_enqueue_batch(&batch).await {
+                                Ok(HandleBatchOutcome { acks, sync_performed, timer_directive }) => {
                                     if sync_performed {
                                         ctx.record_sync().await;
                                     }
                                     ctx.apply_timer_directive(timer_directive, &mut timer);
-                                    let _ = ack_tx.send(Ok(ack));
+                                    for ((_, _, tx), ack) in batch.into_iter().zip(acks.into_iter()) {
+                                        let _ = tx.send(Ok(ack));
+                                    }
                                 }
                                 Err(err) => {
                                     ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
-                                    let _ = ack_tx.send(Err(err.clone()));
+                                    for (_, _, tx) in batch.into_iter() {
+                                        let _ = tx.send(Err(err.clone()));
+                                    }
                                     return Err(err);
+                                }
+                            }
+
+                            if let Some(msg) = deferred {
+                                match msg {
+                                    WriterMsg::Rotate { ack_tx } => {
+                                        match ctx.handle_rotation_request().await {
+                                            Ok(rotation) => {
+                                                if rotation.sync_performed {
+                                                    ctx.record_sync().await;
+                                                }
+                                                if rotation.performed {
+                                                    ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
+                                                } else {
+                                                    ctx.recompute_timer(&mut timer);
+                                                }
+                                                let _ = ack_tx.send(Ok(()));
+                                            }
+                                            Err(err) => {
+                                                ctx.apply_timer_directive(TimerDirective::Cancel, &mut timer);
+                                                let _ = ack_tx.send(Err(err.clone()));
+                                                return Err(err);
+                                            }
+                                        }
+                                    }
+                                    WriterMsg::Snapshot { ack_tx } => {
+                                        let snapshot = ctx.snapshot();
+                                        let _ = ack_tx.send(Ok(snapshot));
+                                    }
+                                    WriterMsg::Enqueue { .. } => unreachable!(),
                                 }
                             }
                         }
@@ -279,9 +333,34 @@ where
                 }) => {
                     ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
                     ctx.update_queue_depth_metric().await;
-                    match ctx.handle_enqueue(command, enqueued_at).await {
-                        Ok(HandleOutcome {
-                            ack,
+
+                    let mut batch = Vec::with_capacity(8);
+                    batch.push((command, enqueued_at, ack_tx));
+                    let mut deferred: Option<WriterMsg> = None;
+                    while let Ok(Some(next)) = receiver.try_next() {
+                        match next {
+                            WriterMsg::Enqueue {
+                                _submission_seq: _,
+                                command,
+                                enqueued_at,
+                                ack_tx,
+                            } => {
+                                ctx.queue_depth.fetch_sub(1, Ordering::SeqCst);
+                                batch.push((command, enqueued_at, ack_tx));
+                                if batch.len() >= ctx.cfg.queue_size {
+                                    break;
+                                }
+                            }
+                            other => {
+                                deferred = Some(other);
+                                break;
+                            }
+                        }
+                    }
+
+                    match ctx.handle_enqueue_batch(&batch).await {
+                        Ok(HandleBatchOutcome {
+                            acks,
                             sync_performed,
                             timer_directive,
                         }) => {
@@ -289,11 +368,47 @@ where
                                 ctx.record_sync().await;
                             }
                             ctx.apply_timer_directive(timer_directive, &mut timer);
-                            let _ = ack_tx.send(Ok(ack));
+                            for ((_, _, tx), ack) in batch.into_iter().zip(acks.into_iter()) {
+                                let _ = tx.send(Ok(ack));
+                            }
                         }
                         Err(err) => {
-                            let _ = ack_tx.send(Err(err.clone()));
+                            for (_, _, tx) in batch.into_iter() {
+                                let _ = tx.send(Err(err.clone()));
+                            }
                             return Err(err);
+                        }
+                    }
+
+                    if let Some(msg) = deferred {
+                        match msg {
+                            WriterMsg::Rotate { ack_tx } => {
+                                match ctx.handle_rotation_request().await {
+                                    Ok(rotation) => {
+                                        if rotation.sync_performed {
+                                            ctx.record_sync().await;
+                                        }
+                                        if rotation.performed {
+                                            ctx.apply_timer_directive(
+                                                TimerDirective::Cancel,
+                                                &mut timer,
+                                            );
+                                        } else {
+                                            ctx.recompute_timer(&mut timer);
+                                        }
+                                        let _ = ack_tx.send(Ok(()));
+                                    }
+                                    Err(err) => {
+                                        let _ = ack_tx.send(Err(err.clone()));
+                                        return Err(err);
+                                    }
+                                }
+                            }
+                            WriterMsg::Snapshot { ack_tx } => {
+                                let snapshot = ctx.snapshot();
+                                let _ = ack_tx.send(Ok(snapshot));
+                            }
+                            WriterMsg::Enqueue { .. } => unreachable!(),
                         }
                     }
                 }
@@ -359,6 +474,12 @@ where
     active_segment: Option<WalSegmentBounds>,
     state: Option<WalStateHandle>,
     state_dirty: bool,
+}
+
+struct HandleBatchOutcome {
+    acks: Vec<WalAck>,
+    sync_performed: bool,
+    timer_directive: TimerDirective,
 }
 
 impl<E> WriterContext<E>
@@ -524,6 +645,28 @@ where
         };
         Ok(HandleOutcome {
             ack,
+            sync_performed,
+            timer_directive,
+        })
+    }
+
+    async fn handle_enqueue_batch(
+        &mut self,
+        batch: &[(WalCommand, Instant, oneshot::Sender<WalResult<WalAck>>)],
+    ) -> WalResult<HandleBatchOutcome> {
+        let mut acks = Vec::with_capacity(batch.len());
+        let mut sync_performed = false;
+        let mut timer_directive = TimerDirective::None;
+
+        for (command, enqueued_at, _) in batch.iter() {
+            let outcome = self.handle_enqueue(command.clone(), *enqueued_at).await?;
+            sync_performed |= outcome.sync_performed;
+            timer_directive = outcome.timer_directive;
+            acks.push(outcome.ack);
+        }
+
+        Ok(HandleBatchOutcome {
+            acks,
             sync_performed,
             timer_directive,
         })

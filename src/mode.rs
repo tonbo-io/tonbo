@@ -51,7 +51,7 @@ pub trait Mode {
 
     /// Insert `value` into the given database instance.
     fn insert<'a, E>(
-        db: &'a mut DB<Self, E>,
+        db: &'a DB<Self, E>,
         value: Self::InsertInput,
     ) -> impl std::future::Future<Output = Result<(), KeyExtractError>> + 'a
     where
@@ -87,16 +87,16 @@ pub struct DynMode {
 /// Configuration bundle for constructing a `DynMode`.
 pub struct DynModeConfig {
     /// Arrow schema describing the dynamic table.
-    pub schema: SchemaRef,
+    pub(crate) schema: SchemaRef,
     /// Extractor used to derive logical keys from dynamic batches.
-    pub extractor: Arc<dyn KeyProjection>,
+    pub(crate) extractor: Arc<dyn KeyProjection>,
     /// WAL acknowledgement mode for transactional commits.
-    pub commit_ack_mode: CommitAckMode,
+    pub(crate) commit_ack_mode: CommitAckMode,
 }
 
 impl DynModeConfig {
     /// Validate the extractor against `schema` and construct the config bundle.
-    pub fn new(
+    pub(crate) fn new(
         schema: SchemaRef,
         extractor: Box<dyn KeyProjection>,
     ) -> Result<Self, KeyExtractError> {
@@ -113,6 +113,11 @@ impl DynModeConfig {
     pub fn with_commit_ack_mode(mut self, mode: CommitAckMode) -> Self {
         self.commit_ack_mode = mode;
         self
+    }
+
+    /// Clone the schema associated with this configuration.
+    pub fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
     }
 }
 
@@ -152,14 +157,14 @@ impl Mode for DynMode {
     }
 
     fn insert<'a, E>(
-        db: &'a mut DB<Self, E>,
+        db: &'a DB<Self, E>,
         batch: RecordBatch,
     ) -> impl std::future::Future<Output = Result<(), KeyExtractError>> + 'a
     where
         E: Executor + Timer,
     {
         async fn insert_impl<E>(
-            db: &mut DB<DynMode, E>,
+            db: &DB<DynMode, E>,
             batch: RecordBatch,
         ) -> Result<(), KeyExtractError>
         where

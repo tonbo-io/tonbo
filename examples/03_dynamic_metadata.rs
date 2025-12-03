@@ -6,7 +6,6 @@ use fusio::executor::BlockingExecutor;
 use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DbBuilder, DynMode},
-    mvcc::Timestamp,
     query::{ColumnRef, Predicate},
 };
 use typed_arrow::{
@@ -41,7 +40,7 @@ async fn main() {
 
     // Create DB from metadata
     let executor = Arc::new(BlockingExecutor);
-    let mut db: DB<DynMode, BlockingExecutor> = DbBuilder::from_schema_metadata(schema.clone())
+    let db: DB<DynMode, BlockingExecutor> = DbBuilder::from_schema_metadata(schema.clone())
         .expect("metadata config")
         .in_memory("dynamic-metadata")
         .build_with_executor(Arc::clone(&executor))
@@ -51,8 +50,9 @@ async fn main() {
 
     // Scan all rows using a trivial predicate
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let plan = db
-        .plan_scan(&pred, None, None, Timestamp::MAX)
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(&db, &pred, None, None)
         .await
         .expect("plan");
     let rows: Vec<(String, i32)> = db

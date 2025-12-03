@@ -32,6 +32,7 @@ fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fus
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet" }
 futures = "0.3"
 lockable = "0.2"
+crossbeam-skiplist = "0.1"
 once_cell = "1"
 parquet = { version = "56.2.0", default-features = false, features = [
     "async",

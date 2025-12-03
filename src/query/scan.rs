@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use arrow_schema::{Schema, SchemaRef};
 use predicate::{Operand, Predicate, PredicateNode};
 
-use crate::{extractor::KeyExtractError, mvcc::Timestamp};
+use crate::{extractor::KeyExtractError, manifest::TableSnapshot, mvcc::Timestamp};
 
 /// Internal representation of a scan plan. Things included in the plan:
 /// * predicate: the caller-supplied predicate used for pruning and residual evaluation
@@ -22,6 +22,8 @@ pub struct ScanPlan {
     pub(crate) scan_schema: SchemaRef,
     pub(crate) limit: Option<usize>,
     pub(crate) read_ts: Timestamp,
+    #[allow(dead_code)]
+    pub(crate) _snapshot: TableSnapshot,
 }
 
 pub(crate) fn projection_with_predicate(

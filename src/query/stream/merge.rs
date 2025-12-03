@@ -20,10 +20,12 @@ use crate::{
 pin_project! {
     /// Stream that merges multiple ordered sources respecting MVCC ordering semantics.
     pub struct MergeStream<'t, S>
+    where
+        S: RecordBatchStorage,
     {
         streams: Vec<ScanStream<'t, S>>,
-        peeked: BinaryHeap<Reverse<HeapEntry<'t>>>,
-        buf: Option<StreamEntry<'t>>,
+        peeked: BinaryHeap<Reverse<HeapEntry>>,
+        buf: Option<StreamEntry>,
         ts: Timestamp,
         limit: Option<usize>,
         order: Option<Order>,
@@ -69,7 +71,7 @@ impl<'t, S> Stream for MergeStream<'t, S>
 where
     S: RecordBatchStorage,
 {
-    type Item = Result<StreamEntry<'t>, StreamError>;
+    type Item = Result<StreamEntry, StreamError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -124,18 +126,18 @@ where
     }
 }
 
-struct HeapEntry<'t> {
+struct HeapEntry {
     stream_idx: usize,
     source_priority: SourcePriority,
-    entry: StreamEntry<'t>,
+    entry: StreamEntry,
     order: Option<Order>,
 }
 
-impl<'t> HeapEntry<'t> {
+impl HeapEntry {
     pub(crate) fn new(
         stream_idx: usize,
         priority: SourcePriority,
-        entry: StreamEntry<'t>,
+        entry: StreamEntry,
         order: Option<Order>,
     ) -> Self {
         Self {
@@ -147,7 +149,7 @@ impl<'t> HeapEntry<'t> {
     }
 }
 
-impl<'t> Ord for HeapEntry<'t> {
+impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Entries are ordered by commit timestamp, then key ordering, followed by source priority
         // (txn > mutable > immutable > SST).
@@ -162,19 +164,19 @@ impl<'t> Ord for HeapEntry<'t> {
     }
 }
 
-impl<'t> PartialOrd for HeapEntry<'t> {
+impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'t> PartialEq for HeapEntry<'t> {
+impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl<'t> Eq for HeapEntry<'t> {}
+impl Eq for HeapEntry {}
 
 fn decrement_limit(limit: &mut Option<usize>) {
     if let Some(value) = limit {
@@ -198,7 +200,7 @@ mod tests {
         key::KeyOwned,
         mutation::DynMutation,
         mvcc::{MVCC_COMMIT_COL, Timestamp},
-        query::stream::ScanStream,
+        query::stream::{OwnedImmutableScan, OwnedMutableScan, ScanStream},
         test_util::build_batch,
         transaction::TransactionScan,
     };
@@ -246,37 +248,42 @@ mod tests {
             let mutable_scan = mutable
                 .scan_visible(None, Timestamp::MAX)
                 .expect("mutable scan");
+            let immutable_segment = Arc::new(immutable_segment);
             let immutable_scan = immutable_segment
                 .scan_visible(None, Timestamp::MAX)
                 .expect("immutable scan");
-            let mut streams = vec![
-                ScanStream::<'_, RecordBatch>::from(immutable_scan),
-                ScanStream::<'_, RecordBatch>::from(mutable_scan),
+
+            let mut staged_txn1 = BTreeMap::new();
+            staged_txn1.insert(
+                KeyOwned::from("d"),
+                DynMutation::Upsert(DynRow(vec![
+                    Some(DynCell::Str("d".into())),
+                    Some(DynCell::I64(500)),
+                ])),
+            );
+            let txn_scan1 = TransactionScan::new(&staged_txn1, &schema, Timestamp::new(60), None)
+                .expect("txn scan");
+
+            let mut staged_txn2 = BTreeMap::new();
+            staged_txn2.insert(
+                KeyOwned::from("d"),
+                DynMutation::Upsert(DynRow(vec![
+                    Some(DynCell::Str("d".into())),
+                    Some(DynCell::I64(500)),
+                ])),
+            );
+            let txn_scan2 = TransactionScan::new(&staged_txn2, &schema, Timestamp::new(60), None)
+                .expect("txn scan");
+
+            let streams = vec![
+                ScanStream::<'_, RecordBatch>::from(OwnedImmutableScan::new(
+                    Arc::clone(&immutable_segment),
+                    immutable_scan,
+                )),
+                ScanStream::<'_, RecordBatch>::from(OwnedMutableScan::from_scan(mutable_scan)),
+                ScanStream::<'_, RecordBatch>::from(txn_scan1),
+                ScanStream::<'_, RecordBatch>::from(txn_scan2),
             ];
-
-            let mut staged = BTreeMap::new();
-            staged.insert(
-                KeyOwned::from("d"),
-                DynMutation::Upsert(DynRow(vec![
-                    Some(DynCell::Str("d".into())),
-                    Some(DynCell::I64(500)),
-                ])),
-            );
-            let txn_scan =
-                TransactionScan::new(&staged, &schema, Timestamp::new(60), None).expect("txn scan");
-            streams.push(ScanStream::<'_, RecordBatch>::from(txn_scan));
-
-            let mut staged = BTreeMap::new();
-            staged.insert(
-                KeyOwned::from("d"),
-                DynMutation::Upsert(DynRow(vec![
-                    Some(DynCell::Str("d".into())),
-                    Some(DynCell::I64(500)),
-                ])),
-            );
-            let txn_scan =
-                TransactionScan::new(&staged, &schema, Timestamp::new(60), None).expect("txn scan");
-            streams.push(ScanStream::<'_, RecordBatch>::from(txn_scan));
 
             let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(order))
                 .await
@@ -372,6 +379,7 @@ mod tests {
             .insert_delete_batch(delete_projection.as_ref(), delete_batch)
             .expect("delete row");
 
+        let immutable_segment = Arc::new(immutable_segment);
         let immutable_scan = immutable_segment
             .scan_visible(None, Timestamp::MAX)
             .expect("immutable scan");
@@ -379,8 +387,11 @@ mod tests {
             .scan_visible(None, Timestamp::MAX)
             .expect("mutable scan");
         let streams = vec![
-            ScanStream::from(immutable_scan),
-            ScanStream::from(mutable_scan),
+            ScanStream::from(OwnedImmutableScan::new(
+                Arc::clone(&immutable_segment),
+                immutable_scan,
+            )),
+            ScanStream::from(OwnedMutableScan::from_scan(mutable_scan)),
         ];
         let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(Order::Asc))
             .await
