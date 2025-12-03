@@ -24,7 +24,10 @@ use crate::{
     manifest::{ManifestError, SstEntry, VersionEdit, WalSegmentRef},
     mode::DynMode,
     mvcc::Timestamp,
-    ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId, SsTableMerger},
+    ondisk::{
+        merge::cleanup_descriptors,
+        sstable::{SsTableConfig, SsTableDescriptor, SsTableId, SsTableMerger},
+    },
 };
 
 /// Lease/ownership token used when delegating compaction to a remote worker.
@@ -315,10 +318,10 @@ impl LocalCompactionExecutor {
 
     fn output_caps_for_level(&self, level: usize) -> (Option<usize>, Option<usize>) {
         let rows_cap = self.max_output_rows;
+        // Only apply hard cap to defaults; respect explicit caller overrides.
         let bytes_cap = self
             .max_output_bytes
-            .or_else(|| Some(Self::default_output_bytes_for_level(level)))
-            .map(|cap| cap.min(DEFAULT_OUTPUT_HARD_CAP_BYTES));
+            .or_else(|| Some(Self::default_output_bytes_for_level(level)));
         (rows_cap, bytes_cap)
     }
 
@@ -384,16 +387,7 @@ impl CompactionExecutor for LocalCompactionExecutor {
         outputs: &'a [SsTableDescriptor],
     ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
         Box::pin(async move {
-            let fs = Arc::clone(self.config.fs());
-            for desc in outputs {
-                let data_path = desc
-                    .data_path()
-                    .ok_or(CompactionError::MissingPath("data"))?;
-                fs.remove(data_path).await.map_err(SsTableError::from)?;
-                if let Some(delete_path) = desc.delete_path() {
-                    fs.remove(delete_path).await.map_err(SsTableError::from)?;
-                }
-            }
+            cleanup_descriptors(&self.config, outputs).await;
             Ok(())
         })
     }

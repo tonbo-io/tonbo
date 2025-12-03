@@ -669,8 +669,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
         match result {
             Ok(outputs) => Ok(outputs),
             Err(err) => {
-                // Best-effort cleanup; surface the original error.
-                let _ = cleanup_descriptors(&config, &written_desc).await;
+                cleanup_descriptors(&config, &written_desc).await;
                 Err(err)
             }
         }
@@ -937,21 +936,16 @@ pub(crate) fn concat_batches(
         .map_err(|err| ParquetError::ArrowError(err.to_string()))
 }
 
-async fn cleanup_descriptors(
-    config: &Arc<SsTableConfig>,
-    descriptors: &[SsTableDescriptor],
-) -> Result<(), SsTableError> {
-    if descriptors.is_empty() {
-        return Ok(());
-    }
-    let fs = Arc::clone(config.fs());
+/// Best-effort cleanup of SST files referenced by descriptors.
+/// Continues on individual file errors to avoid leaving partial orphans.
+pub(crate) async fn cleanup_descriptors(config: &SsTableConfig, descriptors: &[SsTableDescriptor]) {
+    let fs = config.fs();
     for desc in descriptors {
         if let Some(path) = desc.data_path() {
-            fs.remove(path).await.map_err(SsTableError::from)?;
+            let _ = fs.remove(path).await;
         }
         if let Some(path) = desc.delete_path() {
-            fs.remove(path).await.map_err(SsTableError::from)?;
+            let _ = fs.remove(path).await;
         }
     }
-    Ok(())
 }
