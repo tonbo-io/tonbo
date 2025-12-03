@@ -15,19 +15,18 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::{StreamExt, stream};
 use parquet::errors::ParquetError;
 
-use super::sstable::{SsTableReader, take_record_batch};
+use super::sstable::{
+    SsTable, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId, SsTableReader,
+    take_record_batch,
+};
 use crate::{
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
     id::FileId,
     inmem::immutable::memtable::{DeleteSidecar, MVCC_COMMIT_COL},
     key::KeyOwned,
     mvcc::Timestamp,
-    ondisk::sstable::{
-        ParquetTableWriter, SsTable, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId,
-    },
+    ondisk::sstable::ParquetTableWriter,
 };
-
-const DEFAULT_MERGE_ITERATION_BUDGET: usize = 10_000_000;
 
 const MVCC_SEQUENCE_COL: &str = "_sequence";
 
@@ -466,7 +465,7 @@ pub struct SsTableMerger<M: crate::mode::Mode> {
     max_output_rows: Option<usize>,
     max_output_bytes: Option<usize>,
     chunk_rows: usize,
-    max_iterations: usize,
+    max_iterations: Option<usize>,
     _mode: PhantomData<M>,
 }
 
@@ -545,6 +544,72 @@ mod tests {
         // Keep tmpdir alive until here.
         drop(tmpdir);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn merger_cleans_outputs_on_error() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let tmpdir = tempdir().expect("temp dir");
+        let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder");
+        let fs: Arc<dyn fusio::dynamic::DynFs> = Arc::new(fusio::disk::LocalFs {});
+        let root = Path::from(tmpdir.path().to_string_lossy().to_string());
+        let cfg = Arc::new(
+            SsTableConfig::new(Arc::clone(&mode_cfg.schema), fs, root.clone())
+                .with_key_extractor(Arc::clone(&mode_cfg.extractor)),
+        );
+
+        let batch = build_batch(
+            Arc::clone(&schema),
+            vec![
+                DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+                DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            ],
+        )
+        .expect("batch");
+        let immutable =
+            segment_from_batch_with_key_name(batch, "id").expect("immutable segment from batch");
+        let mut builder = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&cfg),
+            SsTableDescriptor::new(SsTableId::new(1), 0),
+        );
+        builder.add_immutable(&immutable).expect("stage seg");
+        let input = builder.finish().await.expect("sst");
+
+        // Force an error by using an impossible iteration budget after writing the first row.
+        let target = SsTableDescriptor::new(SsTableId::new(10), 1);
+        let merger = SsTableMerger::<DynMode>::new(
+            Arc::clone(&cfg),
+            vec![input.descriptor().clone()],
+            target.clone(),
+        )
+        .with_output_caps(Some(1), None)
+        .with_chunk_rows(1); // will error when allocator is missing for the second output
+        let result = merger.execute().await;
+        assert!(matches!(result, Err(SsTableError::MissingIdAllocator)));
+
+        // All files should be gone after cleanup.
+        let level_dir = cfg.level_dir(target.level()).expect("level dir");
+        let mut entries = cfg
+            .fs()
+            .list(&level_dir)
+            .await
+            .expect("level dir should exist");
+        let mut count = 0usize;
+        while let Some(item) = entries.next().await.transpose().expect("stream ok") {
+            let name = item.path.as_ref();
+            if name.ends_with(".parquet") || name.ends_with(".delete.parquet") {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 0, "expected no SST files after cleanup");
+
+        drop(tmpdir);
+    }
 }
 
 impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> SsTableMerger<M> {
@@ -555,6 +620,9 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
         target: SsTableDescriptor,
     ) -> Self {
         debug_assert!(!inputs.is_empty(), "merger requires at least one input");
+        let merge_iteration_budget = config.merge_iteration_budget();
+        let max_iterations =
+            (merge_iteration_budget != usize::MAX).then_some(merge_iteration_budget);
         Self {
             config,
             inputs,
@@ -563,7 +631,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
             max_output_rows: None,
             max_output_bytes: None,
             chunk_rows: 1024,
-            max_iterations: DEFAULT_MERGE_ITERATION_BUDGET,
+            max_iterations,
             _mode: PhantomData,
         }
     }
@@ -583,7 +651,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
 
     /// Configure an iteration budget for merge safety; returns an error when exceeded.
     pub fn with_iteration_budget(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations.max(1);
+        self.max_iterations = Some(max_iterations.max(1));
         self
     }
 
@@ -595,6 +663,23 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
 
     /// Execute the merge and return a newly written SSTable.
     pub async fn execute(self) -> Result<Vec<SsTable<M>>, SsTableError> {
+        let mut written_desc: Vec<SsTableDescriptor> = Vec::new();
+        let config = Arc::clone(&self.config);
+        let result = self.execute_inner(&mut written_desc).await;
+        match result {
+            Ok(outputs) => Ok(outputs),
+            Err(err) => {
+                // Best-effort cleanup; surface the original error.
+                let _ = cleanup_descriptors(&config, &written_desc).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn execute_inner(
+        self,
+        written_desc: &mut Vec<SsTableDescriptor>,
+    ) -> Result<Vec<SsTable<M>>, SsTableError> {
         let extractor = self
             .config
             .key_extractor()
@@ -631,10 +716,10 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
 
         while let Some(entry) = heap.pop() {
             iterations += 1;
-            if iterations > self.max_iterations {
-                return Err(SsTableError::MergeIterationBudgetExceeded {
-                    budget: self.max_iterations,
-                });
+            if let Some(max_iters) = self.max_iterations
+                && iterations > max_iters
+            {
+                return Err(SsTableError::MergeIterationBudgetExceeded { budget: max_iters });
             }
             let mut group = vec![entry];
             while let Some(next) = heap.peek() {
@@ -679,6 +764,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
                 let table = output_state
                     .finish(descriptor, &self.config, &extractor, &wal_ids)
                     .await?;
+                written_desc.push(table.descriptor().clone());
                 outputs.push(table);
                 output_state.reset_for_next();
                 let next_descriptor = self.allocate_next_descriptor()?;
@@ -695,6 +781,9 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
                     .finish(descriptor, &self.config, &extractor, &wal_ids)
                     .await?,
             );
+            if let Some(desc) = outputs.last().map(|sst| sst.descriptor().clone()) {
+                written_desc.push(desc);
+            }
         }
 
         if outputs.is_empty() {
@@ -846,4 +935,23 @@ pub(crate) fn concat_batches(
 ) -> Result<RecordBatch, ParquetError> {
     arrow_select::concat::concat_batches(schema, batches)
         .map_err(|err| ParquetError::ArrowError(err.to_string()))
+}
+
+async fn cleanup_descriptors(
+    config: &Arc<SsTableConfig>,
+    descriptors: &[SsTableDescriptor],
+) -> Result<(), SsTableError> {
+    if descriptors.is_empty() {
+        return Ok(());
+    }
+    let fs = Arc::clone(config.fs());
+    for desc in descriptors {
+        if let Some(path) = desc.data_path() {
+            fs.remove(path).await.map_err(SsTableError::from)?;
+        }
+        if let Some(path) = desc.delete_path() {
+            fs.remove(path).await.map_err(SsTableError::from)?;
+        }
+    }
+    Ok(())
 }

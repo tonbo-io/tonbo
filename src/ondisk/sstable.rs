@@ -67,6 +67,10 @@ impl SsTableId {
     }
 }
 
+/// Default iteration budget used by merge operations to guard against runaway loops.
+/// `usize::MAX` disables the guard; set explicitly via config when debugging.
+pub const DEFAULT_MERGE_ITERATION_BUDGET: usize = usize::MAX;
+
 /// Configuration bundle shared by SSTable builders and readers.
 #[derive(Clone)]
 pub struct SsTableConfig {
@@ -76,6 +80,7 @@ pub struct SsTableConfig {
     fs: Arc<dyn DynFs>,
     root: Path,
     key_extractor: Option<Arc<dyn KeyProjection>>,
+    merge_iteration_budget: usize,
 }
 
 impl SsTableConfig {
@@ -88,6 +93,7 @@ impl SsTableConfig {
             fs,
             root,
             key_extractor: None,
+            merge_iteration_budget: DEFAULT_MERGE_ITERATION_BUDGET,
         }
     }
 
@@ -128,6 +134,14 @@ impl SsTableConfig {
         &self.root
     }
 
+    /// Build a level-scoped path under the SST root.
+    pub(crate) fn level_dir(&self, level: usize) -> Result<Path, SsTableError> {
+        let level_name = format!("L{level}");
+        let part = PathPart::parse(&level_name)
+            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
+        Ok(self.root.child(part))
+    }
+
     /// Attach a key extractor used for ordered merges or reader planning.
     pub fn with_key_extractor(mut self, extractor: Arc<dyn KeyProjection>) -> Self {
         self.key_extractor = Some(extractor);
@@ -137,6 +151,17 @@ impl SsTableConfig {
     /// Access the configured key extractor, if any.
     pub fn key_extractor(&self) -> Option<&Arc<dyn KeyProjection>> {
         self.key_extractor.as_ref()
+    }
+
+    /// Configure the merge iteration budget used by compaction merges.
+    pub fn with_merge_iteration_budget(mut self, budget: usize) -> Self {
+        self.merge_iteration_budget = budget.max(1);
+        self
+    }
+
+    /// Access the merge iteration budget used for merges.
+    pub fn merge_iteration_budget(&self) -> usize {
+        self.merge_iteration_budget
     }
 }
 
@@ -148,6 +173,7 @@ impl fmt::Debug for SsTableConfig {
             .field("compression", &self.compression)
             .field("root", &self.root)
             .field("has_key_extractor", &self.key_extractor.is_some())
+            .field("merge_iteration_budget", &self.merge_iteration_budget)
             .finish()
     }
 }
@@ -444,6 +470,7 @@ where
             _mode: PhantomData,
         }
     }
+
     pub(crate) fn set_wal_ids(&mut self, wal_ids: Option<Vec<FileId>>) {
         self.wal_ids = wal_ids;
     }
@@ -673,21 +700,9 @@ impl WriteContext {
         descriptor: &SsTableDescriptor,
     ) -> Result<Self, SsTableError> {
         let fs = Arc::clone(config.fs());
-        let level_name = format!("L{}", descriptor.level());
-        let level_part = PathPart::parse(&level_name)
-            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
-        let dir_path = config.root().child(level_part);
+        let (dir_path, data_path, delete_path) =
+            build_table_paths(&config, descriptor.level(), descriptor.id())?;
         fs.create_dir_all(&dir_path).await?;
-
-        let data_file_name = format!("{:020}.parquet", descriptor.id().raw());
-        let data_part = PathPart::parse(&data_file_name)
-            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
-        let data_path = dir_path.child(data_part);
-
-        let delete_file_name = format!("{:020}.delete.parquet", descriptor.id().raw());
-        let delete_part = PathPart::parse(&delete_file_name)
-            .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
-        let delete_path = dir_path.child(delete_part);
 
         let data_options = OpenOptions::default()
             .create(true)
@@ -792,6 +807,26 @@ impl Drop for WriteContext {
             "WriteContext dropped without closing writers"
         );
     }
+}
+
+pub(crate) fn build_table_paths(
+    config: &SsTableConfig,
+    level: usize,
+    id: &SsTableId,
+) -> Result<(Path, Path, Path), SsTableError> {
+    let dir_path = config.level_dir(level)?;
+
+    let data_file_name = format!("{:020}.parquet", id.raw());
+    let data_part = PathPart::parse(&data_file_name)
+        .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
+    let data_path = dir_path.child(data_part);
+
+    let delete_file_name = format!("{:020}.delete.parquet", id.raw());
+    let delete_part = PathPart::parse(&delete_file_name)
+        .map_err(|err| SsTableError::InvalidPath(err.to_string()))?;
+    let delete_path = dir_path.child(delete_part);
+
+    Ok((dir_path, data_path, delete_path))
 }
 
 /// Planner responsible for turning immutable runs into SSTable files.

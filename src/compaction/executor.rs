@@ -257,6 +257,8 @@ pub(crate) struct LocalCompactionExecutor {
     next_id: Arc<AtomicU64>,
     max_output_rows: Option<usize>,
     max_output_bytes: Option<usize>,
+    #[cfg(test)]
+    corrupt_descriptors: bool,
 }
 
 const DEFAULT_BASE_OUTPUT_BYTES: usize = 128 * 1024 * 1024; // 128 MiB
@@ -273,6 +275,8 @@ impl LocalCompactionExecutor {
             next_id: Arc::new(AtomicU64::new(start_id)),
             max_output_rows: None,
             max_output_bytes: None,
+            #[cfg(test)]
+            corrupt_descriptors: false,
         }
     }
 
@@ -288,6 +292,13 @@ impl LocalCompactionExecutor {
     #[allow(dead_code)]
     pub fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
         self.max_output_bytes = Some(max_output_bytes.max(1));
+        self
+    }
+
+    /// Test-only hook to corrupt descriptors before outcome construction and exercise cleanup.
+    #[cfg(test)]
+    pub(crate) fn with_corrupt_descriptors_for_test(mut self) -> Self {
+        self.corrupt_descriptors = true;
         self
     }
 
@@ -334,12 +345,37 @@ impl CompactionExecutor for LocalCompactionExecutor {
                     .with_output_caps(max_rows, max_bytes);
             let merged = merger.execute().await?;
             let descriptors: Vec<_> = merged.iter().map(|sst| sst.descriptor().clone()).collect();
-            CompactionOutcome::from_outputs(
-                descriptors,
+            let descriptors_for_outcome = {
+                #[cfg(test)]
+                {
+                    if self.corrupt_descriptors {
+                        let mut corrupted = descriptors.clone();
+                        if let Some(first) = corrupted.first_mut() {
+                            *first = SsTableDescriptor::new(first.id().clone(), first.level());
+                        }
+                        corrupted
+                    } else {
+                        descriptors.clone()
+                    }
+                }
+                #[cfg(not(test))]
+                {
+                    descriptors.clone()
+                }
+            };
+            match CompactionOutcome::from_outputs(
+                descriptors_for_outcome,
                 job.inputs,
                 job.task.target_level as u32,
                 None,
-            )
+            ) {
+                Ok(outcome) => Ok(outcome),
+                Err(err) => {
+                    // Best-effort cleanup for partial outputs; surface original error.
+                    let _ = self.cleanup_outputs(&descriptors).await;
+                    Err(err)
+                }
+            }
         })
     }
 
@@ -368,19 +404,103 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::{dynamic::DynFs, path::Path};
+    use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
+    use futures::StreamExt;
+    use tempfile::tempdir;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        compaction::planner::CompactionInput,
+        compaction::planner::{CompactionInput, CompactionTask},
         id::FileIdGenerator,
         inmem::immutable::memtable::segment_from_batch_with_key_name,
+        mode::DynMode,
         ondisk::sstable::{
             SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId, SsTableStats,
         },
         schema::SchemaBuilder,
+        test_util::build_batch,
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_executor_cleans_outputs_when_outcome_build_fails() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let tmpdir = tempdir().expect("tempdir");
+        let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+            .primary_key("id")
+            .build()
+            .expect("schema builder");
+        let extractor = Arc::clone(&mode_cfg.extractor);
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let cfg = Arc::new(
+            SsTableConfig::new(
+                Arc::clone(&mode_cfg.schema),
+                fs,
+                Path::from(tmpdir.path().to_string_lossy().to_string()),
+            )
+            .with_key_extractor(extractor),
+        );
+
+        let batch = build_batch(
+            Arc::clone(&schema),
+            vec![
+                DynRow(vec![Some(DynCell::Str("a".into())), Some(DynCell::I32(1))]),
+                DynRow(vec![Some(DynCell::Str("b".into())), Some(DynCell::I32(2))]),
+            ],
+        )
+        .expect("batch");
+        let immutable =
+            segment_from_batch_with_key_name(batch, "id").expect("immutable segment from batch");
+        let mut builder = SsTableBuilder::<DynMode>::new(
+            Arc::clone(&cfg),
+            SsTableDescriptor::new(SsTableId::new(1), 0),
+        );
+        builder.add_immutable(&immutable).expect("stage seg");
+        let input = builder.finish().await.expect("sst");
+
+        let task = CompactionTask {
+            source_level: 0,
+            target_level: 1,
+            input: vec![CompactionInput {
+                level: 0,
+                sst_id: input.descriptor().id().clone(),
+            }],
+            key_range: None,
+        };
+        let job = CompactionJob {
+            task,
+            inputs: vec![input.descriptor().clone()],
+            lease: None,
+        };
+
+        let executor =
+            LocalCompactionExecutor::new(Arc::clone(&cfg), 10).with_corrupt_descriptors_for_test();
+        let result = executor.execute(job).await;
+        match result {
+            Err(CompactionError::MissingPath("data")) => {}
+            other => panic!("expected missing path error, got {other:?}"),
+        }
+
+        let level_dir = cfg.level_dir(1).expect("level dir");
+        let mut entries = cfg
+            .fs()
+            .list(&level_dir)
+            .await
+            .expect("level dir should exist");
+        let mut count = 0usize;
+        while let Some(item) = entries.next().await.transpose().expect("stream ok") {
+            let name = item.path.as_ref();
+            if name.ends_with(".parquet") || name.ends_with(".delete.parquet") {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 0, "expected compaction outputs to be cleaned");
+
+        drop(tmpdir);
+    }
 
     #[test]
     fn outcome_builds_version_edits() {

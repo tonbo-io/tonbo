@@ -80,6 +80,12 @@ Compaction is single-tenant for now: the worker loop in `compaction::spawn_compa
   - Data Parquet (user schema + `_commit_ts` column).
   - Optional delete sidecar Parquet (key-only + `_commit_ts`).
 
+### Failure handling and safeguards
+
+- We remove the hard merge-iteration cap as a default guard; work is bounded by planner sizing (input count/bytes) and output chunking instead of a pop-count budget that can trip on normal overlap. The config knob remains for debugging but defaults to effectively unlimited.
+- Outputs are written directly to final level-scoped paths; on any merge error before manifest publish, written files are tracked and deleted so we do not leave orphan SST files that GC cannot see.
+- Next: add telemetry for aborted/cleaned compactions and optional time/byte-based guards instead of pop-count caps.
+
 ### Interfaces with other components
 
 - **Manifest:** CompactionOutcome emits `VersionEdit`s; `VersionState` stores WAL segments, WAL floor, and tombstone watermark derived from merged outputs. Manifest head advances monotonically; DB prunes WAL below manifest floor after apply.
