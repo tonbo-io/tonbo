@@ -44,6 +44,7 @@ use crate::{
             CompactionError, CompactionExecutor, CompactionJob, CompactionLease, CompactionOutcome,
         },
         planner::{CompactionInput, CompactionPlanner, CompactionSnapshot},
+        trigger::{ManifestCompactionLease, TriggerRequest, stateless_compaction_once},
     },
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
@@ -1349,6 +1350,32 @@ where
         self.compaction_driver()
             .run_compaction_task_with_lease(planner, executor, lease)
             .await
+    }
+
+    /// Stateless compaction trigger helper suitable for cron/HTTP callers with optional
+    /// idempotency.
+    #[allow(dead_code)]
+    pub async fn trigger_compaction_once<CE, P>(
+        &self,
+        planner: &P,
+        executor: &CE,
+        request: TriggerRequest,
+        lease: Option<CompactionLease>,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+        P: CompactionPlanner,
+    {
+        let idempotency_manager = ManifestCompactionLease::new(self.manifest.idempotency_runtime());
+        stateless_compaction_once(
+            self,
+            planner,
+            executor,
+            request,
+            Some(&idempotency_manager),
+            lease,
+        )
+        .await
     }
 
     /// Spawn a current-thread compaction worker that calls `compact_once` every `interval`.

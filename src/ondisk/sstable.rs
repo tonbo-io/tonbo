@@ -219,6 +219,7 @@ pub struct SsTableDescriptor {
     stats: Option<SsTableStats>,
     wal_ids: Option<Vec<FileId>>,
     data_path: Option<Path>,
+    mvcc_path: Option<Path>,
     delete_path: Option<Path>,
 }
 
@@ -231,6 +232,7 @@ impl SsTableDescriptor {
             stats: None,
             wal_ids: None,
             data_path: None,
+            mvcc_path: None,
             delete_path: None,
         }
     }
@@ -277,6 +279,11 @@ impl SsTableDescriptor {
     /// Relative path to the SSTable payload file.
     pub fn data_path(&self) -> Option<&Path> {
         self.data_path.as_ref()
+    }
+
+    /// Relative path to the MVCC sidecar file.
+    pub fn mvcc_path(&self) -> Option<&Path> {
+        self.mvcc_path.as_ref()
     }
 
     /// Relative path to the delete sidecar file, when present.

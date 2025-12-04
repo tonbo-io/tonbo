@@ -66,7 +66,7 @@ pub trait CompactionLeaseManager {
 /// Execution context for a single planned compaction.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct CompactionJob {
+pub struct CompactionJob {
     /// Planner output describing which level/inputs to merge.
     pub task: CompactionTask,
     /// Resolved input SST descriptors (including stats/paths) for the task.
@@ -78,7 +78,7 @@ pub(crate) struct CompactionJob {
 /// Outcome of a successful compaction run.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct CompactionOutcome {
+pub struct CompactionOutcome {
     /// Newly produced SST entries to be added to the target level.
     pub(crate) add_ssts: Vec<SstEntry>,
     /// SST identifiers that should be removed once compaction finishes.
@@ -237,7 +237,7 @@ pub enum CompactionLeaseError {
 
 /// Async trait for orchestrating a major compaction over SST inputs.
 #[allow(dead_code)]
-pub(crate) trait CompactionExecutor {
+pub trait CompactionExecutor {
     /// Execute a compaction job and return a manifest edit describing the change.
     fn execute(
         &self,
@@ -252,10 +252,10 @@ pub(crate) trait CompactionExecutor {
     ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>>;
 }
 
-/// Local no-op executor placeholder. Returns `Unimplemented` until merge plumbing lands.
+/// Local executor that merges SST inputs on the current host.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct LocalCompactionExecutor {
+pub struct LocalCompactionExecutor {
     config: Arc<SsTableConfig>,
     next_id: Arc<AtomicU64>,
     max_output_rows: Option<usize>,
@@ -488,7 +488,10 @@ mod tests {
         let mut count = 0usize;
         while let Some(item) = entries.next().await.transpose().expect("stream ok") {
             let name = item.path.as_ref();
-            if name.ends_with(".parquet") || name.ends_with(".delete.parquet") {
+            if name.ends_with(".parquet")
+                || name.ends_with(".mvcc.parquet")
+                || name.ends_with(".delete.parquet")
+            {
                 count += 1;
             }
         }

@@ -602,7 +602,10 @@ mod tests {
         let mut count = 0usize;
         while let Some(item) = entries.next().await.transpose().expect("stream ok") {
             let name = item.path.as_ref();
-            if name.ends_with(".parquet") || name.ends_with(".delete.parquet") {
+            if name.ends_with(".parquet")
+                || name.ends_with(".mvcc.parquet")
+                || name.ends_with(".delete.parquet")
+            {
                 count += 1;
             }
         }
@@ -942,6 +945,9 @@ pub(crate) async fn cleanup_descriptors(config: &SsTableConfig, descriptors: &[S
     let fs = config.fs();
     for desc in descriptors {
         if let Some(path) = desc.data_path() {
+            let _ = fs.remove(path).await;
+        }
+        if let Some(path) = desc.mvcc_path() {
             let _ = fs.remove(path).await;
         }
         if let Some(path) = desc.delete_path() {

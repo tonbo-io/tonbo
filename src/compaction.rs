@@ -10,6 +10,8 @@ pub mod planner;
 /// Scheduler scaffolding for background/remote compaction (native builds only for now).
 #[cfg(feature = "tokio-runtime")]
 pub mod scheduler;
+/// Stateless trigger helpers intended for cron/HTTP surfaces.
+pub mod trigger;
 
 #[cfg(feature = "tokio-runtime")]
 use std::sync::Weak;

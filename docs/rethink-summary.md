@@ -112,6 +112,7 @@ Rethinking Tonbo pivots the engine to a single Arrow‑first, runtime columnar c
 | Minor Flush Pipeline | In progress | Parquet writer emits data/MVCC/delete files and manifest publication runs after flush (`src/ondisk/sstable.rs:420-640`; `src/db/mod.rs:776-860`). |
 | Stats & PK Index Build | In progress | `StagedTableStats` tracks key/ts bounds and bytes though PK sidecar persistence still TBD (`src/ondisk/sstable.rs:320-520`). |
 | Leveled/Range Planner | Not started | Compaction module lacks leveled scheduling or overlap logic (`src/compaction.rs:21-140`). |
+| Stateless Compaction Trigger | In progress | CLI trigger + manifest-backed idempotency landed (`src/bin/tonbo-admin.rs`, `docs/admin_trigger.md`); HTTP helper exposed under `http-server` feature but no built-in router due to `DB` being !Send/!Sync. |
 | Observability & Tuning | In progress | Memtable stats drive sealing decisions and WAL writer updates `WalMetrics` queue-depth/sync counters (`src/inmem/mutable/memtable.rs:557-569`; `src/wal/writer.rs:210-219`). |
 | Snapshot Tokens & Reader Registry | Not started | MVCC module offers timestamps only; no durable snapshots (`src/mvcc/mod.rs:1-120`). |
 | Tombstone Pruning | In progress | Immutable segments track tombstones without compaction pruning (`src/inmem/immutable/memtable.rs:18-200`). |

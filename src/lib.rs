@@ -58,3 +58,7 @@ pub mod ondisk;
 
 /// Simple compaction orchestrators.
 pub mod compaction;
+
+/// Optional admin HTTP surfaces.
+#[cfg(feature = "http-server")]
+pub mod admin;

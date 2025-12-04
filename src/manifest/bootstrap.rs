@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
@@ -7,8 +7,9 @@ use fusio::{
     path::{Path, PathPart},
 };
 use fusio_manifest::{
-    BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseStoreImpl,
-    ManifestContext, SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
+    BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseHandle,
+    LeaseStoreImpl, ManifestContext, NoopExecutor, SegmentStoreImpl, snapshot::Snapshot,
+    types::Error as FusioManifestError,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use futures::future::BoxFuture;
@@ -138,12 +139,40 @@ pub(crate) trait CatalogRuntime: MaybeSend + MaybeSync {
     fn table_meta<'a>(&'a self, table: TableId) -> BoxFuture<'a, ManifestResult<TableMeta>>;
 }
 
+/// Lease store abstraction for compaction/GC coordination.
+#[allow(dead_code)]
+pub(crate) trait LeaseRuntime: Send + Sync {
+    fn try_acquire<'a>(
+        &'a self,
+        snapshot_txn_id: u64,
+        ttl: Duration,
+    ) -> BoxFuture<'a, ManifestResult<Option<LeaseHandle>>>;
+
+    fn release<'a>(&'a self, lease: LeaseHandle) -> BoxFuture<'a, ManifestResult<()>>;
+}
+
+/// Idempotency store abstraction to avoid duplicate work across processes.
+pub(crate) trait IdempotencyRuntime: Send + Sync {
+    /// Returns true when the key was acquired, false if an unexpired record already exists.
+    fn try_acquire<'a>(
+        &'a self,
+        key: &'a str,
+        ttl: Duration,
+    ) -> BoxFuture<'a, ManifestResult<bool>>;
+
+    /// Release the key after completion.
+    fn release<'a>(&'a self, key: &'a str) -> BoxFuture<'a, ManifestResult<()>>;
+}
+
 /// Primary manifest handle exposed to the rest of the crate.
 #[derive(Clone)]
 pub(crate) struct TonboManifest {
     version: Arc<dyn VersionRuntime>,
     catalog: Arc<dyn CatalogRuntime>,
     gc_plan: Arc<dyn GcPlanRuntime>,
+    #[allow(dead_code)]
+    lease: Arc<dyn LeaseRuntime>,
+    idempotency: Arc<dyn IdempotencyRuntime>,
 }
 
 impl TonboManifest {
@@ -151,11 +180,15 @@ impl TonboManifest {
         version: Arc<dyn VersionRuntime>,
         catalog: Arc<dyn CatalogRuntime>,
         gc_plan: Arc<dyn GcPlanRuntime>,
+        lease: Arc<dyn LeaseRuntime>,
+        idempotency: Arc<dyn IdempotencyRuntime>,
     ) -> Self {
         Self {
             version,
             catalog,
             gc_plan,
+            lease,
+            idempotency,
         }
     }
 
@@ -199,6 +232,15 @@ impl TonboManifest {
 
     pub(crate) async fn wal_floor(&self, table: TableId) -> ManifestResult<Option<WalSegmentRef>> {
         self.version.wal_floor(table).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn lease_runtime(&self) -> Arc<dyn LeaseRuntime> {
+        Arc::clone(&self.lease)
+    }
+
+    pub(crate) fn idempotency_runtime(&self) -> Arc<dyn IdempotencyRuntime> {
+        Arc::clone(&self.idempotency)
     }
 
     async fn init_table_head(&self, table_id: TableId, head: TableHead) -> ManifestResult<()> {
@@ -366,6 +408,42 @@ where
     }
 }
 
+/// Adapter over a manifest lease store to implement `LeaseRuntime`.
+#[allow(dead_code)]
+pub(crate) struct LeaseHandleAdapter<LS> {
+    store: LS,
+}
+
+impl<LS> LeaseHandleAdapter<LS> {
+    pub(crate) fn new(store: LS) -> Self {
+        Self { store }
+    }
+}
+
+impl<LS> LeaseRuntime for LeaseHandleAdapter<LS>
+where
+    LS: fusio_manifest::LeaseStore + Send + Sync + Clone + 'static,
+{
+    fn try_acquire<'a>(
+        &'a self,
+        snapshot_txn_id: u64,
+        ttl: Duration,
+    ) -> BoxFuture<'a, ManifestResult<Option<LeaseHandle>>> {
+        Box::pin(async move {
+            let lease = self
+                .store
+                .create(snapshot_txn_id, None, ttl)
+                .await
+                .map_err(ManifestError::from)?;
+            Ok(Some(lease))
+        })
+    }
+
+    fn release<'a>(&'a self, lease: LeaseHandle) -> BoxFuture<'a, ManifestResult<()>> {
+        Box::pin(async move { self.store.release(lease).await.map_err(ManifestError::from) })
+    }
+}
+
 fn wrap_version_manifest<M>(manifest: M) -> Arc<dyn VersionRuntime>
 where
     ManifestHandle<M>: VersionRuntime,
@@ -388,6 +466,130 @@ where
     M: MaybeSend + MaybeSync + 'static,
 {
     Arc::new(GcPlanHandle(manifest))
+}
+
+fn wrap_lease_runtime<LS>(store: LS) -> Arc<dyn LeaseRuntime>
+where
+    LeaseHandleAdapter<LS>: LeaseRuntime,
+    LS: Send + Sync + 'static,
+{
+    Arc::new(LeaseHandleAdapter::new(store))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct IdempotencyDoc {
+    expires_at_ms: u64,
+}
+
+/// Manifest-backed idempotency store using CAS on per-key documents.
+pub(crate) struct IdempotencyHandleAdapter<FS> {
+    fs: FS,
+    prefix: String,
+}
+
+impl<FS> IdempotencyHandleAdapter<FS> {
+    pub(crate) fn new(fs: FS, prefix: impl Into<String>) -> Self {
+        Self {
+            fs,
+            prefix: prefix.into(),
+        }
+    }
+
+    fn key_for(&self, key: &str) -> String {
+        if self.prefix.is_empty() {
+            format!("idempotency/{key}.json")
+        } else {
+            format!("{}/idempotency/{key}.json", self.prefix)
+        }
+    }
+}
+
+impl<FS> IdempotencyRuntime for IdempotencyHandleAdapter<FS>
+where
+    FS: Fs + FsCas + Send + Sync + Clone + 'static,
+{
+    fn try_acquire<'a>(
+        &'a self,
+        key: &'a str,
+        ttl: Duration,
+    ) -> BoxFuture<'a, ManifestResult<bool>> {
+        Box::pin(async move {
+            let ttl_ms = ttl.as_millis().min(u128::from(u64::MAX)) as u64;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            let path = Path::parse(self.key_for(key))
+                .map_err(|_| ManifestError::Invariant("idempotency path parse failed"))?;
+            let doc = IdempotencyDoc {
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            };
+            let body = serde_json::to_vec(&doc)
+                .map_err(|_| ManifestError::Invariant("idempotency encode failed"))?;
+            match self
+                .fs
+                .put_conditional(
+                    &path,
+                    &body,
+                    Some("application/json"),
+                    None,
+                    fusio::fs::CasCondition::IfNotExists,
+                )
+                .await
+            {
+                Ok(_) => return Ok(true),
+                Err(fusio::Error::PreconditionFailed) => {}
+                Err(err) => return Err(ManifestError::Backend(err.into())),
+            }
+
+            // Check existing doc; overwrite if expired.
+            let (bytes, tag) = match self.fs.load_with_tag(&path).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return Ok(false),
+                Err(err) => return Err(ManifestError::Backend(err.into())),
+            };
+            let existing: IdempotencyDoc = serde_json::from_slice(&bytes)
+                .map_err(|_| ManifestError::Invariant("idempotency decode failed"))?;
+            if existing.expires_at_ms > now_ms {
+                return Ok(false);
+            }
+            let body = serde_json::to_vec(&doc)
+                .map_err(|_| ManifestError::Invariant("idempotency encode failed"))?;
+            match self
+                .fs
+                .put_conditional(
+                    &path,
+                    &body,
+                    Some("application/json"),
+                    None,
+                    fusio::fs::CasCondition::IfMatch(tag),
+                )
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(fusio::Error::PreconditionFailed) => Ok(false),
+                Err(err) => Err(ManifestError::Backend(err.into())),
+            }
+        })
+    }
+
+    fn release<'a>(&'a self, key: &'a str) -> BoxFuture<'a, ManifestResult<()>> {
+        Box::pin(async move {
+            let path = Path::parse(self.key_for(key))
+                .map_err(|_| ManifestError::Invariant("idempotency path parse failed"))?;
+            let _ = self.fs.remove(&path).await;
+            Ok(())
+        })
+    }
+}
+
+fn wrap_idempotency_runtime<FS>(fs: FS, prefix: impl Into<String>) -> Arc<dyn IdempotencyRuntime>
+where
+    IdempotencyHandleAdapter<FS>: IdempotencyRuntime,
+    FS: Send + Sync + 'static,
+{
+    Arc::new(IdempotencyHandleAdapter::new(fs, prefix))
 }
 
 /// Raw helper used by tests needing direct access to the concrete manifest.
@@ -447,13 +649,27 @@ where
     ensure_manifest_dirs::<FS>(&catalog_root).await?;
     ensure_manifest_dirs::<FS>(&gc_root).await?;
 
+    let fs_for_gc = fs.clone();
+    let lease_store = LeaseStoreImpl::new(
+        fs.clone(),
+        version_root.as_ref().to_string(),
+        BackoffPolicy::default(),
+        NoopExecutor,
+    );
     let version_manifest = open_manifest_instance::<FS, VersionCodec>(fs.clone(), &version_root);
     let catalog_manifest = open_manifest_instance::<FS, CatalogCodec>(fs.clone(), &catalog_root);
-    let gc_manifest = open_manifest_instance::<FS, GcPlanCodec>(fs, &gc_root);
+    let gc_manifest = open_manifest_instance::<FS, GcPlanCodec>(fs_for_gc, &gc_root);
+    let lease_runtime = wrap_lease_runtime(lease_store);
+    // Keep idempotency records on the manifest filesystem so duplicate triggers are deduped
+    // across processes and restarts.
+    let idempotency_runtime =
+        wrap_idempotency_runtime(fs.clone(), version_root.as_ref().to_string());
     let tonbo = TonboManifest::new(
         wrap_version_manifest(version_manifest),
         wrap_catalog_manifest(catalog_manifest),
         wrap_gc_plan_manifest(gc_manifest),
+        lease_runtime,
+        idempotency_runtime,
     );
     tonbo.init_catalog().await?;
     Ok(tonbo)
@@ -478,6 +694,8 @@ where
     ensure_dir_path::<FS>(&base.child(PathPart::parse("checkpoints").expect("checkpoints part")))
         .await?;
     ensure_dir_path::<FS>(&base.child(PathPart::parse("leases").expect("leases part"))).await?;
+    ensure_dir_path::<FS>(&base.child(PathPart::parse("idempotency").expect("idempotency part")))
+        .await?;
     Ok(())
 }
 

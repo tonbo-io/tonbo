@@ -31,6 +31,7 @@ web-opfs = ["web", "fusio/opfs"]
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
 test-helpers = []
+http-server = ["dep:axum"]
 
 [dependencies]
 arrow-array = "56.2.0"
@@ -38,6 +39,8 @@ arrow-buffer = "56.2.0"
 arrow-ipc = "56.1.0"
 arrow-schema = { version = "56.2.0", features = ["serde"] }
 arrow-select = "56.2.0"
+axum = { version = "0.8.7", features = ["http1", "macros"], optional = true }
+http = "0.2"
 crc32c = "0.6"
 fusio = { git = "https://github.com/tonbo-io/fusio.git", default-features = false, features = [
     "aws",
@@ -74,6 +77,8 @@ typed-arrow-dyn = { git = "https://github.com/tonbo-io/typed-arrow.git", package
     "serde",
 ] }
 ulid = { version = "1", features = ["serde"] }
+clap = { version = "4.5.4", features = ["derive"] }
+anyhow = "1"
 
 
 [dev-dependencies]
