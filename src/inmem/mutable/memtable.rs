@@ -143,7 +143,7 @@ impl DynMem {
         }
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     /// Returns the number of batches currently stored.
     pub(crate) fn batch_count(&self) -> usize {
         self.batch_cursor.load(Ordering::Relaxed)
@@ -700,7 +700,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        extractor::projection_for_columns, inmem::policy::StatsProvider, test_util::build_batch,
+        extractor::projection_for_columns, inmem::policy::StatsProvider, test::build_batch,
     };
 
     #[test]

@@ -396,60 +396,57 @@ impl<'t> Iterator for RecordBatchIterator<'t> {
     /// while the views reference it.
     type Item = Result<(Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw), SstableScanError>;
 
-    #[allow(clippy::never_loop)]
     fn next(&mut self) -> Option<Self::Item> {
-        // Loop exists for consistency with original pattern - data file has no tombstones to skip,
-        // but the structure allows future skip conditions if needed.
-        while self.remaining > 0 {
-            let row_idx = self.offset;
-            self.remaining -= 1;
-            if self.step < 0 {
-                let magnitude = (-self.step) as usize;
-                self.offset = self.offset.saturating_sub(magnitude);
-            } else if self.step > 0 {
-                self.offset = self.offset.saturating_add(self.step as usize);
-            }
-
-            // Note: tombstone check removed - data file doesn't contain tombstones,
-            // they're in the delete sidecar which is handled by SstableScan
-
-            let key_rows = match self.extractor.project_view(&self.batch, &[row_idx]) {
-                Ok(rows) => rows,
-                Err(err) => return Some(Err(SstableScanError::Key(err))),
-            };
-            let key_row = match key_rows.into_iter().next() {
-                Some(row) => row,
-                None => {
-                    return Some(Err(SstableScanError::Key(KeyExtractError::RowOutOfBounds(
-                        row_idx,
-                        self.batch.num_rows(),
-                    ))));
-                }
-            };
-
-            let commit_ts = match self.mvcc.commit_ts.get(row_idx).copied() {
-                Some(ts) => ts,
-                None => {
-                    return Some(Err(SstableScanError::Key(KeyExtractError::RowOutOfBounds(
-                        row_idx,
-                        self.mvcc.commit_ts.len(),
-                    ))));
-                }
-            };
-
-            let row = match self
-                .projection
-                .project_row_raw(&self.dyn_schema, &self.batch, row_idx)
-            {
-                Ok(row) => row,
-                Err(err) => return Some(Err(SstableScanError::DynView(err))),
-            };
-
-            let key = KeyTsViewRaw::new(key_row, commit_ts);
-            return Some(Ok((Arc::clone(&self.batch), key, row)));
+        if self.remaining == 0 {
+            return None;
         }
 
-        None
+        let row_idx = self.offset;
+        self.remaining -= 1;
+        if self.step < 0 {
+            let magnitude = (-self.step) as usize;
+            self.offset = self.offset.saturating_sub(magnitude);
+        } else if self.step > 0 {
+            self.offset = self.offset.saturating_add(self.step as usize);
+        }
+
+        // Note: tombstone check not needed here - data file doesn't contain tombstones,
+        // they're in the delete sidecar which is handled by SstableScan
+
+        let key_rows = match self.extractor.project_view(&self.batch, &[row_idx]) {
+            Ok(rows) => rows,
+            Err(err) => return Some(Err(SstableScanError::Key(err))),
+        };
+        let key_row = match key_rows.into_iter().next() {
+            Some(row) => row,
+            None => {
+                return Some(Err(SstableScanError::Key(KeyExtractError::RowOutOfBounds(
+                    row_idx,
+                    self.batch.num_rows(),
+                ))));
+            }
+        };
+
+        let commit_ts = match self.mvcc.commit_ts.get(row_idx).copied() {
+            Some(ts) => ts,
+            None => {
+                return Some(Err(SstableScanError::Key(KeyExtractError::RowOutOfBounds(
+                    row_idx,
+                    self.mvcc.commit_ts.len(),
+                ))));
+            }
+        };
+
+        let row = match self
+            .projection
+            .project_row_raw(&self.dyn_schema, &self.batch, row_idx)
+        {
+            Ok(row) => row,
+            Err(err) => return Some(Err(SstableScanError::DynView(err))),
+        };
+
+        let key = KeyTsViewRaw::new(key_row, commit_ts);
+        Some(Ok((Arc::clone(&self.batch), key, row)))
     }
 }
 

@@ -10,12 +10,13 @@ use fusio::{
 };
 use futures::StreamExt;
 use tonbo::{
-    BatchesThreshold, DB, Transaction,
+    BatchesThreshold, DB,
     db::{DynDbHandle, DynDbHandleExt},
     key::KeyOwned,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
     query::{ColumnRef, Predicate, ScalarValue},
+    transaction::Transaction,
     wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
 };
 use typed_arrow_dyn::{DynCell, DynRow};

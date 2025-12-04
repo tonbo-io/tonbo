@@ -202,7 +202,7 @@ mod tests {
         mutation::DynMutation,
         mvcc::{MVCC_COMMIT_COL, Timestamp},
         query::stream::{OwnedImmutableScan, OwnedMutableScan, ScanStream},
-        test_util::build_batch,
+        test::build_batch,
         transaction::TransactionScan,
     };
 

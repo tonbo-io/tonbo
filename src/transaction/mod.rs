@@ -19,7 +19,7 @@ use typed_arrow_dyn::{
     DynViewError,
 };
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use crate::manifest::{TableHead, VersionState};
 use crate::{
     db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, DynDbHandle, TxnWalPublishContext, WalFrameRange},
@@ -83,13 +83,13 @@ impl Snapshot {
     }
 
     /// Manifest head describing the table state visible to the snapshot.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) fn head(&self) -> &TableHead {
         &self.manifest.head
     }
 
     /// Latest committed version included in the snapshot, when available.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) fn latest_version(&self) -> Option<&VersionState> {
         self.manifest.latest_version.as_ref()
     }
@@ -776,7 +776,7 @@ mod tests {
         mode::DynModeConfig,
         mvcc::Timestamp,
         query::{ColumnRef, Predicate, ScalarValue},
-        test_util::build_batch,
+        test::build_batch,
     };
 
     type TestTx = Transaction<NoopExecutor>;

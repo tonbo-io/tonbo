@@ -14,9 +14,9 @@ mod driver;
 mod version;
 
 pub(crate) use bootstrap::{
-    IdempotencyRuntime, TableSnapshot, TonboManifest, init_fs_manifest, init_in_memory_manifest,
+    TableSnapshot, TonboManifest, init_fs_manifest, init_in_memory_manifest,
 };
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) use domain::TableHead;
 pub(crate) use domain::{
     GcPlanState, GcSstRef, SstEntry, TableDefinition, TableId, VersionState, WalSegmentRef,

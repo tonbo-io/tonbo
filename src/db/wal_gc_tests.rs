@@ -1,4 +1,4 @@
-#![cfg(feature = "test-helpers")]
+//! WAL garbage collection tests.
 
 use std::{
     fs,
@@ -17,16 +17,17 @@ use fusio::{
 };
 use futures::TryStreamExt;
 use tokio::time::sleep;
-use tonbo::{
-    BatchesThreshold, CommitAckMode, DB, NeverSeal,
-    mode::{DynMode, DynModeConfig},
-    mvcc::Timestamp,
+use typed_arrow_dyn::{DynCell, DynRow};
+
+use crate::{
+    db::{DB, DynDbHandleExt},
+    inmem::policy::{BatchesThreshold, NeverSeal},
+    mode::DynModeConfig,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     query::{ColumnRef, Predicate},
-    test_helpers::DbTestExt,
+    transaction::CommitAckMode,
     wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
 };
-use typed_arrow_dyn::{DynCell, DynRow};
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -74,14 +75,18 @@ fn single_row_batch(schema: Arc<Schema>, id: &str, value: i32) -> RecordBatch {
     .expect("batch")
 }
 
-fn rows_from_db(db: &DB<DynMode, TokioExecutor>) -> Vec<(String, i32)> {
+async fn rows_from_db(db: &DB<crate::mode::DynMode, TokioExecutor>) -> Vec<(String, i32)> {
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot = futures::executor::block_on(db.begin_snapshot()).expect("snapshot");
-    let plan =
-        futures::executor::block_on(snapshot.plan_scan(db, &pred, None, None)).expect("plan");
-    let stream = futures::executor::block_on(db.execute_scan(plan)).expect("execute");
-    let batches =
-        futures::executor::block_on(stream.try_collect::<Vec<_>>()).expect("collect batches");
+    let snapshot = db.begin_snapshot().await.expect("snapshot");
+    let plan = snapshot
+        .plan_scan(db, &pred, None, None)
+        .await
+        .expect("plan");
+    let stream = db.execute_scan(plan).await.expect("execute");
+    let batches = stream
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("collect batches");
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()
         .flat_map(|batch| {
@@ -128,7 +133,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let sst_path = FusioPath::from_filesystem_path(&sst_dir)?;
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_path));
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
+    let mut db = DB::<crate::mode::DynMode, TokioExecutor>::builder(build_config)
         .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_segment_bytes(512)
@@ -170,9 +175,10 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     );
 
     let descriptor_a = SsTableDescriptor::new(SsTableId::new(1), 0);
-    db.flush_immutables_with_descriptor_for_tests(Arc::clone(&sst_cfg), descriptor_a)
+    // Call internal method directly instead of via DbTestExt
+    db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_a)
         .await?;
-    db.prune_wal_segments_below_floor_for_tests().await;
+    db.prune_wal_segments_below_floor().await;
 
     let after_flush = wal_segment_paths(&wal_dir_local);
     assert!(after_flush.len() <= before_flush.len());
@@ -183,24 +189,38 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let pinned_file = wal_file_for_seq(&wal_dir_local, pinned_floor);
     assert!(pinned_file.exists(), "pinned WAL segment must stay on disk");
 
+    // Drop original db before recovery test to avoid WAL state file conflicts
+    db.disable_wal().await?;
+    drop(db);
+
     let recovery_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
     // Recovery happens before releasing the pinned WAL range: older GC logic
     // would have dropped the segment here which meant WAL replay lost data.
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(recovery_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .wal_segment_bytes(512)
-            .wal_flush_interval(Duration::from_millis(1))
-            .wal_sync_policy(WalSyncPolicy::Disabled)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
-    assert_eq!(rows_from_db(&recovered), {
+    let recovered = DB::<crate::mode::DynMode, TokioExecutor>::builder(recovery_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .wal_segment_bytes(512)
+        .wal_flush_interval(Duration::from_millis(1))
+        .wal_sync_policy(WalSyncPolicy::Disabled)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
+    assert_eq!(rows_from_db(&recovered).await, {
         let mut rows = ingested_rows.clone();
         rows.sort();
         rows
     });
     drop(recovered);
+
+    // Reopen db to continue testing final flush and GC
+    let reopen_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+    let mut db = DB::<crate::mode::DynMode, TokioExecutor>::builder(reopen_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .wal_segment_bytes(512)
+        .wal_flush_interval(Duration::from_millis(1))
+        .wal_sync_policy(WalSyncPolicy::Disabled)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
     let final_id = "flushed".to_string();
@@ -212,9 +232,9 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
         "expected pending mutable to seal before final flush"
     );
     let descriptor_b = SsTableDescriptor::new(SsTableId::new(2), 0);
-    db.flush_immutables_with_descriptor_for_tests(Arc::clone(&sst_cfg), descriptor_b)
+    db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor_b)
         .await?;
-    db.prune_wal_segments_below_floor_for_tests().await;
+    db.prune_wal_segments_below_floor().await;
     let after_final_gc = wal_segment_paths(&wal_dir_local);
     assert!(
         !after_final_gc.contains(&pinned_file),
@@ -246,7 +266,7 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
     wal_cfg.flush_interval = Duration::from_millis(1);
     wal_cfg.sync = WalSyncPolicy::Always;
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
+    let mut db = DB::new(config, Arc::clone(&executor)).await?;
     db.enable_wal(wal_cfg.clone()).await?;
     let db = db.into_shared();
     assert!(db.wal_floor_seq().await.is_none());
@@ -262,7 +282,7 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
         .wal_floor_seq()
         .await
         .expect("transaction commit should publish wal floor");
-    db.prune_wal_segments_below_floor_for_tests().await;
+    db.prune_wal_segments_below_floor().await;
 
     let wal_dir_local = { path_to_local(&db.wal_config().expect("wal").dir)? };
     let pinned = wal_file_for_seq(&wal_dir_local, floor);
@@ -290,7 +310,7 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
     wal_cfg.flush_interval = Duration::from_millis(1);
     wal_cfg.sync = WalSyncPolicy::Disabled;
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
+    let mut db = DB::new(config, Arc::clone(&executor)).await?;
     db.enable_wal(wal_cfg.clone()).await?;
     let db = db.into_shared();
 
@@ -310,6 +330,6 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
         sleep(Duration::from_millis(10)).await;
     }
 
-    db.prune_wal_segments_below_floor_for_tests().await;
+    db.prune_wal_segments_below_floor().await;
     Ok(())
 }

@@ -214,13 +214,13 @@ impl SealPolicy for AnyOf {
 }
 
 /// Composite policy that triggers only if all inner policies trigger.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[derive(Default)]
 pub struct AllOf {
     inner: Vec<Arc<dyn SealPolicy + Send + Sync>>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl AllOf {
     /// Create a composite policy from a list of inner policies.
     pub fn new(inner: Vec<Arc<dyn SealPolicy + Send + Sync>>) -> Self {
@@ -228,7 +228,7 @@ impl AllOf {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl SealPolicy for AllOf {
     fn evaluate(&self, stats: &MemStats) -> SealDecision {
         let mut last_reason: Option<SealReason> = None;

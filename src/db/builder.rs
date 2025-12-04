@@ -1164,7 +1164,6 @@ where
             db.enable_wal(cfg).await?;
         }
 
-        let mut db = db;
         if let Some(loop_cfg) = self.compaction_loop_cfg {
             // Temporary shortcut: spawn a local compaction loop for dyn mode using a
             // caller-provided SST config. This should be replaced by a real

@@ -394,7 +394,7 @@ mod tests {
             ColumnRef, Predicate, ScalarValue,
             stream::{Order, ScanStream, merge::MergeStream},
         },
-        test_util::build_batch,
+        test::build_batch,
     };
 
     #[tokio::test(flavor = "current_thread")]

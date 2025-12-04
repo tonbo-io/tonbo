@@ -486,7 +486,7 @@ mod tests {
         mode::DynMode,
         ondisk::sstable::{SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId},
         schema::SchemaBuilder,
-        test_util::build_batch,
+        test::build_batch,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

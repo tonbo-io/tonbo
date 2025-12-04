@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use fusio::dynamic::{MaybeSend, MaybeSync};
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use fusio_manifest::snapshot::ScanRange;
 use fusio_manifest::{
     CheckpointStore, DefaultExecutor, HeadStore, LeaseStore, SegmentIo, context::ManifestContext,
@@ -296,7 +296,7 @@ where
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) async fn list_versions(
         &self,
         table: TableId,
@@ -377,7 +377,7 @@ where
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) async fn take_gc_plan(
         &self,
         table_id: TableId,

@@ -278,7 +278,7 @@ impl LocalCompactionExecutor {
     }
 
     /// Cap the number of bytes per output SST. Prevents oversized single files when splitting.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
         self.max_output_bytes = Some(max_output_bytes.max(1));
         self
@@ -401,7 +401,7 @@ mod tests {
             SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId, SsTableStats,
         },
         schema::SchemaBuilder,
-        test_util::build_batch,
+        test::build_batch,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -687,7 +687,7 @@ mod tests {
             .with_key_extractor(Arc::clone(&mode_cfg.extractor)),
         );
         let exec = LocalCompactionExecutor::new(cfg, 100);
-        let batch = crate::test_util::build_batch(
+        let batch = crate::test::build_batch(
             Arc::clone(&schema),
             vec![DynRow(vec![
                 Some(DynCell::Str("a".into())),

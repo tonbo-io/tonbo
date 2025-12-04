@@ -1043,7 +1043,7 @@ mod tests {
         inmem::immutable::memtable::{ImmutableIndexEntry, ImmutableMemTable, bundle_mvcc_sidecar},
         key::KeyTsViewRaw,
         mvcc::Timestamp,
-        test_util::build_batch,
+        test::build_batch,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

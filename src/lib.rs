@@ -21,18 +21,9 @@ pub mod schema;
 pub use crate::db::DB;
 // Re-export in-memory sealing policy helpers for embedders that tweak durability.
 pub use crate::inmem::policy::{BatchesThreshold, NeverSeal, SealPolicy};
-// Re-export the transaction builder and related errors/options for ergonomic imports.
-pub use crate::transaction::{
-    CommitAckMode, Transaction, TransactionCommitError, TransactionError,
-};
-
-#[cfg(feature = "test-helpers")]
-pub mod test_helpers;
 
 #[cfg(test)]
-mod test_util;
-#[cfg(all(test, target_arch = "wasm32", feature = "web"))]
-mod wasm_web_tests;
+mod test;
 
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;
@@ -57,7 +48,3 @@ pub mod ondisk;
 
 /// Simple compaction orchestrators.
 pub mod compaction;
-
-/// Optional admin HTTP surfaces.
-#[cfg(feature = "http-server")]
-pub mod admin;

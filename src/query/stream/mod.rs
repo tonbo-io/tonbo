@@ -114,7 +114,7 @@ impl<'t, S> OwnedImmutableScan<'t, S>
 where
     S: RecordBatchStorage,
 {
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) fn new(keep: Arc<ImmutableMemTable<S>>, inner: ImmutableVisibleScan<'t, S>) -> Self {
         Self { _keep: keep, inner }
     }
@@ -434,7 +434,7 @@ mod tests {
         key::KeyOwned,
         mutation::DynMutation,
         mvcc::Timestamp,
-        test_util::build_batch,
+        test::build_batch,
         transaction::TransactionScan,
     };
 

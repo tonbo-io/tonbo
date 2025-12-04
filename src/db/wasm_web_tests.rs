@@ -1,4 +1,4 @@
-#![cfg(all(test, target_arch = "wasm32", feature = "web"))]
+//! Wasm/web integration tests for DB with S3 backend.
 
 use std::sync::Arc;
 
@@ -9,9 +9,10 @@ use futures::StreamExt;
 use js_sys::Date;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
+use super::{AwsCreds, DB, ObjectSpec, S3Spec};
 use crate::{
-    db::{AwsCreds, DB, DynMode, ObjectSpec, S3Spec},
     inmem::policy::BatchesThreshold,
+    mode::DynMode,
     mvcc::Timestamp,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId, SsTableReader},
     schema::SchemaBuilder,

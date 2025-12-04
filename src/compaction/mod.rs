@@ -9,27 +9,25 @@ pub mod executor;
 pub mod planner;
 /// Scheduler scaffolding for background/remote compaction (native builds only for now).
 pub mod scheduler;
-/// Stateless trigger helpers intended for cron/HTTP surfaces.
-pub mod trigger;
 
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use std::{pin::Pin, sync::Weak, time::Duration};
 
 use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use fusio::{
     dynamic::{MaybeSend, MaybeSendFuture, MaybeSync},
     executor::JoinHandle,
 };
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use futures::future::{AbortHandle, AbortRegistration, Abortable};
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use crate::compaction::{
     executor::{CompactionError, CompactionExecutor, CompactionOutcome},
     planner::CompactionPlanner,
@@ -42,7 +40,7 @@ use crate::{
 };
 
 /// Minimal capability required by the background compaction loop.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) trait CompactionHost<M: Mode, E: Executor + Timer> {
     fn compact_once<'a, CE, P>(
         &'a self,
@@ -63,13 +61,13 @@ pub struct MinorCompactor {
     next_id: AtomicU64,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) struct CompactionLoopHandle<E: Executor> {
     abort: AbortHandle,
     handle: Option<E::JoinHandle<()>>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl<E: Executor> CompactionLoopHandle<E> {
     // Currently only used by tests/manual cleanup; runtime cancellation relies on Drop.
     pub async fn abort(mut self) {
@@ -80,7 +78,7 @@ impl<E: Executor> CompactionLoopHandle<E> {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl<E: Executor> Drop for CompactionLoopHandle<E> {
     fn drop(&mut self) {
         self.abort.abort();
@@ -89,7 +87,7 @@ impl<E: Executor> Drop for CompactionLoopHandle<E> {
 
 /// Drive compaction in a simple loop, waiting on the provided timer between attempts.
 /// Callers should run this in their runtime/task and handle cancellation externally.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) async fn compaction_loop<M, E, CE, P>(
     db: Weak<impl CompactionHost<M, E> + MaybeSend + MaybeSync + 'static>,
     planner: P,
@@ -127,7 +125,7 @@ pub(crate) async fn compaction_loop<M, E, CE, P>(
 /// This is a stopgap to keep compaction running until a proper scheduler/lease lands.
 /// Callers are responsible for choosing an interval and handling cancellation via the returned
 /// handle.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) fn spawn_compaction_loop_local<M, E, CE, P>(
     db: Weak<impl CompactionHost<M, E> + MaybeSend + MaybeSync + 'static>,
     planner: P,
@@ -240,7 +238,7 @@ mod tests {
         db::DB,
         mode::DynMode,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor},
-        test_util::build_batch,
+        test::build_batch,
     };
 
     async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, NoopExecutor>) {

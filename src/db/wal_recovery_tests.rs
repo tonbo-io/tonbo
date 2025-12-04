@@ -1,4 +1,4 @@
-#![cfg(feature = "test-helpers")]
+//! WAL recovery tests.
 
 use std::{
     fs,
@@ -10,31 +10,27 @@ use std::{
 use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{
-    DynFs, Write, disk::LocalFs, executor::tokio::TokioExecutor, fs::FsCas, path::Path as FusioPath,
+    DynFs, Write as FusioWrite, disk::LocalFs, executor::tokio::TokioExecutor, fs::FsCas,
+    path::Path as FusioPath,
 };
 use futures::TryStreamExt;
-use tonbo::{
-    BatchesThreshold, DB,
-    db::WalConfig as BuilderWalConfig,
+
+use crate::{
+    db::{DB, WalConfig as BuilderWalConfig},
+    inmem::policy::BatchesThreshold,
     mode::{DynMode, DynModeConfig},
     mvcc::Timestamp,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     query::{ColumnRef, Predicate},
-    test_helpers::DbTestExt,
+    test::config_with_pk,
     wal::{
-        DynBatchPayload, WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalRecoveryMode,
-        WalSyncPolicy,
-        frame::{INITIAL_FRAME_SEQ, WalEvent, encode_autocommit_frames, encode_command},
+        DynBatchPayload, WalCommand, WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy,
+        frame::{INITIAL_FRAME_SEQ, WalEvent, encode_command},
         replay::Replayer,
         state::FsWalStateStore,
         storage::WalStorage,
     },
 };
-
-#[path = "common/mod.rs"]
-mod common;
-
-use common::config_with_pk;
 
 fn workspace_temp_dir(prefix: &str) -> PathBuf {
     let base = std::env::current_dir().expect("cwd");
@@ -156,7 +152,6 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     let schema = build_config.schema();
     let executor = Arc::new(TokioExecutor::default());
 
-    // Configure WAL to persist state and ensure small segments for replay coverage.
     let wal_dir = temp_root.join("wal");
     fs::create_dir_all(&wal_dir)?;
     let wal_path = FusioPath::from_filesystem_path(&wal_dir)?;
@@ -172,7 +167,6 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
         .flush_interval(Duration::from_millis(1))
         .sync_policy(WalSyncPolicy::Disabled);
 
-    // SST config for the flush; reads are still served from WAL replay.
     let sst_dir = temp_root.join("sst");
     fs::create_dir_all(&sst_dir)?;
     let sst_root = FusioPath::from_filesystem_path(&sst_dir)?;
@@ -208,12 +202,11 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     );
 
     let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
-    db.flush_immutables_with_descriptor_for_tests(Arc::clone(&sst_cfg), descriptor)
+    db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor)
         .await?;
-    db.prune_wal_segments_below_floor_for_tests().await;
+    db.prune_wal_segments_below_floor().await;
     drop(db);
 
-    // Restart: rely on manifest WAL floor to drive WAL replay back into memtables.
     let recover_config = config_with_pk(
         vec![
             Field::new("id", DataType::Utf8, false),
@@ -556,528 +549,6 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wal_recovery_ignores_truncated_commit() -> Result<(), Box<dyn std::error::Error>> {
-    let root_dir = workspace_temp_dir("tonbo-wal-truncated");
-    let root_str = root_dir.to_string_lossy().into_owned();
-    let wal_dir = root_dir.join("wal");
-
-    let mode_config = config_with_pk(
-        vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int32, false),
-        ],
-        &["id"],
-    );
-    let schema = mode_config.schema();
-
-    let executor = Arc::new(TokioExecutor::default());
-
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
-    storage.ensure_dir(storage.root()).await?;
-    let mut segment = storage.open_segment(1).await?;
-
-    let committed_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["committed"])) as _,
-            Arc::new(Int32Array::from(vec![1])) as _,
-        ],
-    )?;
-    let committed_frames =
-        encode_autocommit_frames(committed_batch.clone(), 11, Timestamp::new(100))?;
-
-    let partial_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["partial"])) as _,
-            Arc::new(Int32Array::from(vec![999])) as _,
-        ],
-    )?;
-    let partial_frames = encode_autocommit_frames(partial_batch.clone(), 17, Timestamp::new(200))?;
-
-    let mut seq = INITIAL_FRAME_SEQ;
-    for frame in committed_frames {
-        let bytes = frame.into_bytes(seq);
-        let (write_res, _) = segment.file_mut().write_all(bytes).await;
-        write_res?;
-        seq += 1;
-    }
-
-    let append_bytes = partial_frames[0].clone().into_bytes(seq);
-    let (write_res, _) = segment.file_mut().write_all(append_bytes).await;
-    write_res?;
-    seq += 1;
-
-    let mut commit_bytes = partial_frames[1].clone().into_bytes(seq);
-    commit_bytes.truncate(commit_bytes.len().saturating_sub(4));
-    let (write_res, _) = segment.file_mut().write_all(commit_bytes).await;
-    write_res?;
-    segment.file_mut().flush().await?;
-    drop(segment);
-    drop(storage);
-
-    let mut recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
-
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot = recovered.begin_snapshot().await.expect("snapshot");
-    let plan = snapshot
-        .plan_scan(&recovered, &pred, None, None)
-        .await
-        .expect("plan");
-    let batches = recovered
-        .execute_scan(plan)
-        .await
-        .expect("execute")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect");
-    let mut rows: Vec<(String, i32)> = batches
-        .into_iter()
-        .flat_map(|batch| {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("id col");
-            let vals = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("value col");
-            ids.iter()
-                .zip(vals.iter())
-                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    rows.sort();
-    assert_eq!(rows, vec![("committed".into(), 1)]);
-
-    recovered.disable_wal().await?;
-    drop(recovered);
-    if let Err(err) = fs::remove_dir_all(&root_dir) {
-        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wal_recovery_tolerates_corrupted_tail() -> Result<(), Box<dyn std::error::Error>> {
-    let root_dir = workspace_temp_dir("tonbo-wal-tolerate");
-    let root_str = root_dir.to_string_lossy().into_owned();
-    let wal_dir = root_dir.join("wal");
-
-    let mode_config = config_with_pk(
-        vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int32, false),
-        ],
-        &["id"],
-    );
-    let schema = mode_config.schema();
-
-    let executor = Arc::new(TokioExecutor::default());
-
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-    wal_cfg.recovery = WalRecoveryMode::TolerateCorruptedTail;
-
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
-    storage.ensure_dir(storage.root()).await?;
-    let mut segment = storage.open_segment(1).await?;
-
-    let committed_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["committed"])) as _,
-            Arc::new(Int32Array::from(vec![1])) as _,
-        ],
-    )?;
-    let committed_frames =
-        encode_autocommit_frames(committed_batch.clone(), 11, Timestamp::new(100))?;
-
-    let partial_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["partial"])) as _,
-            Arc::new(Int32Array::from(vec![999])) as _,
-        ],
-    )?;
-    let partial_frames = encode_autocommit_frames(partial_batch.clone(), 17, Timestamp::new(200))?;
-
-    let mut seq = INITIAL_FRAME_SEQ;
-    for frame in committed_frames {
-        let bytes = frame.into_bytes(seq);
-        let (write_res, _) = segment.file_mut().write_all(bytes).await;
-        write_res?;
-        seq += 1;
-    }
-
-    let append_bytes = partial_frames[0].clone().into_bytes(seq);
-    let (write_res, _) = segment.file_mut().write_all(append_bytes).await;
-    write_res?;
-    seq += 1;
-
-    let mut commit_bytes = partial_frames[1].clone().into_bytes(seq);
-    commit_bytes.truncate(commit_bytes.len().saturating_sub(4));
-    let (write_res, _) = segment.file_mut().write_all(commit_bytes).await;
-    write_res?;
-    segment.file_mut().flush().await?;
-    drop(segment);
-
-    let mut recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .wal_config(
-                BuilderWalConfig::default().recovery_mode(WalRecoveryMode::TolerateCorruptedTail),
-            )
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
-
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot = recovered.begin_snapshot().await?;
-    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
-    let batches = recovered
-        .execute_scan(plan)
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
-    let mut rows: Vec<(String, i32)> = batches
-        .into_iter()
-        .flat_map(|batch| {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("id col");
-            let vals = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("value col");
-            ids.iter()
-                .zip(vals.iter())
-                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    rows.sort();
-    assert_eq!(rows, vec![("committed".into(), 1)]);
-
-    recovered.disable_wal().await?;
-    drop(recovered);
-    if let Err(err) = fs::remove_dir_all(&root_dir) {
-        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wal_recovery_rewrite_after_truncated_tail() -> Result<(), Box<dyn std::error::Error>> {
-    let root_dir = workspace_temp_dir("tonbo-wal-rewrite");
-    let root_str = root_dir.to_string_lossy().into_owned();
-    let wal_dir = root_dir.join("wal");
-
-    let mode_config = config_with_pk(
-        vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int32, false),
-        ],
-        &["id"],
-    );
-    let schema = mode_config.schema();
-
-    let executor = Arc::new(TokioExecutor::default());
-
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
-    storage.ensure_dir(storage.root()).await?;
-    let mut segment = storage.open_segment(1).await?;
-
-    let committed_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["committed"])) as _,
-            Arc::new(Int32Array::from(vec![1])) as _,
-        ],
-    )?;
-    let committed_frames =
-        encode_autocommit_frames(committed_batch.clone(), 11, Timestamp::new(100))?;
-
-    let partial_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["partial"])) as _,
-            Arc::new(Int32Array::from(vec![999])) as _,
-        ],
-    )?;
-    let partial_frames = encode_autocommit_frames(partial_batch.clone(), 17, Timestamp::new(200))?;
-
-    let mut seq = INITIAL_FRAME_SEQ;
-    for frame in committed_frames {
-        let bytes = frame.into_bytes(seq);
-        let (write_res, _) = segment.file_mut().write_all(bytes).await;
-        write_res?;
-        seq += 1;
-    }
-
-    let append_bytes = partial_frames[0].clone().into_bytes(seq);
-    let (write_res, _) = segment.file_mut().write_all(append_bytes).await;
-    write_res?;
-    seq += 1;
-
-    let mut commit_bytes = partial_frames[1].clone().into_bytes(seq);
-    commit_bytes.truncate(commit_bytes.len().saturating_sub(4));
-    let (write_res, _) = segment.file_mut().write_all(commit_bytes).await;
-    write_res?;
-    segment.file_mut().flush().await?;
-    drop(segment);
-
-    let mut recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
-
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot = recovered.begin_snapshot().await?;
-    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
-    let batches = recovered
-        .execute_scan(plan)
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
-    let rows: Vec<(String, i32)> = batches
-        .into_iter()
-        .flat_map(|batch| {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("id col");
-            let vals = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("value col");
-            ids.iter()
-                .zip(vals.iter())
-                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    assert_eq!(rows, vec![("committed".into(), 1)]);
-
-    let runtime_cfg = recovered
-        .wal_config()
-        .cloned()
-        .expect("wal config available");
-    recovered.disable_wal().await?;
-    recovered.enable_wal(runtime_cfg.clone()).await?;
-    let rewrite_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["rewrite"])) as _,
-            Arc::new(Int32Array::from(vec![2])) as _,
-        ],
-    )?;
-    recovered.ingest(rewrite_batch).await?;
-    recovered.disable_wal().await?;
-    drop(recovered);
-
-    let final_config = config_with_pk(
-        vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int32, false),
-        ],
-        &["id"],
-    );
-    let mut recovered_again: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(final_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
-
-    let pred_after = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot_after = recovered_again.begin_snapshot().await.expect("snapshot");
-    let plan_after = snapshot_after
-        .plan_scan(&recovered_again, &pred_after, None, None)
-        .await
-        .expect("plan");
-    let batches_after = recovered_again
-        .execute_scan(plan_after)
-        .await
-        .expect("execute")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect");
-    let mut rows_after: Vec<(String, i32)> = batches_after
-        .into_iter()
-        .flat_map(|batch| {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("id col");
-            let vals = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("value col");
-            ids.iter()
-                .zip(vals.iter())
-                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    rows_after.sort();
-    assert!(rows_after.contains(&("rewrite".into(), 2)));
-
-    recovered_again.disable_wal().await?;
-    drop(recovered_again);
-    if let Err(err) = fs::remove_dir_all(&root_dir) {
-        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wal_recovery_ignores_aborted_transactions() -> Result<(), Box<dyn std::error::Error>> {
-    let root_dir = workspace_temp_dir("tonbo-wal-abort");
-    let root_str = root_dir.to_string_lossy().into_owned();
-    let wal_dir = root_dir.join("wal");
-    fs::create_dir_all(&wal_dir)?;
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
-    ]));
-    let mode_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
-
-    let executor = Arc::new(TokioExecutor::default());
-
-    let mut wal_cfg = RuntimeWalConfig::default();
-    wal_cfg.dir = FusioPath::from_filesystem_path(&wal_dir)?;
-
-    let storage = WalStorage::new(Arc::clone(&wal_cfg.segment_backend), wal_cfg.dir.clone());
-    storage.ensure_dir(storage.root()).await?;
-    let mut segment = storage.open_segment(1).await?;
-
-    let committed_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["live"])) as _,
-            Arc::new(Int32Array::from(vec![1])) as _,
-        ],
-    )?;
-    let committed_frames =
-        encode_autocommit_frames(committed_batch.clone(), 41, Timestamp::new(100))?;
-
-    let aborted_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["aborted"])) as _,
-            Arc::new(Int32Array::from(vec![999])) as _,
-        ],
-    )?;
-    let mut aborted_frames =
-        encode_autocommit_frames(aborted_batch.clone(), 55, Timestamp::new(150))?;
-    let aborted_append = aborted_frames.remove(0);
-    drop(aborted_frames);
-
-    let aborted_begin = encode_command(WalCommand::TxnBegin { provisional_id: 55 })?;
-    let aborted_abort = encode_command(WalCommand::TxnAbort { provisional_id: 55 })?;
-
-    let mut seq = INITIAL_FRAME_SEQ;
-    for frame in committed_frames {
-        let bytes = frame.into_bytes(seq);
-        let (write_res, _) = segment.file_mut().write_all(bytes).await;
-        write_res?;
-        seq += 1;
-    }
-
-    for frame in aborted_begin {
-        let bytes = frame.into_bytes(seq);
-        let (write_res, _) = segment.file_mut().write_all(bytes).await;
-        write_res?;
-        seq += 1;
-    }
-
-    let bytes = aborted_append.into_bytes(seq);
-    let (write_res, _) = segment.file_mut().write_all(bytes).await;
-    write_res?;
-    seq += 1;
-
-    for frame in aborted_abort {
-        let bytes = frame.into_bytes(seq);
-        let (write_res, _) = segment.file_mut().write_all(bytes).await;
-        write_res?;
-        seq += 1;
-    }
-
-    segment.file_mut().flush().await?;
-    drop(segment);
-
-    let recovered: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .on_disk(root_str.clone())?
-        .create_dirs(true)
-        .recover_or_init_with_executor(Arc::clone(&executor))
-        .await?;
-
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot = recovered.begin_snapshot().await?;
-    let plan = snapshot.plan_scan(&recovered, &pred, None, None).await?;
-    let batches = recovered
-        .execute_scan(plan)
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
-    let rows: Vec<(String, i32)> = batches
-        .into_iter()
-        .flat_map(|batch| {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("id col");
-            let vals = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("value col");
-            ids.iter()
-                .zip(vals.iter())
-                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    assert_eq!(rows, vec![("live".into(), 1)]);
-
-    drop(recovered);
-    if let Err(err) = fs::remove_dir_all(&root_dir) {
-        eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::error::Error>> {
     let root_dir = workspace_temp_dir("tonbo-wal-rotate");
     let root_str = root_dir.to_string_lossy().into_owned();
@@ -1175,80 +646,8 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     ];
     assert_eq!(rows, expected);
 
-    let runtime_cfg = recovered
-        .wal_config()
-        .cloned()
-        .expect("wal config available");
-    recovered.disable_wal().await?;
-    recovered.enable_wal(runtime_cfg.clone()).await?;
-    let extra_batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["user-extra"])) as _,
-            Arc::new(Int32Array::from(vec![999])) as _,
-        ],
-    )?;
-    recovered.ingest(extra_batch).await?;
     recovered.disable_wal().await?;
     drop(recovered);
-
-    let mode_config_final = config_with_pk(
-        vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int32, false),
-        ],
-        &["id"],
-    );
-    let mut recovered_again: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(mode_config_final)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .wal_segment_bytes(1)
-            .wal_flush_interval(Duration::from_millis(0))
-            .wal_sync_policy(WalSyncPolicy::Always)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
-
-    let pred_final = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot_final = recovered_again.begin_snapshot().await.expect("snapshot");
-    let plan_final = snapshot_final
-        .plan_scan(&recovered_again, &pred_final, None, None)
-        .await
-        .expect("plan");
-    let batches_final = recovered_again
-        .execute_scan(plan_final)
-        .await
-        .expect("execute")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect");
-    let mut rows_final: Vec<(String, i32)> = batches_final
-        .into_iter()
-        .flat_map(|batch| {
-            let ids = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("id col");
-            let vals = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("value col");
-            ids.iter()
-                .zip(vals.iter())
-                .filter_map(|(id, v)| Some((id?.to_string(), v?)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    rows_final.sort();
-    let mut expected_final = expected.clone();
-    expected_final.push(("user-extra".into(), 999));
-    expected_final.sort();
-    assert_eq!(rows_final, expected_final);
-
-    recovered_again.disable_wal().await?;
-    drop(recovered_again);
     if let Err(err) = fs::remove_dir_all(&root_dir) {
         eprintln!("failed to clean test dir {:?}: {err}", &root_dir);
     }

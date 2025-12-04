@@ -408,7 +408,7 @@ mod tests {
     use crate::{
         extractor::{KeyProjection, projection_for_columns, projection_for_field},
         inmem::mutable::memtable::DynMem,
-        test_util::build_batch,
+        test::build_batch,
     };
 
     /// Build a dynamic immutable segment from a batch using a provided extractor.

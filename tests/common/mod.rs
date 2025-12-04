@@ -1,4 +1,8 @@
-use arrow_schema::{Field, Schema, SchemaRef};
+//! Common test utilities for integration tests.
+
+use std::sync::Arc;
+
+use arrow_schema::{Field, Schema};
 use tonbo::{mode::DynModeConfig, schema::SchemaBuilder};
 
 /// Convenience helper that builds a DynMode configuration with embedded PK metadata.
@@ -8,7 +12,7 @@ pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig
         "schema builder requires at least one primary-key column"
     );
 
-    let schema = SchemaRef::new(Schema::new(fields));
+    let schema = Arc::new(Schema::new(fields));
     let builder = SchemaBuilder::from_schema(schema);
     let builder = if primary_key.len() == 1 {
         builder.primary_key(primary_key[0].to_string())
@@ -20,16 +24,4 @@ pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig
     builder
         .build()
         .expect("schema builder configuration should succeed")
-}
-
-/// Convenience helper that only returns the schema with embedded metadata.
-
-pub fn schema_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> SchemaRef {
-    config_with_pk(fields, primary_key).schema()
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn schema_with_pk_for_tests(fields: Vec<Field>, primary_key: &[&str]) -> SchemaRef {
-    schema_with_pk(fields, primary_key)
 }

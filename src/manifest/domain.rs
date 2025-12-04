@@ -503,12 +503,9 @@ impl WalSegmentRef {
         &self.file_id
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn first_frame(&self) -> u64 {
         self.first_frame
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
 
     pub(crate) fn last_frame(&self) -> u64 {
         self.last_frame

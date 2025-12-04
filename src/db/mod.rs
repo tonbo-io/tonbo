@@ -16,10 +16,8 @@ use std::{
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use fusio::dynamic::MaybeSendFuture;
-#[cfg(any(test, feature = "test-helpers"))]
-use fusio::executor::JoinHandle;
 use fusio::{
     DynFs,
     dynamic::{MaybeSend, MaybeSync},
@@ -31,6 +29,12 @@ use typed_arrow_dyn::DynRow;
 use web_time::Instant;
 mod builder;
 mod error;
+#[cfg(all(test, feature = "tokio-runtime"))]
+mod wal_gc_tests;
+#[cfg(all(test, feature = "tokio-runtime"))]
+mod wal_recovery_tests;
+#[cfg(all(test, target_arch = "wasm32", feature = "web"))]
+mod wasm_web_tests;
 
 pub use builder::{
     AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig,
@@ -38,17 +42,14 @@ pub use builder::{
 pub use error::DBError;
 use predicate::Predicate;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use crate::compaction::CompactionHost;
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
     compaction::{
-        executor::{
-            CompactionError, CompactionExecutor, CompactionJob, CompactionLease, CompactionOutcome,
-        },
+        executor::{CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome},
         planner::{CompactionInput, CompactionPlanner, CompactionSnapshot},
         scheduler::{CompactionScheduler, ScheduledCompaction},
-        trigger::{ManifestCompactionLease, TriggerRequest, stateless_compaction_once},
     },
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
@@ -193,22 +194,6 @@ where
     _handle: Option<<E as Executor>::JoinHandle<()>>,
 }
 
-impl<M, E> CompactionLoopHandle<M, E>
-where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
-{
-    #[cfg(any(test, feature = "test-helpers"))]
-    // Tests/manual cleanup call abort; production relies on Drop-driven cancellation.
-    async fn abort(mut self) {
-        self.abort.abort();
-        if let Some(handle) = self._handle.take() {
-            let _ = handle.join().await;
-        }
-    }
-}
-
 impl<M, E> Drop for CompactionLoopHandle<M, E>
 where
     M: Mode,
@@ -323,6 +308,7 @@ where
         DB::<M, E>::plan_compaction_from_version(planner, version)
     }
 
+    #[cfg(test)]
     async fn run_compaction_task<CE, P>(
         &self,
         planner: &P,
@@ -582,7 +568,7 @@ where
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl<M, E> crate::compaction::CompactionHost<M, E> for CompactionDriver<M, E>
 where
     M: Mode + MaybeSend + MaybeSync,
@@ -604,7 +590,7 @@ where
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl<M, E> CompactionHost<M, E> for DB<M, E>
 where
     M: Mode + MaybeSend + MaybeSync,
@@ -1363,7 +1349,7 @@ where
     const MAX_COMPACTION_APPLY_RETRIES: usize = 2;
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) async fn run_compaction_task<CE, P>(
         &self,
         planner: &P,
@@ -1376,48 +1362,6 @@ where
         self.compaction_driver()
             .run_compaction_task(planner, executor)
             .await
-    }
-
-    /// End-to-end compaction orchestrator with optional lease (lease currently unused).
-    pub(crate) async fn run_compaction_task_with_lease<CE, P>(
-        &self,
-        planner: &P,
-        executor: &CE,
-        _lease: Option<CompactionLease>,
-    ) -> Result<Option<CompactionOutcome>, CompactionError>
-    where
-        CE: CompactionExecutor,
-        P: CompactionPlanner,
-    {
-        self.compaction_driver()
-            .run_compaction_task(planner, executor)
-            .await
-    }
-
-    /// Stateless compaction trigger helper suitable for cron/HTTP callers with optional
-    /// idempotency.
-    #[allow(dead_code, private_bounds)]
-    pub async fn trigger_compaction_once<CE, P>(
-        &self,
-        planner: &P,
-        executor: &CE,
-        request: TriggerRequest,
-        lease: Option<CompactionLease>,
-    ) -> Result<Option<CompactionOutcome>, CompactionError>
-    where
-        CE: CompactionExecutor,
-        P: CompactionPlanner,
-    {
-        let idempotency_manager = ManifestCompactionLease::new(self.manifest.idempotency_runtime());
-        stateless_compaction_once(
-            self,
-            planner,
-            executor,
-            request,
-            Some(&idempotency_manager),
-            lease,
-        )
-        .await
     }
 
     /// Spawn a current-thread compaction worker that calls `compact_once` every `interval`.
@@ -1674,7 +1618,7 @@ where
 
     /// Open a read-only snapshot pinned to the current manifest head at an explicit read timestamp.
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) async fn begin_snapshot_at(
         &self,
         read_ts: Timestamp,
@@ -1688,7 +1632,7 @@ where
     }
 
     /// Test-only helper to capture a snapshot at an explicit timestamp.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub async fn begin_snapshot_at_for_tests(
         &self,
         read_ts: Timestamp,
@@ -2304,7 +2248,7 @@ mod tests {
         manifest::{SstEntry, TableId, TonboManifest, VersionEdit, init_fs_manifest},
         mvcc::Timestamp,
         ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
-        test_util::build_batch,
+        test::build_batch,
         wal::{
             DynBatchPayload, WalCommand, WalExt, WalResult, WalSyncPolicy,
             frame::{INITIAL_FRAME_SEQ, encode_command},

@@ -11,54 +11,53 @@ members = [".", "predicate"]
 [features]
 default = ["tokio-runtime"]
 tokio-runtime = [
+    "fusio-manifest/tokio",
     "fusio/executor-tokio",
     "fusio/fs",
     "fusio/tokio",
     "fusio/tokio-http",
-    "fusio-manifest/tokio",
     "tokio",
 ]
 # Web/wasm build using Fusio's WebExecutor and wasm-http client stack.
 web = [
-    "fusio/executor-web",
-    "fusio/web-http",
-    "fusio/aws",
     "fusio-manifest/web",
     "fusio-parquet/executor-web",
+    "fusio/aws",
+    "fusio/executor-web",
+    "fusio/web-http",
 ]
 # Optional OPFS support layered on the web stack.
-web-opfs = ["web", "fusio/opfs"]
+web-opfs = ["fusio/opfs", "web"]
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
-test-helpers = []
-http-server = ["dep:axum"]
 
 [dependencies]
+anyhow = "1"
 arrow-array = "56.2.0"
 arrow-buffer = "56.2.0"
 arrow-ipc = "56.1.0"
 arrow-schema = { version = "56.2.0", features = ["serde"] }
 arrow-select = "56.2.0"
-axum = { version = "0.8.7", features = ["http1", "macros"], optional = true }
-http = "0.2"
 crc32c = "0.6"
+crossbeam-skiplist = "0.1"
 fusio = { git = "https://github.com/tonbo-io/fusio.git", default-features = false, features = [
     "aws",
     "dyn",
     "executor",
     "fs",
 ] }
-fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest", default-features = false, features = ["std"] }
+fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest", default-features = false, features = [
+    "std",
+] }
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet" }
 futures = "0.3"
+http = "0.2"
 lockable = "0.2"
-crossbeam-skiplist = "0.1"
 once_cell = "1"
 parquet = { version = "56.2.0", default-features = false, features = [
     "async",
     "zstd",
 ] }
-web-time = "1.1"
 pin-project-lite = "0.2"
 predicate = { version = "0.1.0", path = "predicate" }
 serde = { version = "1", features = ["derive", "rc"] }
@@ -77,8 +76,7 @@ typed-arrow-dyn = { git = "https://github.com/tonbo-io/typed-arrow.git", package
     "serde",
 ] }
 ulid = { version = "1", features = ["serde"] }
-clap = { version = "4.5.4", features = ["derive"] }
-anyhow = "1"
+web-time = "1.1"
 
 
 [dev-dependencies]
@@ -141,16 +139,6 @@ path = "tests/read_smoke.rs"
 required-features = ["tokio-runtime"]
 
 [[test]]
-name = "wal_gc"
-path = "tests/wal_gc.rs"
-required-features = ["tokio-runtime"]
-
-[[test]]
-name = "wal_recovery"
-path = "tests/wal_recovery.rs"
-required-features = ["tokio-runtime"]
-
-[[test]]
 name = "durability_public"
 path = "tests/durability_public.rs"
 required-features = ["tokio-runtime"]
@@ -162,8 +150,8 @@ required-features = ["tokio-runtime"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen = "0.2"
-wasm-bindgen-test = "0.3"
 wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Ensure getrandom picks the JS backend via cfg flag when building wasm32-unknown-unknown.
