@@ -1,5 +1,7 @@
 //! Asynchronous WAL writer task and queue plumbing.
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 use std::{
     collections::{HashMap, VecDeque},
     error::Error,
@@ -9,22 +11,25 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use fusio::path::path_to_local;
 use fusio::{
     Write,
     dynamic::MaybeSendFuture,
     error::Error as FusioError,
     executor::{Executor, RwLock, Timer},
     fs::FileSystemTag,
-    path::path_to_local,
 };
 use futures::{
     StreamExt,
     channel::{mpsc, oneshot},
     future::{Fuse, FutureExt},
 };
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use crate::{
     mvcc::Timestamp,
@@ -1184,6 +1189,7 @@ enum SyncVariant {
     All,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn perform_sync(
     fs_tag: FileSystemTag,
     segment_path: &fusio::path::Path,
@@ -1227,6 +1233,15 @@ async fn perform_sync(
             fs_tag
         ))),
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn perform_sync(
+    _fs_tag: FileSystemTag,
+    _segment_path: &fusio::path::Path,
+    _variant: SyncVariant,
+) -> WalResult<()> {
+    Ok(())
 }
 
 fn backend_err(action: &str, err: FusioError) -> WalError {
@@ -1284,7 +1299,7 @@ impl SegmentMeta {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{
         cell::RefCell,
@@ -1297,9 +1312,7 @@ mod tests {
     };
 
     use arrow_array::{ArrayRef, UInt64Array};
-    use fusio::{
-        DynFs, executor::BlockingExecutor, fs::FsCas, impls::mem::fs::InMemoryFs, path::Path,
-    };
+    use fusio::{DynFs, executor::NoopExecutor, fs::FsCas, impls::mem::fs::InMemoryFs, path::Path};
     use futures::{channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
     use typed_arrow::{
         arrow_array::{Int64Array, RecordBatch},
@@ -1412,7 +1425,7 @@ mod tests {
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
         cfg.state_store = Some(Arc::clone(&state_store));
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
         let queue_depth = Arc::new(AtomicUsize::new(0));
@@ -1425,9 +1438,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1513,7 +1526,7 @@ mod tests {
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
         cfg.state_store = Some(Arc::clone(&state_store));
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
         let queue_depth = Arc::new(AtomicUsize::new(0));
@@ -1526,9 +1539,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1604,7 +1617,7 @@ mod tests {
     fn snapshot_reports_sealed_and_active_segments() {
         let (storage, cfg) = in_memory_env(4, WalSyncPolicy::Always, "wal-snapshot");
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
         let queue_depth = Arc::new(AtomicUsize::new(0));
@@ -1617,9 +1630,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1733,7 +1746,7 @@ mod tests {
     async fn submit_and_drain_on_shutdown() {
         let (storage, cfg) = in_memory_env(4, WalSyncPolicy::Always, "wal-test");
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
@@ -1747,9 +1760,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1806,7 +1819,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn queue_backpressure_and_metrics() {
         let (storage, cfg) = in_memory_env(1, WalSyncPolicy::Always, "wal-backpressure");
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
@@ -1820,9 +1833,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1913,7 +1926,7 @@ mod tests {
             "wal-interval-time",
         );
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
@@ -1927,9 +1940,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -1986,7 +1999,7 @@ mod tests {
     async fn interval_bytes_policy_honors_threshold() {
         let (storage, cfg) =
             in_memory_env(4, WalSyncPolicy::IntervalBytes(1), "wal-interval-bytes");
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
         let metrics_reader = Arc::clone(&metrics);
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
@@ -2000,9 +2013,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -2073,7 +2086,7 @@ mod tests {
         let state_store: Arc<dyn WalStateStore> = Arc::new(FsWalStateStore::new(fs_cas));
         cfg.state_store = Some(Arc::clone(&state_store));
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
         let queue_depth = Arc::new(AtomicUsize::new(0));
@@ -2086,9 +2099,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage: storage_writer,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -2200,7 +2213,7 @@ mod tests {
         cfg.segment_backend = fs_writer;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
         let queue_depth = Arc::new(AtomicUsize::new(0));
@@ -2213,9 +2226,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage: storage_writer,
                         cfg,
                         metrics: Arc::clone(&metrics),
@@ -2297,7 +2310,7 @@ mod tests {
         cfg.segment_backend = fs_writer;
         cfg.state_store = Some(Arc::new(FsWalStateStore::new(fs_cas)));
 
-        let metrics = Arc::new(BlockingExecutor::rw_lock(WalMetrics::default()));
+        let metrics = Arc::new(NoopExecutor::rw_lock(WalMetrics::default()));
 
         let (mut sender, receiver) = mpsc::channel(cfg.queue_size);
         let queue_depth = Arc::new(AtomicUsize::new(0));
@@ -2310,9 +2323,9 @@ mod tests {
         let spawner = pool.spawner();
         spawner
             .spawn_local(async move {
-                let result = run_writer_loop::<BlockingExecutor>(
+                let result = run_writer_loop::<NoopExecutor>(
                     WriterLoopInit {
-                        exec: Arc::new(BlockingExecutor::default()),
+                        exec: Arc::new(NoopExecutor::default()),
                         storage: storage_writer,
                         cfg,
                         metrics: Arc::clone(&metrics),

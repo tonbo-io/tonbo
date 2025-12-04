@@ -572,7 +572,7 @@ fn backend_err(action: &str, err: FusioError) -> WalError {
     WalError::Storage(format!("failed to {action}: {err}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{
         io,

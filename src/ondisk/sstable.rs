@@ -18,6 +18,7 @@ use arrow_select::take::take as arrow_take;
 use fusio::{
     DynFs,
     error::Error as FsError,
+    executor::NoopExecutor,
     fs::OpenOptions,
     path::{Path, PathPart},
 };
@@ -689,10 +690,11 @@ struct WriteContext {
     fs: Arc<dyn DynFs>,
     data_path: Path,
     delete_path: Path,
-    data_writer: Option<AsyncArrowWriter<AsyncWriter>>,
-    delete_writer: Option<AsyncArrowWriter<AsyncWriter>>,
+    data_writer: Option<AsyncArrowWriter<AsyncWriter<NoopExecutor>>>,
+    delete_writer: Option<AsyncArrowWriter<AsyncWriter<NoopExecutor>>>,
     delete_written: bool,
     compression: SsTableCompression,
+    executor: NoopExecutor,
 }
 impl WriteContext {
     async fn new(
@@ -718,8 +720,10 @@ impl WriteContext {
             config.schema().metadata().clone(),
         ));
 
+        let executor = NoopExecutor;
+
         let data_writer = AsyncArrowWriter::try_new(
-            AsyncWriter::new(data_file),
+            AsyncWriter::new(data_file, executor),
             data_schema,
             Some(writer_properties(config.compression())),
         )?;
@@ -732,6 +736,7 @@ impl WriteContext {
             delete_writer: None,
             delete_written: false,
             compression: config.compression(),
+            executor,
         })
     }
 
@@ -759,7 +764,7 @@ impl WriteContext {
                 .truncate(true);
             let file = self.fs.open_options(&self.delete_path, options).await?;
             let writer = AsyncArrowWriter::try_new(
-                AsyncWriter::new(file),
+                AsyncWriter::new(file, self.executor),
                 batch.schema(),
                 Some(writer_properties(self.compression)),
             )?;
@@ -965,10 +970,10 @@ async fn open_parquet_stream(
     fs: Arc<dyn DynFs>,
     path: Path,
     projection: Option<ProjectionMask>,
-) -> Result<ParquetRecordBatchStream<AsyncReader>, SsTableError> {
+) -> Result<ParquetRecordBatchStream<AsyncReader<NoopExecutor>>, SsTableError> {
     let file = fs.open(&path).await?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
-    let reader = AsyncReader::new(file, size)
+    let reader = AsyncReader::new(file, size, NoopExecutor)
         .await
         .map_err(SsTableError::Fs)?;
     let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
@@ -994,7 +999,7 @@ pub(crate) fn take_record_batch(
         .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{
         collections::BTreeMap,

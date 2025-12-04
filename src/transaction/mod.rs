@@ -765,13 +765,13 @@ fn clone_dyn_row(row: &DynRow) -> DynRow {
     DynRow(row.0.clone())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::sync::Arc;
 
     use arrow_array::{Int32Array, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
-    use fusio::executor::BlockingExecutor;
+    use fusio::executor::NoopExecutor;
     use futures::TryStreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
@@ -785,15 +785,15 @@ mod tests {
         test_util::build_batch,
     };
 
-    type TestTx = Transaction<BlockingExecutor>;
+    type TestTx = Transaction<NoopExecutor>;
 
-    async fn make_db() -> (DynDbHandle<BlockingExecutor>, SchemaRef) {
+    async fn make_db() -> (DynDbHandle<NoopExecutor>, SchemaRef) {
         make_db_with_policy(None).await
     }
 
     async fn make_db_with_policy(
         policy: Option<Arc<dyn crate::inmem::policy::SealPolicy + Send + Sync>>,
-    ) -> (DynDbHandle<BlockingExecutor>, SchemaRef) {
+    ) -> (DynDbHandle<NoopExecutor>, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -801,7 +801,7 @@ mod tests {
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let executor = Arc::new(BlockingExecutor);
+        let executor = Arc::new(NoopExecutor);
         let mut db = DB::new(config, executor).await.expect("db");
         if let Some(policy) = policy {
             db.set_seal_policy(policy);
@@ -809,11 +809,7 @@ mod tests {
         (db.into_shared(), schema)
     }
 
-    async fn ingest_rows(
-        db: &DynDbHandle<BlockingExecutor>,
-        schema: &SchemaRef,
-        rows: Vec<DynRow>,
-    ) {
+    async fn ingest_rows(db: &DynDbHandle<NoopExecutor>, schema: &SchemaRef, rows: Vec<DynRow>) {
         let tombstones = vec![false; rows.len()];
         let batch = build_batch(schema.clone(), rows).expect("batch");
         db.ingest_with_tombstones(batch, tombstones)

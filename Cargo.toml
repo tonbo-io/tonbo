@@ -7,8 +7,27 @@ version = "0.1.0"
 [workspace]
 members = [".", "predicate"]
 
+
 [features]
-default = []
+default = ["tokio-runtime"]
+tokio-runtime = [
+    "fusio/executor-tokio",
+    "fusio/fs",
+    "fusio/tokio",
+    "fusio/tokio-http",
+    "fusio-manifest/tokio",
+    "tokio",
+]
+# Web/wasm build using Fusio's WebExecutor and wasm-http client stack.
+web = [
+    "fusio/executor-web",
+    "fusio/web-http",
+    "fusio/aws",
+    "fusio-manifest/web",
+    "fusio-parquet/executor-web",
+]
+# Optional OPFS support layered on the web stack.
+web-opfs = ["web", "fusio/opfs"]
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
 test-helpers = []
@@ -20,15 +39,13 @@ arrow-ipc = "56.1.0"
 arrow-schema = { version = "56.2.0", features = ["serde"] }
 arrow-select = "56.2.0"
 crc32c = "0.6"
-fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [
+fusio = { git = "https://github.com/tonbo-io/fusio.git", default-features = false, features = [
     "aws",
     "dyn",
-    "executor-tokio",
+    "executor",
     "fs",
-    "tokio",
-    "tokio-http",
 ] }
-fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest" }
+fusio-manifest = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-manifest", default-features = false, features = ["std"] }
 fusio-parquet = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio-parquet" }
 futures = "0.3"
 lockable = "0.2"
@@ -38,13 +55,21 @@ parquet = { version = "56.2.0", default-features = false, features = [
     "async",
     "zstd",
 ] }
+web-time = "1.1"
 pin-project-lite = "0.2"
 predicate = { version = "0.1.0", path = "predicate" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2.0.17"
-tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+], optional = true }
 typed-arrow-dyn = { git = "https://github.com/tonbo-io/typed-arrow.git", package = "typed-arrow-dyn", features = [
     "serde",
 ] }
@@ -53,22 +78,89 @@ ulid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
-fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", features = [
+fusio = { git = "https://github.com/tonbo-io/fusio.git", package = "fusio", default-features = false, features = [
     "aws",
     "dyn",
-    "executor-tokio",
+    "executor",
     "fs",
-    "tokio",
-    "tokio-http",
 ] }
 futures = "0.3"
 tempfile = "3"
-tokio = { version = "1", features = [
-    "macros",
-    "rt",
-    "rt-multi-thread",
-    "time",
-] }
 typed-arrow = { git = "https://github.com/tonbo-io/typed-arrow.git", features = [
     "ext-hooks",
 ] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+[[example]]
+name = "02_dynamic_basic"
+path = "examples/02_dynamic_basic.rs"
+required-features = ["tokio-runtime"]
+
+[[example]]
+name = "03_dynamic_metadata"
+path = "examples/03_dynamic_metadata.rs"
+required-features = ["tokio-runtime"]
+
+[[example]]
+name = "04_dynamic_composite"
+path = "examples/04_dynamic_composite.rs"
+required-features = ["tokio-runtime"]
+
+[[example]]
+name = "05_dynamic_transaction"
+path = "examples/05_dynamic_transaction.rs"
+required-features = ["tokio-runtime"]
+
+[[example]]
+name = "edge_worker"
+path = "examples/edge_worker.rs"
+required-features = ["web"]
+
+[[example]]
+name = "wal_bench"
+path = "examples/wal_bench.rs"
+required-features = ["tokio-runtime"]
+
+[[test]]
+name = "read_smoke"
+path = "tests/read_smoke.rs"
+required-features = ["tokio-runtime"]
+
+[[test]]
+name = "wal_gc"
+path = "tests/wal_gc.rs"
+required-features = ["tokio-runtime"]
+
+[[test]]
+name = "wal_recovery"
+path = "tests/wal_recovery.rs"
+required-features = ["tokio-runtime"]
+
+[[test]]
+name = "durability_public"
+path = "tests/durability_public.rs"
+required-features = ["tokio-runtime"]
+
+[[test]]
+name = "s3_smoke"
+path = "tests/s3_smoke.rs"
+required-features = ["tokio-runtime"]
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-test = "0.3"
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Ensure getrandom picks the JS backend via cfg flag when building wasm32-unknown-unknown.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+js-sys = "0.3"

@@ -184,7 +184,7 @@ fn decrement_limit(limit: &mut Option<usize>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 

@@ -4,10 +4,14 @@ use std::{fmt, sync::Arc};
 
 use fusio::{
     Error as FusioError,
+    dynamic::{MaybeSend, MaybeSync},
     fs::{CasCondition, FsCas},
     path::{Path, PathPart},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use futures::future::BoxFuture;
+#[cfg(target_arch = "wasm32")]
+use futures::future::LocalBoxFuture as BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use super::{WalError, WalResult};
@@ -212,7 +216,7 @@ fn state_path(dir: &Path) -> WalResult<Path> {
 }
 
 /// Storage interface used by [`WalStateHandle`].
-pub trait WalStateStore: Send + Sync {
+pub trait WalStateStore: MaybeSend + MaybeSync {
     /// Load the payload and tag associated with the state file.
     fn load<'a>(&'a self, path: &'a Path) -> WalStateLoadFuture<'a>;
 

@@ -4,7 +4,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{
     DynFs,
-    executor::{BlockingExecutor, tokio::TokioExecutor},
+    executor::{NoopExecutor, tokio::TokioExecutor},
     mem::fs::InMemoryFs,
     path::Path as FusioPath,
 };
@@ -40,20 +40,18 @@ fn build_batch_owned(schema: Arc<Schema>, ids: Vec<String>, values: Vec<i32>) ->
     RecordBatch::try_new(schema, columns).expect("record batch")
 }
 
-async fn make_db() -> (DynDbHandle<BlockingExecutor>, Arc<Schema>) {
+async fn make_db() -> (DynDbHandle<NoopExecutor>, Arc<Schema>) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-    let mut db = DB::new(config, Arc::new(BlockingExecutor))
-        .await
-        .expect("db");
+    let mut db = DB::new(config, Arc::new(NoopExecutor)).await.expect("db");
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
     (db.into_shared(), schema)
 }
 
-type BlockingTx = Transaction<BlockingExecutor>;
+type BlockingTx = Transaction<NoopExecutor>;
 type TokioTx = Transaction<TokioExecutor>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -449,7 +447,7 @@ async fn read_smoke_plan_scan_applies_limit() {
 }
 
 async fn collect_rows_for_predicate(
-    db: &DynDbHandle<BlockingExecutor>,
+    db: &DynDbHandle<NoopExecutor>,
     predicate: &tonbo::query::Predicate,
     _read_ts: Timestamp,
 ) -> Vec<(String, i32)> {

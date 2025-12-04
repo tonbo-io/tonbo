@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use fusio::dynamic::{MaybeSend, MaybeSync};
 use fusio_manifest::{
-    BlockingExecutor, CheckpointStore, HeadStore, LeaseStore, SegmentIo,
+    CheckpointStore, DefaultExecutor, HeadStore, LeaseStore, SegmentIo,
     compactor::Compactor,
     context::ManifestContext,
     manifest::Manifest as FusioManifest,
@@ -89,27 +90,27 @@ impl<HS, SS, CS, LS> Stores<HS, SS, CS, LS> {
 pub(crate) struct Manifest<C, HS, SS, CS, LS>
 where
     C: ManifestCodec,
-    HS: HeadStore + Send + Sync + 'static,
-    SS: SegmentIo + Send + Sync + 'static,
-    CS: CheckpointStore + Send + Sync + 'static,
-    LS: LeaseStore + Send + Sync + 'static,
+    HS: HeadStore + MaybeSend + MaybeSync + 'static,
+    SS: SegmentIo + MaybeSend + MaybeSync + 'static,
+    CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
+    LS: LeaseStore + MaybeSend + MaybeSync + 'static,
 {
-    inner: FusioManifest<C::Key, C::Value, HS, SS, CS, LS, BlockingExecutor, DefaultRetention>,
+    inner: FusioManifest<C::Key, C::Value, HS, SS, CS, LS, DefaultExecutor, DefaultRetention>,
 }
 
 impl<C, HS, SS, CS, LS> Manifest<C, HS, SS, CS, LS>
 where
     C: ManifestCodec,
-    HS: HeadStore + Send + Sync + 'static,
-    SS: SegmentIo + Send + Sync + 'static,
-    CS: CheckpointStore + Send + Sync + 'static,
-    LS: LeaseStore + Send + Sync + 'static,
+    HS: HeadStore + MaybeSend + MaybeSync + 'static,
+    SS: SegmentIo + MaybeSend + MaybeSync + 'static,
+    CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
+    LS: LeaseStore + MaybeSend + MaybeSync + 'static,
 {
     /// Construct a new manifest wrapper from the provided stores and context.
     #[must_use]
     pub(super) fn open(
         stores: Stores<HS, SS, CS, LS>,
-        ctx: Arc<ManifestContext<DefaultRetention, BlockingExecutor>>,
+        ctx: Arc<ManifestContext<DefaultRetention, DefaultExecutor>>,
     ) -> Self {
         Self {
             inner: FusioManifest::new_with_context(
@@ -126,17 +127,17 @@ where
     #[allow(dead_code)]
     pub(crate) fn compactor(
         &self,
-    ) -> Compactor<C::Key, C::Value, HS, SS, CS, LS, BlockingExecutor, DefaultRetention> {
+    ) -> Compactor<C::Key, C::Value, HS, SS, CS, LS, DefaultExecutor, DefaultRetention> {
         self.inner.compactor()
     }
 }
 
 impl<HS, SS, CS, LS> Manifest<VersionCodec, HS, SS, CS, LS>
 where
-    HS: HeadStore + Send + Sync + 'static,
-    SS: SegmentIo + Send + Sync + 'static,
-    CS: CheckpointStore + Send + Sync + 'static,
-    LS: LeaseStore + Send + Sync + 'static,
+    HS: HeadStore + MaybeSend + MaybeSync + 'static,
+    SS: SegmentIo + MaybeSend + MaybeSync + 'static,
+    CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
+    LS: LeaseStore + MaybeSend + MaybeSync + 'static,
 {
     /// Apply a sequence of edits, atomically publishing a new table version together with head
     /// metadata.
@@ -378,10 +379,10 @@ where
 
 impl<HS, SS, CS, LS> Manifest<GcPlanCodec, HS, SS, CS, LS>
 where
-    HS: HeadStore + Send + Sync + 'static,
-    SS: SegmentIo + Send + Sync + 'static,
-    CS: CheckpointStore + Send + Sync + 'static,
-    LS: LeaseStore + Send + Sync + 'static,
+    HS: HeadStore + MaybeSend + MaybeSync + 'static,
+    SS: SegmentIo + MaybeSend + MaybeSync + 'static,
+    CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
+    LS: LeaseStore + MaybeSend + MaybeSync + 'static,
 {
     pub(crate) async fn put_gc_plan(
         &self,
@@ -418,10 +419,10 @@ where
 
 impl<HS, SS, CS, LS> Manifest<CatalogCodec, HS, SS, CS, LS>
 where
-    HS: HeadStore + Send + Sync + 'static,
-    SS: SegmentIo + Send + Sync + 'static,
-    CS: CheckpointStore + Send + Sync + 'static,
-    LS: LeaseStore + Send + Sync + 'static,
+    HS: HeadStore + MaybeSend + MaybeSync + 'static,
+    SS: SegmentIo + MaybeSend + MaybeSync + 'static,
+    CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
+    LS: LeaseStore + MaybeSend + MaybeSync + 'static,
 {
     pub(crate) async fn init_catalog_root(&self) -> ManifestResult<()> {
         let mut session = self.inner.session_write().await?;
@@ -496,9 +497,15 @@ where
     pub(crate) async fn table_meta(&self, table: TableId) -> ManifestResult<TableMeta> {
         let session = self.inner.session_read().await?;
         let key = CatalogKey::TableMeta { table_id: table };
-        let value = session.get(&key).await?.ok_or(ManifestError::Invariant(
-            "catalog metadata missing for table_id",
-        ))?;
+        let value = match session.get(&key).await? {
+            Some(value) => value,
+            None => {
+                session.end().await?;
+                return Err(ManifestError::Invariant(
+                    "catalog metadata missing for table_id",
+                ));
+            }
+        };
         <CatalogCodec as ManifestCodec>::validate_key_value(&key, &value)?;
         let meta = TableMeta::try_from(value)?;
         session.end().await?;
@@ -509,10 +516,10 @@ where
 impl<C, HS, SS, CS, LS> Clone for Manifest<C, HS, SS, CS, LS>
 where
     C: ManifestCodec,
-    HS: HeadStore + Send + Sync + Clone + 'static,
-    SS: SegmentIo + Send + Sync + Clone + 'static,
-    CS: CheckpointStore + Send + Sync + Clone + 'static,
-    LS: LeaseStore + Send + Sync + Clone + 'static,
+    HS: HeadStore + MaybeSend + MaybeSync + Clone + 'static,
+    SS: SegmentIo + MaybeSend + MaybeSync + Clone + 'static,
+    CS: CheckpointStore + MaybeSend + MaybeSync + Clone + 'static,
+    LS: LeaseStore + MaybeSend + MaybeSync + Clone + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -556,13 +563,13 @@ fn ensure_table_compat(meta: &TableMeta, definition: &TableDefinition) -> Manife
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::sync::Arc;
 
     use fusio::{mem::fs::InMemoryFs, path::Path};
     use fusio_manifest::{
-        BackoffPolicy, BlockingExecutor, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl,
+        BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseStoreImpl,
         ManifestContext, SegmentStoreImpl,
     };
 
@@ -586,9 +593,9 @@ mod tests {
         let head = HeadStoreImpl::new(fs.clone(), "head.json");
         let segment = SegmentStoreImpl::new(fs.clone(), "segments");
         let checkpoint = CheckpointStoreImpl::new(fs.clone(), "");
-        let timer = BlockingExecutor;
+        let timer = DefaultExecutor::default();
         let lease = LeaseStoreImpl::new(fs, "", BackoffPolicy::default(), timer);
-        let context = Arc::new(ManifestContext::new(BlockingExecutor));
+        let context = Arc::new(ManifestContext::new(DefaultExecutor::default()));
         Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
     }
 
@@ -597,9 +604,9 @@ mod tests {
         let head = HeadStoreImpl::new(fs.clone(), "catalog/head.json");
         let segment = SegmentStoreImpl::new(fs.clone(), "catalog/segments");
         let checkpoint = CheckpointStoreImpl::new(fs.clone(), "catalog/checkpoints");
-        let timer = BlockingExecutor;
+        let timer = DefaultExecutor::default();
         let lease = LeaseStoreImpl::new(fs, "catalog/leases", BackoffPolicy::default(), timer);
-        let context = Arc::new(ManifestContext::new(BlockingExecutor));
+        let context = Arc::new(ManifestContext::new(DefaultExecutor::default()));
         Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
     }
 

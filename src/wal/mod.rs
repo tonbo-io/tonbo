@@ -4,6 +4,8 @@
 //! as the coordination layer between ingest, the frame encoder, storage
 //! backends, and recovery. Implementations will live in the sibling modules.
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 use std::{
     fmt,
     future::Future,
@@ -13,7 +15,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
@@ -29,6 +31,8 @@ use futures::{
     channel::{mpsc, oneshot},
 };
 use ulid::Ulid;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use crate::{
     db::Mode,
@@ -633,11 +637,22 @@ where
     pub async fn shutdown(self) -> WalResult<()> {
         self.inner.close_channel();
         if let Some(join) = self.inner.take_join() {
-            let join_result = join
-                .join()
-                .await
-                .map_err(|err| WalError::Storage(err.to_string()))?;
-            join_result?
+            match join.join().await {
+                Ok(join_result) => join_result.map_err(|err| WalError::Storage(err.to_string()))?,
+                Err(err) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        // WebExecutor join handles are intentionally unjoinable on wasm; treat this
+                        // as a best-effort shutdown so disable_wal_async() does not fail
+                        // spuriously.
+                        let _ = err;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        return Err(WalError::Storage(err.to_string()));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -783,7 +798,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::sync::Arc;
 
@@ -886,6 +901,42 @@ mod tests {
                         };
                         let _ = ack_tx.send(Ok(snapshot));
                     }
+                }
+            }
+
+            #[cfg(all(test, target_arch = "wasm32", feature = "web"))]
+            mod wasm_tests {
+                use std::sync::{Arc, atomic::AtomicUsize};
+
+                use fusio::executor::web::WebExecutor;
+                use wasm_bindgen_test::*;
+
+                use super::*;
+
+                wasm_bindgen_test_configure!(run_in_browser);
+
+                #[wasm_bindgen_test]
+                async fn shutdown_treats_unjoinable_handles_as_ok() {
+                    let exec = WebExecutor::new();
+                    let (tx, _rx) = futures::channel::mpsc::channel(1);
+                    let queue_depth = Arc::new(AtomicUsize::new(0));
+                    let join = exec.spawn(async { Ok(()) });
+                    let metrics = exec.rw_lock(WalMetrics::default());
+                    let inner = WalHandleInner::new(
+                        tx,
+                        queue_depth,
+                        frame::INITIAL_FRAME_SEQ,
+                        join,
+                        metrics,
+                    );
+                    let handle = WalHandle {
+                        inner: Arc::new(inner),
+                    };
+
+                    handle
+                        .shutdown()
+                        .await
+                        .expect("shutdown should not fail on unjoinable wasm handles");
                 }
             }
             Ok(())

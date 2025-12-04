@@ -9,7 +9,6 @@
 
 use std::{
     collections::HashMap,
-    future::Future,
     pin::Pin,
     sync::{
         Arc,
@@ -17,6 +16,7 @@ use std::{
     },
 };
 
+use fusio::dynamic::MaybeSendFuture;
 use ulid::Ulid;
 
 use crate::{
@@ -48,19 +48,19 @@ pub trait CompactionLeaseManager {
     fn acquire(
         &self,
         task: &CompactionTask,
-    ) -> Pin<Box<dyn Future<Output = Result<CompactionLease, CompactionLeaseError>> + Send + '_>>;
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionLease, CompactionLeaseError>> + '_>>;
 
     /// Renew an existing lease to extend its TTL.
     fn renew(
         &self,
         lease: &CompactionLease,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CompactionLeaseError>> + Send + '_>>;
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionLeaseError>> + '_>>;
 
     /// Release a lease after completion.
     fn release(
         &self,
         lease: CompactionLease,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CompactionLeaseError>> + Send + '_>>;
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionLeaseError>> + '_>>;
 }
 
 /// Execution context for a single planned compaction.
@@ -242,14 +242,14 @@ pub(crate) trait CompactionExecutor {
     fn execute(
         &self,
         job: CompactionJob,
-    ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>>;
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>;
 
     /// Best-effort cleanup hook for outputs produced during execution. Used when manifest
     /// publication fails (e.g., CAS conflict) so temporary artifacts do not leak.
     fn cleanup_outputs<'a>(
         &'a self,
         outputs: &'a [SsTableDescriptor],
-    ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>>;
 }
 
 /// Local no-op executor placeholder. Returns `Unimplemented` until merge plumbing lands.
@@ -335,7 +335,8 @@ impl CompactionExecutor for LocalCompactionExecutor {
     fn execute(
         &self,
         job: CompactionJob,
-    ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>> {
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
+    {
         Box::pin(async move {
             if job.inputs.is_empty() {
                 return Err(CompactionError::NoInputs);
@@ -385,7 +386,7 @@ impl CompactionExecutor for LocalCompactionExecutor {
     fn cleanup_outputs<'a>(
         &'a self,
         outputs: &'a [SsTableDescriptor],
-    ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
         Box::pin(async move {
             cleanup_descriptors(&self.config, outputs).await;
             Ok(())
@@ -393,7 +394,7 @@ impl CompactionExecutor for LocalCompactionExecutor {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::sync::Arc;
 

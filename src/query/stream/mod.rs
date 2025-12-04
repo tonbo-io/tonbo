@@ -370,7 +370,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 

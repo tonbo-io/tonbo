@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use fusio::executor::BlockingExecutor;
+use fusio::executor::NoopExecutor;
 use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DbBuilder, DynMode},
@@ -39,8 +39,8 @@ async fn main() {
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
     // Create DB from metadata
-    let executor = Arc::new(BlockingExecutor);
-    let db: DB<DynMode, BlockingExecutor> = DbBuilder::from_schema_metadata(schema.clone())
+    let executor = Arc::new(NoopExecutor);
+    let db: DB<DynMode, NoopExecutor> = DbBuilder::from_schema_metadata(schema.clone())
         .expect("metadata config")
         .in_memory("dynamic-metadata")
         .build_with_executor(Arc::clone(&executor))

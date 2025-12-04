@@ -1,15 +1,19 @@
 use std::sync::Arc;
 
 use fusio::{
+    dynamic::{MaybeSend, MaybeSync},
     fs::{Fs, FsCas},
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
 use fusio_manifest::{
-    BackoffPolicy, BlockingExecutor, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl,
+    BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseStoreImpl,
     ManifestContext, SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use futures::future::BoxFuture;
+#[cfg(target_arch = "wasm32")]
+use futures::future::LocalBoxFuture as BoxFuture;
 
 use super::{
     codec::{CatalogCodec, GcPlanCodec, ManifestCodec, VersionCodec},
@@ -28,7 +32,7 @@ pub(crate) type InMemoryManifest = Manifest<
     HeadStoreImpl<InMemoryFs>,
     SegmentStoreImpl<InMemoryFs>,
     CheckpointStoreImpl<InMemoryFs>,
-    LeaseStoreImpl<InMemoryFs, BlockingExecutor>,
+    LeaseStoreImpl<InMemoryFs, ManifestExecutor>,
 >;
 
 /// In-memory catalog manifest type used for catalog-specific tests.
@@ -38,7 +42,7 @@ pub(crate) type InMemoryCatalogManifest = Manifest<
     HeadStoreImpl<InMemoryFs>,
     SegmentStoreImpl<InMemoryFs>,
     CheckpointStoreImpl<InMemoryFs>,
-    LeaseStoreImpl<InMemoryFs, BlockingExecutor>,
+    LeaseStoreImpl<InMemoryFs, ManifestExecutor>,
 >;
 
 /// Snapshot combining catalog metadata with the latest version state.
@@ -50,6 +54,8 @@ pub(crate) struct TableSnapshot {
     #[allow(dead_code)]
     pub table_meta: TableMeta,
 }
+
+type ManifestExecutor = DefaultExecutor;
 
 impl TableSnapshot {
     fn from_parts(version: VersionSnapshot, table_meta: TableMeta) -> Self {
@@ -63,7 +69,7 @@ impl TableSnapshot {
 }
 
 /// Trait object abstraction over version manifest backends.
-pub(crate) trait VersionRuntime: Send + Sync {
+pub(crate) trait VersionRuntime: MaybeSend + MaybeSync {
     fn init_table_head<'a>(
         &'a self,
         table_id: TableId,
@@ -105,7 +111,7 @@ pub(crate) trait VersionRuntime: Send + Sync {
 }
 
 /// Trait object abstraction over GC plan manifest backends.
-pub(crate) trait GcPlanRuntime: Send + Sync {
+pub(crate) trait GcPlanRuntime: MaybeSend + MaybeSync {
     fn put_gc_plan<'a>(
         &'a self,
         table_id: TableId,
@@ -120,7 +126,7 @@ pub(crate) trait GcPlanRuntime: Send + Sync {
 }
 
 /// Trait object abstraction over catalog manifest backends.
-pub(crate) trait CatalogRuntime: Send + Sync {
+pub(crate) trait CatalogRuntime: MaybeSend + MaybeSync {
     fn init_catalog_root<'a>(&'a self) -> BoxFuture<'a, ManifestResult<()>>;
 
     fn register_table<'a>(
@@ -246,10 +252,10 @@ pub(crate) struct ManifestHandle<M>(M);
 
 impl<HS, SS, CS, LS> VersionRuntime for ManifestHandle<Manifest<VersionCodec, HS, SS, CS, LS>>
 where
-    HS: fusio_manifest::HeadStore + Send + Sync + Clone + 'static,
-    SS: fusio_manifest::SegmentIo + Send + Sync + Clone + 'static,
-    CS: fusio_manifest::CheckpointStore + Send + Sync + Clone + 'static,
-    LS: fusio_manifest::LeaseStore + Send + Sync + Clone + 'static,
+    HS: fusio_manifest::HeadStore + MaybeSend + MaybeSync + Clone + 'static,
+    SS: fusio_manifest::SegmentIo + MaybeSend + MaybeSync + Clone + 'static,
+    CS: fusio_manifest::CheckpointStore + MaybeSend + MaybeSync + Clone + 'static,
+    LS: fusio_manifest::LeaseStore + MaybeSend + MaybeSync + Clone + 'static,
 {
     fn init_table_head<'a>(
         &'a self,
@@ -312,10 +318,10 @@ pub(crate) struct GcPlanHandle<M>(M);
 
 impl<HS, SS, CS, LS> GcPlanRuntime for GcPlanHandle<Manifest<GcPlanCodec, HS, SS, CS, LS>>
 where
-    HS: fusio_manifest::HeadStore + Send + Sync + Clone + 'static,
-    SS: fusio_manifest::SegmentIo + Send + Sync + Clone + 'static,
-    CS: fusio_manifest::CheckpointStore + Send + Sync + Clone + 'static,
-    LS: fusio_manifest::LeaseStore + Send + Sync + Clone + 'static,
+    HS: fusio_manifest::HeadStore + MaybeSend + MaybeSync + Clone + 'static,
+    SS: fusio_manifest::SegmentIo + MaybeSend + MaybeSync + Clone + 'static,
+    CS: fusio_manifest::CheckpointStore + MaybeSend + MaybeSync + Clone + 'static,
+    LS: fusio_manifest::LeaseStore + MaybeSend + MaybeSync + Clone + 'static,
 {
     fn put_gc_plan<'a>(
         &'a self,
@@ -338,10 +344,10 @@ pub(crate) struct CatalogHandle<M>(M);
 
 impl<HS, SS, CS, LS> CatalogRuntime for CatalogHandle<Manifest<CatalogCodec, HS, SS, CS, LS>>
 where
-    HS: fusio_manifest::HeadStore + Send + Sync + Clone + 'static,
-    SS: fusio_manifest::SegmentIo + Send + Sync + Clone + 'static,
-    CS: fusio_manifest::CheckpointStore + Send + Sync + Clone + 'static,
-    LS: fusio_manifest::LeaseStore + Send + Sync + Clone + 'static,
+    HS: fusio_manifest::HeadStore + MaybeSend + MaybeSync + Clone + 'static,
+    SS: fusio_manifest::SegmentIo + MaybeSend + MaybeSync + Clone + 'static,
+    CS: fusio_manifest::CheckpointStore + MaybeSend + MaybeSync + Clone + 'static,
+    LS: fusio_manifest::LeaseStore + MaybeSend + MaybeSync + Clone + 'static,
 {
     fn init_catalog_root<'a>(&'a self) -> BoxFuture<'a, ManifestResult<()>> {
         Box::pin(async move { self.0.init_catalog_root().await })
@@ -363,7 +369,7 @@ where
 fn wrap_version_manifest<M>(manifest: M) -> Arc<dyn VersionRuntime>
 where
     ManifestHandle<M>: VersionRuntime,
-    M: Send + Sync + 'static,
+    M: MaybeSend + MaybeSync + 'static,
 {
     Arc::new(ManifestHandle(manifest))
 }
@@ -371,7 +377,7 @@ where
 fn wrap_catalog_manifest<M>(manifest: M) -> Arc<dyn CatalogRuntime>
 where
     CatalogHandle<M>: CatalogRuntime,
-    M: Send + Sync + 'static,
+    M: MaybeSend + MaybeSync + 'static,
 {
     Arc::new(CatalogHandle(manifest))
 }
@@ -379,7 +385,7 @@ where
 fn wrap_gc_plan_manifest<M>(manifest: M) -> Arc<dyn GcPlanRuntime>
 where
     GcPlanHandle<M>: GcPlanRuntime,
-    M: Send + Sync + 'static,
+    M: MaybeSend + MaybeSync + 'static,
 {
     Arc::new(GcPlanHandle(manifest))
 }
@@ -394,8 +400,13 @@ pub(crate) async fn init_in_memory_manifest_raw(
     let head = HeadStoreImpl::new(fs.clone(), "head.json");
     let segment = SegmentStoreImpl::new(fs.clone(), "segments");
     let checkpoint = CheckpointStoreImpl::new(fs.clone(), "");
-    let lease = LeaseStoreImpl::new(fs, "", BackoffPolicy::default(), BlockingExecutor);
-    let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
+    let lease = LeaseStoreImpl::new(
+        fs,
+        "",
+        BackoffPolicy::default(),
+        ManifestExecutor::default(),
+    );
+    let ctx = Arc::new(ManifestContext::new(ManifestExecutor::default()));
     let manifest = Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx);
     let table_id = TableId::new(file_ids);
     manifest
@@ -421,11 +432,11 @@ pub(crate) async fn init_in_memory_manifest() -> ManifestResult<TonboManifest> {
 /// Construct a manifest rooted under `root/manifest` using the provided filesystem backend.
 pub(crate) async fn init_fs_manifest<FS>(fs: FS, root: &Path) -> ManifestResult<TonboManifest>
 where
-    FS: Fs + FsCas + Clone + Send + Sync + 'static,
+    FS: Fs + FsCas + Clone + MaybeSend + MaybeSync + 'static,
     HeadStoreImpl<FS>: fusio_manifest::HeadStore,
     SegmentStoreImpl<FS>: fusio_manifest::SegmentIo,
     CheckpointStoreImpl<FS>: fusio_manifest::CheckpointStore,
-    LeaseStoreImpl<FS, BlockingExecutor>: fusio_manifest::LeaseStore,
+    LeaseStoreImpl<FS, ManifestExecutor>: fusio_manifest::LeaseStore,
 {
     let manifest_root = append_segment(root, "manifest");
     let version_root = append_segment(&manifest_root, "version");
@@ -479,15 +490,15 @@ fn open_manifest_instance<FS, C>(
     HeadStoreImpl<FS>,
     SegmentStoreImpl<FS>,
     CheckpointStoreImpl<FS>,
-    LeaseStoreImpl<FS, BlockingExecutor>,
+    LeaseStoreImpl<FS, ManifestExecutor>,
 >
 where
     C: ManifestCodec,
-    FS: Fs + FsCas + Clone + Send + Sync + 'static,
+    FS: Fs + FsCas + Clone + MaybeSend + MaybeSync + 'static,
     HeadStoreImpl<FS>: fusio_manifest::HeadStore,
     SegmentStoreImpl<FS>: fusio_manifest::SegmentIo,
     CheckpointStoreImpl<FS>: fusio_manifest::CheckpointStore,
-    LeaseStoreImpl<FS, BlockingExecutor>: fusio_manifest::LeaseStore,
+    LeaseStoreImpl<FS, ManifestExecutor>: fusio_manifest::LeaseStore,
 {
     let head = HeadStoreImpl::new(
         fs.clone(),
@@ -504,8 +515,13 @@ where
     // LeaseStoreImpl appends the `leases/` suffix internally; pass the manifest prefix so
     // lease records land under `<prefix>/leases/...` alongside other manifest metadata.
     let lease_prefix = prefix.as_ref().to_string();
-    let lease = LeaseStoreImpl::new(fs, lease_prefix, BackoffPolicy::default(), BlockingExecutor);
-    let ctx = Arc::new(ManifestContext::new(BlockingExecutor));
+    let lease = LeaseStoreImpl::new(
+        fs,
+        lease_prefix,
+        BackoffPolicy::default(),
+        ManifestExecutor::default(),
+    );
+    let ctx = Arc::new(ManifestContext::new(ManifestExecutor::default()));
     Manifest::open(Stores::new(head, segment, checkpoint, lease), ctx)
 }
 
@@ -517,7 +533,7 @@ fn append_segment(base: &Path, segment: &str) -> Path {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::time::Duration;
 
@@ -554,7 +570,7 @@ mod tests {
             fs.clone(),
             version_root.as_ref().to_string(),
             BackoffPolicy::default(),
-            BlockingExecutor,
+            ManifestExecutor::default(),
         );
         let lease = lease_store
             .create(1, None, Duration::from_secs(30))

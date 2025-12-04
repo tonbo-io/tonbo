@@ -469,7 +469,7 @@ pub struct SsTableMerger<M: crate::mode::Mode> {
     _mode: PhantomData<M>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::sync::{Arc, atomic::AtomicU64};
 

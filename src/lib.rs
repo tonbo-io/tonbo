@@ -32,6 +32,8 @@ pub mod test_helpers;
 
 #[cfg(test)]
 mod test_util;
+#[cfg(all(test, target_arch = "wasm32", feature = "web"))]
+mod wasm_web_tests;
 
 /// Generic DB that dispatches between typed and dynamic modes via generic types.
 pub mod db;

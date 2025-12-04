@@ -7,21 +7,25 @@
 pub mod executor;
 /// Leveled compaction planning helpers.
 pub mod planner;
-/// Scheduler scaffolding for background/remote compaction.
+/// Scheduler scaffolding for background/remote compaction (native builds only for now).
+#[cfg(feature = "tokio-runtime")]
 pub mod scheduler;
 
+#[cfg(feature = "tokio-runtime")]
+use std::sync::Weak;
+#[cfg(feature = "tokio-runtime")]
+use std::time::Duration;
 use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
 use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
-use tokio::{task::spawn_local, time::Duration};
 
 use crate::{
     compaction::{
@@ -53,8 +57,9 @@ pub struct MinorCompactor {
     next_id: AtomicU64,
 }
 
-/// Drive compaction in a simple loop, waiting on a Tokio `interval` between attempts.
+/// Drive compaction in a simple loop, waiting on a Tokio interval between attempts.
 /// Callers should run this in their runtime/task and handle cancellation externally.
+#[cfg(feature = "tokio-runtime")]
 #[allow(dead_code)]
 pub(crate) async fn compaction_loop<M, E, CE, P>(
     db: Weak<impl CompactionHost<M, E> + 'static>,
@@ -93,6 +98,7 @@ pub(crate) async fn compaction_loop<M, E, CE, P>(
 /// This is a stopgap to keep compaction running until a proper scheduler/lease lands.
 /// Callers are responsible for choosing an interval and handling cancellation via the returned
 /// handle.
+#[cfg(feature = "tokio-runtime")]
 #[allow(dead_code)]
 pub(crate) fn spawn_compaction_loop_local<M, E, CE, P>(
     db: Weak<impl CompactionHost<M, E> + 'static>,
@@ -108,8 +114,9 @@ where
     CE: CompactionExecutor + 'static,
     P: CompactionPlanner + 'static,
 {
-    spawn_local(async move {
-        compaction_loop(db, planner, executor, gc_sst_config, interval, budget).await;
+    tokio::task::spawn_local(async move {
+        compaction_loop::<M, E, CE, P>(db, planner, executor, gc_sst_config, interval, budget)
+            .await;
     })
 }
 
@@ -146,7 +153,7 @@ impl MinorCompactor {
     ) -> Result<Option<SsTable<M>>, SsTableError>
     where
         M: Mode<ImmLayout = RecordBatch, Key = KeyOwned> + Sized,
-        E: Executor + Timer + Send + Sync,
+        E: Executor + Timer,
     {
         if db.num_immutable_segments() < self.segment_threshold {
             return Ok(None);
@@ -158,7 +165,7 @@ impl MinorCompactor {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{
         future::Future,
@@ -172,8 +179,8 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
-        dynamic::DynFs,
-        executor::{BlockingExecutor, tokio::TokioExecutor},
+        dynamic::{DynFs, MaybeSendFuture},
+        executor::{NoopExecutor, tokio::TokioExecutor},
         path::Path,
     };
     use tokio::{
@@ -196,7 +203,7 @@ mod tests {
         test_util::build_batch,
     };
 
-    async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, BlockingExecutor>) {
+    async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, NoopExecutor>) {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -207,8 +214,8 @@ mod tests {
             .build()
             .expect("key field");
         let schema = Arc::clone(&config.schema);
-        let executor = Arc::new(BlockingExecutor);
-        let db = DB::<DynMode, BlockingExecutor>::builder(config)
+        let executor = Arc::new(NoopExecutor);
+        let db = DB::<DynMode, NoopExecutor>::builder(config)
             .in_memory("compaction-test")
             .build_with_executor(Arc::clone(&executor))
             .await
@@ -307,13 +314,13 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct NoopExecutor;
+    struct NoopCompactionExecutor;
 
-    impl CompactionExecutor for NoopExecutor {
+    impl CompactionExecutor for NoopCompactionExecutor {
         fn execute(
             &self,
             _job: CompactionJob,
-        ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>>
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
         {
             Box::pin(async { Err(CompactionError::Unimplemented) })
         }
@@ -321,7 +328,7 @@ mod tests {
         fn cleanup_outputs<'a>(
             &'a self,
             _outputs: &'a [SsTableDescriptor],
-        ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -334,11 +341,11 @@ mod tests {
                 let host = Arc::new(CountingHost::new());
                 let weak = Arc::downgrade(&host);
                 let planner = NoopPlanner;
-                let executor = NoopExecutor;
+                let executor = NoopCompactionExecutor;
                 let handle = spawn_compaction_loop_local::<
                     DynMode,
                     TokioExecutor,
-                    NoopExecutor,
+                    NoopCompactionExecutor,
                     NoopPlanner,
                 >(
                     weak, planner, executor, None, Duration::from_millis(10), 1

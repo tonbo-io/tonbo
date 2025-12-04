@@ -4,24 +4,27 @@
 //! trait-driven structure remains so that compile-time typed dispatch can be
 //! reintroduced without reshaping the API.
 
+#[cfg(feature = "tokio-runtime")]
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
     hash::Hash,
     marker::PhantomData,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard, RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard},
-    time::{Duration, Instant},
 };
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
+#[cfg(test)]
+use fusio::dynamic::MaybeSendFuture;
 #[allow(unused_imports)]
 use fusio::executor::{Executor, RwLock, Timer};
 use futures::{Stream, StreamExt, stream};
 use lockable::LockableHashMap;
 use typed_arrow_dyn::DynRow;
+use web_time::Instant;
 mod builder;
 mod error;
 
@@ -31,6 +34,8 @@ pub use builder::{
 pub use error::DBError;
 use predicate::Predicate;
 
+#[cfg(feature = "tokio-runtime")]
+use crate::compaction::scheduler::{CompactionScheduler, ScheduledCompaction};
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
     compaction::{
@@ -39,7 +44,6 @@ use crate::{
             CompactionError, CompactionExecutor, CompactionJob, CompactionLease, CompactionOutcome,
         },
         planner::{CompactionInput, CompactionPlanner, CompactionSnapshot},
-        scheduler::{CompactionScheduler, ScheduledCompaction},
     },
     extractor::KeyExtractError,
     id::{FileId, FileIdGenerator},
@@ -129,9 +133,7 @@ where
     fn clone_handle(&self) -> DynDbHandle<E>;
 
     /// Begin a transaction using the shared handle.
-    fn begin_transaction(
-        &self,
-    ) -> impl Future<Output = Result<Transaction<E>, TransactionError>> + Send;
+    fn begin_transaction(&self) -> impl Future<Output = Result<Transaction<E>, TransactionError>>;
 }
 
 impl<E> DynDbHandleExt<E> for DynDbHandle<E>
@@ -142,9 +144,7 @@ where
         Arc::clone(self)
     }
 
-    fn begin_transaction(
-        &self,
-    ) -> impl Future<Output = Result<Transaction<E>, TransactionError>> + Send {
+    fn begin_transaction(&self) -> impl Future<Output = Result<Transaction<E>, TransactionError>> {
         let handle = Arc::clone(self);
         async move {
             let snapshot = handle.begin_snapshot().await?;
@@ -173,6 +173,7 @@ where
 type PendingWalTxns = HashMap<u64, PendingWalTxn>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
+#[cfg(feature = "tokio-runtime")]
 struct CompactionLoopHandle<M, E>
 where
     M: Mode,
@@ -416,6 +417,7 @@ where
         }
     }
 
+    #[cfg(feature = "tokio-runtime")]
     async fn run_scheduled_compaction<CE>(
         &self,
         scheduled: ScheduledCompaction,
@@ -501,6 +503,7 @@ where
     /// Spawn a current-thread compaction worker that plans tasks, issues leases, and executes
     /// them via the scheduler loop.
     #[allow(dead_code)]
+    #[cfg(feature = "tokio-runtime")]
     pub(crate) fn spawn_compaction_worker_local<CE, P>(
         self: &Arc<Self>,
         planner: P,
@@ -724,7 +727,7 @@ pub struct DB<M, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer + Send + Sync,
+    E: Executor + Timer,
 {
     mode: M,
     mem: Arc<StdRwLock<M::Mutable>>,
@@ -751,6 +754,7 @@ where
     /// Per-key transactional locks (wired once transactional writes arrive).
     _key_locks: LockMap<M::Key>,
     /// Optional background compaction driver/handle pair for local loops.
+    #[cfg(feature = "tokio-runtime")]
     #[allow(dead_code)]
     compaction_worker: Option<CompactionLoopHandle<M, E>>,
 }
@@ -1149,6 +1153,12 @@ where
         DbBuilder::new(config)
     }
 
+    #[cfg(feature = "tokio-runtime")]
+    /// Whether a background compaction worker was spawned for this DB.
+    pub fn has_compaction_worker(&self) -> bool {
+        self.compaction_worker.is_some()
+    }
+
     fn compaction_driver(&self) -> CompactionDriver<M, E> {
         CompactionDriver::new(self)
     }
@@ -1425,6 +1435,7 @@ where
             mutable_wal_range: Arc::new(Mutex::new(None)),
             file_ids,
             _key_locks: Arc::new(LockableHashMap::new()),
+            #[cfg(feature = "tokio-runtime")]
             compaction_worker: None,
         }
     }
@@ -2186,11 +2197,10 @@ fn take_full_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, 
     }
     RecordBatch::try_new(batch.schema(), columns)
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{
         fs,
-        future::Future,
         path::PathBuf,
         sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -2203,7 +2213,7 @@ mod tests {
     use fusio::{
         disk::LocalFs,
         dynamic::DynFs,
-        executor::{BlockingExecutor, tokio::TokioExecutor},
+        executor::{NoopExecutor, tokio::TokioExecutor},
         fs::FsCas,
         mem::fs::InMemoryFs,
         path::{Path, PathPart},
@@ -2289,8 +2299,8 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-        let executor = Arc::new(BlockingExecutor);
-        let db: DB<DynMode, BlockingExecutor> =
+        let executor = Arc::new(NoopExecutor);
+        let db: DB<DynMode, NoopExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let err = db
@@ -2314,9 +2324,9 @@ mod tests {
         ]));
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let executor = Arc::new(BlockingExecutor);
+        let executor = Arc::new(NoopExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, NoopExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let rows = vec![
@@ -2370,8 +2380,8 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-        let executor = Arc::new(BlockingExecutor);
-        let db: DB<DynMode, BlockingExecutor> =
+        let executor = Arc::new(NoopExecutor);
+        let db: DB<DynMode, NoopExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let batch = RecordBatch::try_new(
@@ -2407,8 +2417,8 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-        let executor = Arc::new(BlockingExecutor);
-        let db: DB<DynMode, BlockingExecutor> =
+        let executor = Arc::new(NoopExecutor);
+        let db: DB<DynMode, NoopExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let wal_schema = Arc::new(Schema::new(vec![
@@ -2444,8 +2454,8 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
-        let executor = Arc::new(BlockingExecutor);
-        let db: DB<DynMode, BlockingExecutor> =
+        let executor = Arc::new(NoopExecutor);
+        let db: DB<DynMode, NoopExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let batch = RecordBatch::try_new(
@@ -2477,9 +2487,9 @@ mod tests {
         ]));
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let executor = Arc::new(BlockingExecutor);
+        let executor = Arc::new(NoopExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let db: DB<DynMode, BlockingExecutor> =
+        let db: DB<DynMode, NoopExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
 
         let snapshot = db.begin_snapshot().await.expect("snapshot");
@@ -2517,7 +2527,7 @@ mod tests {
         let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
 
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name");
-        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let mut db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
             .await
             .expect("schema ok");
         db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
@@ -2533,7 +2543,7 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name");
-        let mut db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let mut db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
             .await
             .expect("schema ok");
 
@@ -2668,52 +2678,61 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn plan_scan_filters_immutable_segments() {
-        let db = db_with_immutable_keys(&["k1", "z1"]);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn plan_scan_filters_immutable_segments() {
+        let db = db_with_immutable_keys(&["k1", "z1"]).await;
         let predicate = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
-        let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
-        let plan = block_on(snapshot.plan_scan(&db, &predicate, None, None)).expect("plan");
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
+        let plan = snapshot
+            .plan_scan(&db, &predicate, None, None)
+            .await
+            .expect("plan");
         // Pruning is currently disabled; expect to scan all immutables and retain the predicate
         // for residual evaluation.
         assert_eq!(plan.immutable_indexes, vec![0, 1]);
         assert!(plan.residual_predicate.is_some());
     }
 
-    #[test]
-    fn plan_scan_preserves_residual_predicate() {
-        let db = db_with_immutable_keys(&["k1"]);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn plan_scan_preserves_residual_predicate() {
+        let db = db_with_immutable_keys(&["k1"]).await;
         let key_pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
         let value_pred = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(5i64));
         let predicate = Predicate::and(vec![key_pred, value_pred]);
-        let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
-        let plan = block_on(snapshot.plan_scan(&db, &predicate, None, None)).expect("plan");
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
+        let plan = snapshot
+            .plan_scan(&db, &predicate, None, None)
+            .await
+            .expect("plan");
         assert!(plan.residual_predicate.is_some());
     }
 
-    #[test]
-    fn plan_scan_marks_empty_range() {
-        let db = db_with_immutable_keys(&["k1"]);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn plan_scan_marks_empty_range() {
+        let db = db_with_immutable_keys(&["k1"]).await;
         let pred_a = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k1"));
         let pred_b = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k2"));
         let predicate = Predicate::and(vec![pred_a, pred_b]);
-        let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
-        let plan = block_on(snapshot.plan_scan(&db, &predicate, None, None)).expect("plan");
+        let snapshot = db.begin_snapshot().await.expect("snapshot");
+        let plan = snapshot
+            .plan_scan(&db, &predicate, None, None)
+            .await
+            .expect("plan");
         // Pruning is currently disabled; even contradictory predicates scan all immutables.
         assert_eq!(plan.immutable_indexes, vec![0]);
     }
 
-    fn db_with_immutable_keys(keys: &[&str]) -> DB<DynMode, BlockingExecutor> {
+    async fn db_with_immutable_keys(keys: &[&str]) -> DB<DynMode, NoopExecutor> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let executor = Arc::new(BlockingExecutor);
+        let executor = Arc::new(NoopExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let mut db: DB<DynMode, BlockingExecutor> =
-            block_on(DB::new(config, Arc::clone(&executor))).expect("db");
+        let mut db: DB<DynMode, NoopExecutor> =
+            DB::new(config, Arc::clone(&executor)).await.expect("db");
         db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
         for (idx, key) in keys.iter().enumerate() {
             let rows = vec![DynRow(vec![
@@ -2721,7 +2740,9 @@ mod tests {
                 Some(DynCell::I32(idx as i32)),
             ])];
             let batch = build_batch(schema.clone(), rows).expect("batch");
-            block_on(db.ingest_with_tombstones(batch, vec![false])).expect("ingest");
+            db.ingest_with_tombstones(batch, vec![false])
+                .await
+                .expect("ingest");
         }
         db
     }
@@ -3219,7 +3240,7 @@ mod tests {
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata key config");
-        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
             .await
             .expect("metadata key");
 
@@ -3242,7 +3263,7 @@ mod tests {
         sm.insert("tonbo.keys".to_string(), "id".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]).with_metadata(sm));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("schema metadata config");
-        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
             .await
             .expect("schema metadata key");
 
@@ -3283,9 +3304,8 @@ mod tests {
             Field::new("v", DataType::Int32, false),
         ]));
         let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name config");
-        let executor = Arc::new(BlockingExecutor);
-        let mut db: DB<DynMode, BlockingExecutor> =
-            DB::new(config, executor).await.expect("db init");
+        let executor = Arc::new(NoopExecutor);
+        let mut db: DB<DynMode, NoopExecutor> = DB::new(config, executor).await.expect("db init");
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
         let sstable_cfg = Arc::new(SsTableConfig::new(
@@ -3310,9 +3330,9 @@ mod tests {
         ]));
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let executor = Arc::new(BlockingExecutor);
+        let executor = Arc::new(NoopExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-        let mut db: DB<DynMode, BlockingExecutor> =
+        let mut db: DB<DynMode, NoopExecutor> =
             DB::new(config, Arc::clone(&executor)).await.expect("db");
         db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
@@ -3474,18 +3494,15 @@ mod tests {
             ])
             .expect("apply edits");
 
-        let wal_ids = DB::<DynMode, BlockingExecutor>::wal_ids_for_remaining_ssts(
-            &version,
-            &HashSet::new(),
-            &[],
-        );
+        let wal_ids =
+            DB::<DynMode, NoopExecutor>::wal_ids_for_remaining_ssts(&version, &HashSet::new(), &[]);
         assert!(
             wal_ids.is_none(),
             "missing wal metadata on a remaining SST should preserve the manifest wal set"
         );
 
         let filtered =
-            DB::<DynMode, BlockingExecutor>::wal_segments_after_compaction(&version, &[], &[]);
+            DB::<DynMode, NoopExecutor>::wal_segments_after_compaction(&version, &[], &[]);
         assert!(
             filtered.is_none(),
             "compaction should not rewrite wal segments when metadata is absent"
@@ -3545,18 +3562,14 @@ mod tests {
             "second entry should carry wal segments"
         );
         let removed_ids: HashSet<SsTableId> = removed.iter().map(|d| d.id().clone()).collect();
-        let wal_ids = DB::<DynMode, BlockingExecutor>::wal_ids_for_remaining_ssts(
-            &version,
-            &removed_ids,
-            &added,
-        );
+        let wal_ids =
+            DB::<DynMode, NoopExecutor>::wal_ids_for_remaining_ssts(&version, &removed_ids, &added);
         assert!(
             wal_ids.is_none(),
             "wal ids should be None when any SST lacks wal metadata"
         );
-        let filtered = DB::<DynMode, BlockingExecutor>::wal_segments_after_compaction(
-            &version, &removed, &added,
-        );
+        let filtered =
+            DB::<DynMode, NoopExecutor>::wal_segments_after_compaction(&version, &removed, &added);
         assert!(
             filtered.is_none(),
             "filtered wal segments should be None when any SST lacks wal metadata"
@@ -3573,7 +3586,7 @@ mod tests {
             wal_floor: None,
             obsolete_wal_segments: vec![wal_a.clone(), wal_b.clone()],
         };
-        let plan = DB::<DynMode, BlockingExecutor>::gc_plan_from_outcome(&outcome)
+        let plan = DB::<DynMode, NoopExecutor>::gc_plan_from_outcome(&outcome)
             .expect("gc plan")
             .expect("plan present");
         assert_eq!(plan.obsolete_wal_segments.len(), 2);
@@ -3603,7 +3616,7 @@ mod tests {
         fn execute(
             &self,
             job: CompactionJob,
-        ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>>
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
         {
             let outputs = self.outputs.clone();
             let wal_segments = self.wal_segments.clone();
@@ -3623,7 +3636,7 @@ mod tests {
         fn cleanup_outputs<'a>(
             &'a self,
             _outputs: &'a [SsTableDescriptor],
-        ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -3650,7 +3663,7 @@ mod tests {
             None,
         );
 
-        let db: DB<DynMode, BlockingExecutor> = DB::new(
+        let db: DB<DynMode, NoopExecutor> = DB::new(
             crate::schema::SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Utf8, false),
                 Field::new("v", DataType::Int32, false),
@@ -3658,7 +3671,7 @@ mod tests {
             .primary_key("id")
             .build()
             .expect("schema builder"),
-            Arc::new(BlockingExecutor),
+            Arc::new(NoopExecutor),
         )
         .await
         .expect("db init");
@@ -3753,7 +3766,7 @@ mod tests {
             None,
         );
 
-        let db: DB<DynMode, BlockingExecutor> = DB::new(
+        let db: DB<DynMode, NoopExecutor> = DB::new(
             crate::schema::SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Utf8, false),
                 Field::new("v", DataType::Int32, false),
@@ -3761,7 +3774,7 @@ mod tests {
             .primary_key("id")
             .build()
             .expect("schema builder"),
-            Arc::new(BlockingExecutor),
+            Arc::new(NoopExecutor),
         )
         .await
         .expect("db init");
@@ -3901,8 +3914,7 @@ mod tests {
             .with_wal_ids(Some(vec![wal_b.file_id().clone()]));
 
         // Seed manifest with the two inputs and WAL set.
-        let db: DB<DynMode, BlockingExecutor> =
-            DB::new(mode_cfg, Arc::new(BlockingExecutor)).await?;
+        let db: DB<DynMode, NoopExecutor> = DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
         let entry_a = SstEntry::new(
             desc_a.id().clone(),
             desc_a.stats().cloned(),
@@ -4047,7 +4059,7 @@ mod tests {
         fn execute(
             &self,
             job: CompactionJob,
-        ) -> Pin<Box<dyn Future<Output = Result<CompactionOutcome, CompactionError>> + Send + '_>>
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
         {
             let inner = self.inner.clone();
             let manifest = self.manifest.clone();
@@ -4076,7 +4088,7 @@ mod tests {
         fn cleanup_outputs<'a>(
             &'a self,
             outputs: &'a [SsTableDescriptor],
-        ) -> Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
             self.inner.cleanup_outputs(outputs)
         }
     }
@@ -4214,7 +4226,7 @@ mod tests {
             key_range: None,
         };
 
-        let resolved = DB::<DynMode, BlockingExecutor>::resolve_compaction_inputs(&version, &task)
+        let resolved = DB::<DynMode, NoopExecutor>::resolve_compaction_inputs(&version, &task)
             .expect("resolve");
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0].level(), 0);
@@ -4552,7 +4564,7 @@ mod tests {
         let f_v = Field::new("v", DataType::Int32, false);
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
             .await
             .expect("composite field metadata");
 
@@ -4627,7 +4639,7 @@ mod tests {
         sm.insert("tonbo.keys".to_string(), "[\"id\", \"ts\"]".to_string());
         let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]).with_metadata(sm));
         let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-        let db: DB<DynMode, BlockingExecutor> = DB::new(config, Arc::new(BlockingExecutor))
+        let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
             .await
             .expect("composite schema metadata");
 
@@ -4751,7 +4763,7 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let mut cfg = RuntimeWalConfig::default();
         cfg.dir = fusio::path::Path::from_filesystem_path(&wal_dir).expect("wal fusio path");
-        let executor = Arc::new(BlockingExecutor);
+        let executor = Arc::new(NoopExecutor);
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let table_definition = DynMode::table_definition(&config, builder::DEFAULT_TABLE_NAME);
         let manifest = init_in_memory_manifest().await.expect("init manifest");
@@ -4761,7 +4773,7 @@ mod tests {
             .await
             .expect("register table")
             .table_id;
-        let db: DB<DynMode, BlockingExecutor> = DB::recover_with_wal_with_manifest(
+        let db: DB<DynMode, NoopExecutor> = DB::recover_with_wal_with_manifest(
             config,
             executor.clone(),
             cfg,
