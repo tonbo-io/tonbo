@@ -8,7 +8,6 @@ pub mod executor;
 /// Leveled compaction planning helpers.
 pub mod planner;
 /// Scheduler scaffolding for background/remote compaction (native builds only for now).
-#[cfg(feature = "tokio-runtime")]
 pub mod scheduler;
 /// Stateless trigger helpers intended for cron/HTTP surfaces.
 pub mod trigger;
@@ -17,15 +16,20 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-#[cfg(feature = "tokio-runtime")]
-use std::time::Duration;
-#[cfg(feature = "tokio-runtime")]
-use std::{future::Future, pin::Pin, sync::Weak};
+#[cfg(any(test, feature = "test-helpers"))]
+use std::{pin::Pin, sync::Weak, time::Duration};
 
 use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
+#[cfg(any(test, feature = "test-helpers"))]
+use fusio::{
+    dynamic::{MaybeSend, MaybeSendFuture, MaybeSync},
+    executor::JoinHandle,
+};
+#[cfg(any(test, feature = "test-helpers"))]
+use futures::future::{AbortHandle, AbortRegistration, Abortable};
 
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::compaction::{
     executor::{CompactionError, CompactionExecutor, CompactionOutcome},
     planner::CompactionPlanner,
@@ -38,16 +42,18 @@ use crate::{
 };
 
 /// Minimal capability required by the background compaction loop.
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) trait CompactionHost<M: Mode, E: Executor + Timer> {
     fn compact_once<'a, CE, P>(
         &'a self,
         planner: &'a P,
         executor: &'a CE,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
+    ) -> Pin<
+        Box<dyn MaybeSendFuture<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>,
+    >
     where
-        CE: CompactionExecutor + 'a,
-        P: CompactionPlanner + 'a;
+        CE: CompactionExecutor + MaybeSend + MaybeSync + 'a,
+        P: CompactionPlanner + MaybeSend + MaybeSync + 'a;
 }
 
 /// Naïve minor-compaction driver that flushes once a segment threshold is hit.
@@ -57,25 +63,49 @@ pub struct MinorCompactor {
     next_id: AtomicU64,
 }
 
-/// Drive compaction in a simple loop, waiting on a Tokio interval between attempts.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) struct CompactionLoopHandle<E: Executor> {
+    abort: AbortHandle,
+    handle: Option<E::JoinHandle<()>>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl<E: Executor> CompactionLoopHandle<E> {
+    // Currently only used by tests/manual cleanup; runtime cancellation relies on Drop.
+    pub async fn abort(mut self) {
+        self.abort.abort();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join().await;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl<E: Executor> Drop for CompactionLoopHandle<E> {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
+}
+
+/// Drive compaction in a simple loop, waiting on the provided timer between attempts.
 /// Callers should run this in their runtime/task and handle cancellation externally.
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) async fn compaction_loop<M, E, CE, P>(
-    db: Weak<impl CompactionHost<M, E> + 'static>,
+    db: Weak<impl CompactionHost<M, E> + MaybeSend + MaybeSync + 'static>,
     planner: P,
     executor: CE,
+    timer: Arc<E>,
     _gc_sst_config: Option<Arc<SsTableConfig>>,
     interval: Duration,
     budget: usize,
 ) where
-    M: Mode,
+    M: Mode + MaybeSend + MaybeSync,
     E: Executor + Timer,
-    CE: CompactionExecutor,
-    P: CompactionPlanner,
+    CE: CompactionExecutor + MaybeSend + MaybeSync,
+    P: CompactionPlanner + MaybeSend + MaybeSync,
 {
-    let mut ticker = tokio::time::interval(interval);
     loop {
-        ticker.tick().await;
+        timer.sleep(interval).await;
         let Some(db_strong) = db.upgrade() else {
             break;
         };
@@ -93,29 +123,44 @@ pub(crate) async fn compaction_loop<M, E, CE, P>(
     }
 }
 
-/// Spawn a non-Send compaction loop on the current-thread Tokio runtime.
+/// Spawn a non-Send compaction loop on the provided executor/timer.
 /// This is a stopgap to keep compaction running until a proper scheduler/lease lands.
 /// Callers are responsible for choosing an interval and handling cancellation via the returned
 /// handle.
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn spawn_compaction_loop_local<M, E, CE, P>(
-    db: Weak<impl CompactionHost<M, E> + 'static>,
+    db: Weak<impl CompactionHost<M, E> + MaybeSend + MaybeSync + 'static>,
     planner: P,
     executor: CE,
+    timer: Arc<E>,
     gc_sst_config: Option<Arc<SsTableConfig>>,
     interval: Duration,
     budget: usize,
-) -> tokio::task::JoinHandle<()>
+) -> CompactionLoopHandle<E>
 where
-    M: Mode + 'static,
+    M: Mode + MaybeSend + MaybeSync + 'static,
     E: Executor + Timer + 'static,
-    CE: CompactionExecutor + 'static,
-    P: CompactionPlanner + 'static,
+    CE: CompactionExecutor + MaybeSend + MaybeSync + 'static,
+    P: CompactionPlanner + MaybeSend + MaybeSync + 'static,
 {
-    tokio::task::spawn_local(async move {
-        compaction_loop::<M, E, CE, P>(db, planner, executor, gc_sst_config, interval, budget)
-            .await;
-    })
+    let (abort, reg): (AbortHandle, AbortRegistration) = AbortHandle::new_pair();
+    let loop_future = compaction_loop::<M, E, CE, P>(
+        db,
+        planner,
+        executor,
+        Arc::clone(&timer),
+        gc_sst_config,
+        interval,
+        budget,
+    );
+    let abortable = Abortable::new(loop_future, reg);
+    let handle = timer.spawn(async move {
+        let _ = abortable.await;
+    });
+    CompactionLoopHandle {
+        abort,
+        handle: Some(handle),
+    }
 }
 
 impl MinorCompactor {
@@ -166,29 +211,25 @@ impl MinorCompactor {
 #[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::{
-        fs,
-        future::Future,
-        path::PathBuf,
         pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use arrow_schema::{DataType, Field, Schema};
     use fusio::{
         disk::LocalFs,
-        dynamic::MaybeSendFuture,
+        dynamic::{DynFs, MaybeSend, MaybeSendFuture, MaybeSync},
         executor::{NoopExecutor, tokio::TokioExecutor},
         path::Path,
     };
-    use tokio::{
-        task::LocalSet,
-        time::{Duration, sleep},
-    };
+    use tokio::time::sleep;
+    use typed_arrow_dyn::{DynCell, DynRow};
 
-    use super::MinorCompactor;
+    use super::{CompactionLoopHandle, MinorCompactor};
     use crate::{
         compaction::{
             CompactionHost,
@@ -198,22 +239,126 @@ mod tests {
         },
         db::DB,
         mode::DynMode,
-        ondisk::sstable::SsTableConfig,
+        ondisk::sstable::{SsTableConfig, SsTableDescriptor},
+        test_util::build_batch,
     };
 
-    #[derive(Default)]
-    struct NeverCompact {
-        attempts: AtomicUsize,
+    async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, NoopExecutor>) {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let config = crate::schema::SchemaBuilder::from_schema(schema)
+            .primary_key("id")
+            .with_metadata()
+            .build()
+            .expect("key field");
+        let schema = Arc::clone(&config.schema);
+        let executor = Arc::new(NoopExecutor);
+        let db = DB::<DynMode, NoopExecutor>::builder(config)
+            .in_memory("compaction-test")
+            .build_with_executor(Arc::clone(&executor))
+            .await
+            .expect("db init");
+
+        let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+        let cfg = Arc::new(SsTableConfig::new(
+            schema.clone(),
+            fs,
+            Path::from("/tmp/tonbo-compaction-test"),
+        ));
+        (cfg, db)
     }
 
-    impl CompactionPlanner for NeverCompact {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn below_threshold_noop() {
+        let (cfg, mut db) = build_db().await;
+        let compactor = MinorCompactor::new(2, 0, 7);
+        let result = compactor.maybe_compact(&mut db, cfg).await;
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(db.num_immutable_segments(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn threshold_met_invokes_flush() {
+        let (cfg, mut db) = build_db().await;
+        db.set_seal_policy(Arc::new(crate::inmem::policy::BatchesThreshold {
+            batches: 1,
+        }));
+        let rows = vec![DynRow(vec![
+            Some(DynCell::Str("k".into())),
+            Some(DynCell::I32(1)),
+        ])];
+        let batch = build_batch(cfg.schema().clone(), rows).expect("batch");
+        db.ingest(batch).await.expect("ingest");
+        assert_eq!(db.num_immutable_segments(), 1);
+
+        let compactor = MinorCompactor::new(1, 0, 9);
+        let table = compactor
+            .maybe_compact(&mut db, cfg)
+            .await
+            .expect("flush result")
+            .expect("sstable");
+        assert_eq!(db.num_immutable_segments(), 0);
+        let descriptor = table.descriptor();
+        assert_eq!(descriptor.id().raw(), 9);
+        assert_eq!(descriptor.level(), 0);
+        assert_eq!(descriptor.stats().map(|s| s.rows), Some(1));
+        let stats = descriptor.stats().expect("descriptor stats");
+        assert_eq!(stats.rows, 1);
+        assert!(stats.bytes > 0);
+    }
+
+    #[derive(Clone)]
+    struct CountingHost {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl CountingHost {
+        fn new() -> Self {
+            Self {
+                hits: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CompactionHost<DynMode, TokioExecutor> for CountingHost {
+        fn compact_once<'a, CE, P>(
+            &'a self,
+            _planner: &'a P,
+            _executor: &'a CE,
+        ) -> Pin<
+            Box<
+                dyn MaybeSendFuture<Output = Result<Option<CompactionOutcome>, CompactionError>>
+                    + 'a,
+            >,
+        >
+        where
+            CE: CompactionExecutor + MaybeSend + MaybeSync + 'a,
+            P: CompactionPlanner + MaybeSend + MaybeSync + 'a,
+        {
+            let hits = Arc::clone(&self.hits);
+            Box::pin(async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopPlanner;
+
+    impl CompactionPlanner for NoopPlanner {
         fn plan(&self, _snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
-            self.attempts.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct NoopCompactionExecutor;
 
     impl CompactionExecutor for NoopCompactionExecutor {
@@ -227,157 +372,186 @@ mod tests {
 
         fn cleanup_outputs<'a>(
             &'a self,
-            _outputs: &'a [crate::ondisk::sstable::SsTableDescriptor],
+            _outputs: &'a [SsTableDescriptor],
         ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
             Box::pin(async { Ok(()) })
         }
-    }
-
-    #[derive(Clone)]
-    struct CountExecutor {
-        count: Arc<AtomicUsize>,
-    }
-
-    impl Default for CountExecutor {
-        fn default() -> Self {
-            Self {
-                count: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-    }
-
-    impl CountExecutor {
-        fn count(&self) -> usize {
-            self.count.load(Ordering::Relaxed)
-        }
-    }
-
-    impl CompactionExecutor for CountExecutor {
-        fn execute(
-            &self,
-            _job: CompactionJob,
-        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
-        {
-            self.count.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { Err(CompactionError::Unimplemented) })
-        }
-
-        fn cleanup_outputs<'a>(
-            &'a self,
-            _outputs: &'a [crate::ondisk::sstable::SsTableDescriptor],
-        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn minor_compactor_skips_when_below_threshold() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("v", DataType::Int32, false),
-        ]));
-        let extractor =
-            crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
-        let mode_config = crate::mode::DynModeConfig::new(schema.clone(), extractor).unwrap();
-        let executor = Arc::new(TokioExecutor::default());
-        let mut db: DB<DynMode, TokioExecutor> =
-            DB::new(mode_config, executor).await.expect("db init");
-        let compactor = MinorCompactor::new(2, 0, 0);
-
-        let tmp_root: PathBuf = std::env::temp_dir().join("tonbo-compaction-test");
-        let _ = fs::create_dir_all(&tmp_root);
-        let fusio_path = Path::from_filesystem_path(&tmp_root).expect("tmp path");
-        let cfg = Arc::new(SsTableConfig::new(
-            schema.clone(),
-            Arc::new(LocalFs {}),
-            fusio_path,
-        ));
-        let res = compactor.maybe_compact(&mut db, cfg).await.unwrap();
-        assert!(res.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compaction_loop_stops_when_host_dropped() {
-        let local = LocalSet::new();
-        local
-            .run_until(async {
-                let planner = NeverCompact::default();
-                let executor = NoopCompactionExecutor::default();
-                let (_tx, rx) = tokio::sync::watch::channel(());
-                let db = Arc::new(TestHost::default());
-                let weak = Arc::downgrade(&db);
-                let handle = spawn_compaction_loop_local(
-                    weak,
-                    planner,
-                    executor,
-                    None,
-                    Duration::from_millis(10),
-                    1,
-                );
-                drop(db);
-                // Allow loop to observe drop
-                sleep(Duration::from_millis(30)).await;
-                handle.abort();
-                let _ = rx; // silence unused warning in cfg gates
-            })
-            .await;
+    async fn compaction_loop_retains_driver_and_upgrades_weak() {
+        let host = Arc::new(CountingHost::new());
+        let weak = Arc::downgrade(&host);
+        let planner = NoopPlanner;
+        let executor = NoopCompactionExecutor;
+        let runtime = Arc::new(TokioExecutor::default());
+        let handle = spawn_compaction_loop_local::<
+            DynMode,
+            TokioExecutor,
+            NoopCompactionExecutor,
+            NoopPlanner,
+        >(
+            weak,
+            planner,
+            executor,
+            Arc::clone(&runtime),
+            None,
+            Duration::from_millis(10),
+            1,
+        );
+
+        struct Guard {
+            _host: Arc<CountingHost>,
+            handle: CompactionLoopHandle<TokioExecutor>,
+        }
+
+        let guard = Guard {
+            _host: Arc::clone(&host),
+            handle,
+        };
+
+        drop(host);
+        sleep(Duration::from_millis(30)).await;
+        guard.handle.abort().await;
+        assert!(
+            guard._host.hits() > 0,
+            "background compaction loop should upgrade the weak ref and run at least once"
+        );
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32", feature = "web"))]
+mod wasm_tests {
+    use std::{
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use fusio::{
+        dynamic::{MaybeSend, MaybeSendFuture, MaybeSync},
+        executor::web::WebExecutor,
+    };
+    use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+
+    use super::CompactionLoopHandle;
+    use crate::{
+        compaction::{
+            CompactionHost,
+            executor::{CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome},
+            planner::{CompactionPlanner, CompactionSnapshot, CompactionTask},
+            spawn_compaction_loop_local,
+        },
+        mode::DynMode,
+        ondisk::sstable::SsTableDescriptor,
+    };
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[derive(Clone)]
+    struct CountingHost {
+        hits: Arc<AtomicUsize>,
     }
 
-    #[derive(Default)]
-    struct TestHost {
-        called: AtomicUsize,
+    impl CountingHost {
+        fn new() -> Self {
+            Self {
+                hits: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
     }
 
-    impl CompactionHost<DynMode, NoopExecutor> for TestHost {
+    impl CompactionHost<DynMode, WebExecutor> for CountingHost {
         fn compact_once<'a, CE, P>(
             &'a self,
             _planner: &'a P,
-            executor: &'a CE,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
+            _executor: &'a CE,
+        ) -> Pin<
+            Box<
+                dyn MaybeSendFuture<Output = Result<Option<CompactionOutcome>, CompactionError>>
+                    + 'a,
+            >,
+        >
         where
-            CE: CompactionExecutor + 'a,
-            P: CompactionPlanner + 'a,
+            CE: CompactionExecutor + MaybeSend + MaybeSync + 'a,
+            P: CompactionPlanner + MaybeSend + MaybeSync + 'a,
         {
-            self.called.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async {
-                // Kick the executor once to exercise scheduling paths; ignore outcome.
-                let job = CompactionJob {
-                    task: CompactionTask {
-                        source_level: 0,
-                        target_level: 0,
-                        input: Vec::new(),
-                        key_range: None,
-                    },
-                    inputs: Vec::new(),
-                    lease: None,
-                };
-                let _ = executor.execute(job).await;
+            let hits = Arc::clone(&self.hits);
+            Box::pin(async move {
+                hits.fetch_add(1, Ordering::SeqCst);
                 Ok(None)
             })
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn spawn_loop_triggers_compaction_attempts() {
-        let local = LocalSet::new();
-        local
-            .run_until(async {
-                let planner = NeverCompact::default();
-                let executor = CountExecutor::default();
-                let host = Arc::new(TestHost::default());
-                let weak = Arc::downgrade(&host);
-                let handle = spawn_compaction_loop_local(
-                    weak,
-                    planner,
-                    executor.clone(),
-                    None,
-                    Duration::from_millis(5),
-                    2,
-                );
-                sleep(Duration::from_millis(20)).await;
-                handle.abort();
-                assert!(executor.count() > 0);
-            })
-            .await;
+    #[derive(Clone)]
+    struct NoopPlanner;
+
+    impl CompactionPlanner for NoopPlanner {
+        fn plan(&self, _snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
+            None
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopCompactionExecutor;
+
+    impl CompactionExecutor for NoopCompactionExecutor {
+        fn execute(
+            &self,
+            _job: CompactionJob,
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
+        {
+            Box::pin(async { Err(CompactionError::Unimplemented) })
+        }
+
+        fn cleanup_outputs<'a>(
+            &'a self,
+            _outputs: &'a [SsTableDescriptor],
+        ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn compaction_loop_runs_on_web_executor() {
+        let host = Arc::new(CountingHost::new());
+        let weak = Arc::downgrade(&host);
+        let planner = NoopPlanner;
+        let executor = NoopCompactionExecutor;
+        let runtime = Arc::new(WebExecutor::new());
+        let handle = spawn_compaction_loop_local::<DynMode, WebExecutor, _, _>(
+            weak,
+            planner,
+            executor,
+            Arc::clone(&runtime),
+            None,
+            Duration::from_millis(10),
+            1,
+        );
+
+        struct Guard {
+            _host: Arc<CountingHost>,
+            handle: CompactionLoopHandle<WebExecutor>,
+        }
+
+        let guard = Guard {
+            _host: Arc::clone(&host),
+            handle,
+        };
+
+        runtime.sleep(Duration::from_millis(30)).await;
+        guard.handle.abort().await;
+        assert!(
+            guard._host.hits() > 0,
+            "web executor compaction loop should upgrade the weak ref and tick"
+        );
     }
 }

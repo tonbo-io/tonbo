@@ -6,6 +6,8 @@ use fusio::{
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
+#[cfg(any(test, feature = "test-helpers"))]
+use fusio_manifest::LeaseHandle;
 use fusio_manifest::{
     BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseStoreImpl,
     ManifestContext, SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
@@ -128,8 +130,20 @@ pub(crate) trait CatalogRuntime: MaybeSend + MaybeSync {
     fn table_meta<'a>(&'a self, table: TableId) -> BoxFuture<'a, ManifestResult<TableMeta>>;
 }
 
+/// Lease store abstraction for compaction/GC coordination.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) trait LeaseRuntime: MaybeSend + MaybeSync {
+    fn try_acquire<'a>(
+        &'a self,
+        snapshot_txn_id: u64,
+        ttl: Duration,
+    ) -> BoxFuture<'a, ManifestResult<Option<LeaseHandle>>>;
+
+    fn release<'a>(&'a self, lease: LeaseHandle) -> BoxFuture<'a, ManifestResult<()>>;
+}
+
 /// Idempotency store abstraction to avoid duplicate work across processes.
-pub(crate) trait IdempotencyRuntime: Send + Sync {
+pub(crate) trait IdempotencyRuntime: MaybeSend + MaybeSync {
     /// Returns true when the key was acquired, false if an unexpired record already exists.
     fn try_acquire<'a>(
         &'a self,
@@ -346,6 +360,44 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+/// Adapter over a manifest lease store to implement `LeaseRuntime` (test-only for now).
+pub(crate) struct LeaseHandleAdapter<LS> {
+    store: LS,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl<LS> LeaseHandleAdapter<LS> {
+    pub(crate) fn new(store: LS) -> Self {
+        Self { store }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl<LS> LeaseRuntime for LeaseHandleAdapter<LS>
+where
+    LS: fusio_manifest::LeaseStore + MaybeSend + MaybeSync + Clone + 'static,
+{
+    fn try_acquire<'a>(
+        &'a self,
+        snapshot_txn_id: u64,
+        ttl: Duration,
+    ) -> BoxFuture<'a, ManifestResult<Option<LeaseHandle>>> {
+        Box::pin(async move {
+            let lease = self
+                .store
+                .create(snapshot_txn_id, None, ttl)
+                .await
+                .map_err(ManifestError::from)?;
+            Ok(Some(lease))
+        })
+    }
+
+    fn release<'a>(&'a self, lease: LeaseHandle) -> BoxFuture<'a, ManifestResult<()>> {
+        Box::pin(async move { self.store.release(lease).await.map_err(ManifestError::from) })
+    }
+}
+
 fn wrap_version_manifest<M>(manifest: M) -> Arc<dyn VersionRuntime>
 where
     ManifestHandle<M>: VersionRuntime,
@@ -368,6 +420,15 @@ where
     M: MaybeSend + MaybeSync + 'static,
 {
     Arc::new(GcPlanHandle(manifest))
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn wrap_lease_runtime<LS>(store: LS) -> Arc<dyn LeaseRuntime>
+where
+    LeaseHandleAdapter<LS>: LeaseRuntime,
+    LS: MaybeSend + MaybeSync + 'static,
+{
+    Arc::new(LeaseHandleAdapter::new(store))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -400,7 +461,7 @@ impl<FS> IdempotencyHandleAdapter<FS> {
 
 impl<FS> IdempotencyRuntime for IdempotencyHandleAdapter<FS>
 where
-    FS: Fs + FsCas + Send + Sync + Clone + 'static,
+    FS: Fs + FsCas + MaybeSend + MaybeSync + Clone + 'static,
 {
     fn try_acquire<'a>(
         &'a self,
@@ -478,10 +539,20 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn wrap_idempotency_runtime<FS>(fs: FS, prefix: impl Into<String>) -> Arc<dyn IdempotencyRuntime>
 where
     IdempotencyHandleAdapter<FS>: IdempotencyRuntime,
-    FS: Send + Sync + 'static,
+    FS: Fs + FsCas + Clone + MaybeSend + MaybeSync + Send + Sync + 'static,
+{
+    Arc::new(IdempotencyHandleAdapter::new(fs, prefix))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wrap_idempotency_runtime<FS>(fs: FS, prefix: impl Into<String>) -> Arc<dyn IdempotencyRuntime>
+where
+    IdempotencyHandleAdapter<FS>: IdempotencyRuntime,
+    FS: Fs + FsCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     Arc::new(IdempotencyHandleAdapter::new(fs, prefix))
 }

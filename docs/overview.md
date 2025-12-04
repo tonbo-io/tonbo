@@ -486,7 +486,7 @@ Tonbo is **Arrow-native in memory** and **Parquet on disk**: Arrow gives a typed
 
 Tonbo runs on **async Rust** with a **Fusio-based Executor / Timer / FS** stack, so the same engine works in servers, serverless/edge, and the **browser**.
 
-- **Web/WASM feature toggle**: build with `--features web` to switch Fusio to the `WebExecutor` + `wasm-http` stack (optionally `web-opfs`). Tokio is disabled in this mode, `JoinHandle::join` is intentionally unjoinable on the web, and the current background compaction loop helper remains native-only until it is fully runtime-agnostic.
+- **Web/WASM feature toggle**: build with `--features web` to switch Fusio to the `WebExecutor` + `wasm-http` stack (optionally `web-opfs`). Tokio is disabled in this mode, `JoinHandle::join` is intentionally unjoinable on the web, and the background compaction loop runs via the Fusio executor/timer abstraction on all targets (Tokio or WebExecutor).
 
 - **OPFS (browser, WASM)**
   First-class storage backend. Core ops (`open/read_at/write_all/size/close`) map to OPFS handles.

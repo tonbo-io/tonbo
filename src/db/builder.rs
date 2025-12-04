@@ -1,7 +1,8 @@
-use std::{env, fs, io::Write, path::Path as StdPath, sync::Arc, time::Duration};
+use std::{env, fs, hash::Hash, io::Write, path::Path as StdPath, sync::Arc, time::Duration};
 
 use fusio::{
     DynFs,
+    dynamic::{MaybeSend, MaybeSync},
     executor::{Executor, Timer},
     fs::FsCas as FusioCas,
     mem::fs::InMemoryFs,
@@ -11,13 +12,12 @@ use fusio::{
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor, path::path_to_local};
 use thiserror::Error;
 
-#[cfg(feature = "tokio-runtime")]
-use super::CompactionLoopHandle;
 use super::{DB, DynMode, Mode};
-#[cfg(feature = "tokio-runtime")]
-use crate::compaction::{executor::LocalCompactionExecutor, spawn_compaction_loop_local};
 use crate::{
-    compaction::planner::{CompactionStrategy, PlannerInitError},
+    compaction::{
+        executor::LocalCompactionExecutor,
+        planner::{CompactionStrategy, PlannerInitError},
+    },
     extractor::{KeyExtractError, projection_for_columns},
     id::FileIdGenerator,
     manifest::{ManifestError, TonboManifest, init_fs_manifest},
@@ -1076,7 +1076,8 @@ where
 
 impl<M, S> DbBuilder<M, S>
 where
-    M: Mode + CatalogDescribe + 'static,
+    M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
+    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
     S: StorageState + TableNameConfigurable,
 {
     /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
@@ -1163,9 +1164,7 @@ where
             db.enable_wal(cfg).await?;
         }
 
-        #[cfg_attr(not(feature = "tokio-runtime"), allow(unused_mut))]
         let mut db = db;
-        #[cfg(feature = "tokio-runtime")]
         if let Some(loop_cfg) = self.compaction_loop_cfg {
             // Temporary shortcut: spawn a local compaction loop for dyn mode using a
             // caller-provided SST config. This should be replaced by a real
@@ -1178,18 +1177,15 @@ where
             let exec =
                 LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
             let driver = Arc::new(db.compaction_driver());
-            let handle = spawn_compaction_loop_local::<M, _, LocalCompactionExecutor, _>(
-                Arc::downgrade(&driver),
+            let handle = driver.spawn_compaction_worker_local(
+                Arc::clone(&db.executor),
                 planner,
                 exec,
                 Some(loop_cfg.sst_config),
                 loop_cfg.interval,
                 1,
             );
-            db.compaction_worker = Some(CompactionLoopHandle {
-                _driver: driver,
-                _handle: handle,
-            });
+            db.compaction_worker = Some(handle);
         }
 
         Ok(db)
@@ -1231,7 +1227,7 @@ impl<S> DbBuilder<DynMode, S>
 where
     S: StorageState,
 {
-    /// Enable a background compaction loop (current-thread Tokio). This is a temporary,
+    /// Enable a background compaction loop on the provided executor. This is a temporary,
     /// dyn-mode-only helper; a proper scheduler/lease should replace it.
     #[must_use]
     pub fn with_compaction_loop(
@@ -1250,7 +1246,8 @@ where
 }
 impl<M, S> DbBuilder<M, S>
 where
-    M: Mode + CatalogDescribe,
+    M: Mode + CatalogDescribe + MaybeSend + MaybeSync,
+    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
     S: TableNameConfigurable,
 {
     /// Attach a stable logical table name enforced at build time.
@@ -1263,7 +1260,8 @@ where
 
 impl<M, S> DbBuilder<M, S>
 where
-    M: Mode + CatalogDescribe + 'static,
+    M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
+    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
     S: DurableStorageState,
 {
     /// Apply a batch of WAL overrides supplied via [`WalConfig`].
@@ -1308,7 +1306,8 @@ where
 
 impl<M, S> DbBuilder<M, S>
 where
-    M: Mode + CatalogDescribe + 'static,
+    M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
+    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
     S: TableNameConfigurable,
 {
     /// Attempt to recover from WAL state if present, otherwise build a fresh durable DB.

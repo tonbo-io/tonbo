@@ -11,7 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fusio::executor::{Executor, Timer};
+use fusio::{
+    dynamic::{MaybeSend, MaybeSync},
+    executor::{Executor, Timer},
+};
 
 use crate::{
     compaction::{
@@ -46,16 +49,22 @@ impl TriggerRequest {
 }
 
 /// Minimal idempotency backend used to gate duplicate triggers.
-pub trait IdempotentCompactionLease: Send + Sync {
+pub trait IdempotentCompactionLease: MaybeSend + MaybeSync {
     /// Attempt to acquire a lease for `key`. Returns `true` when acquired, `false` if already held.
     fn try_acquire<'a>(
         &'a self,
         key: &'a str,
         ttl: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, CompactionError>> + Send + 'a>>;
+    ) -> IdemFuture<'a, Result<bool, CompactionError>>;
     /// Release a previously acquired lease.
-    fn release<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+    fn release<'a>(&'a self, key: &'a str) -> IdemFuture<'a, ()>;
 }
+
+#[cfg(target_arch = "wasm32")]
+type IdemFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type IdemFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// In-memory idempotency backend useful for single-process triggers.
 #[derive(Debug, Default)]
@@ -81,7 +90,7 @@ impl IdempotentCompactionLease for InMemoryCompactionLease {
         &'a self,
         key: &'a str,
         ttl: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, CompactionError>> + Send + 'a>> {
+    ) -> IdemFuture<'a, Result<bool, CompactionError>> {
         Box::pin(async move {
             let now = Instant::now();
             self.prune_expired(now);
@@ -99,7 +108,7 @@ impl IdempotentCompactionLease for InMemoryCompactionLease {
         })
     }
 
-    fn release<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    fn release<'a>(&'a self, key: &'a str) -> IdemFuture<'a, ()> {
         Box::pin(async move {
             if let Ok(mut guard) = self.inner.lock() {
                 guard.remove(key);
@@ -124,7 +133,7 @@ impl IdempotentCompactionLease for ManifestCompactionLease {
         &'a self,
         key: &'a str,
         ttl: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, CompactionError>> + Send + 'a>> {
+    ) -> IdemFuture<'a, Result<bool, CompactionError>> {
         Box::pin(async move {
             let acquired = self
                 .runtime
@@ -135,7 +144,7 @@ impl IdempotentCompactionLease for ManifestCompactionLease {
         })
     }
 
-    fn release<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    fn release<'a>(&'a self, key: &'a str) -> IdemFuture<'a, ()> {
         Box::pin(async move {
             let _ = self.runtime.release(key).await;
         })

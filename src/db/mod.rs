@@ -10,18 +10,22 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard, RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard},
+    time::Duration,
 };
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use fusio::dynamic::MaybeSendFuture;
+#[cfg(any(test, feature = "test-helpers"))]
+use fusio::executor::JoinHandle;
 use fusio::{
     DynFs,
+    dynamic::{MaybeSend, MaybeSync},
     executor::{Executor, RwLock, Timer},
 };
-use futures::{Stream, StreamExt, stream};
+use futures::{Stream, StreamExt, future::AbortHandle, stream};
 use lockable::LockableHashMap;
 use typed_arrow_dyn::DynRow;
 use web_time::Instant;
@@ -34,6 +38,8 @@ pub use builder::{
 pub use error::DBError;
 use predicate::Predicate;
 
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::compaction::CompactionHost;
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
     compaction::{
@@ -41,6 +47,7 @@ use crate::{
             CompactionError, CompactionExecutor, CompactionJob, CompactionLease, CompactionOutcome,
         },
         planner::{CompactionInput, CompactionPlanner, CompactionSnapshot},
+        scheduler::{CompactionScheduler, ScheduledCompaction},
         trigger::{ManifestCompactionLease, TriggerRequest, stateless_compaction_once},
     },
     extractor::KeyExtractError,
@@ -175,7 +182,6 @@ where
 type PendingWalTxns = HashMap<u64, PendingWalTxn>;
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-#[cfg(feature = "tokio-runtime")]
 struct CompactionLoopHandle<M, E>
 where
     M: Mode,
@@ -183,8 +189,35 @@ where
     E: Executor + Timer,
 {
     _driver: Arc<CompactionDriver<M, E>>,
+    abort: AbortHandle,
+    _handle: Option<<E as Executor>::JoinHandle<()>>,
+}
 
-    _handle: tokio::task::JoinHandle<()>,
+impl<M, E> CompactionLoopHandle<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
+    #[cfg(any(test, feature = "test-helpers"))]
+    // Tests/manual cleanup call abort; production relies on Drop-driven cancellation.
+    async fn abort(mut self) {
+        self.abort.abort();
+        if let Some(handle) = self._handle.take() {
+            let _ = handle.join().await;
+        }
+    }
+}
+
+impl<M, E> Drop for CompactionLoopHandle<M, E>
+where
+    M: Mode,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer,
+{
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
 }
 
 pub(crate) struct CompactionDriver<M, E>
@@ -290,7 +323,6 @@ where
         DB::<M, E>::plan_compaction_from_version(planner, version)
     }
 
-    #[cfg(feature = "tokio-runtime")]
     async fn run_compaction_task<CE, P>(
         &self,
         planner: &P,
@@ -371,25 +403,227 @@ where
             }
         }
     }
+    async fn run_scheduled_compaction<CE>(
+        &self,
+        scheduled: ScheduledCompaction,
+        executor: &CE,
+    ) -> Result<Option<CompactionOutcome>, CompactionError>
+    where
+        CE: CompactionExecutor,
+    {
+        let mut attempts = 0usize;
+        loop {
+            attempts += 1;
+            let snapshot = self
+                .manifest
+                .snapshot_latest(self.manifest_table)
+                .await
+                .map_err(CompactionError::Manifest)?;
+            let version = match snapshot.latest_version {
+                Some(ref state) => state,
+                None => return Ok(None),
+            };
+
+            if let Some(expected) = scheduled.manifest_head
+                && snapshot.head.last_manifest_txn != Some(expected)
+            {
+                return Ok(None);
+            }
+
+            let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
+            let inputs = DB::<M, E>::resolve_compaction_inputs(version, &scheduled.task)?;
+            let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
+            let wal_floor = self.manifest_wal_floor().await;
+            let job = CompactionJob {
+                task: scheduled.task.clone(),
+                inputs,
+                lease: Some(scheduled.lease.clone()),
+            };
+
+            let outcome = executor.execute(job).await?;
+            let mut outcome = outcome;
+            outcome.obsolete_sst_ids = obsolete_ids;
+            DB::<M, E>::reconcile_wal_segments(
+                version,
+                &mut outcome,
+                &existing_wal_segments,
+                wal_floor,
+            );
+            let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
+            let edits = outcome.to_version_edits();
+            if edits.is_empty() {
+                return Ok(Some(outcome));
+            }
+            let expected_head = scheduled.manifest_head.or(snapshot.head.last_manifest_txn);
+            match self
+                .manifest
+                .apply_version_edits_cas(self.manifest_table, expected_head, &edits)
+                .await
+            {
+                Ok(_) => {
+                    self.prune_wal_segments_below_floor().await;
+                    if let Some(plan) = gc_plan {
+                        self.manifest
+                            .record_gc_plan(self.manifest_table, plan)
+                            .await
+                            .map_err(CompactionError::Manifest)?;
+                    }
+                    return Ok(Some(outcome));
+                }
+                Err(ManifestError::CasConflict(_)) => {
+                    executor.cleanup_outputs(&outcome.outputs).await?;
+                    if attempts >= DB::<M, E>::MAX_COMPACTION_APPLY_RETRIES {
+                        return Err(CompactionError::CasConflict);
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    executor.cleanup_outputs(&outcome.outputs).await?;
+                    return Err(CompactionError::Manifest(err));
+                }
+            }
+        }
+    }
+
+    /// Spawn a current-thread compaction worker that plans tasks, issues leases, and executes
+    /// them via the scheduler loop.
+    fn spawn_compaction_worker_local<CE, P>(
+        self: &Arc<Self>,
+        runtime: Arc<E>,
+        planner: P,
+        executor: CE,
+        gc_sst_config: Option<Arc<SsTableConfig>>,
+        interval: Duration,
+        budget: usize,
+    ) -> CompactionLoopHandle<M, E>
+    where
+        CE: CompactionExecutor + MaybeSend + MaybeSync + 'static,
+        P: CompactionPlanner + MaybeSend + MaybeSync + 'static,
+        M: Mode + MaybeSend + MaybeSync + 'static,
+        M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
+        E: Executor + Timer + 'static,
+    {
+        let (scheduler, mut rx) = CompactionScheduler::new(budget.max(1), budget.max(1));
+        let driver = Arc::clone(self);
+        let driver_for_handle = Arc::clone(&driver);
+        let driver_for_loop = Arc::clone(&driver);
+        let executor = Arc::new(executor);
+        let _ = gc_sst_config;
+        let runtime_for_loop = Arc::clone(&runtime);
+        let (abort, reg) = futures::future::AbortHandle::new_pair();
+        let loop_future = async move {
+            let runtime = runtime_for_loop;
+            loop {
+                runtime.sleep(interval).await;
+                for _ in 0..budget.max(1) {
+                    match driver_for_loop.plan_compaction_task(&planner).await {
+                        Ok(Some(task)) => {
+                            let manifest_head = match driver_for_loop
+                                .manifest
+                                .snapshot_latest(driver_for_loop.manifest_table)
+                                .await
+                            {
+                                Ok(snapshot) => snapshot.head.last_manifest_txn,
+                                Err(err) => {
+                                    eprintln!("compaction snapshot failed: {err}");
+                                    continue;
+                                }
+                            };
+                            if let Err(err) = scheduler
+                                .enqueue(
+                                    task,
+                                    manifest_head,
+                                    "local-compaction",
+                                    interval.as_millis() as u64,
+                                )
+                                .await
+                            {
+                                eprintln!("compaction scheduler closed: {err}");
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            eprintln!("compaction planner failed: {err}");
+                            break;
+                        }
+                    }
+                }
+
+                if let Err(err) = scheduler
+                    .drain_with_budget(&mut rx, |job| {
+                        let driver = Arc::clone(&driver);
+                        let executor = Arc::clone(&executor);
+                        async move {
+                            if let Err(err) = driver
+                                .run_scheduled_compaction(job, executor.as_ref())
+                                .await
+                            {
+                                eprintln!("scheduled compaction failed: {err}");
+                            }
+                        }
+                    })
+                    .await
+                {
+                    eprintln!("compaction scheduler drain stopped: {err}");
+                    return;
+                }
+            }
+        };
+        let abortable = futures::future::Abortable::new(loop_future, reg);
+        let handle = runtime.spawn(async move {
+            let _ = abortable.await;
+        });
+        CompactionLoopHandle {
+            _driver: driver_for_handle,
+            abort,
+            _handle: Some(handle),
+        }
+    }
 }
 
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(test, feature = "test-helpers"))]
 impl<M, E> crate::compaction::CompactionHost<M, E> for CompactionDriver<M, E>
 where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
+    M: Mode + MaybeSend + MaybeSync,
+    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
     E: Executor + Timer,
 {
     fn compact_once<'a, CE, P>(
         &'a self,
         planner: &'a P,
         executor: &'a CE,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
+    ) -> Pin<
+        Box<dyn MaybeSendFuture<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>,
+    >
     where
-        CE: CompactionExecutor + 'a,
-        P: CompactionPlanner + 'a,
+        CE: CompactionExecutor + MaybeSend + MaybeSync + 'a,
+        P: CompactionPlanner + MaybeSend + MaybeSync + 'a,
     {
         Box::pin(self.run_compaction_task(planner, executor))
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl<M, E> CompactionHost<M, E> for DB<M, E>
+where
+    M: Mode + MaybeSend + MaybeSync,
+    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
+    E: Executor + Timer,
+{
+    fn compact_once<'a, CE, P>(
+        &'a self,
+        planner: &'a P,
+        executor: &'a CE,
+    ) -> Pin<
+        Box<dyn MaybeSendFuture<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>,
+    >
+    where
+        CE: CompactionExecutor + MaybeSend + MaybeSync + 'a,
+        P: CompactionPlanner + MaybeSend + MaybeSync + 'a,
+    {
+        let driver = self.compaction_driver();
+        Box::pin(async move { driver.run_compaction_task(planner, executor).await })
     }
 }
 
@@ -978,7 +1212,6 @@ where
         DbBuilder::new(config)
     }
 
-    #[cfg(feature = "tokio-runtime")]
     /// Whether a background compaction worker was spawned for this DB.
     pub fn has_compaction_worker(&self) -> bool {
         self.compaction_worker.is_some()
@@ -1272,7 +1505,6 @@ where
             manifest_table,
             mutable_wal_range: Arc::new(Mutex::new(None)),
             _key_locks: Arc::new(LockableHashMap::new()),
-            #[cfg(feature = "tokio-runtime")]
             compaction_worker: None,
         }
     }
