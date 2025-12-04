@@ -13,7 +13,6 @@ pub mod id;
 mod inmem;
 /// Zero-copy key projection scaffolding and owned key wrapper.
 pub mod key;
-pub(crate) mod metrics;
 pub mod mode;
 pub(crate) mod mutation;
 pub mod schema;

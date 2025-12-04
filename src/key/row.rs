@@ -85,6 +85,29 @@ impl KeyRow {
     pub(crate) fn heap_size(&self) -> usize {
         dyn_row_heap_size(self.as_dyn())
     }
+
+    /// Debug helper: return a representation of the key bytes for logging.
+    pub fn debug_bytes(&self) -> Vec<String> {
+        self.raw
+            .cells()
+            .iter()
+            .map(|cell| match cell {
+                Some(DynCellRaw::Str { ptr, len }) => {
+                    let bytes = unsafe { slice::from_raw_parts(ptr.as_ptr(), *len) };
+                    format!("Str({:?})", String::from_utf8_lossy(bytes))
+                }
+                Some(DynCellRaw::Bin { ptr, len }) => {
+                    let bytes = unsafe { slice::from_raw_parts(ptr.as_ptr(), *len) };
+                    format!("Bin({:?})", bytes)
+                }
+                Some(DynCellRaw::I32(v)) => format!("I32({v})"),
+                Some(DynCellRaw::I64(v)) => format!("I64({v})"),
+                Some(DynCellRaw::U64(v)) => format!("U64({v})"),
+                Some(other) => format!("{other:?}"),
+                None => "None".to_string(),
+            })
+            .collect()
+    }
 }
 
 impl PartialEq for KeyRow {

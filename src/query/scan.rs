@@ -3,7 +3,11 @@ use std::{collections::BTreeSet, sync::Arc};
 use arrow_schema::{Schema, SchemaRef};
 use predicate::{Operand, Predicate, PredicateNode};
 
-use crate::{extractor::KeyExtractError, manifest::TableSnapshot, mvcc::Timestamp};
+use crate::{
+    extractor::KeyExtractError,
+    manifest::{SstEntry, TableSnapshot},
+    mvcc::Timestamp,
+};
 
 /// Internal representation of a scan plan. Things included in the plan:
 /// * predicate: the caller-supplied predicate used for pruning and residual evaluation
@@ -14,15 +18,14 @@ use crate::{extractor::KeyExtractError, manifest::TableSnapshot, mvcc::Timestamp
 /// * limit: the raw limit
 /// * read_ts: snapshot/read timestamp
 pub struct ScanPlan {
-    #[allow(dead_code)]
-    pub(crate) predicate: Predicate,
+    pub(crate) _predicate: Predicate,
     pub(crate) immutable_indexes: Vec<usize>,
     pub(crate) residual_predicate: Option<Predicate>,
     pub(crate) projected_schema: Option<SchemaRef>,
     pub(crate) scan_schema: SchemaRef,
     pub(crate) limit: Option<usize>,
     pub(crate) read_ts: Timestamp,
-    #[allow(dead_code)]
+
     pub(crate) _snapshot: TableSnapshot,
 }
 
@@ -100,5 +103,21 @@ fn collect_predicate_columns(predicate: &Predicate, out: &mut BTreeSet<Arc<str>>
 fn collect_operand_column(operand: &Operand, out: &mut BTreeSet<Arc<str>>) {
     if let Operand::Column(column) = operand {
         out.insert(Arc::clone(&column.name));
+    }
+}
+
+impl ScanPlan {
+    /// Access SST entries from the snapshot, grouped by compaction level.
+    ///
+    /// Returns all SST entries across all levels that should be scanned.
+    /// Pruning based on key ranges or statistics will be added in future iterations.
+    pub(crate) fn sst_entries(&self) -> impl Iterator<Item = &SstEntry> {
+        self._snapshot
+            .latest_version
+            .as_ref()
+            .map(|v| v.ssts())
+            .unwrap_or(&[])
+            .iter()
+            .flatten()
     }
 }

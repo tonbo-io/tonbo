@@ -23,7 +23,13 @@ pub fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig
 }
 
 /// Convenience helper that only returns the schema with embedded metadata.
-#[allow(dead_code)]
+
 pub fn schema_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> SchemaRef {
     config_with_pk(fields, primary_key).schema()
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn schema_with_pk_for_tests(fields: Vec<Field>, primary_key: &[&str]) -> SchemaRef {
+    schema_with_pk(fields, primary_key)
 }

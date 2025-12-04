@@ -76,7 +76,7 @@ pub trait SealPolicy {
 /// Useful as a safe default when you prefer manual or explicit sealing, or in
 /// tests where sealing is controlled by the test case.
 #[derive(Clone, Debug, Default)]
-#[allow(unused)]
+
 pub struct NeverSeal;
 
 impl SealPolicy for NeverSeal {
@@ -189,32 +189,6 @@ impl SealPolicy for TimeElapsedPolicy {
     }
 }
 
-/// A replace ratio policy that suggests sealing when churn is high.
-#[derive(Clone, Debug)]
-#[allow(unused)]
-pub struct ReplaceRatioPolicy {
-    /// Minimum replaces/inserts ratio to trigger sealing.
-    pub min_ratio: f64,
-    /// Minimum number of inserts observed before evaluating the ratio.
-    pub min_inserts: u64,
-}
-
-impl SealPolicy for ReplaceRatioPolicy {
-    fn evaluate(&self, stats: &MemStats) -> SealDecision {
-        if stats.inserts >= self.min_inserts && stats.inserts > 0 {
-            let ratio = stats.replaces as f64 / stats.inserts as f64;
-            if ratio >= self.min_ratio {
-                return SealDecision::Seal(SealReason::ReplaceRatio {
-                    replaces: stats.replaces,
-                    inserts: stats.inserts,
-                    min_ratio: self.min_ratio,
-                });
-            }
-        }
-        SealDecision::NoOp
-    }
-}
-
 /// Composite policy that triggers if any inner policy triggers.
 #[derive(Default)]
 pub struct AnyOf {
@@ -240,20 +214,21 @@ impl SealPolicy for AnyOf {
 }
 
 /// Composite policy that triggers only if all inner policies trigger.
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Default)]
-#[allow(unused)]
 pub struct AllOf {
     inner: Vec<Arc<dyn SealPolicy + Send + Sync>>,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl AllOf {
     /// Create a composite policy from a list of inner policies.
-    #[allow(unused)]
     pub fn new(inner: Vec<Arc<dyn SealPolicy + Send + Sync>>) -> Self {
         Self { inner }
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl SealPolicy for AllOf {
     fn evaluate(&self, stats: &MemStats) -> SealDecision {
         let mut last_reason: Option<SealReason> = None;

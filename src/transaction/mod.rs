@@ -10,7 +10,6 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, SchemaRef};
 use fusio::executor::{Executor, Timer};
-use fusio_manifest::snapshot::Snapshot as ManifestLease;
 use futures::{StreamExt, pin_mut};
 use lockable::AsyncLimit;
 use predicate::Predicate;
@@ -20,11 +19,13 @@ use typed_arrow_dyn::{
     DynViewError,
 };
 
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::manifest::{TableHead, VersionState};
 use crate::{
     db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, DynDbHandle, TxnWalPublishContext, WalFrameRange},
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
     key::{KeyOwned, KeyTsViewRaw},
-    manifest::{ManifestError, TableHead, TableSnapshot, VersionEdit, VersionState, WalSegmentRef},
+    manifest::{ManifestError, TableSnapshot, VersionEdit},
     mode::DynMode,
     mutation::DynMutation,
     mvcc::{ReadView, Timestamp},
@@ -53,7 +54,7 @@ pub enum TransactionDurability {
 
 /// Errors surfaced while constructing a read-only snapshot.
 #[derive(Debug, Error)]
-#[allow(dead_code)]
+
 pub enum SnapshotError {
     /// Manifest layer failed while capturing the snapshot.
     #[error("failed to load manifest snapshot: {0}")]
@@ -62,13 +63,12 @@ pub enum SnapshotError {
 
 /// Immutable read-only view bound to a manifest lease and MVCC snapshot timestamp.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub struct Snapshot {
     read_view: ReadView,
     manifest: TableSnapshot,
 }
 
-#[allow(dead_code)]
 impl Snapshot {
     pub(crate) fn from_table_snapshot(read_view: ReadView, manifest: TableSnapshot) -> Self {
         Self {
@@ -82,24 +82,16 @@ impl Snapshot {
         self.read_view
     }
 
-    /// Lowest WAL segment that must remain durable for this snapshot.
-    pub(crate) fn wal_floor(&self) -> Option<&WalSegmentRef> {
-        self.manifest.head.wal_floor.as_ref()
-    }
-
     /// Manifest head describing the table state visible to the snapshot.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn head(&self) -> &TableHead {
         &self.manifest.head
     }
 
     /// Latest committed version included in the snapshot, when available.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn latest_version(&self) -> Option<&VersionState> {
         self.manifest.latest_version.as_ref()
-    }
-
-    /// Underlying manifest lease keeping table metadata stable while the snapshot is alive.
-    pub(crate) fn manifest_snapshot(&self) -> &ManifestLease {
-        &self.manifest.manifest_snapshot
     }
 
     /// Full manifest payload retained by the snapshot for downstream consumers.
@@ -109,7 +101,6 @@ impl Snapshot {
 }
 
 /// In-memory staging buffer tracking mutations by primary key.
-#[allow(dead_code)]
 pub(crate) struct StagedMutations {
     /// Snapshot timestamp guarding conflict detection for this transaction.
     snapshot_ts: Timestamp,
@@ -126,7 +117,6 @@ impl fmt::Debug for StagedMutations {
     }
 }
 
-#[allow(dead_code)]
 impl StagedMutations {
     /// Create a new empty staging buffer tied to the supplied snapshot timestamp.
     pub(crate) fn new(snapshot_ts: Timestamp) -> Self {
@@ -321,6 +311,9 @@ impl From<DBError> for TransactionError {
                 TransactionError::Snapshot(SnapshotError::Manifest(manifest))
             }
             DBError::Stream(stream) => TransactionError::Stream(stream),
+            DBError::SsTable(sstable) => {
+                TransactionError::Stream(crate::query::stream::StreamError::SsTableIo(sstable))
+            }
         }
     }
 }
@@ -477,6 +470,7 @@ where
         let streams = self
             .handle
             .build_scan_streams(&plan, txn_scan)
+            .await
             .map_err(TransactionError::from)?;
         if streams.is_empty() {
             return Ok(Vec::new());

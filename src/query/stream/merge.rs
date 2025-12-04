@@ -94,10 +94,10 @@ where
 
             // De-duplicate keys from different streams (timestamps may differ).
             let duplicate_key = {
-                let entry_key = entry.key().key();
+                let entry_key = entry.key_owned();
                 this.buf
                     .as_ref()
-                    .is_some_and(|buf| buf.key().key() == entry_key)
+                    .is_some_and(|buf| buf.key_owned() == entry_key)
             };
             if duplicate_key {
                 continue;
@@ -154,9 +154,10 @@ impl Ord for HeapEntry {
         // Entries are ordered by commit timestamp, then key ordering, followed by source priority
         // (txn > mutable > immutable > SST).
         let ordering = self.order.unwrap_or(Order::Asc);
+        let self_key = self.entry.key_owned();
+        let other_key = other.entry.key_owned();
         let key_cmp = match ordering {
-            Order::Asc => self.entry.key().cmp(other.entry.key()),
-            Order::Desc => other.entry.key().cmp(self.entry.key()),
+            Order::Asc => self_key.cmp(&other_key),
         };
         // Timestamps are always ordered descending (latest first) regardless of key order.
         let ts_cmp = other.entry.ts().cmp(&self.entry.ts());
@@ -293,20 +294,30 @@ mod tests {
             while let Some(entry) = merge.next().await {
                 let entry = entry.expect("entry ok");
                 let (key, ts, row) = match entry {
-                    StreamEntry::Txn((key_ts, row)) => {
-                        (key_ts.key().to_owned(), key_ts.timestamp(), row)
+                    StreamEntry::Txn((key_ts, row)) => (
+                        key_ts.key().to_owned(),
+                        key_ts.timestamp(),
+                        row.into_owned().expect("row"),
+                    ),
+                    StreamEntry::MemTable((key_ts, row)) => (
+                        key_ts.key().to_owned(),
+                        key_ts.timestamp(),
+                        row.into_owned().expect("row"),
+                    ),
+                    StreamEntry::Sstable(row_ref) => {
+                        let key_ts = row_ref.key_ts();
+                        (
+                            key_ts.key().to_owned(),
+                            key_ts.timestamp(),
+                            row_ref.into_row_owned().expect("row"),
+                        )
                     }
-                    StreamEntry::MemTable((key_ts, row)) => {
-                        (key_ts.key().to_owned(), key_ts.timestamp(), row)
-                    }
-                    StreamEntry::MemTableTombstone(_) => continue,
-                    StreamEntry::Sstable((key_ts, row)) => {
-                        (key_ts.key().to_owned(), key_ts.timestamp(), row)
-                    }
-                    StreamEntry::TxnTombstone(_) => continue,
+                    StreamEntry::TxnTombstone(_)
+                    | StreamEntry::MemTableTombstone(_)
+                    | StreamEntry::SstableTombstone(_) => continue,
                 };
                 let key_str = key.as_utf8().expect("utf8 key").to_string();
-                let value = row.into_owned().expect("row owned").0[1]
+                let value = row.0[1]
                     .as_ref()
                     .and_then(|cell| match cell {
                         DynCell::I64(v) => Some(*v),
@@ -401,13 +412,22 @@ mod tests {
         while let Some(entry) = merge.next().await {
             let entry = entry.expect("entry ok");
             let (key, row) = match entry {
-                StreamEntry::Txn((key_ts, row)) => (key_ts.key().to_owned(), row),
-                StreamEntry::MemTable((key_ts, row)) => (key_ts.key().to_owned(), row),
-                StreamEntry::Sstable((key_ts, row)) => (key_ts.key().to_owned(), row),
-                StreamEntry::TxnTombstone(_) | StreamEntry::MemTableTombstone(_) => continue,
+                StreamEntry::Txn((key_ts, row)) => {
+                    (key_ts.key().to_owned(), row.into_owned().expect("row"))
+                }
+                StreamEntry::MemTable((key_ts, row)) => {
+                    (key_ts.key().to_owned(), row.into_owned().expect("row"))
+                }
+                StreamEntry::Sstable(row_ref) => (
+                    row_ref.key_ts().key().to_owned(),
+                    row_ref.into_row_owned().expect("row"),
+                ),
+                StreamEntry::TxnTombstone(_)
+                | StreamEntry::MemTableTombstone(_)
+                | StreamEntry::SstableTombstone(_) => continue,
             };
             let key_str = key.as_utf8().expect("utf8 key").to_string();
-            let value = row.into_owned().expect("row").0[1]
+            let value = row.0[1]
                 .as_ref()
                 .and_then(|cell| match cell {
                     DynCell::I64(v) => Some(*v),

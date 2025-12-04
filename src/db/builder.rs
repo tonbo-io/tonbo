@@ -654,7 +654,7 @@ struct StorageBackend {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
+
 enum StorageBackendKind {
     InMemory {
         fs: Arc<InMemoryFs>,
@@ -720,6 +720,11 @@ impl StorageLayout {
 
     fn backend(&self) -> &StorageBackend {
         &self.backend
+    }
+
+    /// Access the unified filesystem for this storage layout.
+    fn fs(&self) -> Arc<dyn DynFs> {
+        Arc::clone(&self.backend.dyn_fs)
     }
 
     fn wal_route(&self) -> Result<StorageRoute, DbBuildError> {
@@ -1142,13 +1147,15 @@ where
             None
         };
 
+        let fs = layout.fs();
+
         let mut db = DB::from_components(
             mode,
             mem,
+            fs,
             manifest,
             manifest_table,
             wal_cfg.clone(),
-            file_ids,
             executor,
         );
 
@@ -1181,7 +1188,7 @@ where
             );
             db.compaction_worker = Some(CompactionLoopHandle {
                 _driver: driver,
-                handle,
+                _handle: handle,
             });
         }
 
@@ -1213,7 +1220,7 @@ where
 
 /// Configures automatic compaction loop spawning for DynMode builds.
 #[derive(Clone)]
-#[allow(dead_code)]
+
 struct CompactionLoopConfig {
     interval: Duration,
     sst_config: Arc<SsTableConfig>,
@@ -1342,13 +1349,14 @@ where
                 .await
                 .map_err(DbBuildError::Manifest)?;
             let manifest_table = table_meta.table_id;
+            let fs = layout.fs();
             let mut db = DB::recover_with_wal_with_manifest(
                 self.mode_config,
                 Arc::clone(&executor),
+                fs,
                 wal_cfg.clone(),
                 manifest,
                 manifest_table,
-                file_ids,
             )
             .await
             .map_err(DbBuildError::Mode)?;

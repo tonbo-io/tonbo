@@ -16,9 +16,10 @@ mod version;
 pub(crate) use bootstrap::{
     IdempotencyRuntime, TableSnapshot, TonboManifest, init_fs_manifest, init_in_memory_manifest,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) use domain::TableHead;
 pub(crate) use domain::{
-    GcPlanState, GcSstRef, SstEntry, TableDefinition, TableHead, TableId, VersionState,
-    WalSegmentRef,
+    GcPlanState, GcSstRef, SstEntry, TableDefinition, TableId, VersionState, WalSegmentRef,
 };
 pub(crate) use driver::{ManifestError, ManifestResult};
 pub(crate) use version::VersionEdit;

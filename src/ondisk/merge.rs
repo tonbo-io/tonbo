@@ -12,7 +12,9 @@ use std::{
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use futures::{StreamExt, stream};
+use futures::StreamExt;
+#[cfg(test)]
+use futures::stream;
 use parquet::errors::ParquetError;
 
 use super::sstable::{
@@ -63,7 +65,7 @@ impl<M: crate::mode::Mode> SsTableMergeSource<M> {
     }
 
     /// Replace the current buffer with pre-fetched batches (useful for tests).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_batches(batches: Vec<SsTableStreamBatch<M>>) -> Self
     where
         M: crate::mode::Mode<ImmLayout = RecordBatch> + 'static,

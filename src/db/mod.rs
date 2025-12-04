@@ -4,8 +4,6 @@
 //! trait-driven structure remains so that compile-time typed dispatch can be
 //! reintroduced without reshaping the API.
 
-#[cfg(feature = "tokio-runtime")]
-use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -19,8 +17,10 @@ use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
 #[cfg(test)]
 use fusio::dynamic::MaybeSendFuture;
-#[allow(unused_imports)]
-use fusio::executor::{Executor, RwLock, Timer};
+use fusio::{
+    DynFs,
+    executor::{Executor, RwLock, Timer},
+};
 use futures::{Stream, StreamExt, stream};
 use lockable::LockableHashMap;
 use typed_arrow_dyn::DynRow;
@@ -34,12 +34,9 @@ pub use builder::{
 pub use error::DBError;
 use predicate::Predicate;
 
-#[cfg(feature = "tokio-runtime")]
-use crate::compaction::scheduler::{CompactionScheduler, ScheduledCompaction};
 pub use crate::mode::{DynMode, DynModeConfig, Mode};
 use crate::{
     compaction::{
-        CompactionHost,
         executor::{
             CompactionError, CompactionExecutor, CompactionJob, CompactionLease, CompactionOutcome,
         },
@@ -63,8 +60,12 @@ use crate::{
     },
     mode::CatalogDescribe,
     mvcc::{CommitClock, ReadView, Timestamp},
-    ondisk::sstable::{
-        SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId,
+    ondisk::{
+        scan::{SstableScan, load_delete_index},
+        sstable::{
+            SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId,
+            open_parquet_stream,
+        },
     },
     query::{
         scan::{ScanPlan, projection_with_predicate},
@@ -111,7 +112,7 @@ impl TxSnapshot {
         let immutable_indexes = immutable::prune_segments::<DynMode>(&prune_input);
         let read_ts = self.read_view().read_ts();
         Ok(ScanPlan {
-            predicate: predicate.clone(),
+            _predicate: predicate.clone(),
             immutable_indexes,
             residual_predicate,
             projected_schema,
@@ -182,8 +183,8 @@ where
     E: Executor + Timer,
 {
     _driver: Arc<CompactionDriver<M, E>>,
-    #[allow(dead_code)]
-    handle: tokio::task::JoinHandle<()>,
+
+    _handle: tokio::task::JoinHandle<()>,
 }
 
 pub(crate) struct CompactionDriver<M, E>
@@ -289,58 +290,11 @@ where
         DB::<M, E>::plan_compaction_from_version(planner, version)
     }
 
-    async fn plan_compaction_task_with_head<P>(
-        &self,
-        planner: &P,
-    ) -> ManifestResult<
-        Option<(
-            crate::compaction::planner::CompactionTask,
-            Option<Timestamp>,
-        )>,
-    >
-    where
-        P: CompactionPlanner,
-    {
-        let snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
-        let expected_head = snapshot.head.last_manifest_txn;
-        let version = match snapshot.latest_version {
-            Some(ref state) => state,
-            None => return Ok(None),
-        };
-        Ok(DB::<M, E>::plan_compaction_from_version(planner, version)?
-            .map(|task| (task, expected_head)))
-    }
-
-    async fn compact_once<CE, P>(
-        &self,
-        planner: &P,
-        executor: &CE,
-    ) -> Result<Option<CompactionOutcome>, CompactionError>
-    where
-        CE: CompactionExecutor,
-        P: CompactionPlanner,
-    {
-        self.run_compaction_task(planner, executor).await
-    }
-
+    #[cfg(feature = "tokio-runtime")]
     async fn run_compaction_task<CE, P>(
         &self,
         planner: &P,
         executor: &CE,
-    ) -> Result<Option<CompactionOutcome>, CompactionError>
-    where
-        CE: CompactionExecutor,
-        P: CompactionPlanner,
-    {
-        self.run_compaction_task_with_lease(planner, executor, None)
-            .await
-    }
-
-    async fn run_compaction_task_with_lease<CE, P>(
-        &self,
-        planner: &P,
-        executor: &CE,
-        lease: Option<CompactionLease>,
     ) -> Result<Option<CompactionOutcome>, CompactionError>
     where
         CE: CompactionExecutor,
@@ -371,7 +325,7 @@ where
             let job = CompactionJob {
                 task,
                 inputs,
-                lease: lease.clone(),
+                lease: None,
             };
 
             let outcome = executor.execute(job).await?;
@@ -417,168 +371,10 @@ where
             }
         }
     }
-
-    #[cfg(feature = "tokio-runtime")]
-    async fn run_scheduled_compaction<CE>(
-        &self,
-        scheduled: ScheduledCompaction,
-        executor: &CE,
-    ) -> Result<Option<CompactionOutcome>, CompactionError>
-    where
-        CE: CompactionExecutor,
-    {
-        let mut attempts = 0usize;
-        loop {
-            attempts += 1;
-            let snapshot = self
-                .manifest
-                .snapshot_latest(self.manifest_table)
-                .await
-                .map_err(CompactionError::Manifest)?;
-            let version = match snapshot.latest_version {
-                Some(ref state) => state,
-                None => return Ok(None),
-            };
-
-            if let Some(expected) = scheduled.manifest_head
-                && snapshot.head.last_manifest_txn != Some(expected)
-            {
-                return Ok(None);
-            }
-
-            let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
-            let inputs = DB::<M, E>::resolve_compaction_inputs(version, &scheduled.task)?;
-            let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
-            let wal_floor = self.manifest_wal_floor().await;
-            let job = CompactionJob {
-                task: scheduled.task.clone(),
-                inputs,
-                lease: Some(scheduled.lease.clone()),
-            };
-
-            let outcome = executor.execute(job).await?;
-            let mut outcome = outcome;
-            outcome.obsolete_sst_ids = obsolete_ids;
-            DB::<M, E>::reconcile_wal_segments(
-                version,
-                &mut outcome,
-                &existing_wal_segments,
-                wal_floor,
-            );
-            let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
-            let edits = outcome.to_version_edits();
-            if edits.is_empty() {
-                return Ok(Some(outcome));
-            }
-            let expected_head = scheduled.manifest_head.or(snapshot.head.last_manifest_txn);
-            match self
-                .manifest
-                .apply_version_edits_cas(self.manifest_table, expected_head, &edits)
-                .await
-            {
-                Ok(_) => {
-                    self.prune_wal_segments_below_floor().await;
-                    if let Some(plan) = gc_plan {
-                        self.manifest
-                            .record_gc_plan(self.manifest_table, plan)
-                            .await
-                            .map_err(CompactionError::Manifest)?;
-                    }
-                    return Ok(Some(outcome));
-                }
-                Err(ManifestError::CasConflict(_)) => {
-                    executor.cleanup_outputs(&outcome.outputs).await?;
-                    if attempts >= DB::<M, E>::MAX_COMPACTION_APPLY_RETRIES {
-                        return Err(CompactionError::CasConflict);
-                    }
-                    continue;
-                }
-                Err(err) => {
-                    executor.cleanup_outputs(&outcome.outputs).await?;
-                    return Err(CompactionError::Manifest(err));
-                }
-            }
-        }
-    }
-
-    /// Spawn a current-thread compaction worker that plans tasks, issues leases, and executes
-    /// them via the scheduler loop.
-    #[allow(dead_code)]
-    #[cfg(feature = "tokio-runtime")]
-    pub(crate) fn spawn_compaction_worker_local<CE, P>(
-        self: &Arc<Self>,
-        planner: P,
-        executor: CE,
-        gc_sst_config: Option<Arc<SsTableConfig>>,
-        interval: Duration,
-        budget: usize,
-    ) -> tokio::task::JoinHandle<()>
-    where
-        CE: CompactionExecutor + 'static,
-        P: CompactionPlanner + 'static,
-        M: 'static,
-        E: 'static,
-    {
-        let (scheduler, mut rx) = CompactionScheduler::new(budget.max(1), budget.max(1));
-        let driver = Arc::clone(self);
-        let executor = Arc::new(executor);
-        let _ = gc_sst_config;
-        tokio::task::spawn_local(async move {
-            let mut ticker = tokio::time::interval(interval);
-            loop {
-                ticker.tick().await;
-                for _ in 0..budget.max(1) {
-                    match driver.plan_compaction_task_with_head(&planner).await {
-                        Ok(Some((task, head))) => {
-                            if let Err(err) = scheduler
-                                .enqueue(
-                                    task,
-                                    head,
-                                    "local-compaction",
-                                    interval.as_millis() as u64,
-                                )
-                                .await
-                            {
-                                eprintln!("compaction scheduler closed: {err}");
-                                return;
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(err) => {
-                            eprintln!("compaction planner failed: {err}");
-                            break;
-                        }
-                    }
-                }
-                // Avoid parking the worker if no jobs were enqueued this tick.
-                if rx.is_empty() {
-                    continue;
-                }
-
-                if let Err(err) = scheduler
-                    .drain_with_budget(&mut rx, |job| {
-                        let driver = Arc::clone(&driver);
-                        let executor = Arc::clone(&executor);
-                        async move {
-                            if let Err(err) = driver
-                                .run_scheduled_compaction(job, executor.as_ref())
-                                .await
-                            {
-                                eprintln!("scheduled compaction failed: {err}");
-                            }
-                        }
-                    })
-                    .await
-                {
-                    eprintln!("compaction scheduler drain stopped: {err}");
-                    return;
-                }
-            }
-        })
-    }
 }
 
-impl<M, E> CompactionHost<M, E> for CompactionDriver<M, E>
+#[cfg(feature = "tokio-runtime")]
+impl<M, E> crate::compaction::CompactionHost<M, E> for CompactionDriver<M, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
@@ -593,27 +389,7 @@ where
         CE: CompactionExecutor + 'a,
         P: CompactionPlanner + 'a,
     {
-        Box::pin(self.compact_once(planner, executor))
-    }
-}
-
-impl<M, E> CompactionHost<M, E> for DB<M, E>
-where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
-{
-    fn compact_once<'a, CE, P>(
-        &'a self,
-        planner: &'a P,
-        executor: &'a CE,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<CompactionOutcome>, CompactionError>> + 'a>>
-    where
-        CE: CompactionExecutor + 'a,
-        P: CompactionPlanner + 'a,
-    {
-        let driver = self.compaction_driver();
-        Box::pin(async move { driver.compact_once(planner, executor).await })
+        Box::pin(self.run_compaction_task(planner, executor))
     }
 }
 
@@ -738,6 +514,8 @@ where
     policy: Arc<dyn SealPolicy + Send + Sync>,
     // Executor powering async subsystems such as the WAL.
     executor: Arc<E>,
+    /// Unified filesystem access for SSTable reads, WAL, and other I/O operations.
+    fs: Arc<dyn DynFs>,
     // Optional WAL handle when durability is enabled.
     wal: Option<WalHandle<E>>,
     /// Pending WAL configuration captured before the writer is installed.
@@ -749,14 +527,9 @@ where
     manifest_table: TableId,
     /// WAL frame bounds covering the current mutable memtable, if any.
     mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
-    /// File identifier allocator scoped to this DB instance.
-    #[allow(dead_code)]
-    file_ids: FileIdGenerator,
     /// Per-key transactional locks (wired once transactional writes arrive).
     _key_locks: LockMap<M::Key>,
     /// Optional background compaction driver/handle pair for local loops.
-    #[cfg(feature = "tokio-runtime")]
-    #[allow(dead_code)]
     compaction_worker: Option<CompactionLoopHandle<M, E>>,
 }
 
@@ -944,7 +717,7 @@ where
             .clone()
             .unwrap_or_else(|| Arc::clone(&self.mode.schema));
         let scan_schema = Arc::clone(&plan.scan_schema);
-        let streams = self.build_scan_streams(&plan, None)?;
+        let streams = self.build_scan_streams(&plan, None).await?;
 
         if streams.is_empty() {
             let stream = stream::empty::<Result<RecordBatch, DBError>>();
@@ -978,7 +751,7 @@ where
             >)
     }
 
-    pub(crate) fn build_scan_streams<'a>(
+    pub(crate) async fn build_scan_streams<'a>(
         &'a self,
         plan: &ScanPlan,
         txn_scan: Option<TransactionScan<'a>>,
@@ -987,7 +760,6 @@ where
         if let Some(txn_scan) = txn_scan {
             streams.push(ScanStream::from(txn_scan));
         }
-
         let projection_schema = Arc::clone(&plan.scan_schema);
         let mutable_scan = OwnedMutableScan::from_guard(
             self.mem_read(),
@@ -996,13 +768,13 @@ where
         )?;
         streams.push(ScanStream::from(mutable_scan));
 
-        let seal = self.seal_state_lock();
-        let immutables: Vec<Arc<Immutable<DynMode>>> = plan
-            .immutable_indexes
-            .iter()
-            .filter_map(|idx| seal.immutables.get(*idx).cloned())
-            .collect();
-        drop(seal);
+        let immutables: Vec<Arc<Immutable<DynMode>>> = {
+            let seal = self.seal_state_lock();
+            plan.immutable_indexes
+                .iter()
+                .filter_map(|idx| seal.immutables.get(*idx).cloned())
+                .collect()
+        };
         for segment in immutables {
             let owned = OwnedImmutableScan::from_arc(
                 Arc::clone(&segment),
@@ -1010,6 +782,58 @@ where
                 plan.read_ts,
             )?;
             streams.push(ScanStream::from(owned));
+        }
+
+        // Add SSTable scans for each SST entry in the plan
+        for sst_entry in plan.sst_entries() {
+            let data_path = sst_entry.data_path().clone();
+            let data_stream = open_parquet_stream(Arc::clone(&self.fs), data_path, None)
+                .await
+                .map_err(DBError::SsTable)?;
+
+            // Load delete sidecar if present
+            let delete_index = if let Some(delete_path) = sst_entry.delete_path() {
+                let delete_stream =
+                    open_parquet_stream(Arc::clone(&self.fs), delete_path.clone(), None)
+                        .await
+                        .map_err(DBError::SsTable)?;
+                // Collect all delete batches and build index
+                use futures::StreamExt;
+                let mut delete_stream = std::pin::pin!(delete_stream);
+                let mut index = std::collections::BTreeMap::new();
+                while let Some(batch_result) = delete_stream.next().await {
+                    let batch =
+                        batch_result.map_err(|e| DBError::SsTable(SsTableError::Parquet(e)))?;
+                    let batch_index = load_delete_index(&batch, self.mode.extractor.as_ref())
+                        .map_err(|e| {
+                            DBError::Stream(crate::query::stream::StreamError::SsTable(e))
+                        })?;
+                    for (key, ts) in batch_index {
+                        // Keep the latest (max) delete timestamp for each key across batches
+                        index
+                            .entry(key)
+                            .and_modify(|cur: &mut crate::mvcc::Timestamp| *cur = (*cur).max(ts))
+                            .or_insert(ts);
+                    }
+                }
+                index
+            } else {
+                std::collections::BTreeMap::new()
+            };
+
+            // Calculate projection indices for user columns (exclude _commit_ts)
+            let projection_indices: Vec<usize> = (0..projection_schema.fields().len()).collect();
+
+            let sstable_scan = SstableScan::new(
+                data_stream,
+                self.mode.extractor.as_ref(),
+                projection_indices,
+                Some(Order::Asc),
+                plan.read_ts,
+                delete_index,
+            );
+
+            streams.push(ScanStream::from(sstable_scan));
         }
 
         Ok(streams)
@@ -1303,25 +1127,10 @@ where
 
     /// Trigger a single compaction attempt using the provided planner and executor.
     /// Returns `Ok(None)` when no task is scheduled by the planner.
-    #[allow(dead_code)]
-    pub(crate) async fn compact_once<CE, P>(
-        &self,
-        planner: &P,
-        executor: &CE,
-    ) -> Result<Option<CompactionOutcome>, CompactionError>
-    where
-        CE: CompactionExecutor,
-        P: CompactionPlanner,
-    {
-        self.compaction_driver()
-            .compact_once(planner, executor)
-            .await
-    }
-
     const MAX_COMPACTION_APPLY_RETRIES: usize = 2;
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn run_compaction_task<CE, P>(
         &self,
         planner: &P,
@@ -1335,26 +1144,26 @@ where
             .run_compaction_task(planner, executor)
             .await
     }
-    /// End-to-end compaction orchestrator with an optional lease token.
-    #[allow(dead_code)]
+
+    /// End-to-end compaction orchestrator with optional lease (lease currently unused).
     pub(crate) async fn run_compaction_task_with_lease<CE, P>(
         &self,
         planner: &P,
         executor: &CE,
-        lease: Option<CompactionLease>,
+        _lease: Option<CompactionLease>,
     ) -> Result<Option<CompactionOutcome>, CompactionError>
     where
         CE: CompactionExecutor,
         P: CompactionPlanner,
     {
         self.compaction_driver()
-            .run_compaction_task_with_lease(planner, executor, lease)
+            .run_compaction_task(planner, executor)
             .await
     }
 
     /// Stateless compaction trigger helper suitable for cron/HTTP callers with optional
     /// idempotency.
-    #[allow(dead_code)]
+    #[allow(dead_code, private_bounds)]
     pub async fn trigger_compaction_once<CE, P>(
         &self,
         planner: &P,
@@ -1436,13 +1245,14 @@ where
     }
 
     /// Construct a database from pre-initialised components.
+    #[allow(clippy::too_many_arguments)]
     fn from_components(
         mode: M,
         mem: M::Mutable,
+        fs: Arc<dyn DynFs>,
         manifest: TonboManifest,
         manifest_table: TableId,
         wal_config: Option<RuntimeWalConfig>,
-        file_ids: FileIdGenerator,
         executor: Arc<E>,
     ) -> Self
     where
@@ -1454,13 +1264,13 @@ where
             seal_state: Mutex::new(SealState::default()),
             policy: crate::inmem::policy::default_policy(),
             executor,
+            fs,
             wal: None,
             wal_config,
             commit_clock: CommitClock::default(),
             manifest,
             manifest_table,
             mutable_wal_range: Arc::new(Mutex::new(None)),
-            file_ids,
             _key_locks: Arc::new(LockableHashMap::new()),
             #[cfg(feature = "tokio-runtime")]
             compaction_worker: None,
@@ -1483,46 +1293,42 @@ where
             .await
             .map_err(manifest_error_as_key_extract)?;
         let manifest_table = table_meta.table_id;
+        // In-memory mode uses an in-memory filesystem with empty root path
+        let fs: Arc<dyn DynFs> = Arc::new(fusio::disk::LocalFs {});
         Ok(Self::from_components(
             mode,
             mem,
+            fs,
             manifest,
             manifest_table,
             None,
-            file_ids,
             executor,
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn recover_with_wal_with_manifest(
         config: M::Config,
         executor: Arc<E>,
+        fs: Arc<dyn DynFs>,
         wal_cfg: RuntimeWalConfig,
         manifest: TonboManifest,
         manifest_table: TableId,
-        file_ids: FileIdGenerator,
     ) -> Result<Self, KeyExtractError>
     where
         M: Sized + CatalogDescribe,
     {
-        Self::recover_with_wal_inner(
-            config,
-            executor,
-            wal_cfg,
-            manifest,
-            manifest_table,
-            file_ids,
-        )
-        .await
+        Self::recover_with_wal_inner(config, executor, fs, wal_cfg, manifest, manifest_table).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn recover_with_wal_inner(
         config: M::Config,
         executor: Arc<E>,
+        fs: Arc<dyn DynFs>,
         wal_cfg: RuntimeWalConfig,
         manifest: TonboManifest,
         manifest_table: TableId,
-        file_ids: FileIdGenerator,
     ) -> Result<Self, KeyExtractError>
     where
         M: Sized + CatalogDescribe,
@@ -1539,10 +1345,10 @@ where
         let mut db = Self::from_components(
             mode,
             mem,
+            fs,
             manifest,
             manifest_table,
             Some(wal_cfg.clone()),
-            file_ids,
             executor,
         );
         db.set_wal_config(Some(wal_cfg.clone()));
@@ -1623,7 +1429,6 @@ where
     }
 
     /// Open a read-only snapshot pinned to the current manifest head.
-    #[allow(dead_code)]
     pub async fn begin_snapshot(&self) -> Result<TxSnapshot, SnapshotError> {
         let manifest_snapshot = self.manifest.snapshot_latest(self.manifest_table).await?;
         let next_ts = self.commit_clock.peek();
@@ -1636,7 +1441,8 @@ where
     }
 
     /// Open a read-only snapshot pinned to the current manifest head at an explicit read timestamp.
-    #[allow(dead_code)]
+
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn begin_snapshot_at(
         &self,
         read_ts: Timestamp,
@@ -1661,12 +1467,6 @@ where
     /// Allocate the next commit timestamp for WAL/autocommit flows.
     pub(crate) fn next_commit_ts(&self) -> Timestamp {
         self.commit_clock.alloc()
-    }
-
-    /// Allocate a new process-unique file identifier.
-    #[allow(dead_code)]
-    pub(crate) fn next_file_id(&self) -> FileId {
-        self.file_ids.generate()
     }
 
     /// Access the active WAL handle, if any.
@@ -1750,7 +1550,10 @@ where
             builder.add_immutable(seg)?;
         }
         let existing_floor = self.manifest_wal_floor().await;
-        let live_floor = self.wal_live_frame_floor();
+        // Use only mutable's WAL range as live_floor, not immutables' ranges.
+        // The immutables being flushed will have their data in the SST,
+        // so their WAL frames are no longer "live" and shouldn't be replayed.
+        let live_floor = self.mutable_wal_range_snapshot().map(|range| range.first);
         let (wal_ids, wal_refs) = if let Some(cfg) = &self.wal_config {
             match manifest_ext::collect_wal_segment_refs(cfg, existing_floor.as_ref(), live_floor)
                 .await
@@ -1838,7 +1641,6 @@ where
     M::Key: Eq + Hash + Clone,
     E: Executor + Timer,
 {
-    #[allow(dead_code)]
     fn add_immutable(&self, seg: Immutable<M>, wal_range: Option<WalFrameRange>) {
         let mut seal = self.seal_state_lock();
         seal.immutables.push(Arc::new(seg));
@@ -1902,7 +1704,6 @@ where
     }
 
     /// Access the per-key transactional lock map.
-    #[allow(dead_code)]
     pub(crate) fn key_locks(&self) -> &LockMap<M::Key> {
         &self._key_locks
     }
@@ -2635,13 +2436,14 @@ mod tests {
             .table_id;
 
         let (mode, mem) = build_dyn_components(build_config)?;
+        let db_fs: Arc<dyn DynFs> = Arc::new(fs.clone());
         let mut db = DB::from_components(
             mode,
             mem,
+            db_fs,
             manifest,
             manifest_table,
             Some(wal_cfg.clone()),
-            file_ids,
             Arc::clone(&executor),
         );
         db.enable_wal(wal_cfg.clone()).await.expect("enable wal");
@@ -2662,13 +2464,14 @@ mod tests {
             .await
             .expect("reopen manifest");
         let recover_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
+        let recover_fs: Arc<dyn DynFs> = Arc::new(fs.clone());
         let mut recovered = DB::recover_with_wal_with_manifest(
             recover_config,
             Arc::clone(&executor),
+            recover_fs,
             wal_cfg.clone(),
             manifest,
             manifest_table,
-            FileIdGenerator::default(),
         )
         .await
         .expect("recover");
@@ -4800,13 +4603,14 @@ mod tests {
             .await
             .expect("register table")
             .table_id;
+        let test_fs: Arc<dyn DynFs> = Arc::new(fusio::disk::LocalFs {});
         let db: DB<DynMode, NoopExecutor> = DB::recover_with_wal_with_manifest(
             config,
             executor.clone(),
+            test_fs,
             cfg,
             manifest,
             manifest_table,
-            file_ids,
         )
         .await
         .expect("recover");

@@ -49,7 +49,7 @@ impl BatchAttachment {
         Timestamp::new(self.commit_ts.value(row))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn into_storage(self) -> RecordBatch {
         self.storage
     }
@@ -143,14 +143,8 @@ impl DynMem {
         }
     }
 
-    /// Returns the maximum number of batches this memtable can hold.
-    #[allow(dead_code)]
-    pub(crate) fn capacity(&self) -> usize {
-        self.batch_slots.len()
-    }
-
+    #[cfg(any(test, feature = "test-helpers"))]
     /// Returns the number of batches currently stored.
-    #[allow(dead_code)]
     pub(crate) fn batch_count(&self) -> usize {
         self.batch_cursor.load(Ordering::Relaxed)
     }
@@ -609,7 +603,7 @@ pub(crate) enum DynRowScanEntry {
 }
 
 impl DynRowScanEntry {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn into_row(self) -> Option<(KeyTsViewRaw, DynRowRaw)> {
         match self {
             DynRowScanEntry::Row(key, row) => Some((key, row)),

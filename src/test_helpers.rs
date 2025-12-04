@@ -1,5 +1,4 @@
 //! Test-only helpers exposed under the `test-helpers` feature.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 

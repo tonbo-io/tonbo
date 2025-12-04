@@ -40,7 +40,7 @@ impl From<TableId> for Ulid {
 }
 
 /// Keys stored by the catalog manifest instance.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) enum CatalogKey {
     /// Global catalog state, including allocator metadata.
@@ -53,7 +53,7 @@ pub(crate) enum CatalogKey {
 }
 
 /// Values stored by the catalog manifest instance.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub(crate) enum CatalogValue {
@@ -98,7 +98,7 @@ pub(crate) enum VersionValue {
 }
 
 /// Keys tracked by the GC-plan manifest instance.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) enum GcPlanKey {
     /// Stored garbage-collection plan for a table.
@@ -109,7 +109,7 @@ pub(crate) enum GcPlanKey {
 }
 
 /// Values tracked by the GC-plan manifest instance.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub(crate) enum GcPlanValue {
@@ -183,7 +183,7 @@ impl TryFrom<GcPlanValue> for GcPlanState {
 }
 
 /// Snapshot of catalog-level metadata stored in the manifest.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct CatalogState {
     /// Mapping of table identifiers to their catalog entries.
@@ -193,7 +193,7 @@ pub(crate) struct CatalogState {
 }
 
 /// Entry describing a table inside the catalog root.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TableCatalogEntry {
     /// Logical representation of the table.
@@ -201,7 +201,7 @@ pub(crate) struct TableCatalogEntry {
 }
 
 /// Static metadata for a Tonbo table.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TableMeta {
     /// Identifier of the table.
@@ -234,7 +234,7 @@ pub struct TableDefinition {
 }
 
 /// Retention policy knobs for a table.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableRetionConfig {
     /// Maximum number of committed versions to retain.
@@ -370,7 +370,6 @@ impl VersionState {
         &self.ssts
     }
 
-    #[allow(dead_code)]
     pub(crate) fn wal_segments(&self) -> &[WalSegmentRef] {
         &self.wal_segments
     }
@@ -510,14 +509,14 @@ impl WalSegmentRef {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    #[allow(dead_code)]
+
     pub(crate) fn last_frame(&self) -> u64 {
         self.last_frame
     }
 }
 
 /// Garbage-collection plan for a table.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct GcPlanState {
     /// SST identifiers and paths that can be removed.

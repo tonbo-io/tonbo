@@ -872,9 +872,8 @@ where
 /// Handle used by the read path to stream rows from an SSTable.
 #[derive(Debug)]
 pub struct SsTableReader<M: Mode> {
-    #[allow(dead_code)]
     descriptor: SsTableDescriptor,
-    #[allow(dead_code)]
+
     config: Arc<SsTableConfig>,
     // TODO: attach actual Parquet readers when scan/merge lands.
     _mode: PhantomData<M>,
@@ -973,11 +972,28 @@ impl<M: Mode> SsTableReader<M> {
     }
 }
 
-async fn open_parquet_stream(
+pub(crate) async fn open_parquet_stream(
     fs: Arc<dyn DynFs>,
     path: Path,
     projection: Option<ProjectionMask>,
 ) -> Result<ParquetRecordBatchStream<AsyncReader<NoopExecutor>>, SsTableError> {
+    let (stream, _schema) = open_parquet_stream_with_schema(fs, path, projection).await?;
+    Ok(stream)
+}
+
+/// Open a Parquet file as an async record batch stream, returning both the stream and
+/// the Arrow schema derived from the Parquet metadata.
+pub(crate) async fn open_parquet_stream_with_schema(
+    fs: Arc<dyn DynFs>,
+    path: Path,
+    projection: Option<ProjectionMask>,
+) -> Result<
+    (
+        ParquetRecordBatchStream<AsyncReader<NoopExecutor>>,
+        SchemaRef,
+    ),
+    SsTableError,
+> {
     let file = fs.open(&path).await?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
     let reader = AsyncReader::new(file, size, NoopExecutor)
@@ -986,9 +1002,11 @@ async fn open_parquet_stream(
     let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
         .await
         .map_err(SsTableError::Parquet)?;
+    let schema = builder.schema().clone();
     let mask = projection.unwrap_or_else(ProjectionMask::all);
     builder = builder.with_projection(mask);
-    builder.build().map_err(SsTableError::Parquet)
+    let stream = builder.build().map_err(SsTableError::Parquet)?;
+    Ok((stream, schema))
 }
 
 pub(crate) fn take_record_batch(

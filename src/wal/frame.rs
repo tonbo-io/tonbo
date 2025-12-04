@@ -140,7 +140,6 @@ pub enum FrameType {
     /// Advisory seal marker.
     SealMarker,
     /// Reserved for future typed payloads.
-    #[allow(dead_code)]
     TypedAppend,
 }
 

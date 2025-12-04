@@ -15,8 +15,7 @@ use fusio::executor::{Executor, Timer};
 
 use crate::{
     compaction::{
-        CompactionOutcome,
-        executor::{CompactionError, CompactionLease},
+        executor::{CompactionError, CompactionLease, CompactionOutcome},
         planner::CompactionPlanner,
     },
     db::DB,
@@ -143,7 +142,6 @@ impl IdempotentCompactionLease for ManifestCompactionLease {
     }
 }
 
-#[allow(dead_code)]
 async fn with_idempotency_guard<L, F, Fut, R>(
     manager: Option<&L>,
     request: &TriggerRequest,
@@ -180,7 +178,6 @@ where
 /// This wraps the existing `run_compaction_task_with_lease` path in an optional idempotency
 /// lease. When an idempotency key is supplied and a lease backend is provided, duplicate triggers
 /// with the same key will return `Ok(None)` without executing compaction.
-#[allow(dead_code)]
 pub(crate) async fn stateless_compaction_once<M, E, CE, P, L>(
     db: &DB<M, E>,
     planner: &P,

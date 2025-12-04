@@ -57,9 +57,9 @@ pub(crate) async fn collect_wal_segment_refs(
         }
     }
 
-    if let Some(floor_ref) = manifest_floor.filter(|_| refs.is_empty()) {
-        refs.push(floor_ref.clone());
-    }
+    // Note: We intentionally don't re-add the old floor when refs is empty.
+    // If no segments are required (all data persisted), the floor should be cleared.
+    // This ensures WAL replay doesn't replay already-persisted data.
 
     refs.sort_by_key(|segment| segment.seq());
     refs.dedup_by_key(|segment| segment.seq());

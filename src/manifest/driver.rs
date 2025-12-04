@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
 use fusio::dynamic::{MaybeSend, MaybeSync};
+#[cfg(any(test, feature = "test-helpers"))]
+use fusio_manifest::snapshot::ScanRange;
 use fusio_manifest::{
-    CheckpointStore, DefaultExecutor, HeadStore, LeaseStore, SegmentIo,
-    compactor::Compactor,
-    context::ManifestContext,
-    manifest::Manifest as FusioManifest,
-    retention::DefaultRetention,
-    snapshot::{ScanRange, Snapshot},
+    CheckpointStore, DefaultExecutor, HeadStore, LeaseStore, SegmentIo, context::ManifestContext,
+    manifest::Manifest as FusioManifest, retention::DefaultRetention, snapshot::Snapshot,
     types::Error as FusioManifestError,
 };
 use thiserror::Error;
@@ -44,7 +42,7 @@ pub enum ManifestError {
 pub(crate) type ManifestResult<T> = Result<T, ManifestError>;
 
 /// Result of loading the latest state for a table tracked by the version manifest.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone)]
 pub(crate) struct VersionSnapshot {
     /// Underlying fusio snapshot guarding read leases.
@@ -121,14 +119,6 @@ where
                 ctx,
             ),
         }
-    }
-
-    /// Access the underlying compactor for advanced merging workflows.
-    #[allow(dead_code)]
-    pub(crate) fn compactor(
-        &self,
-    ) -> Compactor<C::Key, C::Value, HS, SS, CS, LS, DefaultExecutor, DefaultRetention> {
-        self.inner.compactor()
     }
 }
 
@@ -249,7 +239,6 @@ where
         Ok(next_txn)
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn snapshot_latest(&self, table: TableId) -> ManifestResult<VersionSnapshot> {
         let session = self.inner.session_read().await?;
         let manifest_snapshot = session.snapshot().clone();
@@ -307,7 +296,7 @@ where
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn list_versions(
         &self,
         table: TableId,
@@ -353,14 +342,6 @@ where
         Ok(versions)
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn recover_orphans(&self) -> ManifestResult<usize> {
-        self.inner
-            .recover_orphans()
-            .await
-            .map_err(ManifestError::from)
-    }
-
     /// Fetch the persisted WAL floor for a table.
     pub(crate) async fn wal_floor(&self, table: TableId) -> ManifestResult<Option<WalSegmentRef>> {
         let session = self.inner.session_read().await?;
@@ -396,7 +377,7 @@ where
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn take_gc_plan(
         &self,
         table_id: TableId,

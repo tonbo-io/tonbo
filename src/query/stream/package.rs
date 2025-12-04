@@ -12,10 +12,10 @@ use arrow_schema::SchemaRef;
 use futures::Stream;
 use pin_project_lite::pin_project;
 use predicate::{
-    ComparisonOp, Operand, Predicate, PredicateNode, PredicateVisitor, ScalarValueRef, VisitOutcome,
+    ComparisonOp, Operand, Predicate, PredicateNode, PredicateVisitor, ScalarValue, VisitOutcome,
 };
 use thiserror::Error;
-use typed_arrow_dyn::{DynBuilders, DynCellRaw, DynProjection, DynRow, DynRowRaw, DynSchema};
+use typed_arrow_dyn::{DynBuilders, DynProjection, DynRow, DynSchema};
 
 use crate::{
     inmem::immutable::memtable::RecordBatchStorage,
@@ -95,7 +95,7 @@ where
                         if let (Some(predicate), Some(evaluator)) =
                             (this.residual_predicate.as_ref(), this.residual.as_ref())
                         {
-                            match evaluator.matches(predicate, &row) {
+                            match evaluator.matches_owned(predicate, &row) {
                                 Ok(true) => {}
                                 Ok(false) => continue,
                                 Err(err) => {
@@ -104,15 +104,16 @@ where
                             }
                         }
                         let projected = if let Some(projection) = this.projection.as_ref() {
-                            let owned = row.into_owned()?;
+                            // Row is already owned, use it directly
                             let mut builders = DynBuilders::new(Arc::clone(&*this.scan_schema), 1);
-                            builders.append_option_row(Some(owned))?;
+                            builders.append_option_row(Some(row))?;
                             let batch = builders.try_finish_into_batch()?;
                             let raw =
                                 projection.project_row_raw(&*this.scan_dyn_schema, &batch, 0)?;
                             raw.into_owned().map_err(StreamError::from)?
                         } else {
-                            row.into_owned().map_err(StreamError::from)?
+                            // Row is already owned
+                            row
                         };
                         if let Err(err) = this.builder.append_row(projected) {
                             return Poll::Ready(Some(Err(err)));
@@ -207,8 +208,8 @@ impl ResidualEvaluator {
         Self { column_map }
     }
 
-    fn matches(&self, predicate: &Predicate, row: &DynRowRaw) -> Result<bool, ResidualError> {
-        let mut visitor = ResidualRowVisitor {
+    fn matches_owned(&self, predicate: &Predicate, row: &DynRow) -> Result<bool, ResidualError> {
+        let mut visitor = ResidualOwnedRowVisitor {
             row,
             column_map: &self.column_map,
         };
@@ -220,18 +221,15 @@ impl ResidualEvaluator {
     }
 }
 
-struct ResidualRowVisitor<'a> {
-    row: &'a DynRowRaw,
+struct ResidualOwnedRowVisitor<'a> {
+    row: &'a DynRow,
     column_map: &'a HashMap<Arc<str>, usize>,
 }
 
-impl<'a> ResidualRowVisitor<'a> {
-    fn resolve_operand(
-        &'a self,
-        operand: &'a Operand,
-    ) -> Result<ScalarValueRef<'a>, ResidualError> {
+impl<'a> ResidualOwnedRowVisitor<'a> {
+    fn resolve_operand(&self, operand: &Operand) -> Result<ScalarValue, ResidualError> {
         match operand {
-            Operand::Literal(literal) => Ok(literal.as_ref()),
+            Operand::Literal(literal) => Ok(literal.clone()),
             Operand::Column(column) => {
                 let idx = column
                     .index
@@ -239,14 +237,12 @@ impl<'a> ResidualRowVisitor<'a> {
                     .ok_or_else(|| ResidualError::MissingColumn(Arc::clone(&column.name)))?;
                 let cell = self
                     .row
-                    .cells()
+                    .0
                     .get(idx)
                     .ok_or_else(|| ResidualError::MissingColumn(Arc::clone(&column.name)))?;
                 match cell {
-                    None => Ok(ScalarValueRef::from_dyn(typed_arrow_dyn::DynCellRef::from(
-                        DynCellRaw::Null,
-                    ))),
-                    Some(raw) => convert_cell(raw),
+                    None => Ok(ScalarValue::null()),
+                    Some(c) => convert_owned_cell(c),
                 }
             }
         }
@@ -260,7 +256,7 @@ impl<'a> ResidualRowVisitor<'a> {
     }
 }
 
-impl<'a> PredicateVisitor for ResidualRowVisitor<'a> {
+impl<'a> PredicateVisitor for ResidualOwnedRowVisitor<'a> {
     type Error = ResidualError;
     type Value = bool;
 
@@ -275,10 +271,22 @@ impl<'a> PredicateVisitor for ResidualRowVisitor<'a> {
                 match op {
                     ComparisonOp::Equal => lhs == rhs,
                     ComparisonOp::NotEqual => lhs != rhs,
-                    ComparisonOp::LessThan => lhs < rhs,
-                    ComparisonOp::LessThanOrEqual => lhs <= rhs,
-                    ComparisonOp::GreaterThan => lhs > rhs,
-                    ComparisonOp::GreaterThanOrEqual => lhs >= rhs,
+                    ComparisonOp::LessThan => lhs
+                        .compare(&rhs)
+                        .map(|ord| ord == std::cmp::Ordering::Less)
+                        .unwrap_or(false),
+                    ComparisonOp::LessThanOrEqual => lhs
+                        .compare(&rhs)
+                        .map(|ord| ord != std::cmp::Ordering::Greater)
+                        .unwrap_or(false),
+                    ComparisonOp::GreaterThan => lhs
+                        .compare(&rhs)
+                        .map(|ord| ord == std::cmp::Ordering::Greater)
+                        .unwrap_or(false),
+                    ComparisonOp::GreaterThanOrEqual => lhs
+                        .compare(&rhs)
+                        .map(|ord| ord != std::cmp::Ordering::Less)
+                        .unwrap_or(false),
                 }
             }
             PredicateNode::InList {
@@ -290,7 +298,7 @@ impl<'a> PredicateVisitor for ResidualRowVisitor<'a> {
                 if value.is_null() {
                     *negated
                 } else {
-                    let contains = list.iter().any(|literal| value == literal.as_ref());
+                    let contains = list.contains(&value);
                     if *negated { !contains } else { contains }
                 }
             }
@@ -347,23 +355,24 @@ impl<'a> PredicateVisitor for ResidualRowVisitor<'a> {
     }
 }
 
-fn convert_cell(cell: &DynCellRaw) -> Result<ScalarValueRef<'_>, ResidualError> {
+fn convert_owned_cell(cell: &typed_arrow_dyn::DynCell) -> Result<ScalarValue, ResidualError> {
+    use typed_arrow_dyn::DynCell;
     match cell {
-        DynCellRaw::Struct(_)
-        | DynCellRaw::List(_)
-        | DynCellRaw::FixedSizeList(_)
-        | DynCellRaw::Map(_)
-        | DynCellRaw::Union { .. } => Err(ResidualError::UnsupportedColumn),
-        DynCellRaw::Str { ptr, len } => {
-            let bytes = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), *len) };
-            std::str::from_utf8(bytes).map_err(|_| ResidualError::InvalidUtf8)?;
-            Ok(ScalarValueRef::from_dyn(typed_arrow_dyn::DynCellRef::from(
-                cell.clone(),
-            )))
-        }
-        _ => Ok(ScalarValueRef::from_dyn(typed_arrow_dyn::DynCellRef::from(
-            cell.clone(),
-        ))),
+        DynCell::Str(s) => Ok(ScalarValue::from(s.to_string())),
+        DynCell::Bin(b) => Ok(ScalarValue::from(b.clone())),
+        DynCell::Bool(v) => Ok(ScalarValue::from(*v)),
+        DynCell::I8(v) => Ok(ScalarValue::from(*v as i64)),
+        DynCell::I16(v) => Ok(ScalarValue::from(*v as i64)),
+        DynCell::I32(v) => Ok(ScalarValue::from(*v as i64)),
+        DynCell::I64(v) => Ok(ScalarValue::from(*v)),
+        DynCell::U8(v) => Ok(ScalarValue::from(*v as u64)),
+        DynCell::U16(v) => Ok(ScalarValue::from(*v as u64)),
+        DynCell::U32(v) => Ok(ScalarValue::from(*v as u64)),
+        DynCell::U64(v) => Ok(ScalarValue::from(*v)),
+        DynCell::F32(v) => Ok(ScalarValue::from(*v as f64)),
+        DynCell::F64(v) => Ok(ScalarValue::from(*v)),
+        DynCell::Null => Ok(ScalarValue::null()),
+        _ => Err(ResidualError::UnsupportedColumn),
     }
 }
 

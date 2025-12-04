@@ -42,7 +42,6 @@ pub struct CompactionLease {
 }
 
 /// API for acquiring/renewing/releasing compaction leases (placeholder for remote executors).
-#[allow(dead_code)]
 pub trait CompactionLeaseManager {
     /// Acquire a lease for the given task.
     fn acquire(
@@ -64,7 +63,7 @@ pub trait CompactionLeaseManager {
 }
 
 /// Execution context for a single planned compaction.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone)]
 pub struct CompactionJob {
     /// Planner output describing which level/inputs to merge.
@@ -76,7 +75,7 @@ pub struct CompactionJob {
 }
 
 /// Outcome of a successful compaction run.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
     /// Newly produced SST entries to be added to the target level.
@@ -101,7 +100,6 @@ pub struct CompactionOutcome {
 
 impl CompactionOutcome {
     /// Build manifest edits representing the outcome.
-    #[allow(dead_code)]
     pub(crate) fn to_version_edits(&self) -> Vec<VersionEdit> {
         let mut edits = Vec::new();
         let mut level_for_sst: HashMap<SsTableId, u32> = HashMap::new();
@@ -152,7 +150,6 @@ impl CompactionOutcome {
     }
 
     /// Build a compaction outcome from finished SST descriptors, validating required paths.
-    #[allow(dead_code)]
     pub(crate) fn from_outputs(
         outputs: Vec<SsTableDescriptor>,
         remove_ssts: Vec<SsTableDescriptor>,
@@ -236,8 +233,7 @@ pub enum CompactionLeaseError {
 }
 
 /// Async trait for orchestrating a major compaction over SST inputs.
-#[allow(dead_code)]
-pub trait CompactionExecutor {
+pub(crate) trait CompactionExecutor {
     /// Execute a compaction job and return a manifest edit describing the change.
     fn execute(
         &self,
@@ -253,7 +249,6 @@ pub trait CompactionExecutor {
 }
 
 /// Local executor that merges SST inputs on the current host.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct LocalCompactionExecutor {
     config: Arc<SsTableConfig>,
@@ -271,7 +266,6 @@ const DEFAULT_OUTPUT_HARD_CAP_BYTES: usize = 512 * 1024 * 1024; // 512 MiB safet
 impl LocalCompactionExecutor {
     /// Build a local executor that will use `config` for outputs and allocate SST ids starting at
     /// `start_id`.
-    #[allow(dead_code)]
     pub fn new(config: Arc<SsTableConfig>, start_id: u64) -> Self {
         Self {
             config,
@@ -283,16 +277,8 @@ impl LocalCompactionExecutor {
         }
     }
 
-    /// Cap the number of rows per output SST. Helpful for preventing oversized single-file outputs
-    /// in the happy-path executor.
-    #[allow(dead_code)]
-    pub fn with_max_output_rows(mut self, max_output_rows: usize) -> Self {
-        self.max_output_rows = Some(max_output_rows.max(1));
-        self
-    }
-
     /// Cap the number of bytes per output SST. Prevents oversized single files when splitting.
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
         self.max_output_bytes = Some(max_output_bytes.max(1));
         self
@@ -341,6 +327,7 @@ impl CompactionExecutor for LocalCompactionExecutor {
             if job.inputs.is_empty() {
                 return Err(CompactionError::NoInputs);
             }
+            let _ = job.lease.as_ref();
             let target = self.alloc_descriptor(job.task.target_level);
             let (max_rows, max_bytes) = self.output_caps_for_level(job.task.target_level);
             let merger =

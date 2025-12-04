@@ -55,12 +55,11 @@ impl DeleteSidecar {
         self.commit_ts.is_empty()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn commit_ts(&self, idx: usize) -> Timestamp {
         self.commit_ts[idx]
     }
 
-    #[allow(dead_code)]
     pub fn key_batch(&self) -> &RecordBatch {
         &self.keys
     }
@@ -103,12 +102,11 @@ impl<S> ImmutableMemTable<S> {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.index.len()
     }
 
-    #[allow(unused)]
     pub(crate) fn storage(&self) -> &S {
         &self.storage
     }
@@ -141,7 +139,6 @@ impl<S> ImmutableMemTable<S> {
             .map(|view| view.key().to_owned())
     }
 
-    #[allow(unused)]
     pub(crate) fn mvcc_columns(&self) -> &MvccColumns {
         &self.mvcc
     }
@@ -151,7 +148,6 @@ impl<S> ImmutableMemTable<S> {
         (self.mvcc.commit_ts[idx], self.mvcc.tombstone[idx])
     }
 
-    #[allow(unused)]
     pub(crate) fn scan_visible<'t>(
         &'t self,
         projection_schema: Option<SchemaRef>,
@@ -202,7 +198,7 @@ pub(crate) enum ImmutableVisibleEntry {
 }
 
 impl ImmutableVisibleEntry {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn into_row(self) -> Option<(KeyTsViewRaw, DynRowRaw)> {
         match self {
             ImmutableVisibleEntry::Row(key, row) => Some((key, row)),
@@ -401,11 +397,7 @@ impl MvccColumns {
 }
 
 #[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use tests::{
-    segment_from_batch_with_extractor, segment_from_batch_with_key_col,
-    segment_from_batch_with_key_name,
-};
+pub(crate) use tests::segment_from_batch_with_key_name;
 
 #[cfg(test)]
 mod tests {

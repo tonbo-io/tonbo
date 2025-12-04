@@ -16,7 +16,7 @@ use futures::{Stream, ready, stream};
 pub use package::ResidualError;
 use pin_project_lite::pin_project;
 use thiserror::Error;
-use typed_arrow_dyn::{DynError, DynRowRaw, DynViewError};
+use typed_arrow_dyn::{DynError, DynRow, DynRowRaw, DynViewError};
 
 use crate::{
     extractor::KeyExtractError,
@@ -26,9 +26,12 @@ use crate::{
         },
         mutable::memtable::{DynMem, DynRowScan, DynRowScanEntry},
     },
-    key::KeyTsViewRaw,
+    key::{KeyOwned, KeyTsOwned, KeyTsViewRaw},
     mvcc::Timestamp,
-    ondisk::scan::{SstableScan, SstableScanError},
+    ondisk::{
+        scan::{SstableRowRef, SstableScan, SstableScanError},
+        sstable::SsTableError,
+    },
     transaction::{TransactionScan, TransactionScanEntry},
 };
 
@@ -38,9 +41,6 @@ pub enum Order {
     /// Ascending (lowest to highest primary key).
     #[default]
     Asc,
-    #[allow(dead_code)]
-    /// Descending (highest to lowest primary key).
-    Desc,
 }
 
 /// Source priority applied while reconciling overlapping entries.
@@ -114,7 +114,7 @@ impl<'t, S> OwnedImmutableScan<'t, S>
 where
     S: RecordBatchStorage,
 {
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn new(keep: Arc<ImmutableMemTable<S>>, inner: ImmutableVisibleScan<'t, S>) -> Self {
         Self { _keep: keep, inner }
     }
@@ -164,6 +164,9 @@ pub enum StreamError {
     /// Failure originating while scanning SSTables.
     #[error(transparent)]
     SsTable(#[from] SstableScanError),
+    /// SSTable I/O error (opening files, reading metadata, etc.).
+    #[error("sstable I/O error: {0}")]
+    SsTableIo(#[from] SsTableError),
     /// Dynamic row conversion failed while materializing a batch.
     #[error("dynamic row conversion failed: {0}")]
     DynRow(#[from] DynViewError),
@@ -176,7 +179,6 @@ pub enum StreamError {
 }
 
 /// Unified entry yielded by the read stream for both in-memory and on-disk sources.
-#[derive(Debug)]
 pub enum StreamEntry {
     /// Entry sourced from the staging buffer of a transaction.
     Txn((KeyTsViewRaw, DynRowRaw)),
@@ -186,18 +188,50 @@ pub enum StreamEntry {
     MemTable((KeyTsViewRaw, DynRowRaw)),
     /// Tombstone sourced from a mutable layer.
     MemTableTombstone(KeyTsViewRaw),
-    /// Entry produced by the SSTable scan pipeline.
-    Sstable((KeyTsViewRaw, DynRowRaw)),
+    /// Entry produced by the SSTable scan pipeline with zero-copy Arc-backed reference.
+    Sstable(SstableRowRef),
+    /// Tombstone sourced from an SSTable delete sidecar (owned).
+    SstableTombstone(KeyTsOwned),
+}
+
+impl std::fmt::Debug for StreamEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StreamEntry::Txn((key, _)) => f.debug_tuple("Txn").field(key).finish(),
+            StreamEntry::TxnTombstone(key) => f.debug_tuple("TxnTombstone").field(key).finish(),
+            StreamEntry::MemTable((key, _)) => f.debug_tuple("MemTable").field(key).finish(),
+            StreamEntry::MemTableTombstone(key) => {
+                f.debug_tuple("MemTableTombstone").field(key).finish()
+            }
+            StreamEntry::Sstable(row_ref) => {
+                f.debug_tuple("Sstable").field(row_ref.key_ts()).finish()
+            }
+            StreamEntry::SstableTombstone(key) => {
+                f.debug_tuple("SstableTombstone").field(key).finish()
+            }
+        }
+    }
 }
 
 impl StreamEntry {
-    pub(crate) fn key(&self) -> &KeyTsViewRaw {
+    /// Get the owned key for comparison. Converts borrowed keys to owned.
+    pub(crate) fn key_owned(&self) -> KeyOwned {
         match self {
-            StreamEntry::Txn((key_ts, _)) => key_ts,
-            StreamEntry::TxnTombstone(key_ts) => key_ts,
-            StreamEntry::MemTable((key_ts, _)) => key_ts,
-            StreamEntry::MemTableTombstone(key_ts) => key_ts,
-            StreamEntry::Sstable((key_ts, _)) => key_ts,
+            StreamEntry::Txn((key_ts, _)) => {
+                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
+            }
+            StreamEntry::TxnTombstone(key_ts) => {
+                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
+            }
+            StreamEntry::MemTable((key_ts, _)) => {
+                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
+            }
+            StreamEntry::MemTableTombstone(key_ts) => {
+                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
+            }
+            StreamEntry::Sstable(row_ref) => KeyOwned::from_key_row(row_ref.key_ts().key())
+                .expect("key extraction should succeed"),
+            StreamEntry::SstableTombstone(key_ts) => key_ts.key().clone(),
         }
     }
 
@@ -207,24 +241,32 @@ impl StreamEntry {
             StreamEntry::TxnTombstone(key_ts) => key_ts.timestamp(),
             StreamEntry::MemTable((key_ts, _)) => key_ts.timestamp(),
             StreamEntry::MemTableTombstone(key_ts) => key_ts.timestamp(),
-            StreamEntry::Sstable((key_ts, _)) => key_ts.timestamp(),
+            StreamEntry::Sstable(row_ref) => row_ref.key_ts().timestamp(),
+            StreamEntry::SstableTombstone(key_ts) => key_ts.timestamp(),
         }
     }
 
-    pub(crate) fn into_row(self) -> Option<DynRowRaw> {
+    /// Convert entry to owned row data. For SSTable entries, this is where
+    /// the actual clone happens (deferred from scan time for zero-copy streaming).
+    pub(crate) fn into_row(self) -> Option<DynRow> {
         match self {
-            StreamEntry::Txn((_, row)) => Some(row),
-            StreamEntry::MemTable((_, row)) => Some(row),
-            StreamEntry::Sstable((_, row)) => Some(row),
+            StreamEntry::Txn((_, row)) => Some(row.into_owned().expect("row conversion")),
+            StreamEntry::MemTable((_, row)) => Some(row.into_owned().expect("row conversion")),
+            StreamEntry::Sstable(row_ref) => {
+                Some(row_ref.into_row_owned().expect("row conversion"))
+            }
             StreamEntry::TxnTombstone(_) => None,
             StreamEntry::MemTableTombstone(_) => None,
+            StreamEntry::SstableTombstone(_) => None,
         }
     }
 
     pub(crate) fn is_tombstone(&self) -> bool {
         matches!(
             self,
-            StreamEntry::TxnTombstone(_) | StreamEntry::MemTableTombstone(_)
+            StreamEntry::TxnTombstone(_)
+                | StreamEntry::MemTableTombstone(_)
+                | StreamEntry::SstableTombstone(_)
         )
     }
 }
@@ -362,7 +404,13 @@ where
                 None => Poll::Ready(None),
             },
             ScanStreamProject::SsTable { inner } => match ready!(inner.poll_next(cx)) {
-                Some(Ok(entry)) => Poll::Ready(Some(Ok(StreamEntry::Sstable(entry)))),
+                Some(Ok(crate::ondisk::scan::SstableVisibleEntry::Row(row_ref))) => {
+                    // Zero-copy: pass through the Arc-backed reference directly
+                    Poll::Ready(Some(Ok(StreamEntry::Sstable(row_ref))))
+                }
+                Some(Ok(crate::ondisk::scan::SstableVisibleEntry::Tombstone(key_owned))) => {
+                    Poll::Ready(Some(Ok(StreamEntry::SstableTombstone(key_owned))))
+                }
                 Some(Err(err)) => Poll::Ready(Some(Err(StreamError::from(err)))),
                 None => Poll::Ready(None),
             },

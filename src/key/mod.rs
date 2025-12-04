@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Zero-copy key projection scaffolding.
 //!
 //! This module introduces the skeleton for the zero-copy key design.

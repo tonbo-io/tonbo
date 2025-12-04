@@ -19,7 +19,7 @@ pub(crate) trait ManifestCodec {
 }
 
 /// Marker codec binding the catalog key/value types together.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CatalogCodec;
 
@@ -51,7 +51,7 @@ impl ManifestCodec for VersionCodec {
 }
 
 /// Marker codec binding the GC-plan key/value types together.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct GcPlanCodec;
 

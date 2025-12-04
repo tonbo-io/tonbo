@@ -2,7 +2,7 @@ use super::domain::{SstEntry, WalSegmentRef};
 use crate::ondisk::sstable::SsTableId;
 
 /// Manifest edits applied sequentially to produce a new version.
-#[allow(dead_code)]
+
 #[derive(Debug, Clone)]
 pub(crate) enum VersionEdit {
     /// Add SST entries to the specified level.

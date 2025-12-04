@@ -7,9 +7,8 @@ use fusio::{
     path::{Path, PathPart},
 };
 use fusio_manifest::{
-    BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseHandle,
-    LeaseStoreImpl, ManifestContext, NoopExecutor, SegmentStoreImpl, snapshot::Snapshot,
-    types::Error as FusioManifestError,
+    BackoffPolicy, CheckpointStoreImpl, DefaultExecutor, HeadStoreImpl, LeaseStoreImpl,
+    ManifestContext, SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use futures::future::BoxFuture;
@@ -49,11 +48,11 @@ pub(crate) type InMemoryCatalogManifest = Manifest<
 /// Snapshot combining catalog metadata with the latest version state.
 #[derive(Debug, Clone)]
 pub(crate) struct TableSnapshot {
-    pub manifest_snapshot: Snapshot,
+    pub _manifest_snapshot: Snapshot,
     pub head: TableHead,
     pub latest_version: Option<VersionState>,
-    #[allow(dead_code)]
-    pub table_meta: TableMeta,
+
+    pub _table_meta: TableMeta,
 }
 
 type ManifestExecutor = DefaultExecutor;
@@ -61,10 +60,10 @@ type ManifestExecutor = DefaultExecutor;
 impl TableSnapshot {
     fn from_parts(version: VersionSnapshot, table_meta: TableMeta) -> Self {
         Self {
-            manifest_snapshot: version.manifest_snapshot,
+            _manifest_snapshot: version.manifest_snapshot,
             head: version.head,
             latest_version: version.latest_version,
-            table_meta,
+            _table_meta: table_meta,
         }
     }
 }
@@ -95,16 +94,6 @@ pub(crate) trait VersionRuntime: MaybeSend + MaybeSync {
         table: TableId,
     ) -> BoxFuture<'a, ManifestResult<VersionSnapshot>>;
 
-    #[allow(dead_code)]
-    fn list_versions<'a>(
-        &'a self,
-        table: TableId,
-        limit: usize,
-    ) -> BoxFuture<'a, ManifestResult<Vec<VersionState>>>;
-
-    #[allow(dead_code)]
-    fn recover_orphans<'a>(&'a self) -> BoxFuture<'a, ManifestResult<usize>>;
-
     fn wal_floor<'a>(
         &'a self,
         table: TableId,
@@ -119,7 +108,7 @@ pub(crate) trait GcPlanRuntime: MaybeSend + MaybeSync {
         plan: GcPlanState,
     ) -> BoxFuture<'a, ManifestResult<()>>;
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn take_gc_plan<'a>(
         &'a self,
         table_id: TableId,
@@ -137,18 +126,6 @@ pub(crate) trait CatalogRuntime: MaybeSend + MaybeSync {
     ) -> BoxFuture<'a, ManifestResult<TableMeta>>;
 
     fn table_meta<'a>(&'a self, table: TableId) -> BoxFuture<'a, ManifestResult<TableMeta>>;
-}
-
-/// Lease store abstraction for compaction/GC coordination.
-#[allow(dead_code)]
-pub(crate) trait LeaseRuntime: Send + Sync {
-    fn try_acquire<'a>(
-        &'a self,
-        snapshot_txn_id: u64,
-        ttl: Duration,
-    ) -> BoxFuture<'a, ManifestResult<Option<LeaseHandle>>>;
-
-    fn release<'a>(&'a self, lease: LeaseHandle) -> BoxFuture<'a, ManifestResult<()>>;
 }
 
 /// Idempotency store abstraction to avoid duplicate work across processes.
@@ -170,8 +147,6 @@ pub(crate) struct TonboManifest {
     version: Arc<dyn VersionRuntime>,
     catalog: Arc<dyn CatalogRuntime>,
     gc_plan: Arc<dyn GcPlanRuntime>,
-    #[allow(dead_code)]
-    lease: Arc<dyn LeaseRuntime>,
     idempotency: Arc<dyn IdempotencyRuntime>,
 }
 
@@ -180,14 +155,12 @@ impl TonboManifest {
         version: Arc<dyn VersionRuntime>,
         catalog: Arc<dyn CatalogRuntime>,
         gc_plan: Arc<dyn GcPlanRuntime>,
-        lease: Arc<dyn LeaseRuntime>,
         idempotency: Arc<dyn IdempotencyRuntime>,
     ) -> Self {
         Self {
             version,
             catalog,
             gc_plan,
-            lease,
             idempotency,
         }
     }
@@ -216,27 +189,8 @@ impl TonboManifest {
         Ok(TableSnapshot::from_parts(version_snapshot, table_meta))
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn list_versions(
-        &self,
-        table: TableId,
-        limit: usize,
-    ) -> ManifestResult<Vec<VersionState>> {
-        self.version.list_versions(table, limit).await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn recover_orphans(&self) -> ManifestResult<usize> {
-        self.version.recover_orphans().await
-    }
-
     pub(crate) async fn wal_floor(&self, table: TableId) -> ManifestResult<Option<WalSegmentRef>> {
         self.version.wal_floor(table).await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn lease_runtime(&self) -> Arc<dyn LeaseRuntime> {
-        Arc::clone(&self.lease)
     }
 
     pub(crate) fn idempotency_runtime(&self) -> Arc<dyn IdempotencyRuntime> {
@@ -270,11 +224,6 @@ impl TonboManifest {
         Ok(meta)
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn table_meta(&self, table: TableId) -> ManifestResult<TableMeta> {
-        self.catalog.table_meta(table).await
-    }
-
     pub(crate) async fn record_gc_plan(
         &self,
         table: TableId,
@@ -283,7 +232,7 @@ impl TonboManifest {
         self.gc_plan.put_gc_plan(table, plan).await
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn take_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
         self.gc_plan.take_gc_plan(table).await
     }
@@ -335,18 +284,6 @@ where
         Box::pin(async move { self.0.snapshot_latest(table).await })
     }
 
-    fn list_versions<'a>(
-        &'a self,
-        table: TableId,
-        limit: usize,
-    ) -> BoxFuture<'a, ManifestResult<Vec<VersionState>>> {
-        Box::pin(async move { self.0.list_versions(table, limit).await })
-    }
-
-    fn recover_orphans<'a>(&'a self) -> BoxFuture<'a, ManifestResult<usize>> {
-        Box::pin(async move { self.0.recover_orphans().await })
-    }
-
     fn wal_floor<'a>(
         &'a self,
         table: TableId,
@@ -373,6 +310,7 @@ where
         Box::pin(async move { self.0.put_gc_plan(table_id, plan).await })
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     fn take_gc_plan<'a>(
         &'a self,
         table_id: TableId,
@@ -408,42 +346,6 @@ where
     }
 }
 
-/// Adapter over a manifest lease store to implement `LeaseRuntime`.
-#[allow(dead_code)]
-pub(crate) struct LeaseHandleAdapter<LS> {
-    store: LS,
-}
-
-impl<LS> LeaseHandleAdapter<LS> {
-    pub(crate) fn new(store: LS) -> Self {
-        Self { store }
-    }
-}
-
-impl<LS> LeaseRuntime for LeaseHandleAdapter<LS>
-where
-    LS: fusio_manifest::LeaseStore + Send + Sync + Clone + 'static,
-{
-    fn try_acquire<'a>(
-        &'a self,
-        snapshot_txn_id: u64,
-        ttl: Duration,
-    ) -> BoxFuture<'a, ManifestResult<Option<LeaseHandle>>> {
-        Box::pin(async move {
-            let lease = self
-                .store
-                .create(snapshot_txn_id, None, ttl)
-                .await
-                .map_err(ManifestError::from)?;
-            Ok(Some(lease))
-        })
-    }
-
-    fn release<'a>(&'a self, lease: LeaseHandle) -> BoxFuture<'a, ManifestResult<()>> {
-        Box::pin(async move { self.store.release(lease).await.map_err(ManifestError::from) })
-    }
-}
-
 fn wrap_version_manifest<M>(manifest: M) -> Arc<dyn VersionRuntime>
 where
     ManifestHandle<M>: VersionRuntime,
@@ -466,14 +368,6 @@ where
     M: MaybeSend + MaybeSync + 'static,
 {
     Arc::new(GcPlanHandle(manifest))
-}
-
-fn wrap_lease_runtime<LS>(store: LS) -> Arc<dyn LeaseRuntime>
-where
-    LeaseHandleAdapter<LS>: LeaseRuntime,
-    LS: Send + Sync + 'static,
-{
-    Arc::new(LeaseHandleAdapter::new(store))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -650,16 +544,9 @@ where
     ensure_manifest_dirs::<FS>(&gc_root).await?;
 
     let fs_for_gc = fs.clone();
-    let lease_store = LeaseStoreImpl::new(
-        fs.clone(),
-        version_root.as_ref().to_string(),
-        BackoffPolicy::default(),
-        NoopExecutor,
-    );
     let version_manifest = open_manifest_instance::<FS, VersionCodec>(fs.clone(), &version_root);
     let catalog_manifest = open_manifest_instance::<FS, CatalogCodec>(fs.clone(), &catalog_root);
     let gc_manifest = open_manifest_instance::<FS, GcPlanCodec>(fs_for_gc, &gc_root);
-    let lease_runtime = wrap_lease_runtime(lease_store);
     // Keep idempotency records on the manifest filesystem so duplicate triggers are deduped
     // across processes and restarts.
     let idempotency_runtime =
@@ -668,7 +555,6 @@ where
         wrap_version_manifest(version_manifest),
         wrap_catalog_manifest(catalog_manifest),
         wrap_gc_plan_manifest(gc_manifest),
-        lease_runtime,
         idempotency_runtime,
     );
     tonbo.init_catalog().await?;
