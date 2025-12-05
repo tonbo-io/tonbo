@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use fusio::executor::NoopExecutor;
+use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
 use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DbBuilder, DynMode},
@@ -36,7 +36,7 @@ async fn main() {
 
     // Create DB from metadata
     let executor = Arc::new(NoopExecutor);
-    let db: DB<DynMode, NoopExecutor> = DbBuilder::from_schema_metadata(schema.clone())
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DbBuilder::from_schema_metadata(schema.clone())
         .expect("metadata config")
         .in_memory("dynamic-composite")
         .build_with_executor(Arc::clone(&executor))

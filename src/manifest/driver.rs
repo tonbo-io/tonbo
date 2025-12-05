@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use fusio::dynamic::{MaybeSend, MaybeSync};
+use fusio::{
+    dynamic::{MaybeSend, MaybeSync},
+    executor::{Executor, Timer},
+};
 #[cfg(test)]
 use fusio_manifest::snapshot::ScanRange;
 use fusio_manifest::{
-    CheckpointStore, DefaultExecutor, HeadStore, LeaseStore, SegmentIo, context::ManifestContext,
+    CheckpointStore, HeadStore, LeaseStore, SegmentIo, context::ManifestContext,
     manifest::Manifest as FusioManifest, retention::DefaultRetention, snapshot::Snapshot,
     types::Error as FusioManifestError,
 };
@@ -85,30 +88,32 @@ impl<HS, SS, CS, LS> Stores<HS, SS, CS, LS> {
 }
 
 /// Manifest wrapper parameterized by the codec describing its key/value types.
-pub(crate) struct Manifest<C, HS, SS, CS, LS>
+pub(crate) struct Manifest<C, HS, SS, CS, LS, E = fusio_manifest::DefaultExecutor>
 where
     C: ManifestCodec,
     HS: HeadStore + MaybeSend + MaybeSync + 'static,
     SS: SegmentIo + MaybeSend + MaybeSync + 'static,
     CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
+    E: Executor + Timer + Clone + 'static,
 {
-    inner: FusioManifest<C::Key, C::Value, HS, SS, CS, LS, DefaultExecutor, DefaultRetention>,
+    inner: FusioManifest<C::Key, C::Value, HS, SS, CS, LS, E, DefaultRetention>,
 }
 
-impl<C, HS, SS, CS, LS> Manifest<C, HS, SS, CS, LS>
+impl<C, HS, SS, CS, LS, E> Manifest<C, HS, SS, CS, LS, E>
 where
     C: ManifestCodec,
     HS: HeadStore + MaybeSend + MaybeSync + 'static,
     SS: SegmentIo + MaybeSend + MaybeSync + 'static,
     CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
+    E: Executor + Timer + Clone + 'static,
 {
     /// Construct a new manifest wrapper from the provided stores and context.
     #[must_use]
     pub(super) fn open(
         stores: Stores<HS, SS, CS, LS>,
-        ctx: Arc<ManifestContext<DefaultRetention, DefaultExecutor>>,
+        ctx: Arc<ManifestContext<DefaultRetention, E>>,
     ) -> Self {
         Self {
             inner: FusioManifest::new_with_context(
@@ -122,12 +127,13 @@ where
     }
 }
 
-impl<HS, SS, CS, LS> Manifest<VersionCodec, HS, SS, CS, LS>
+impl<HS, SS, CS, LS, E> Manifest<VersionCodec, HS, SS, CS, LS, E>
 where
     HS: HeadStore + MaybeSend + MaybeSync + 'static,
     SS: SegmentIo + MaybeSend + MaybeSync + 'static,
     CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
+    E: Executor + Timer + Clone + 'static,
 {
     /// Apply a sequence of edits, atomically publishing a new table version together with head
     /// metadata.
@@ -358,12 +364,13 @@ where
     }
 }
 
-impl<HS, SS, CS, LS> Manifest<GcPlanCodec, HS, SS, CS, LS>
+impl<HS, SS, CS, LS, E> Manifest<GcPlanCodec, HS, SS, CS, LS, E>
 where
     HS: HeadStore + MaybeSend + MaybeSync + 'static,
     SS: SegmentIo + MaybeSend + MaybeSync + 'static,
     CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
+    E: Executor + Timer + Clone + 'static,
 {
     pub(crate) async fn put_gc_plan(
         &self,
@@ -398,12 +405,13 @@ where
     }
 }
 
-impl<HS, SS, CS, LS> Manifest<CatalogCodec, HS, SS, CS, LS>
+impl<HS, SS, CS, LS, E> Manifest<CatalogCodec, HS, SS, CS, LS, E>
 where
     HS: HeadStore + MaybeSend + MaybeSync + 'static,
     SS: SegmentIo + MaybeSend + MaybeSync + 'static,
     CS: CheckpointStore + MaybeSend + MaybeSync + 'static,
     LS: LeaseStore + MaybeSend + MaybeSync + 'static,
+    E: Executor + Timer + Clone + 'static,
 {
     pub(crate) async fn init_catalog_root(&self) -> ManifestResult<()> {
         let mut session = self.inner.session_write().await?;
@@ -494,13 +502,14 @@ where
     }
 }
 
-impl<C, HS, SS, CS, LS> Clone for Manifest<C, HS, SS, CS, LS>
+impl<C, HS, SS, CS, LS, E> Clone for Manifest<C, HS, SS, CS, LS, E>
 where
     C: ManifestCodec,
     HS: HeadStore + MaybeSend + MaybeSync + Clone + 'static,
     SS: SegmentIo + MaybeSend + MaybeSync + Clone + 'static,
     CS: CheckpointStore + MaybeSend + MaybeSync + Clone + 'static,
     LS: LeaseStore + MaybeSend + MaybeSync + Clone + 'static,
+    E: Executor + Timer + Clone + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -544,7 +553,7 @@ fn ensure_table_compat(meta: &TableMeta, definition: &TableDefinition) -> Manife
     Ok(())
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::sync::Arc;
 
@@ -555,10 +564,7 @@ mod tests {
     };
 
     use super::{
-        super::{
-            bootstrap::InMemoryCatalogManifest,
-            domain::{SstEntry, TableDefinition},
-        },
+        super::domain::{SstEntry, TableDefinition},
         *,
     };
     use crate::{
@@ -567,7 +573,7 @@ mod tests {
         ondisk::sstable::{SsTableId, SsTableStats},
     };
 
-    type TestManifest = super::super::bootstrap::InMemoryManifest;
+    type TestManifest = super::super::bootstrap::InMemoryManifest<DefaultExecutor>;
 
     fn bare_manifest() -> TestManifest {
         let fs = InMemoryFs::new();
@@ -580,7 +586,8 @@ mod tests {
         Manifest::open(Stores::new(head, segment, checkpoint, lease), context)
     }
 
-    fn bare_catalog_manifest() -> InMemoryCatalogManifest {
+    fn bare_catalog_manifest() -> super::super::bootstrap::InMemoryCatalogManifest<DefaultExecutor>
+    {
         let fs = InMemoryFs::new();
         let head = HeadStoreImpl::new(fs.clone(), "catalog/head.json");
         let segment = SegmentStoreImpl::new(fs.clone(), "catalog/segments");
@@ -599,9 +606,10 @@ mod tests {
     #[tokio::test]
     async fn apply_version_edits_snapshot_latest_and_list_versions_happy_path() {
         let file_ids = FileIdGenerator::default();
-        let (manifest, table_id) = init_in_memory_manifest_raw(1, &file_ids)
-            .await
-            .expect("manifest should initialize");
+        let (manifest, table_id) =
+            init_in_memory_manifest_raw(1, &file_ids, DefaultExecutor::default())
+                .await
+                .expect("manifest should initialize");
 
         let wal_segment_a = WalSegmentRef::new(40, file_ids.generate(), 0, 10);
         let wal_segment_b = WalSegmentRef::new(42, file_ids.generate(), 5, 20);
@@ -854,9 +862,10 @@ mod tests {
     #[tokio::test]
     async fn wal_floor_clears_once_no_segments_remain() {
         let file_ids = FileIdGenerator::default();
-        let (manifest, table_id) = init_in_memory_manifest_raw(1, &file_ids)
-            .await
-            .expect("manifest should initialize");
+        let (manifest, table_id) =
+            init_in_memory_manifest_raw(1, &file_ids, DefaultExecutor::default())
+                .await
+                .expect("manifest should initialize");
 
         let wal_segment = WalSegmentRef::new(9, file_ids.generate(), 0, 4);
         manifest
@@ -1020,9 +1029,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn apply_version_edits_cas_conflict() {
         let file_ids = FileIdGenerator::default();
-        let (manifest, table_id) = init_in_memory_manifest_raw(1, &file_ids)
-            .await
-            .expect("manifest should initialize");
+        let (manifest, table_id) =
+            init_in_memory_manifest_raw(1, &file_ids, DefaultExecutor::default())
+                .await
+                .expect("manifest should initialize");
 
         let data0 = test_paths(30);
         let edits = vec![VersionEdit::AddSsts {

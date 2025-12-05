@@ -54,7 +54,7 @@ fn wal_cfg_with_backend(
 }
 
 async fn rows_from_db(
-    db: &DB<DynMode, TokioExecutor>,
+    db: &DB<DynMode, LocalFs, TokioExecutor>,
 ) -> Result<Vec<(String, i32)>, Box<dyn std::error::Error>> {
     let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
     let snapshot = db.begin_snapshot().await?;
@@ -109,12 +109,13 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())?
-        .create_dirs(true)
-        .wal_config(wal_cfg.clone())
-        .recover_or_init_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(build_config)
+            .on_disk(root_str.clone())?
+            .create_dirs(true)
+            .wal_config(wal_cfg.clone())
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let expected_rows = vec![
@@ -151,8 +152,8 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
         ],
         &["id"],
     );
-    let mut recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(recover_config)
+    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)
@@ -190,12 +191,13 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
     let wal_dir = temp_root.join("wal");
     let wal_cfg = wal_cfg_with_backend(&wal_dir, true)?;
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())?
-        .create_dirs(true)
-        .wal_config(wal_cfg.clone())
-        .recover_or_init_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(build_config)
+            .on_disk(root_str.clone())?
+            .create_dirs(true)
+            .wal_config(wal_cfg.clone())
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let expected_rows = vec![("delta".to_string(), 100), ("echo".to_string(), 200)];
@@ -220,8 +222,8 @@ async fn durability_restart_via_wal_only() -> Result<(), Box<dyn std::error::Err
         ],
         &["id"],
     );
-    let mut recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(recover_config)
+    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)
@@ -266,12 +268,13 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
     let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())?
-        .create_dirs(true)
-        .wal_config(wal_cfg.clone())
-        .recover_or_init_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(build_config)
+            .on_disk(root_str.clone())?
+            .create_dirs(true)
+            .wal_config(wal_cfg.clone())
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     // First batch: will be sealed + flushed.
@@ -315,8 +318,8 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
         ],
         &["id"],
     );
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(recover_config)
+    let recovered: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)
@@ -356,7 +359,7 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
         executor: Arc<TokioExecutor>,
         schema: Arc<Schema>,
         rows: Vec<(String, i32)>,
-    ) -> Result<DB<DynMode, TokioExecutor>, Box<dyn std::error::Error>> {
+    ) -> Result<DB<DynMode, LocalFs, TokioExecutor>, Box<dyn std::error::Error>> {
         let reopen_config = config_with_pk(
             vec![
                 Field::new("id", DataType::Utf8, false),
@@ -364,8 +367,8 @@ async fn durability_multi_restart_idempotent() -> Result<(), Box<dyn std::error:
             ],
             &["id"],
         );
-        let mut db: DB<DynMode, TokioExecutor> =
-            DB::<DynMode, TokioExecutor>::builder(reopen_config)
+        let mut db: DB<DynMode, LocalFs, TokioExecutor> =
+            DB::<DynMode, LocalFs, TokioExecutor>::builder(reopen_config)
                 .on_disk(root.to_string())?
                 .create_dirs(true)
                 .wal_config(wal_cfg.clone())
@@ -447,12 +450,13 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
     let wal_dir = temp_root.join("wal");
     let wal_cfg = wal_cfg_with_backend(&wal_dir, false)?;
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())?
-        .create_dirs(true)
-        .wal_config(wal_cfg.clone())
-        .recover_or_init_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(build_config)
+            .on_disk(root_str.clone())?
+            .create_dirs(true)
+            .wal_config(wal_cfg.clone())
+            .recover_or_init_with_executor(Arc::clone(&executor))
+            .await?;
     db.set_seal_policy(Arc::new(NeverSeal::default()));
 
     let expected_rows = vec![("ns1".to_string(), 7), ("ns2".to_string(), 8)];
@@ -475,8 +479,8 @@ async fn durability_wal_only_no_state_store() -> Result<(), Box<dyn std::error::
         ],
         &["id"],
     );
-    let recovered: DB<DynMode, TokioExecutor> =
-        DB::<DynMode, TokioExecutor>::builder(recover_config)
+    let recovered: DB<DynMode, LocalFs, TokioExecutor> =
+        DB::<DynMode, LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg)

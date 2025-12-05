@@ -319,11 +319,13 @@ impl From<DBError> for TransactionError {
 }
 
 /// Builder-style transaction used by the dynamic mode.
-pub struct Transaction<E>
+pub struct Transaction<FS, E>
 where
-    E: Executor + Timer,
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    handle: DynDbHandle<E>,
+    handle: DynDbHandle<FS, E>,
     schema: SchemaRef,
     delete_schema: SchemaRef,
     extractor: Arc<dyn KeyProjection>,
@@ -334,12 +336,14 @@ where
     durability: TransactionDurability,
 }
 
-impl<E> Transaction<E>
+impl<FS, E> Transaction<FS, E>
 where
-    E: Executor + Timer,
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     pub(crate) fn new(
-        handle: DynDbHandle<E>,
+        handle: DynDbHandle<FS, E>,
         schema: SchemaRef,
         delete_schema: SchemaRef,
         extractor: Arc<dyn KeyProjection>,
@@ -539,10 +543,14 @@ where
         Ok(())
     }
 
-    fn read_mutable_rows(
+    fn read_mutable_rows<C>(
         &self,
-        db: &DB<DynMode, E>,
-    ) -> Result<BTreeMap<KeyOwned, DynRow>, TransactionError> {
+        db: &DB<DynMode, C, E>,
+    ) -> Result<BTreeMap<KeyOwned, DynRow>, TransactionError>
+    where
+        C: crate::manifest::ManifestFs<E>,
+        <C as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
         let read_ts = self.read_ts();
         let mut out = BTreeMap::new();
         let rows = db
@@ -581,7 +589,7 @@ where
     /// Commit the staged mutations into the supplied DB, ensuring WAL durability first.
     pub async fn commit(self) -> Result<(), TransactionCommitError>
     where
-        E: Executor + Timer + 'static,
+        E: Executor + Timer + Clone + 'static,
     {
         let Transaction {
             handle,
@@ -735,14 +743,16 @@ fn build_delete_batch(
         .map_err(TransactionCommitError::RowEncoding)
 }
 
-fn apply_staged_payloads<E>(
-    db: &DB<DynMode, E>,
+fn apply_staged_payloads<FS, E>(
+    db: &DB<DynMode, FS, E>,
     upserts: Option<RecordBatch>,
     deletes: Option<RecordBatch>,
     commit_ts: Timestamp,
 ) -> Result<(), TransactionCommitError>
 where
-    E: Executor + Timer,
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     if let Some(batch) = upserts {
         db.apply_committed_batch(batch, commit_ts)
@@ -759,13 +769,13 @@ fn clone_dyn_row(row: &DynRow) -> DynRow {
     DynRow(row.0.clone())
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::sync::Arc;
 
     use arrow_array::{Int32Array, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
-    use fusio::executor::NoopExecutor;
+    use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
     use futures::TryStreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
@@ -779,15 +789,15 @@ mod tests {
         test::build_batch,
     };
 
-    type TestTx = Transaction<NoopExecutor>;
+    type TestTx = Transaction<InMemoryFs, NoopExecutor>;
 
-    async fn make_db() -> (DynDbHandle<NoopExecutor>, SchemaRef) {
+    async fn make_db() -> (DynDbHandle<InMemoryFs, NoopExecutor>, SchemaRef) {
         make_db_with_policy(None).await
     }
 
     async fn make_db_with_policy(
         policy: Option<Arc<dyn crate::inmem::policy::SealPolicy + Send + Sync>>,
-    ) -> (DynDbHandle<NoopExecutor>, SchemaRef) {
+    ) -> (DynDbHandle<InMemoryFs, NoopExecutor>, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -803,7 +813,11 @@ mod tests {
         (db.into_shared(), schema)
     }
 
-    async fn ingest_rows(db: &DynDbHandle<NoopExecutor>, schema: &SchemaRef, rows: Vec<DynRow>) {
+    async fn ingest_rows(
+        db: &DynDbHandle<InMemoryFs, NoopExecutor>,
+        schema: &SchemaRef,
+        rows: Vec<DynRow>,
+    ) {
         let tombstones = vec![false; rows.len()];
         let batch = build_batch(schema.clone(), rows).expect("batch");
         db.ingest_with_tombstones(batch, tombstones)
@@ -1200,7 +1214,7 @@ async fn write_wal_transaction<E>(
     commit_ts: Timestamp,
 ) -> Result<WalTxnTickets<E>, TransactionCommitError>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     let mut tickets = Vec::new();
     let begin_ticket = wal.txn_begin(provisional_id).await?;
@@ -1230,14 +1244,14 @@ where
 
 struct WalTxnTickets<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     tickets: Vec<crate::wal::WalTicket<E>>,
 }
 
 impl<E> WalTxnTickets<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     async fn await_range(self) -> Result<WalFrameRange, TransactionCommitError> {
         let mut range = AckRange::default();
@@ -1277,12 +1291,14 @@ impl AckRange {
     }
 }
 
-fn spawn_publish_task<E>(
+fn spawn_publish_task<FS, E>(
     executor: Arc<E>,
-    publish_ctx: TxnWalPublishContext,
+    publish_ctx: TxnWalPublishContext<FS, E>,
     tickets: WalTxnTickets<E>,
 ) where
-    E: Executor + Timer + 'static,
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     executor.spawn(async move {
         match tickets.await_range().await {
@@ -1298,7 +1314,12 @@ fn spawn_publish_task<E>(
     });
 }
 
-impl TxnWalPublishContext {
+impl<FS, E> TxnWalPublishContext<FS, E>
+where
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
     async fn finalize(&self, wal_range: WalFrameRange) -> Result<(), TransactionCommitError> {
         {
             let mut guard = self

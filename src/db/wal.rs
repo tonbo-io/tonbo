@@ -18,7 +18,7 @@ use crate::{
         policy::{SealDecision, StatsProvider},
     },
     key::KeyOwned,
-    manifest::{TableId, TonboManifest},
+    manifest::{ManifestFs, TableId, TonboManifest},
     mode::{DynMode, Mode},
     mvcc::Timestamp,
     wal::{
@@ -72,8 +72,13 @@ impl WalRangeAccumulator {
 }
 
 #[derive(Clone)]
-pub(crate) struct TxnWalPublishContext {
-    pub(crate) manifest: TonboManifest,
+pub(crate) struct TxnWalPublishContext<FS, E>
+where
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    pub(crate) manifest: TonboManifest<FS, E>,
     pub(crate) manifest_table: TableId,
     pub(crate) wal_config: Option<RuntimeWalConfig>,
     pub(crate) mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
@@ -129,16 +134,18 @@ impl PendingWalTxn {
     }
 }
 
-impl<E> DB<DynMode, E>
+impl<FS, E> DB<DynMode, FS, E>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     pub(crate) fn schema(&self) -> &SchemaRef {
         &self.mode.schema
     }
 
     /// Wrap this database in an executor-provided read-write lock for shared transactional use.
-    pub fn into_shared(self) -> Arc<DB<DynMode, E>> {
+    pub fn into_shared(self) -> Arc<DB<DynMode, FS, E>> {
         Arc::new(self)
     }
 
@@ -340,11 +347,13 @@ where
     }
 }
 
-impl<M, E> DB<M, E>
+impl<M, FS, E> DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + std::hash::Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Attach WAL configuration prior to enabling durability.
     pub fn with_wal_config(mut self, cfg: RuntimeWalConfig) -> Self {
@@ -396,7 +405,13 @@ where
         }
     }
 
-    pub(crate) fn txn_publish_context(&self, prev_live_floor: Option<u64>) -> TxnWalPublishContext {
+    pub(crate) fn txn_publish_context(
+        &self,
+        prev_live_floor: Option<u64>,
+    ) -> TxnWalPublishContext<FS, E>
+    where
+        E: Clone,
+    {
         TxnWalPublishContext {
             manifest: self.manifest.clone(),
             manifest_table: self.manifest_table,
@@ -454,13 +469,15 @@ where
     }
 }
 
-async fn insert_dyn_wal_batch<E>(
-    db: &DB<DynMode, E>,
+async fn insert_dyn_wal_batch<FS, E>(
+    db: &DB<DynMode, FS, E>,
     batch: RecordBatch,
     tombstones: Vec<bool>,
 ) -> Result<(), KeyExtractError>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     validate_record_batch_schema(db, &batch)?;
     validate_vec_tombstone_bitmap(&batch, &tombstones)?;
@@ -532,12 +549,14 @@ where
     Ok(())
 }
 
-async fn insert_dyn_wal_batches<E>(
-    db: &DB<DynMode, E>,
+async fn insert_dyn_wal_batches<FS, E>(
+    db: &DB<DynMode, FS, E>,
     batches: Vec<(RecordBatch, Vec<bool>)>,
 ) -> Result<(), KeyExtractError>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     for (batch, tombstones) in batches {
         insert_dyn_wal_batch(db, batch, tombstones).await?;
@@ -545,14 +564,16 @@ where
     Ok(())
 }
 
-pub(crate) fn apply_dyn_wal_batch<E>(
-    db: &DB<DynMode, E>,
+pub(crate) fn apply_dyn_wal_batch<FS, E>(
+    db: &DB<DynMode, FS, E>,
     batch: RecordBatch,
     commit_ts_column: ArrayRef,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     let schema_contains_tombstone = db
         .mode
@@ -600,13 +621,15 @@ where
     Ok(())
 }
 
-fn apply_dyn_delete_wal_batch<E>(
-    db: &DB<DynMode, E>,
+fn apply_dyn_delete_wal_batch<FS, E>(
+    db: &DB<DynMode, FS, E>,
     batch: RecordBatch,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     validate_delete_batch_schema(db, &batch)?;
     validate_delete_commit_ts(&batch, commit_ts)?;
@@ -617,12 +640,14 @@ where
     Ok(())
 }
 
-fn validate_record_batch_schema<E>(
-    db: &DB<DynMode, E>,
+fn validate_record_batch_schema<FS, E>(
+    db: &DB<DynMode, FS, E>,
     batch: &RecordBatch,
 ) -> Result<(), KeyExtractError>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     if db.mode.schema.as_ref() != batch.schema().as_ref() {
         return Err(KeyExtractError::SchemaMismatch {
@@ -646,12 +671,14 @@ fn validate_vec_tombstone_bitmap(
     Ok(())
 }
 
-fn validate_delete_batch_schema<E>(
-    db: &DB<DynMode, E>,
+fn validate_delete_batch_schema<FS, E>(
+    db: &DB<DynMode, FS, E>,
     batch: &RecordBatch,
 ) -> Result<(), KeyExtractError>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     if db.mode.delete_schema.as_ref() != batch.schema().as_ref() {
         return Err(KeyExtractError::SchemaMismatch {

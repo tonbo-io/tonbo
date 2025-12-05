@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use fusio::{executor::web::WebExecutor, path::Path};
+use fusio::{executor::web::WebExecutor, impls::remotes::aws::fs::AmazonS3, path::Path};
 use futures::StreamExt;
 use js_sys::Date;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -48,12 +48,13 @@ async fn web_s3_roundtrip_wal_and_sstable() {
     let s3_spec = memory_s3_spec(prefix.clone());
 
     let exec = Arc::new(WebExecutor::new());
-    let mut db: DB<DynMode, WebExecutor> = DB::<DynMode, WebExecutor>::builder(schema_cfg)
-        .object_store(ObjectSpec::s3(s3_spec))
-        .wal_sync_policy(WalSyncPolicy::Always)
-        .build_with_executor(Arc::clone(&exec))
-        .await
-        .expect("build web db");
+    let mut db: DB<DynMode, AmazonS3, WebExecutor> =
+        DB::<DynMode, AmazonS3, WebExecutor>::builder(schema_cfg)
+            .object_store(ObjectSpec::s3(s3_spec))
+            .wal_sync_policy(WalSyncPolicy::Always)
+            .build_with_executor(Arc::clone(&exec))
+            .await
+            .expect("build web db");
 
     // Seal after every batch so immutables are flushed deterministically in tests.
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));

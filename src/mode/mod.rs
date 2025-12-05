@@ -8,6 +8,7 @@ use std::{hash::Hash, sync::Arc};
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use fusio::executor::{Executor, Timer};
+use futures::future::LocalBoxFuture;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -50,23 +51,27 @@ pub trait Mode {
         Self: Sized;
 
     /// Insert `value` into the given database instance.
-    fn insert<'a, E>(
-        db: &'a DB<Self, E>,
+    fn insert<FS, E>(
+        db: &DB<Self, FS, E>,
         value: Self::InsertInput,
-    ) -> impl std::future::Future<Output = Result<(), KeyExtractError>> + 'a
+    ) -> LocalBoxFuture<'_, Result<(), KeyExtractError>>
     where
         Self: Sized,
-        E: Executor + Timer;
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit;
 
     /// Replay WAL events into the database during recovery, returning the last commit timestamp if
     /// any.
-    fn replay_wal<E>(
-        db: &mut DB<Self, E>,
+    fn replay_wal<FS, E>(
+        db: &mut DB<Self, FS, E>,
         events: Vec<WalEvent>,
     ) -> Result<Option<Timestamp>, KeyExtractError>
     where
         Self: Sized,
-        E: Executor + Timer;
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit;
 }
 
 /// Modes capable of describing their catalog metadata for bootstrap.
@@ -156,20 +161,16 @@ impl Mode for DynMode {
         ))
     }
 
-    fn insert<'a, E>(
-        db: &'a DB<Self, E>,
+    fn insert<FS, E>(
+        db: &DB<Self, FS, E>,
         batch: RecordBatch,
-    ) -> impl std::future::Future<Output = Result<(), KeyExtractError>> + 'a
+    ) -> LocalBoxFuture<'_, Result<(), KeyExtractError>>
     where
-        E: Executor + Timer,
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        async fn insert_impl<E>(
-            db: &DB<DynMode, E>,
-            batch: RecordBatch,
-        ) -> Result<(), KeyExtractError>
-        where
-            E: Executor + Timer,
-        {
+        Box::pin(async move {
             if db.schema().as_ref() != batch.schema().as_ref() {
                 return Err(KeyExtractError::SchemaMismatch {
                     expected: db.schema().clone(),
@@ -199,17 +200,17 @@ impl Mode for DynMode {
             }
             db.maybe_seal_after_insert()?;
             Ok(())
-        }
-
-        insert_impl(db, batch)
+        }) as LocalBoxFuture<'_, Result<(), KeyExtractError>>
     }
 
-    fn replay_wal<E>(
-        db: &mut DB<Self, E>,
+    fn replay_wal<FS, E>(
+        db: &mut DB<Self, FS, E>,
         events: Vec<WalEvent>,
     ) -> Result<Option<Timestamp>, KeyExtractError>
     where
-        E: Executor + Timer,
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         db.replay_wal_events(events)
     }

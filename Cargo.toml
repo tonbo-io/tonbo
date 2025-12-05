@@ -9,14 +9,14 @@ members = [".", "predicate"]
 
 
 [features]
-default = ["tokio-runtime"]
-tokio-runtime = [
+default = ["tokio"]
+tokio = [
+    "dep:tokio",
     "fusio-manifest/tokio",
     "fusio/executor-tokio",
     "fusio/fs",
     "fusio/tokio",
     "fusio/tokio-http",
-    "tokio",
 ]
 # Web/wasm build using Fusio's WebExecutor and wasm-http client stack.
 web = [
@@ -106,22 +106,22 @@ tokio = { version = "1", default-features = false, features = [
 [[example]]
 name = "02_dynamic_basic"
 path = "examples/02_dynamic_basic.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [[example]]
 name = "03_dynamic_metadata"
 path = "examples/03_dynamic_metadata.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [[example]]
 name = "04_dynamic_composite"
 path = "examples/04_dynamic_composite.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [[example]]
 name = "05_dynamic_transaction"
 path = "examples/05_dynamic_transaction.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [[example]]
 name = "edge_worker"
@@ -131,22 +131,22 @@ required-features = ["web"]
 [[example]]
 name = "wal_bench"
 path = "examples/wal_bench.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [[test]]
 name = "read_smoke"
 path = "tests/read_smoke.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [[test]]
 name = "durability_public"
 path = "tests/durability_public.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [[test]]
 name = "s3_smoke"
 path = "tests/s3_smoke.rs"
-required-features = ["tokio-runtime"]
+required-features = ["tokio"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen = "0.2"

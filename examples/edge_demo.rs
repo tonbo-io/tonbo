@@ -6,7 +6,7 @@ mod wasm_edge {
 
     use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::executor::web::WebExecutor;
+    use fusio::{executor::web::WebExecutor, impls::remotes::aws::fs::AmazonS3};
     use futures::StreamExt;
     use js_sys::Date;
     use predicate::ScalarValue;
@@ -47,12 +47,13 @@ mod wasm_edge {
         let s3_spec = s3_spec(prefix.clone())?;
 
         let exec = Arc::new(WebExecutor::new());
-        let db: DB<DynMode, WebExecutor> = DB::<DynMode, WebExecutor>::builder(schema_cfg)
-            .object_store(ObjectSpec::s3(s3_spec))
-            .wal_sync_policy(WalSyncPolicy::Always)
-            .build_with_executor(Arc::clone(&exec))
-            .await
-            .map_err(|err| format!("build: {err}"))?;
+        let db: DB<DynMode, AmazonS3, WebExecutor> =
+            DB::<DynMode, AmazonS3, WebExecutor>::builder(schema_cfg)
+                .object_store(ObjectSpec::s3(s3_spec))
+                .wal_sync_policy(WalSyncPolicy::Always)
+                .build_with_executor(Arc::clone(&exec))
+                .await
+                .map_err(|err| format!("build: {err}"))?;
 
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),

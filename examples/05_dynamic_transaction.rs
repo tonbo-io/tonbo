@@ -1,11 +1,11 @@
 // 05: Transactional writes (strict WAL) with optimistic staging and commit
 
-use fusio::executor::tokio::TokioExecutor;
+use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use futures::StreamExt;
 use tonbo::{
     db::{DbBuilder, DynDbHandle, DynDbHandleExt},
     query::{ColumnRef, Predicate, ScalarValue},
-    transaction::{CommitAckMode, Transaction},
+    transaction::CommitAckMode,
 };
 use typed_arrow::{Record, schema::SchemaMeta};
 use typed_arrow_dyn::DynCell;
@@ -50,7 +50,7 @@ async fn main() {
     // let batch = builders.finish().into_record_batch();
 
     // // Begin a transaction and stage mutations.
-    let tx: Transaction<TokioExecutor> = db.begin_transaction().await.expect("begin tx");
+    let tx = db.begin_transaction().await.expect("begin tx");
     // tx.upsert_batch(&batch).expect("stage batch");
     // tx.delete("ghost").expect("stage delete");
 
@@ -84,7 +84,10 @@ async fn main() {
     println!("committed rows: {:?}", committed);
 }
 
-async fn scan_pairs(db: &DynDbHandle<TokioExecutor>, predicate: &Predicate) -> Vec<(String, i32)> {
+async fn scan_pairs(
+    db: &DynDbHandle<LocalFs, TokioExecutor>,
+    predicate: &Predicate,
+) -> Vec<(String, i32)> {
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
         .plan_scan(db, predicate, None, None)

@@ -376,7 +376,7 @@ fn convert_owned_cell(cell: &typed_arrow_dyn::DynCell) -> Result<ScalarValue, Re
     }
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::sync::Arc;
 

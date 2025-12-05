@@ -157,7 +157,7 @@ impl Replayer {
     }
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::sync::Arc;
 

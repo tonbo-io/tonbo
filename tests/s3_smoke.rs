@@ -10,7 +10,7 @@ use std::{
 
 use arrow_array::{Array, Int32Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field};
-use fusio::executor::tokio::TokioExecutor;
+use fusio::{executor::tokio::TokioExecutor, impls::remotes::aws::fs::AmazonS3};
 use tonbo::{
     db::{AwsCreds, DB, DynMode, ObjectSpec, S3Spec},
     wal::{WalConfig, WalExt, WalSyncPolicy, frame::WalEvent, replay::Replayer},
@@ -85,13 +85,14 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
     s3.region = Some(region);
     s3.sign_payload = Some(true);
 
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(config)
-        .object_store(ObjectSpec::s3(s3))
-        .wal_sync_policy(WalSyncPolicy::Always)
-        .wal_retention_bytes(Some(1 << 20))
-        .build()
-        .await
-        .map_err(|err| format!("failed to build S3-backed DB: {err}"))?;
+    let mut db: DB<DynMode, AmazonS3, TokioExecutor> =
+        DB::<DynMode, AmazonS3, TokioExecutor>::builder(config)
+            .object_store(ObjectSpec::s3(s3))
+            .wal_sync_policy(WalSyncPolicy::Always)
+            .wal_retention_bytes(Some(1 << 20))
+            .build()
+            .await
+            .map_err(|err| format!("failed to build S3-backed DB: {err}"))?;
 
     let wal_cfg: WalConfig = db
         .wal_config()

@@ -1024,7 +1024,7 @@ pub(crate) fn take_record_batch(
         .map_err(|err| SsTableError::Parquet(ParquetError::ArrowError(err.to_string())))
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{
         collections::BTreeMap,

@@ -8,7 +8,7 @@ use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray, UInt32Array, U
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use arrow_select::take::take;
 use clap::{Parser, ValueEnum};
-use fusio::executor::tokio::TokioExecutor;
+use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use tonbo::{
     db::{DB, DbBuilder, DynMode},
     mvcc::{MVCC_COMMIT_COL, Timestamp},
@@ -151,18 +151,19 @@ async fn bench_wal_append(cfg: &Config, schema: Arc<Schema>) -> (Duration, usize
     (elapsed, bytes_per_batch * cfg.batches)
 }
 
-async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, TokioExecutor> {
+async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, LocalFs, TokioExecutor> {
     let label = format!("wal-bench-{}", Ulid::new());
     let root = std::env::temp_dir().join(&label);
     fs::create_dir_all(&root).expect("wal bench dir");
-    let db: DB<DynMode, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")
-        .expect("config")
-        .on_disk(&root)
-        .expect("on_disk")
-        .wal_sync_policy(sync)
-        .build()
-        .await
-        .expect("db");
+    let db: DB<DynMode, LocalFs, TokioExecutor> =
+        DbBuilder::from_schema_key_name(schema.clone(), "id")
+            .expect("config")
+            .on_disk(&root)
+            .expect("on_disk")
+            .wal_sync_policy(sync)
+            .build()
+            .await
+            .expect("db");
     db
 }
 

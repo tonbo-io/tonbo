@@ -36,15 +36,17 @@ pub const DEFAULT_SCAN_BATCH_ROWS: usize = 1024;
 
 impl TxSnapshot {
     /// Plan a scan using this snapshot for MVCC visibility and manifest pinning.
-    pub async fn plan_scan<E>(
+    pub async fn plan_scan<FS, E>(
         &self,
-        db: &DB<DynMode, E>,
+        db: &DB<DynMode, FS, E>,
         predicate: &Predicate,
         projected_schema: Option<&SchemaRef>,
         limit: Option<usize>,
     ) -> Result<ScanPlan, crate::db::DBError>
     where
-        E: Executor + Timer,
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         let projected_schema = projected_schema.cloned();
         let residual_predicate = Some(predicate.clone());
@@ -71,9 +73,11 @@ impl TxSnapshot {
     }
 }
 
-impl<E> DB<DynMode, E>
+impl<FS, E> DB<DynMode, FS, E>
 where
-    E: Executor + Timer,
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Execute the scan plan with MVCC visibility
     pub async fn execute_scan<'a>(

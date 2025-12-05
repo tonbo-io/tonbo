@@ -16,6 +16,7 @@ use compaction::CompactionLoopHandle;
 use fusio::{
     DynFs,
     executor::{Executor, Timer},
+    mem::fs::InMemoryFs,
 };
 use lockable::LockableHashMap;
 use wal::SealState;
@@ -24,7 +25,7 @@ mod builder;
 mod compaction;
 mod error;
 mod scan;
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests;
 mod wal;
 
@@ -42,7 +43,7 @@ use crate::{
     inmem::{mutable::MutableLayout, policy::SealPolicy},
     key::KeyOwned,
     manifest::{
-        ManifestError, SstEntry, TableId, TonboManifest, VersionEdit, WalSegmentRef,
+        ManifestError, ManifestFs, SstEntry, TableId, TonboManifest, VersionEdit, WalSegmentRef,
         init_in_memory_manifest,
     },
     mode::CatalogDescribe,
@@ -58,30 +59,39 @@ use crate::{
 };
 
 /// Shared handle for the dynamic mode database backed by an `Arc`.
-pub type DynDbHandle<E> = Arc<DB<DynMode, E>>;
+pub type DynDbHandle<FS, E> = Arc<DB<DynMode, FS, E>>;
+
 /// Extension methods on dynamic DB handles.
-pub trait DynDbHandleExt<E>
+pub trait DynDbHandleExt<FS, E>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Clone the underlying `Arc`.
-    fn clone_handle(&self) -> DynDbHandle<E>;
+    fn clone_handle(&self) -> DynDbHandle<FS, E>;
 
     /// Begin a transaction using the shared handle.
-    fn begin_transaction(&self) -> impl Future<Output = Result<Transaction<E>, TransactionError>>;
+    fn begin_transaction(
+        &self,
+    ) -> impl Future<Output = Result<Transaction<FS, E>, TransactionError>>;
 }
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-impl<E> DynDbHandleExt<E> for DynDbHandle<E>
+impl<FS, E> DynDbHandleExt<FS, E> for DynDbHandle<FS, E>
 where
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    fn clone_handle(&self) -> DynDbHandle<E> {
+    fn clone_handle(&self) -> DynDbHandle<FS, E> {
         Arc::clone(self)
     }
 
-    fn begin_transaction(&self) -> impl Future<Output = Result<Transaction<E>, TransactionError>> {
+    fn begin_transaction(
+        &self,
+    ) -> impl Future<Output = Result<Transaction<FS, E>, TransactionError>> {
         let handle = Arc::clone(self);
         async move {
             let snapshot = handle.begin_snapshot().await?;
@@ -111,12 +121,14 @@ fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
 
-/// A DB parametrized by a mode `M` that defines key, payload and insert interface.
-pub struct DB<M, E>
+/// A DB parametrized by a mode `M`, filesystem `FS`, and executor `E`.
+pub struct DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     mode: M,
     mem: Arc<StdRwLock<M::Mutable>>,
@@ -134,43 +146,49 @@ where
     wal_config: Option<RuntimeWalConfig>,
     /// Monotonic commit timestamp assigned to ingests (autocommit path for now).
     commit_clock: CommitClock,
-    /// Manifest handle used by the dev branch manifest integration (in-memory for now).
-    manifest: TonboManifest,
+    /// Manifest handle with concrete filesystem type for static dispatch.
+    manifest: TonboManifest<FS, E>,
     manifest_table: TableId,
     /// WAL frame bounds covering the current mutable memtable, if any.
     mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
     /// Per-key transactional locks (wired once transactional writes arrive).
     _key_locks: LockMap<M::Key>,
     /// Optional background compaction driver/handle pair for local loops.
-    compaction_worker: Option<CompactionLoopHandle<M, E>>,
+    compaction_worker: Option<CompactionLoopHandle<M, FS, E>>,
 }
 
 // SAFETY: DB shares internal state behind explicit synchronization. The mode key and executor
 // bounds ensure the constituent types are safe to send/share across threads when guarded.
-unsafe impl<M, E> Send for DB<M, E>
+unsafe impl<M, FS, E> Send for DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone + Send + Sync,
     M::Mutable: Send + Sync,
-    E: Executor + Timer + Send + Sync,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + Send + Sync,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
 }
 
 // SAFETY: See rationale above for `Send`; read access is synchronized via external locks.
-unsafe impl<M, E> Sync for DB<M, E>
+unsafe impl<M, FS, E> Sync for DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone + Send + Sync,
     M::Mutable: Send + Sync,
-    E: Executor + Timer + Send + Sync,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + Send + Sync,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
 }
 
-impl<M, E> DB<M, E>
+impl<M, FS, E> DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     #[inline]
     fn mem_read(&self) -> RwLockReadGuard<'_, M::Mutable> {
@@ -197,18 +215,20 @@ where
 }
 
 // Methods common to all modes
-impl<M, E> DB<M, E>
+impl<M, FS, E> DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     #[allow(clippy::too_many_arguments)]
     fn from_components(
         mode: M,
         mem: M::Mutable,
         fs: Arc<dyn DynFs>,
-        manifest: TonboManifest,
+        manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
@@ -234,41 +254,13 @@ where
         }
     }
 
-    /// Construct a new DB in mode `M` using its configuration.
-    pub async fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError>
-    where
-        M: Sized + CatalogDescribe,
-    {
-        let table_definition = M::table_definition(&config, builder::DEFAULT_TABLE_NAME);
-        let (mode, mem) = M::build(config)?;
-        let file_ids = FileIdGenerator::default();
-        let manifest = init_in_memory_manifest()
-            .await
-            .map_err(manifest_error_as_key_extract)?;
-        let table_meta = manifest
-            .register_table(&file_ids, &table_definition)
-            .await
-            .map_err(manifest_error_as_key_extract)?;
-        let manifest_table = table_meta.table_id;
-        let fs: Arc<dyn DynFs> = Arc::new(fusio::disk::LocalFs {});
-        Ok(Self::from_components(
-            mode,
-            mem,
-            fs,
-            manifest,
-            manifest_table,
-            None,
-            executor,
-        ))
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn recover_with_wal_with_manifest(
         config: M::Config,
         executor: Arc<E>,
         fs: Arc<dyn DynFs>,
         wal_cfg: RuntimeWalConfig,
-        manifest: TonboManifest,
+        manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
     ) -> Result<Self, KeyExtractError>
     where
@@ -283,7 +275,7 @@ where
         executor: Arc<E>,
         fs: Arc<dyn DynFs>,
         wal_cfg: RuntimeWalConfig,
-        manifest: TonboManifest,
+        manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
     ) -> Result<Self, KeyExtractError>
     where
@@ -530,5 +522,38 @@ where
     /// Access the per-key transactional lock map.
     pub(crate) fn key_locks(&self) -> &LockMap<M::Key> {
         &self._key_locks
+    }
+}
+
+// In-memory convenience constructors.
+impl<M, E> DB<M, InMemoryFs, E>
+where
+    M: Mode + CatalogDescribe,
+    M::Key: Eq + Hash + Clone,
+    E: Executor + Timer + Clone + 'static,
+{
+    /// Construct a new in-memory DB in mode `M` using its configuration.
+    pub async fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError> {
+        let table_definition = M::table_definition(&config, builder::DEFAULT_TABLE_NAME);
+        let (mode, mem) = M::build(config)?;
+        let file_ids = FileIdGenerator::default();
+        let manifest = init_in_memory_manifest((*executor).clone())
+            .await
+            .map_err(manifest_error_as_key_extract)?;
+        let table_meta = manifest
+            .register_table(&file_ids, &table_definition)
+            .await
+            .map_err(manifest_error_as_key_extract)?;
+        let manifest_table = table_meta.table_id;
+        let fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
+        Ok(Self::from_components(
+            mode,
+            mem,
+            fs,
+            manifest,
+            manifest_table,
+            None,
+            executor,
+        ))
     }
 }

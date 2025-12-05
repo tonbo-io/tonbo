@@ -1,11 +1,13 @@
 //! Manifest integration layered on top of `fusio-manifest`.
 //!
-//! The implementation is split across smaller modules:
-//! - `domain`: strongly typed keys and values stored in the manifests.
-//! - `codec`: codec markers binding key/value pairs for individual manifest instances.
-//! - `driver`: thin wrapper around `fusio-manifest` providing higher-level helpers.
-//! - `version`: logic for applying manifest `VersionEdit`s.
-//! - `bootstrap`: convenience helpers for spinning up in-memory manifests during tests.
+//! Internals are generic, but we expose concrete helpers for the supported
+//! filesystem backends instead of a new abstraction layer.
+
+use fusio::{
+    dynamic::{MaybeSend, MaybeSync},
+    executor::{Executor, Timer},
+    fs::{Fs, FsCas},
+};
 
 pub(crate) mod bootstrap;
 pub(crate) mod codec;
@@ -13,6 +15,26 @@ mod domain;
 mod driver;
 mod version;
 
+/// Filesystem bound required by manifest store implementations.
+pub trait ManifestFs<E>: Fs + FsCas + Clone + MaybeSend + MaybeSync + 'static
+where
+    E: Executor + Timer + Clone + 'static,
+    Self: fusio_manifest::ObjectHead,
+    <Self as Fs>::File: fusio::durability::FileCommit,
+{
+}
+
+impl<FS, E> ManifestFs<E> for FS
+where
+    FS: Fs + FsCas + Clone + MaybeSend + MaybeSync + 'static,
+    E: Executor + Timer + Clone + 'static,
+    FS: fusio_manifest::ObjectHead,
+    <FS as Fs>::File: fusio::durability::FileCommit,
+{
+}
+
+#[cfg(test)]
+pub(crate) use bootstrap::init_fs_manifest_in_memory;
 pub(crate) use bootstrap::{
     TableSnapshot, TonboManifest, init_fs_manifest, init_in_memory_manifest,
 };

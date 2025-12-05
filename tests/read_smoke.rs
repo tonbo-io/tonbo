@@ -41,7 +41,7 @@ fn build_batch_owned(schema: Arc<Schema>, ids: Vec<String>, values: Vec<i32>) ->
     RecordBatch::try_new(schema, columns).expect("record batch")
 }
 
-async fn make_db() -> (DynDbHandle<NoopExecutor>, Arc<Schema>) {
+async fn make_db() -> (DynDbHandle<InMemoryFs, NoopExecutor>, Arc<Schema>) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
@@ -52,8 +52,8 @@ async fn make_db() -> (DynDbHandle<NoopExecutor>, Arc<Schema>) {
     (db.into_shared(), schema)
 }
 
-type BlockingTx = Transaction<NoopExecutor>;
-type TokioTx = Transaction<TokioExecutor>;
+type BlockingTx = Transaction<InMemoryFs, NoopExecutor>;
+type TokioTx = Transaction<InMemoryFs, TokioExecutor>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_smoke_streams_mutable_and_immutable() {
@@ -243,7 +243,8 @@ async fn read_smoke_transaction_scan() {
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(config, executor).await.expect("db");
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
+        DB::new(config, executor).await.expect("db");
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let mem_fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
@@ -448,7 +449,7 @@ async fn read_smoke_plan_scan_applies_limit() {
 }
 
 async fn collect_rows_for_predicate(
-    db: &DynDbHandle<NoopExecutor>,
+    db: &DynDbHandle<InMemoryFs, NoopExecutor>,
     predicate: &tonbo::query::Predicate,
     _read_ts: Timestamp,
 ) -> Vec<(String, i32)> {

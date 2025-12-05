@@ -41,7 +41,7 @@ use crate::{
 
 /// Minimal capability required by the background compaction loop.
 #[cfg(test)]
-pub(crate) trait CompactionHost<M: Mode, E: Executor + Timer> {
+pub(crate) trait CompactionHost<M: Mode, E: Executor + Timer + Clone> {
     fn compact_once<'a, CE, P>(
         &'a self,
         planner: &'a P,
@@ -98,7 +98,7 @@ pub(crate) async fn compaction_loop<M, E, CE, P>(
     budget: usize,
 ) where
     M: Mode + MaybeSend + MaybeSync,
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
     CE: CompactionExecutor + MaybeSend + MaybeSync,
     P: CompactionPlanner + MaybeSend + MaybeSync,
 {
@@ -137,7 +137,7 @@ pub(crate) fn spawn_compaction_loop_local<M, E, CE, P>(
 ) -> CompactionLoopHandle<E>
 where
     M: Mode + MaybeSend + MaybeSync + 'static,
-    E: Executor + Timer + 'static,
+    E: Executor + Timer + Clone + 'static,
     CE: CompactionExecutor + MaybeSend + MaybeSync + 'static,
     P: CompactionPlanner + MaybeSend + MaybeSync + 'static,
 {
@@ -187,14 +187,16 @@ impl MinorCompactor {
     }
 
     /// Flush immutables when the threshold is met, returning the new SST on success.
-    pub async fn maybe_compact<M, E>(
+    pub async fn maybe_compact<M, FS, E>(
         &self,
-        db: &mut DB<M, E>,
+        db: &mut DB<M, FS, E>,
         config: Arc<SsTableConfig>,
     ) -> Result<Option<SsTable<M>>, SsTableError>
     where
         M: Mode<ImmLayout = RecordBatch, Key = KeyOwned> + Sized,
-        E: Executor + Timer,
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         if db.num_immutable_segments() < self.segment_threshold {
             return Ok(None);
@@ -206,7 +208,7 @@ impl MinorCompactor {
     }
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{
         pin::Pin,
@@ -222,6 +224,7 @@ mod tests {
         disk::LocalFs,
         dynamic::{DynFs, MaybeSend, MaybeSendFuture, MaybeSync},
         executor::{NoopExecutor, tokio::TokioExecutor},
+        mem::fs::InMemoryFs,
         path::Path,
     };
     use tokio::time::sleep;
@@ -241,7 +244,7 @@ mod tests {
         test::build_batch,
     };
 
-    async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, NoopExecutor>) {
+    async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, InMemoryFs, NoopExecutor>) {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -253,7 +256,7 @@ mod tests {
             .expect("key field");
         let schema = Arc::clone(&config.schema);
         let executor = Arc::new(NoopExecutor);
-        let db = DB::<DynMode, NoopExecutor>::builder(config)
+        let db = DB::<DynMode, InMemoryFs, NoopExecutor>::builder(config)
             .in_memory("compaction-test")
             .build_with_executor(Arc::clone(&executor))
             .await

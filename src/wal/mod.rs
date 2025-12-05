@@ -439,7 +439,7 @@ pub(crate) fn split_commit_column(
 
 struct WalHandleInner<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     sender: mpsc::Sender<writer::WriterMsg>,
     queue_depth: Arc<AtomicUsize>, // current queue occupancy
@@ -450,7 +450,7 @@ where
 
 impl<E> WalHandleInner<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     fn new(
         sender: mpsc::Sender<writer::WriterMsg>,
@@ -493,14 +493,14 @@ where
 /// Handle returned when enabling the WAL on a `DB`.
 pub struct WalHandle<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     inner: Arc<WalHandleInner<E>>,
 }
 
 impl<E> Clone for WalHandle<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -511,7 +511,7 @@ where
 
 impl<E> fmt::Debug for WalHandle<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WalHandle").finish()
@@ -520,7 +520,7 @@ where
 
 impl<E> WalHandle<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     fn from_parts(
         sender: mpsc::Sender<writer::WriterMsg>,
@@ -766,7 +766,7 @@ pub struct WalAppendResult<E> {
 
 impl<E> WalAppendResult<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     /// Resolve the commit marker and return both acks (append, commit).
     pub async fn durable(self) -> WalResult<(WalAck, WalAck)> {
@@ -778,7 +778,7 @@ where
 
 impl<E> WalTicket<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     /// Resolve once durability is achieved.
     pub async fn durable(self) -> WalResult<WalAck> {
@@ -791,14 +791,14 @@ where
 
 impl<E> fmt::Debug for WalTicket<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WalTicket").field("seq", &self.seq).finish()
     }
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::sync::Arc;
 
@@ -969,7 +969,12 @@ mod tests {
 }
 
 /// Extension methods on the `DB` to enable/disable the WAL.
-pub trait WalExt<M: Mode, E: Executor + Timer> {
+pub trait WalExt<M: Mode, FS, E>
+where
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
     /// Enable the WAL with the provided configuration and executor.
     fn enable_wal(&mut self, _cfg: WalConfig)
     -> impl Future<Output = WalResult<WalHandle<E>>> + '_;
@@ -981,11 +986,13 @@ pub trait WalExt<M: Mode, E: Executor + Timer> {
     fn wal(&self) -> Option<&WalHandle<E>>;
 }
 
-impl<M, E> WalExt<M, E> for crate::db::DB<M, E>
+impl<M, FS, E> WalExt<M, FS, E> for crate::db::DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     async fn enable_wal(&mut self, cfg: WalConfig) -> WalResult<WalHandle<E>> {
         let storage = storage::WalStorage::new(Arc::clone(&cfg.segment_backend), cfg.dir.clone());

@@ -1,4 +1,4 @@
-#![cfg(feature = "tokio-runtime")]
+#![cfg(feature = "tokio")]
 
 use std::{sync::Arc, time::Duration};
 
@@ -25,7 +25,7 @@ async fn compaction_loop_is_spawned_when_configured() {
             let root = Path::parse("compaction").expect("path");
             let sst_cfg = Arc::new(SsTableConfig::new(Arc::clone(&schema), fs, root));
 
-            let db = DB::<DynMode, TokioExecutor>::builder(cfg)
+            let db = DB::<DynMode, InMemoryFs, TokioExecutor>::builder(cfg)
                 .in_memory("compaction-loop")
                 .with_compaction_strategy(CompactionStrategy::default())
                 .with_compaction_loop(Duration::from_millis(5), Arc::clone(&sst_cfg), 1)

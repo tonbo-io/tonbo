@@ -47,7 +47,10 @@ use crate::{
         mutable::memtable::DynMem,
         policy::{BatchesThreshold, NeverSeal},
     },
-    manifest::{SstEntry, TableId, TonboManifest, VersionEdit, VersionState, init_fs_manifest},
+    manifest::{
+        SstEntry, TableId, TonboManifest, VersionEdit, VersionState, init_fs_manifest_in_memory,
+        init_in_memory_manifest,
+    },
     mvcc::Timestamp,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
     test::build_batch,
@@ -106,7 +109,8 @@ async fn ingest_tombstone_length_mismatch() {
 
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(NoopExecutor);
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::clone(&executor)).await.expect("db");
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(config, Arc::clone(&executor)).await.expect("db");
 
     let err = db
         .ingest_with_tombstones(batch, vec![])
@@ -130,7 +134,8 @@ async fn ingest_batch_with_tombstones_marks_versions_and_visibility() {
     let extractor = crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
     let executor = Arc::new(NoopExecutor);
     let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::clone(&executor)).await.expect("db");
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(config, Arc::clone(&executor)).await.expect("db");
 
     let rows = vec![
         DynRow(vec![Some(DynCell::Str("k1".into())), Some(DynCell::I32(1))]),
@@ -184,7 +189,8 @@ async fn apply_dyn_wal_batch_inserts_live_rows() {
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(NoopExecutor);
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::clone(&executor)).await.expect("db");
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(config, Arc::clone(&executor)).await.expect("db");
 
     let batch = RecordBatch::try_new(
         schema,
@@ -220,7 +226,8 @@ async fn apply_dyn_wal_batch_rejects_tombstone_payloads() {
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(NoopExecutor);
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::clone(&executor)).await.expect("db");
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(config, Arc::clone(&executor)).await.expect("db");
 
     let wal_schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -256,7 +263,8 @@ async fn apply_dyn_wal_batch_allows_user_tombstone_column() {
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(NoopExecutor);
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::clone(&executor)).await.expect("db");
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(config, Arc::clone(&executor)).await.expect("db");
 
     let batch = RecordBatch::try_new(
         schema,
@@ -288,7 +296,8 @@ async fn begin_snapshot_tracks_commit_clock() {
     let extractor = crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
     let executor = Arc::new(NoopExecutor);
     let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::clone(&executor)).await.expect("db");
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(config, Arc::clone(&executor)).await.expect("db");
 
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     assert_eq!(snapshot.read_view().read_ts(), Timestamp::MIN);
@@ -325,7 +334,7 @@ async fn dynamic_seal_on_batches_threshold() {
     let batch: RecordBatch = build_batch(schema.clone(), rows).expect("valid dyn rows");
 
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name");
-    let mut db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
+    let mut db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
         .await
         .expect("schema ok");
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
@@ -341,7 +350,7 @@ async fn auto_seals_when_memtable_hits_capacity() {
         Field::new("v", DataType::Int32, false),
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name");
-    let mut db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
+    let mut db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
         .await
         .expect("schema ok");
 
@@ -393,7 +402,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
     let cas_backend: Arc<dyn FsCas> = Arc::new(fs.clone());
     wal_cfg.state_store = Some(Arc::new(FsWalStateStore::new(cas_backend)));
 
-    let manifest = init_fs_manifest(fs.clone(), &manifest_root)
+    let manifest = init_fs_manifest_in_memory(fs.clone(), &manifest_root, TokioExecutor::default())
         .await
         .expect("init manifest");
     let file_ids = FileIdGenerator::default();
@@ -429,7 +438,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
         .expect("ingest");
     drop(db);
 
-    let manifest = init_fs_manifest(fs.clone(), &manifest_root)
+    let manifest = init_fs_manifest_in_memory(fs.clone(), &manifest_root, TokioExecutor::default())
         .await
         .expect("reopen manifest");
     let recover_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
@@ -521,7 +530,7 @@ async fn plan_scan_marks_empty_range() {
     assert_eq!(plan.immutable_indexes, vec![0]);
 }
 
-async fn db_with_immutable_keys(keys: &[&str]) -> DB<DynMode, NoopExecutor> {
+async fn db_with_immutable_keys(keys: &[&str]) -> DB<DynMode, InMemoryFs, NoopExecutor> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
@@ -529,7 +538,7 @@ async fn db_with_immutable_keys(keys: &[&str]) -> DB<DynMode, NoopExecutor> {
     let extractor = crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
     let executor = Arc::new(NoopExecutor);
     let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-    let mut db: DB<DynMode, NoopExecutor> =
+    let mut db: DB<DynMode, InMemoryFs, NoopExecutor> =
         DB::new(config, Arc::clone(&executor)).await.expect("db");
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
     for (idx, key) in keys.iter().enumerate() {
@@ -632,7 +641,7 @@ async fn ingest_waits_for_wal_durable_ack() {
     ])];
     let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
-    let mut db: DB<DynMode, TokioExecutor> =
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
         DB::new(config, Arc::clone(&executor)).await.expect("db");
     let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
     let handle =
@@ -731,7 +740,7 @@ async fn wal_live_frame_floor_tracks_multi_frame_append() {
     ])];
     let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
-    let mut db: DB<DynMode, TokioExecutor> =
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
         DB::new(config, Arc::clone(&executor)).await.expect("db");
     let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
     let handle =
@@ -835,7 +844,7 @@ async fn wal_live_frame_floor_tracks_multi_frame_append_via_insert() {
     ])];
     let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
-    let mut db: DB<DynMode, TokioExecutor> =
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
         DB::new(config, Arc::clone(&executor)).await.expect("db");
     let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
     let handle =
@@ -973,7 +982,7 @@ async fn dyn_insert_enqueues_commit_before_append_ack() {
     ])];
     let batch: RecordBatch = build_batch(schema.clone(), rows).expect("batch");
 
-    let mut db: DB<DynMode, TokioExecutor> =
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
         DB::new(config, Arc::clone(&executor)).await.expect("db");
     let metrics = Arc::new(TokioExecutor::rw_lock(WalMetrics::default()));
     let handle =
@@ -1010,7 +1019,7 @@ async fn dynamic_new_from_metadata_field_marker() {
     let f_v = Field::new("v", DataType::Int32, false);
     let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]));
     let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata key config");
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
         .await
         .expect("metadata key");
 
@@ -1033,7 +1042,7 @@ async fn dynamic_new_from_metadata_schema_level() {
     sm.insert("tonbo.keys".to_string(), "id".to_string());
     let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_v]).with_metadata(sm));
     let config = DynModeConfig::from_metadata(schema.clone()).expect("schema metadata config");
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
         .await
         .expect("schema metadata key");
 
@@ -1075,7 +1084,8 @@ async fn flush_without_immutables_errors() {
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name config");
     let executor = Arc::new(NoopExecutor);
-    let mut db: DB<DynMode, NoopExecutor> = DB::new(config, executor).await.expect("db init");
+    let mut db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(config, executor).await.expect("db init");
 
     let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
     let sstable_cfg = Arc::new(SsTableConfig::new(
@@ -1101,7 +1111,7 @@ async fn flush_publishes_manifest_version() {
     let extractor = crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
     let executor = Arc::new(NoopExecutor);
     let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
-    let mut db: DB<DynMode, NoopExecutor> =
+    let mut db: DB<DynMode, InMemoryFs, NoopExecutor> =
         DB::new(config, Arc::clone(&executor)).await.expect("db");
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
@@ -1172,7 +1182,8 @@ async fn plan_compaction_returns_task() -> Result<(), Box<dyn std::error::Error>
         .expect("schema builder");
     let schema = Arc::clone(&config.schema);
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
+        DB::new(config, Arc::clone(&executor)).await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
@@ -1226,7 +1237,7 @@ async fn plan_compaction_empty_manifest_is_none() -> Result<(), Box<dyn std::err
         .build()
         .expect("schema builder");
     let executor = Arc::new(TokioExecutor::default());
-    let db: DB<DynMode, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
+    let db: DB<DynMode, InMemoryFs, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
     let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig::default());
     let plan = db.plan_compaction_task(&planner).await?;
     assert!(plan.is_none());
@@ -1263,14 +1274,18 @@ fn wal_segments_after_compaction_preserves_manifest_when_metadata_missing() {
         ])
         .expect("apply edits");
 
-    let wal_ids =
-        DB::<DynMode, NoopExecutor>::wal_ids_for_remaining_ssts(&version, &HashSet::new(), &[]);
+    let wal_ids = DB::<DynMode, InMemoryFs, NoopExecutor>::wal_ids_for_remaining_ssts(
+        &version,
+        &HashSet::new(),
+        &[],
+    );
     assert!(
         wal_ids.is_none(),
         "missing wal metadata on a remaining SST should preserve the manifest wal set"
     );
 
-    let filtered = DB::<DynMode, NoopExecutor>::wal_segments_after_compaction(&version, &[], &[]);
+    let filtered =
+        DB::<DynMode, InMemoryFs, NoopExecutor>::wal_segments_after_compaction(&version, &[], &[]);
     assert!(
         filtered.is_none(),
         "compaction should not rewrite wal segments when metadata is absent"
@@ -1330,14 +1345,18 @@ fn wal_segments_after_compaction_filters_and_tracks_obsolete() {
         "second entry should carry wal segments"
     );
     let removed_ids: HashSet<SsTableId> = removed.iter().map(|d| d.id().clone()).collect();
-    let wal_ids =
-        DB::<DynMode, NoopExecutor>::wal_ids_for_remaining_ssts(&version, &removed_ids, &added);
+    let wal_ids = DB::<DynMode, InMemoryFs, NoopExecutor>::wal_ids_for_remaining_ssts(
+        &version,
+        &removed_ids,
+        &added,
+    );
     assert!(
         wal_ids.is_none(),
         "wal ids should be None when any SST lacks wal metadata"
     );
-    let filtered =
-        DB::<DynMode, NoopExecutor>::wal_segments_after_compaction(&version, &removed, &added);
+    let filtered = DB::<DynMode, InMemoryFs, NoopExecutor>::wal_segments_after_compaction(
+        &version, &removed, &added,
+    );
     assert!(
         filtered.is_none(),
         "filtered wal segments should be None when any SST lacks wal metadata"
@@ -1354,7 +1373,7 @@ fn wal_segments_after_compaction_filters_and_tracks_obsolete() {
         wal_floor: None,
         obsolete_wal_segments: vec![wal_a.clone(), wal_b.clone()],
     };
-    let plan = DB::<DynMode, NoopExecutor>::gc_plan_from_outcome(&outcome)
+    let plan = DB::<DynMode, InMemoryFs, NoopExecutor>::gc_plan_from_outcome(&outcome)
         .expect("gc plan")
         .expect("plan present");
     assert_eq!(plan.obsolete_wal_segments.len(), 2);
@@ -1431,7 +1450,7 @@ async fn compaction_updates_manifest_wal_and_records_gc_plan()
         None,
     );
 
-    let db: DB<DynMode, NoopExecutor> = DB::new(
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(
         crate::schema::SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -1534,7 +1553,7 @@ async fn compaction_preserves_manifest_wal_when_metadata_missing()
         None,
     );
 
-    let db: DB<DynMode, NoopExecutor> = DB::new(
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(
         crate::schema::SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -1678,7 +1697,8 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
         .with_wal_ids(Some(vec![wal_b.file_id().clone()]));
 
     // Seed manifest with the two inputs and WAL set.
-    let db: DB<DynMode, NoopExecutor> = DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> =
+        DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
     let entry_a = SstEntry::new(
         desc_a.id().clone(),
         desc_a.stats().cloned(),
@@ -1798,7 +1818,7 @@ async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn st
 #[derive(Clone)]
 struct ConflictingExecutor {
     inner: LocalCompactionExecutor,
-    manifest: TonboManifest,
+    manifest: TonboManifest<InMemoryFs, TokioExecutor>,
     table: TableId,
     outputs: Arc<Mutex<Vec<SsTableDescriptor>>>,
 }
@@ -1806,7 +1826,7 @@ struct ConflictingExecutor {
 impl ConflictingExecutor {
     fn new(
         inner: LocalCompactionExecutor,
-        manifest: TonboManifest,
+        manifest: TonboManifest<InMemoryFs, TokioExecutor>,
         table: TableId,
         outputs: Arc<Mutex<Vec<SsTableDescriptor>>>,
     ) -> Self {
@@ -1871,7 +1891,8 @@ async fn compaction_cas_conflict_cleans_outputs() -> Result<(), Box<dyn std::err
     let extractor = Arc::clone(&mode_cfg.extractor);
     let schema = Arc::clone(&mode_cfg.schema);
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, TokioExecutor> = DB::new(mode_cfg, Arc::clone(&executor)).await?;
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
+        DB::new(mode_cfg, Arc::clone(&executor)).await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let sst_root = temp_root.join("sst");
@@ -1991,7 +2012,8 @@ fn resolve_compaction_inputs_keeps_levels() {
     };
 
     let resolved =
-        DB::<DynMode, NoopExecutor>::resolve_compaction_inputs(&version, &task).expect("resolve");
+        DB::<DynMode, InMemoryFs, NoopExecutor>::resolve_compaction_inputs(&version, &task)
+            .expect("resolve");
     assert_eq!(resolved.len(), 2);
     assert_eq!(resolved[0].level(), 0);
     assert_eq!(resolved[1].level(), 1);
@@ -2010,10 +2032,11 @@ async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::e
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("wal-gc-smoke");
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .in_memory(namespace.to_string())
-        .build_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
+        DB::<DynMode, InMemoryFs, TokioExecutor>::builder(mode_config)
+            .in_memory(namespace.to_string())
+            .build_with_executor(Arc::clone(&executor))
+            .await?;
 
     let wal_local_fs = Arc::new(LocalFs {});
     let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
@@ -2145,10 +2168,11 @@ async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>>
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("wal-gc-dry-run");
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .in_memory(namespace.to_string())
-        .build_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
+        DB::<DynMode, InMemoryFs, TokioExecutor>::builder(mode_config)
+            .in_memory(namespace.to_string())
+            .build_with_executor(Arc::clone(&executor))
+            .await?;
 
     let wal_local_fs = Arc::new(LocalFs {});
     let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
@@ -2236,10 +2260,11 @@ async fn flush_records_manifest_metadata() -> Result<(), Box<dyn std::error::Err
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("wal-manifest-metadata");
-    let mut db: DB<DynMode, TokioExecutor> = DB::<DynMode, TokioExecutor>::builder(mode_config)
-        .in_memory(namespace.to_string())
-        .build_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
+        DB::<DynMode, InMemoryFs, TokioExecutor>::builder(mode_config)
+            .in_memory(namespace.to_string())
+            .build_with_executor(Arc::clone(&executor))
+            .await?;
 
     let wal_local_fs = Arc::new(LocalFs {});
     let wal_dyn_fs: Arc<dyn DynFs> = wal_local_fs.clone();
@@ -2328,7 +2353,7 @@ async fn dynamic_composite_from_field_ordinals_and_scan() {
     let f_v = Field::new("v", DataType::Int32, false);
     let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]));
     let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
         .await
         .expect("composite field metadata");
 
@@ -2403,7 +2428,7 @@ async fn dynamic_composite_from_schema_list_and_scan() {
     sm.insert("tonbo.keys".to_string(), "[\"id\", \"ts\"]".to_string());
     let schema = std::sync::Arc::new(Schema::new(vec![f_id, f_ts, f_v]).with_metadata(sm));
     let config = DynModeConfig::from_metadata(schema.clone()).expect("metadata config");
-    let db: DB<DynMode, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::new(config, Arc::new(NoopExecutor))
         .await
         .expect("composite schema metadata");
 
@@ -2529,7 +2554,9 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
     let executor = Arc::new(NoopExecutor);
     let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
     let table_definition = DynMode::table_definition(&config, builder::DEFAULT_TABLE_NAME);
-    let manifest = init_in_memory_manifest().await.expect("init manifest");
+    let manifest = init_in_memory_manifest(NoopExecutor)
+        .await
+        .expect("init manifest");
     let file_ids = FileIdGenerator::default();
     let manifest_table = manifest
         .register_table(&file_ids, &table_definition)
@@ -2537,7 +2564,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         .expect("register table")
         .table_id;
     let test_fs: Arc<dyn DynFs> = Arc::new(fusio::disk::LocalFs {});
-    let db: DB<DynMode, NoopExecutor> = DB::recover_with_wal_with_manifest(
+    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DB::recover_with_wal_with_manifest(
         config,
         executor.clone(),
         test_fs,

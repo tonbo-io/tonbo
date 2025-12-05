@@ -21,56 +21,64 @@ use crate::{
     db::DB,
     id::FileId,
     manifest::{
-        GcPlanState, GcSstRef, ManifestError, ManifestResult, TableId, TonboManifest, VersionState,
-        WalSegmentRef,
+        GcPlanState, GcSstRef, ManifestError, ManifestFs, ManifestResult, TableId, TonboManifest,
+        VersionState, WalSegmentRef,
     },
     mode::Mode,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     wal::{WalConfig as RuntimeWalConfig, WalHandle, manifest_ext},
 };
 
-pub(crate) struct CompactionLoopHandle<M, E>
+pub(crate) struct CompactionLoopHandle<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    _driver: Arc<CompactionDriver<M, E>>,
+    _driver: Arc<CompactionDriver<M, FS, E>>,
     pub(crate) abort: AbortHandle,
     _handle: Option<<E as Executor>::JoinHandle<()>>,
 }
 
-impl<M, E> Drop for CompactionLoopHandle<M, E>
+impl<M, FS, E> Drop for CompactionLoopHandle<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     fn drop(&mut self) {
         self.abort.abort();
     }
 }
 
-pub(crate) struct CompactionDriver<M, E>
+pub(crate) struct CompactionDriver<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    pub(crate) manifest: TonboManifest,
+    pub(crate) manifest: TonboManifest<FS, E>,
     pub(crate) manifest_table: TableId,
     pub(crate) wal_config: Option<RuntimeWalConfig>,
     pub(crate) wal_handle: Option<WalHandle<E>>,
     _marker: PhantomData<M>,
 }
 
-impl<M, E> CompactionDriver<M, E>
+impl<M, FS, E> CompactionDriver<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    pub(crate) fn new(db: &DB<M, E>) -> Self {
+    pub(crate) fn new(db: &DB<M, FS, E>) -> Self {
         Self {
             manifest: db.manifest.clone(),
             manifest_table: db.manifest_table,
@@ -151,7 +159,7 @@ where
             Some(ref state) => state,
             None => return Ok(None),
         };
-        DB::<M, E>::plan_compaction_from_version(planner, version)
+        DB::<M, FS, E>::plan_compaction_from_version(planner, version)
     }
 
     #[cfg(test)]
@@ -179,11 +187,11 @@ where
             let expected_head = snapshot.head.last_manifest_txn;
             let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
 
-            let Some(task) = DB::<M, E>::plan_compaction_from_version(planner, version)? else {
+            let Some(task) = DB::<M, FS, E>::plan_compaction_from_version(planner, version)? else {
                 return Ok(None);
             };
 
-            let inputs = DB::<M, E>::resolve_compaction_inputs(version, &task)?;
+            let inputs = DB::<M, FS, E>::resolve_compaction_inputs(version, &task)?;
             let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
             let wal_floor = self.manifest_wal_floor().await;
             let job = CompactionJob {
@@ -195,13 +203,13 @@ where
             let outcome = executor.execute(job).await?;
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
-            DB::<M, E>::reconcile_wal_segments(
+            DB::<M, FS, E>::reconcile_wal_segments(
                 version,
                 &mut outcome,
                 &existing_wal_segments,
                 wal_floor,
             );
-            let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
+            let gc_plan = DB::<M, FS, E>::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
                 return Ok(Some(outcome));
@@ -223,7 +231,7 @@ where
                 }
                 Err(ManifestError::CasConflict(_)) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
-                    if attempts >= DB::<M, E>::MAX_COMPACTION_APPLY_RETRIES {
+                    if attempts >= DB::<M, FS, E>::MAX_COMPACTION_APPLY_RETRIES {
                         return Err(CompactionError::CasConflict);
                     }
                     continue;
@@ -264,7 +272,7 @@ where
             }
 
             let existing_wal_segments: Vec<WalSegmentRef> = version.wal_segments().to_vec();
-            let inputs = DB::<M, E>::resolve_compaction_inputs(version, &scheduled.task)?;
+            let inputs = DB::<M, FS, E>::resolve_compaction_inputs(version, &scheduled.task)?;
             let obsolete_ids = inputs.iter().map(|d| d.id().clone()).collect();
             let wal_floor = self.manifest_wal_floor().await;
             let job = CompactionJob {
@@ -276,13 +284,13 @@ where
             let outcome = executor.execute(job).await?;
             let mut outcome = outcome;
             outcome.obsolete_sst_ids = obsolete_ids;
-            DB::<M, E>::reconcile_wal_segments(
+            DB::<M, FS, E>::reconcile_wal_segments(
                 version,
                 &mut outcome,
                 &existing_wal_segments,
                 wal_floor,
             );
-            let gc_plan = DB::<M, E>::gc_plan_from_outcome(&outcome)?;
+            let gc_plan = DB::<M, FS, E>::gc_plan_from_outcome(&outcome)?;
             let edits = outcome.to_version_edits();
             if edits.is_empty() {
                 return Ok(Some(outcome));
@@ -305,7 +313,7 @@ where
                 }
                 Err(ManifestError::CasConflict(_)) => {
                     executor.cleanup_outputs(&outcome.outputs).await?;
-                    if attempts >= DB::<M, E>::MAX_COMPACTION_APPLY_RETRIES {
+                    if attempts >= DB::<M, FS, E>::MAX_COMPACTION_APPLY_RETRIES {
                         return Err(CompactionError::CasConflict);
                     }
                     continue;
@@ -328,13 +336,13 @@ where
         gc_sst_config: Option<Arc<SsTableConfig>>,
         interval: Duration,
         budget: usize,
-    ) -> CompactionLoopHandle<M, E>
+    ) -> CompactionLoopHandle<M, FS, E>
     where
         CE: CompactionExecutor + MaybeSend + MaybeSync + 'static,
         P: CompactionPlanner + MaybeSend + MaybeSync + 'static,
         M: Mode + MaybeSend + MaybeSync + 'static,
         M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-        E: Executor + Timer + 'static,
+        E: Executor + Timer + Clone + 'static,
     {
         let (scheduler, mut rx) = CompactionScheduler::new(budget.max(1), budget.max(1));
         let driver = Arc::clone(self);
@@ -416,11 +424,13 @@ where
 }
 
 #[cfg(test)]
-impl<M, E> CompactionHost<M, E> for CompactionDriver<M, E>
+impl<M, FS, E> CompactionHost<M, E> for CompactionDriver<M, FS, E>
 where
     M: Mode + MaybeSend + MaybeSync,
     M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     fn compact_once<'a, CE, P>(
         &'a self,
@@ -437,13 +447,15 @@ where
     }
 }
 
-impl<M, E> DB<M, E>
+impl<M, FS, E> DB<M, FS, E>
 where
     M: Mode,
     M::Key: Eq + Hash + Clone,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    pub(crate) fn compaction_driver(&self) -> CompactionDriver<M, E> {
+    pub(crate) fn compaction_driver(&self) -> CompactionDriver<M, FS, E> {
         CompactionDriver::new(self)
     }
 
@@ -668,11 +680,13 @@ where
 }
 
 #[cfg(test)]
-impl<M, E> CompactionHost<M, E> for DB<M, E>
+impl<M, FS, E> CompactionHost<M, E> for DB<M, FS, E>
 where
     M: Mode + MaybeSend + MaybeSync,
     M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-    E: Executor + Timer,
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     fn compact_once<'a, CE, P>(
         &'a self,

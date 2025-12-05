@@ -97,7 +97,7 @@ impl WriterMsg {
 /// Handle returned by [`spawn_writer`] to allow enqueueing work and joining the task.
 pub(crate) struct WriterHandle<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     /// Bounded sender feeding the writer task.
     pub(crate) sender: mpsc::Sender<WriterMsg>,
@@ -108,7 +108,7 @@ where
 
 impl<E> WriterHandle<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     /// Consume the handle and return its constituent pieces.
     pub(crate) fn into_parts(
@@ -132,7 +132,7 @@ pub(crate) fn spawn_writer<E>(
     initial_frame_seq: u64,
 ) -> WriterHandle<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     let (sender, receiver) = mpsc::channel(cfg.queue_size);
     let queue_depth = Arc::new(AtomicUsize::new(0));
@@ -174,7 +174,7 @@ async fn run_writer_loop<E>(
     mut receiver: mpsc::Receiver<WriterMsg>,
 ) -> WalResult<()>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     let WriterLoopInit {
         exec,
@@ -449,7 +449,7 @@ where
 
 struct WriterContext<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     exec: Arc<E>,
     storage: WalStorage,
@@ -483,7 +483,7 @@ struct HandleBatchOutcome {
 
 impl<E> WriterContext<E>
 where
-    E: Executor + Timer,
+    E: Executor + Timer + Clone,
 {
     async fn new(
         exec: Arc<E>,
@@ -1293,7 +1293,7 @@ impl SegmentMeta {
     }
 }
 
-#[cfg(all(test, feature = "tokio-runtime"))]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{
         cell::RefCell,
