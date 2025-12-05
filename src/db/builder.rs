@@ -1264,10 +1264,7 @@ where
     S: DurableStorageState,
 {
     /// Apply a batch of WAL overrides supplied via [`WalConfig`].
-    #[cfg_attr(
-        feature = "tokio-runtime",
-        doc = "```rust,ignore\n// Example (requires `fusio/executor-tokio`):\n// let overrides = WalConfig::default()\n//     .segment_max_bytes(8 * 1024 * 1024)\n//     .sync_policy(WalSyncPolicy::Always);\n// let _db = DB::<DynMode, TokioExecutor>::builder(config)\n//     .on_disk(\"/data/tonbo\".to_string())?\n//     .wal_config(overrides)\n//     .build()\n//     .await?;\n// ```"
-    )]
+    #[cfg(feature = "tokio-runtime")]
     #[must_use]
     pub fn wal_config(mut self, overrides: WalConfig) -> Self {
         self.state.merge_wal_config(overrides);
