@@ -6,8 +6,7 @@ use std::{
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{ArrowError, SchemaRef};
 use arrow_select::take::take;
-use fusio::executor::{Executor, Timer};
-use web_time::Instant;
+use fusio::executor::{Executor, Instant, Timer};
 
 use crate::{
     db::DB,
@@ -284,7 +283,7 @@ where
             let wal_range = self.take_mutable_wal_range();
             self.add_immutable(seg, wal_range);
             let mut seal = self.seal_state_lock();
-            seal.last_seal_at = Some(Instant::now());
+            seal.last_seal_at = Some(self.executor.now());
         }
         Ok(())
     }

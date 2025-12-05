@@ -76,7 +76,6 @@ typed-arrow-dyn = { git = "https://github.com/tonbo-io/typed-arrow.git", package
     "serde",
 ] }
 ulid = { version = "1", features = ["serde"] }
-web-time = "1.1"
 
 
 [dev-dependencies]

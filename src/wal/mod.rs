@@ -4,8 +4,6 @@
 //! as the coordination layer between ingest, the frame encoder, storage
 //! backends, and recovery. Implementations will live in the sibling modules.
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 use std::{
     fmt,
     future::Future,
@@ -23,7 +21,7 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{
     DynFs,
     disk::LocalFs,
-    executor::{Executor, JoinHandle, Timer},
+    executor::{Executor, Instant, JoinHandle, Timer},
     path::Path,
 };
 use futures::{
@@ -31,8 +29,6 @@ use futures::{
     channel::{mpsc, oneshot},
 };
 use ulid::Ulid;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 
 use crate::{
     db::Mode,

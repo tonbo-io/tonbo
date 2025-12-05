@@ -1,7 +1,5 @@
 //! Asynchronous WAL writer task and queue plumbing.
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 use std::{
     collections::{HashMap, VecDeque},
     error::Error,
@@ -20,7 +18,7 @@ use fusio::{
     Write,
     dynamic::MaybeSendFuture,
     error::Error as FusioError,
-    executor::{Executor, RwLock, Timer},
+    executor::{Executor, Instant, RwLock, Timer},
     fs::FileSystemTag,
 };
 use futures::{
@@ -28,8 +26,6 @@ use futures::{
     channel::{mpsc, oneshot},
     future::{Fuse, FutureExt},
 };
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 
 use crate::{
     mvcc::Timestamp,
@@ -543,6 +539,8 @@ where
             state_dirty = true;
         }
 
+        let now = exec.now();
+
         let mut ctx = Self {
             exec,
             storage,
@@ -553,13 +551,13 @@ where
             segment_seq,
             segment,
             segment_bytes,
-            segment_opened_at: Instant::now(),
+            segment_opened_at: now,
             rotation_deadline: None,
             next_sync_deadline: None,
             scheduled_deadline: None,
             bytes_since_sync: 0,
-            last_sync: Instant::now(),
-            last_flush: Instant::now(),
+            last_sync: now,
+            last_flush: now,
             next_frame_seq,
             next_segment_seq,
             completed_segments,
@@ -570,7 +568,7 @@ where
         if ctx.segment_bytes > 0
             && let Some(max_age) = ctx.cfg.segment_max_age
         {
-            let now = Instant::now();
+            let now = ctx.now();
             ctx.segment_opened_at = now;
             if let Some(deadline) = now.checked_add(max_age) {
                 ctx.rotation_deadline = Some(deadline);
@@ -578,6 +576,11 @@ where
         }
         ctx.enforce_retention_limit().await?;
         Ok(ctx)
+    }
+
+    #[inline]
+    fn now(&self) -> Instant {
+        self.exec.now()
     }
 
     async fn handle_enqueue(
@@ -609,12 +612,12 @@ where
             && self.segment_bytes > 0
             && let Some(max_age) = self.cfg.segment_max_age
         {
-            let now = Instant::now();
+            let now = self.now();
             self.segment_opened_at = now;
             if let Some(deadline) = now.checked_add(max_age) {
                 self.rotation_deadline = Some(deadline);
             } else {
-                self.rotation_deadline = Some(Instant::now());
+                self.rotation_deadline = Some(self.now());
             }
         }
 
@@ -692,7 +695,7 @@ where
                 .flush()
                 .await
                 .map_err(|err| backend_err("flush wal segment", err))?;
-            self.last_flush = Instant::now();
+            self.last_flush = self.now();
         }
         Ok(())
     }
@@ -702,7 +705,7 @@ where
             WalSyncPolicy::Always => {
                 self.sync_all().await?;
                 self.bytes_since_sync = 0;
-                self.last_sync = Instant::now();
+                self.last_sync = self.now();
                 Ok(SyncOutcome {
                     performed: true,
                     timer_directive: TimerDirective::Cancel,
@@ -712,7 +715,7 @@ where
                 if self.bytes_since_sync >= threshold {
                     self.sync_data().await?;
                     self.bytes_since_sync = 0;
-                    self.last_sync = Instant::now();
+                    self.last_sync = self.now();
                     Ok(SyncOutcome {
                         performed: true,
                         timer_directive: TimerDirective::Cancel,
@@ -768,7 +771,7 @@ where
         if !matches!(self.cfg.sync, WalSyncPolicy::Disabled) {
             self.sync_all().await?;
             self.bytes_since_sync = 0;
-            self.last_sync = Instant::now();
+            self.last_sync = self.now();
             sync_performed = true;
         }
 
@@ -787,7 +790,7 @@ where
         self.segment_seq = new_seq;
         self.segment_bytes = new_bytes;
         self.next_segment_seq = new_seq.saturating_add(1);
-        let now = Instant::now();
+        let now = self.now();
         self.last_flush = now;
         self.segment_opened_at = now;
         self.rotation_deadline = None;
@@ -859,7 +862,7 @@ where
         if !matches!(self.cfg.sync, WalSyncPolicy::Disabled) {
             self.sync_all().await?;
             self.bytes_since_sync = 0;
-            self.last_sync = Instant::now();
+            self.last_sync = self.now();
             synced = true;
         }
         self.close_active_segment().await?;
@@ -1000,7 +1003,7 @@ where
                 self.next_sync_deadline = None;
             }
             TimerDirective::Schedule(interval) => {
-                let now = Instant::now();
+                let now = self.now();
                 let deadline = now.checked_add(interval).unwrap_or(now);
                 self.next_sync_deadline = match self.next_sync_deadline {
                     Some(existing) => Some(existing.min(deadline)),
@@ -1017,7 +1020,7 @@ where
 
         match next_deadline {
             Some(deadline) => {
-                let now = Instant::now();
+                let now = self.now();
                 let duration = deadline.saturating_duration_since(now);
                 *timer_slot = Some(self.exec.sleep(duration).fuse());
                 self.scheduled_deadline = Some(deadline);
@@ -1112,7 +1115,7 @@ where
     async fn handle_timer_elapsed(&mut self) -> WalResult<TimerTickOutcome> {
         self.scheduled_deadline = None;
         let mut sync_performed = false;
-        let now = Instant::now();
+        let now = self.now();
 
         if let Some(deadline) = self.rotation_deadline
             && deadline <= now
@@ -1134,7 +1137,7 @@ where
             if self.bytes_since_sync > 0 {
                 self.sync_data().await?;
                 self.bytes_since_sync = 0;
-                self.last_sync = Instant::now();
+                self.last_sync = self.now();
                 sync_performed = true;
             }
         }

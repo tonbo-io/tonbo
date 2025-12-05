@@ -20,7 +20,6 @@ use fusio::{
 };
 use lockable::LockableHashMap;
 use wal::SealState;
-use web_time::Instant;
 mod builder;
 mod compaction;
 mod error;
@@ -499,7 +498,7 @@ where
                 let mut seal = self.seal_state_lock();
                 seal.immutables = Vec::new();
                 seal.immutable_wal_ranges.clear();
-                seal.last_seal_at = Some(Instant::now());
+                seal.last_seal_at = Some(self.executor.now());
                 Ok(table)
             }
             Err(err) => Err(err),
