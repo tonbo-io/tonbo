@@ -1,7 +1,7 @@
-use std::{env, fs, hash::Hash, io::Write, path::Path as StdPath, sync::Arc, time::Duration};
+use std::{env, hash::Hash, io, sync::Arc, time::Duration};
 
 use fusio::{
-    DynFs,
+    DynFs, Fs,
     dynamic::{MaybeSend, MaybeSync},
     executor::{Executor, Timer},
     fs::FsCas as FusioCas,
@@ -9,7 +9,7 @@ use fusio::{
     path::{Path, PathPart},
 };
 #[cfg(feature = "tokio")]
-use fusio::{disk::LocalFs, executor::tokio::TokioExecutor, path::path_to_local};
+use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl};
 use thiserror::Error;
 
@@ -21,7 +21,9 @@ use crate::{
     },
     extractor::{KeyExtractError, projection_for_columns},
     id::FileIdGenerator,
-    manifest::{ManifestError, ManifestFs, TonboManifest, init_fs_manifest},
+    manifest::{
+        ManifestError, ManifestFs, TonboManifest, bootstrap::ensure_manifest_dirs, init_fs_manifest,
+    },
     mode::{CatalogDescribe, DynModeConfig},
     ondisk::sstable::SsTableConfig,
     transaction::CommitAckMode,
@@ -185,15 +187,14 @@ impl WalConfig {
     }
 }
 
-mod sealed {
-    pub trait Sealed {}
-}
-
 pub(crate) const DEFAULT_TABLE_NAME: &str = "tonbo-default";
 
+/// Durability classification for storage backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityClass {
+    /// In-memory storage; data is lost on process exit.
     Volatile,
+    /// Persistent storage with WAL support.
     Durable,
 }
 
@@ -203,257 +204,178 @@ impl DurabilityClass {
     }
 }
 
+/// Unconfigured builder state before storage backend selection.
 #[derive(Debug, Default)]
 pub struct Unconfigured;
 
-pub struct InMemoryState {
-    label: String,
-    table_name: Option<String>,
-}
-
-pub struct DiskDurableState {
+/// Generic storage configuration for any filesystem implementing required traits.
+///
+/// This unified type replaces the previous `InMemoryState`, `DiskDurableState`,
+/// and `ObjectDurableState` types. It works with any filesystem that implements
+/// `Fs + FusioCas`.
+pub struct StorageConfig<FS> {
+    fs: Arc<FS>,
     root: Path,
     table_name: Option<String>,
-    wal_config: WalConfig,
-    create_dirs: bool,
+    wal_config: Option<WalConfig>,
+    durability: DurabilityClass,
+    create_layout: bool,
 }
 
-pub struct ObjectDurableState {
-    spec: ObjectSpec,
-    table_name: Option<String>,
-    wal_config: WalConfig,
-}
-
-impl DiskDurableState {
-    fn new(root: Path) -> Self {
+impl<FS> StorageConfig<FS> {
+    /// Create a new storage configuration.
+    pub fn new(fs: Arc<FS>, root: Path, durability: DurabilityClass) -> Self {
+        let wal_config = if durability.is_durable() {
+            Some(WalConfig::default())
+        } else {
+            None
+        };
         Self {
+            fs,
             root,
             table_name: None,
-            wal_config: WalConfig::default(),
-            create_dirs: true,
-        }
-    }
-}
-
-#[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
-fn ensure_disk_layout(root: &Path) -> Result<(), DbBuildError> {
-    if root.as_ref().is_empty() {
-        return Err(DbBuildError::InvalidPath {
-            path: root.to_string(),
-            reason: "root cannot be empty".into(),
-        });
-    }
-    let base = path_to_local(root).map_err(|err| DbBuildError::InvalidPath {
-        path: root.to_string(),
-        reason: err.to_string(),
-    })?;
-    const REQUIRED_PATHS: &[&str] = &[
-        "wal",
-        "sst",
-        "manifest/catalog",
-        "manifest/catalog/segments",
-        "manifest/catalog/checkpoints",
-        "manifest/catalog/leases",
-        "manifest/version",
-        "manifest/version/segments",
-        "manifest/version/checkpoints",
-        "manifest/version/leases",
-    ];
-    let base = base.as_path();
-    for suffix in REQUIRED_PATHS {
-        let path = base.join(suffix);
-        if let Err(source) = fs::create_dir_all(&path) {
-            return Err(DbBuildError::PreparePath {
-                path: path.display().to_string(),
-                source,
-            });
+            wal_config,
+            durability,
+            create_layout: false,
         }
     }
 
-    const EMPTY_HEAD_JSON: &str =
-        r#"{"version":1,"checkpoint_id":null,"last_segment_seq":null,"last_txn_id":0}"#;
-    let catalog_head = base.join("manifest/catalog/head.json");
-    if !catalog_head.exists() {
-        write_head_file(&catalog_head, EMPTY_HEAD_JSON)?;
-    }
-    let version_head = base.join("manifest/version/head.json");
-    if !version_head.exists() {
-        write_head_file(&version_head, EMPTY_HEAD_JSON)?;
+    /// Set an optional table name.
+    #[must_use]
+    pub fn with_table_name(mut self, name: impl Into<String>) -> Self {
+        self.table_name = Some(name.into());
+        self
     }
 
-    Ok(())
-}
-
-#[cfg(any(target_arch = "wasm32", not(feature = "tokio")))]
-fn ensure_disk_layout(_root: &Path) -> Result<(), DbBuildError> {
-    Err(DbBuildError::UnsupportedBackend { backend: "disk" })
-}
-
-fn write_head_file(path: &StdPath, body: &str) -> Result<(), DbBuildError> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|source| DbBuildError::PreparePath {
-            path: path.display().to_string(),
-            source,
-        })?;
-    file.write_all(body.as_bytes())
-        .map_err(|source| DbBuildError::PreparePath {
-            path: path.display().to_string(),
-            source,
-        })
-}
-
-pub trait StorageState: sealed::Sealed {
-    const CLASS: DurabilityClass;
-
-    type Fs: fusio::fs::Fs + FusioCas + Clone + MaybeSend + MaybeSync + 'static;
-
-    fn layout(&self) -> Result<StorageLayout<Self::Fs>, DbBuildError>;
-
-    fn prepare_layout(&self) -> Result<(), DbBuildError> {
-        Ok(())
-    }
-
-    fn table_name(&self) -> Option<&String> {
-        None
-    }
-
-    fn wal_config_ref(&self) -> Option<&WalConfig> {
-        None
-    }
-}
-
-pub trait TableNameConfigurable: StorageState {
-    fn table_name_slot(&mut self) -> &mut Option<String>;
-}
-
-pub trait DurableStorageState: TableNameConfigurable {
-    fn wal_config_mut(&mut self) -> &mut WalConfig;
-    fn merge_wal_config(&mut self, overrides: WalConfig) {
-        self.wal_config_mut().merge(overrides);
-    }
-}
-
-impl sealed::Sealed for InMemoryState {}
-
-impl StorageState for InMemoryState {
-    const CLASS: DurabilityClass = DurabilityClass::Volatile;
-
-    type Fs = InMemoryFs;
-
-    fn layout(&self) -> Result<StorageLayout<Self::Fs>, DbBuildError> {
-        if self.label.is_empty() {
-            return Err(DbBuildError::InvalidPath {
-                path: self.label.clone(),
-                reason: "label cannot be empty".into(),
-            });
+    /// Set WAL configuration overrides (only meaningful for durable backends).
+    #[must_use]
+    pub fn with_wal_config(mut self, config: WalConfig) -> Self {
+        if let Some(ref mut existing) = self.wal_config {
+            existing.merge(config);
+        } else if self.durability.is_durable() {
+            self.wal_config = Some(config);
         }
-        let fs = Arc::new(InMemoryFs::new());
-        let cas: Arc<dyn FusioCas> = fs.clone();
-        let root = Path::parse(&self.label).map_err(|err| DbBuildError::InvalidPath {
-            path: self.label.clone(),
-            reason: err.to_string(),
-        })?;
-        Ok(StorageLayout::new(fs, Some(cas), root))
+        self
     }
 
-    fn table_name(&self) -> Option<&String> {
+    /// Enable automatic creation of the storage layout directories.
+    #[must_use]
+    pub fn with_create_layout(mut self, enable: bool) -> Self {
+        self.create_layout = enable;
+        self
+    }
+
+    /// Returns the durability class of this storage configuration.
+    pub fn durability(&self) -> DurabilityClass {
+        self.durability
+    }
+
+    /// Returns a reference to the table name if set.
+    pub fn table_name(&self) -> Option<&String> {
         self.table_name.as_ref()
     }
-}
 
-impl TableNameConfigurable for InMemoryState {
-    fn table_name_slot(&mut self) -> &mut Option<String> {
+    /// Returns a mutable reference to the table name slot.
+    pub fn table_name_mut(&mut self) -> &mut Option<String> {
         &mut self.table_name
     }
-}
 
-impl sealed::Sealed for DiskDurableState {}
+    /// Returns a reference to the WAL config if present.
+    pub fn wal_config(&self) -> Option<&WalConfig> {
+        self.wal_config.as_ref()
+    }
 
-#[cfg(feature = "tokio")]
-impl StorageState for DiskDurableState {
-    const CLASS: DurabilityClass = DurabilityClass::Durable;
+    /// Returns a mutable reference to the WAL config if present.
+    pub fn wal_config_mut(&mut self) -> Option<&mut WalConfig> {
+        self.wal_config.as_mut()
+    }
 
-    type Fs = LocalFs;
+    /// Returns whether layout creation is enabled.
+    pub fn should_create_layout(&self) -> bool {
+        self.create_layout
+    }
 
-    fn prepare_layout(&self) -> Result<(), DbBuildError> {
-        if self.create_dirs {
-            ensure_disk_layout(&self.root)
+    /// Execute layout preparation (creating directories) if enabled.
+    pub async fn prepare(&self) -> Result<(), DbBuildError>
+    where
+        FS: Fs,
+    {
+        if self.create_layout {
+            ensure_storage_layout::<FS>(&self.root).await
         } else {
             Ok(())
         }
     }
 
-    fn layout(&self) -> Result<StorageLayout<Self::Fs>, DbBuildError> {
+    /// Build the storage layout from this configuration.
+    pub fn layout(&self) -> Result<StorageLayout<FS>, DbBuildError>
+    where
+        FS: DynFs + FusioCas + 'static,
+    {
         if self.root.as_ref().is_empty() {
             return Err(DbBuildError::InvalidPath {
                 path: self.root.to_string(),
                 reason: "root cannot be empty".into(),
             });
         }
-        let fs = Arc::new(LocalFs {});
-        let cas: Arc<dyn FusioCas> = fs.clone();
-        Ok(StorageLayout::new(fs, Some(cas), self.root.clone()))
-    }
-
-    fn table_name(&self) -> Option<&String> {
-        self.table_name.as_ref()
-    }
-
-    fn wal_config_ref(&self) -> Option<&WalConfig> {
-        Some(&self.wal_config)
+        let cas: Arc<dyn FusioCas> = self.fs.clone();
+        Ok(StorageLayout::new(
+            self.fs.clone(),
+            Some(cas),
+            self.root.clone(),
+        ))
     }
 }
 
-impl TableNameConfigurable for DiskDurableState {
-    fn table_name_slot(&mut self) -> &mut Option<String> {
-        &mut self.table_name
-    }
-}
-
-impl DurableStorageState for DiskDurableState {
-    fn wal_config_mut(&mut self) -> &mut WalConfig {
-        &mut self.wal_config
-    }
-}
-
-impl sealed::Sealed for ObjectDurableState {}
-
-impl StorageState for ObjectDurableState {
-    const CLASS: DurabilityClass = DurabilityClass::Durable;
-
-    type Fs = fusio::impls::remotes::aws::fs::AmazonS3;
-
-    fn layout(&self) -> Result<StorageLayout<Self::Fs>, DbBuildError> {
-        let (fs, root) = match &self.spec {
-            ObjectSpec::S3(spec) => build_s3_fs(spec.clone())?,
-        };
-        let cas: Arc<dyn FusioCas> = fs.clone();
-        Ok(StorageLayout::new(fs, Some(cas), root))
+/// Ensure required directories exist for storage.
+///
+/// This creates the standard Tonbo directory layout:
+/// - `{root}/wal/` - Write-ahead log segments
+/// - `{root}/sst/` - SSTable files
+/// - `{root}/manifest/` - Manifest files (version, catalog, gc)
+///
+/// This function is generic over the filesystem type, allowing it to work
+/// with local disk, OPFS, or any other filesystem that implements `Fs`.
+pub(crate) async fn ensure_storage_layout<FS>(root: &Path) -> Result<(), DbBuildError>
+where
+    FS: Fs,
+{
+    if root.as_ref().is_empty() {
+        return Err(DbBuildError::InvalidPath {
+            path: root.to_string(),
+            reason: "root cannot be empty".into(),
+        });
     }
 
-    fn table_name(&self) -> Option<&String> {
-        self.table_name.as_ref()
+    // Provision required directories via the filesystem's associated functions.
+    async fn mk_dir<F: Fs>(path: &Path) -> Result<(), DbBuildError> {
+        F::create_dir_all(path)
+            .await
+            .map_err(|err| DbBuildError::PreparePath {
+                path: path.to_string(),
+                source: io::Error::other(err.to_string()),
+            })
     }
 
-    fn wal_config_ref(&self) -> Option<&WalConfig> {
-        Some(&self.wal_config)
-    }
-}
+    mk_dir::<FS>(&root.child(PathPart::parse("wal").expect("wal part"))).await?;
+    mk_dir::<FS>(&root.child(PathPart::parse("sst").expect("sst part"))).await?;
 
-impl TableNameConfigurable for ObjectDurableState {
-    fn table_name_slot(&mut self) -> &mut Option<String> {
-        &mut self.table_name
-    }
-}
+    let manifest_root = root.child(PathPart::parse("manifest").expect("manifest part"));
+    let version_root = manifest_root.child(PathPart::parse("version").expect("version part"));
+    let catalog_root = manifest_root.child(PathPart::parse("catalog").expect("catalog part"));
+    let gc_root = manifest_root.child(PathPart::parse("gc").expect("gc part"));
 
-impl DurableStorageState for ObjectDurableState {
-    fn wal_config_mut(&mut self) -> &mut WalConfig {
-        &mut self.wal_config
-    }
+    ensure_manifest_dirs::<FS>(&version_root)
+        .await
+        .map_err(DbBuildError::Manifest)?;
+    ensure_manifest_dirs::<FS>(&catalog_root)
+        .await
+        .map_err(DbBuildError::Manifest)?;
+    ensure_manifest_dirs::<FS>(&gc_root)
+        .await
+        .map_err(DbBuildError::Manifest)?;
+
+    Ok(())
 }
 
 /// Builder-style configuration surface for constructing a [`DB`] instance.
@@ -470,16 +392,6 @@ where
     compaction_strategy: CompactionStrategy,
     compaction_interval: Option<Duration>,
     compaction_loop_cfg: Option<CompactionLoopConfig>,
-}
-
-impl ObjectDurableState {
-    fn new(spec: ObjectSpec) -> Self {
-        Self {
-            spec,
-            table_name: None,
-            wal_config: WalConfig::default(),
-        }
-    }
 }
 
 /// Error returned when building a [`DB`] through [`DbBuilder`].
@@ -811,18 +723,23 @@ where
 
     /// Select the in-memory storage backend, labelling the namespace with the
     /// provided identifier.
-    #[must_use]
-    pub fn in_memory(self, label: impl Into<String>) -> DbBuilder<M, InMemoryState> {
-        DbBuilder {
+    pub fn in_memory(
+        self,
+        label: impl Into<String>,
+    ) -> Result<DbBuilder<M, StorageConfig<InMemoryFs>>, DbBuildError> {
+        let label_str = label.into();
+        let root = Path::parse(&label_str).map_err(|err| DbBuildError::InvalidPath {
+            path: label_str,
+            reason: err.to_string(),
+        })?;
+        let fs = Arc::new(InMemoryFs::new());
+        Ok(DbBuilder {
             mode_config: self.mode_config,
-            state: InMemoryState {
-                label: label.into(),
-                table_name: None,
-            },
+            state: StorageConfig::new(fs, root, DurabilityClass::Volatile),
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
-        }
+        })
     }
 
     /// Select a local filesystem backend rooted at `root`.
@@ -831,16 +748,18 @@ where
     pub fn on_disk(
         self,
         root: impl AsRef<std::path::Path>,
-    ) -> Result<DbBuilder<M, DiskDurableState>, DbBuildError> {
+    ) -> Result<DbBuilder<M, StorageConfig<LocalFs>>, DbBuildError> {
         let root_ref = root.as_ref();
         let path =
             Path::from_filesystem_path(root_ref).map_err(|err| DbBuildError::InvalidPath {
                 path: root_ref.display().to_string(),
                 reason: err.to_string(),
             })?;
+        let fs = Arc::new(LocalFs {});
+        let state = StorageConfig::new(fs, path, DurabilityClass::Durable).with_create_layout(true);
         Ok(DbBuilder {
             mode_config: self.mode_config,
-            state: DiskDurableState::new(path),
+            state,
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
@@ -848,15 +767,37 @@ where
     }
 
     /// Select an object-store backend using the provided specification.
-    #[must_use]
-    pub fn object_store(self, spec: ObjectSpec) -> DbBuilder<M, ObjectDurableState> {
-        DbBuilder {
+    pub fn object_store(
+        self,
+        spec: ObjectSpec,
+    ) -> Result<DbBuilder<M, StorageConfig<fusio::impls::remotes::aws::fs::AmazonS3>>, DbBuildError>
+    {
+        let (fs, root) = match spec {
+            ObjectSpec::S3(s3_spec) => build_s3_fs(s3_spec)?,
+        };
+        Ok(DbBuilder {
             mode_config: self.mode_config,
-            state: ObjectDurableState::new(spec),
+            state: StorageConfig::new(fs, root, DurabilityClass::Durable),
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
-        }
+        })
+    }
+}
+
+impl<M, FS> DbBuilder<M, StorageConfig<FS>>
+where
+    M: Mode + CatalogDescribe,
+{
+    /// Enable or disable provisioning of the storage layout prior to build/recovery.
+    ///
+    /// When `enable` is `true` (the default for `on_disk()`), the builder will create
+    /// the required directory structure (`wal/`, `sst/`, `manifest/`) before opening
+    /// the database.
+    #[must_use]
+    pub fn create_dirs(mut self, enable: bool) -> Self {
+        self.state.create_layout = enable;
+        self
     }
 }
 
@@ -890,23 +831,11 @@ impl DbBuilder<DynMode, Unconfigured> {
     }
 }
 
-impl<M> DbBuilder<M, DiskDurableState>
-where
-    M: Mode + CatalogDescribe,
-{
-    /// Enable or disable provisioning of the on-disk layout prior to build/recovery.
-    #[must_use]
-    pub fn create_dirs(mut self, enable: bool) -> Self {
-        self.state.create_dirs = enable;
-        self
-    }
-}
-
-impl<M, S> DbBuilder<M, S>
+impl<M, FS> DbBuilder<M, StorageConfig<FS>>
 where
     M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
     M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-    S: StorageState + TableNameConfigurable,
+    FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
     #[must_use]
@@ -915,15 +844,22 @@ where
         self
     }
 
+    /// Attach a stable logical table name enforced at build time.
+    #[must_use]
+    pub fn table_name(mut self, name: impl Into<String>) -> Self {
+        *self.state.table_name_mut() = Some(name.into());
+        self
+    }
+
     /// Materialise a [`DB`] using the accumulated builder state.
     #[cfg(feature = "tokio")]
-    pub async fn build(self) -> Result<DB<M, S::Fs, TokioExecutor>, DbBuildError>
+    pub async fn build(self) -> Result<DB<M, FS, TokioExecutor>, DbBuildError>
     where
-        S::Fs: ManifestFs<TokioExecutor>,
-        <S::Fs as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+        FS: ManifestFs<TokioExecutor>,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         let executor = Arc::new(TokioExecutor::default());
-        if S::CLASS.is_durable() {
+        if self.state.durability().is_durable() {
             // Default to recovering existing state (manifest + WAL) when present.
             return self.recover_or_init_with_executor(executor).await;
         }
@@ -934,17 +870,17 @@ where
     pub async fn build_with_executor<E>(
         self,
         executor: Arc<E>,
-    ) -> Result<DB<M, S::Fs, E>, DbBuildError>
+    ) -> Result<DB<M, FS, E>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
-        S::Fs: ManifestFs<E>,
-        <S::Fs as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+        FS: ManifestFs<E>,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        if S::CLASS.is_durable() {
+        if self.state.durability().is_durable() {
             // Durable backends should reuse existing on-disk state when available.
             return self.recover_or_init_with_executor(executor).await;
         }
-        self.state.prepare_layout()?;
+        self.state.prepare().await?;
         let layout = self.state.layout()?;
         self.build_with_layout(executor, layout).await
     }
@@ -952,12 +888,12 @@ where
     async fn build_with_layout<E>(
         self,
         executor: Arc<E>,
-        layout: StorageLayout<S::Fs>,
-    ) -> Result<DB<M, S::Fs, E>, DbBuildError>
+        layout: StorageLayout<FS>,
+    ) -> Result<DB<M, FS, E>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
-        S::Fs: ManifestFs<E> + fusio_manifest::ObjectHead,
-        <S::Fs as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+        FS: ManifestFs<E> + fusio_manifest::ObjectHead,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         let manifest_init = ManifestBootstrap::new(&layout);
         let file_ids = FileIdGenerator::default();
@@ -978,10 +914,10 @@ where
             .map_err(DbBuildError::Manifest)?;
         let manifest_table = table_meta.table_id;
 
-        let mut wal_cfg = if S::CLASS.is_durable() {
+        let mut wal_cfg = if self.state.durability().is_durable() {
             let mut cfg = RuntimeWalConfig::default();
             layout.apply_wal_defaults(&mut cfg)?;
-            if let Some(overrides) = self.state.wal_config_ref() {
+            if let Some(overrides) = self.state.wal_config() {
                 overrides.apply(&mut cfg);
             }
             Some(cfg)
@@ -1003,6 +939,7 @@ where
             db.enable_wal(cfg).await?;
         }
 
+        let mut db = db;
         if let Some(loop_cfg) = self.compaction_loop_cfg {
             // Temporary shortcut: spawn a local compaction loop for dyn mode using a
             // caller-provided SST config. This should be replaced by a real
@@ -1015,7 +952,7 @@ where
             let exec =
                 LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
             let driver = Arc::new(db.compaction_driver());
-            let handle = driver.spawn_compaction_worker_local(
+            let handle = driver.spawn_worker(
                 Arc::clone(&db.executor),
                 planner,
                 exec,
@@ -1039,9 +976,9 @@ impl<S> DbBuilder<DynMode, S> {
     }
 }
 
-impl<S> DbBuilder<DynMode, S>
+impl<FS> DbBuilder<DynMode, StorageConfig<FS>>
 where
-    S: StorageState,
+    FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     /// Configure an optional background compaction interval (current-thread Tokio only).
     /// This is a temporary opt-in; a proper scheduler/lease should replace it.
@@ -1050,21 +987,7 @@ where
         self.compaction_interval = Some(interval);
         self
     }
-}
 
-/// Configures automatic compaction loop spawning for DynMode builds.
-#[derive(Clone)]
-
-struct CompactionLoopConfig {
-    interval: Duration,
-    sst_config: Arc<SsTableConfig>,
-    start_id: u64,
-}
-
-impl<S> DbBuilder<DynMode, S>
-where
-    S: StorageState,
-{
     /// Enable a background compaction loop on the provided executor. This is a temporary,
     /// dyn-mode-only helper; a proper scheduler/lease should replace it.
     #[must_use]
@@ -1082,75 +1005,75 @@ where
         self
     }
 }
-impl<M, S> DbBuilder<M, S>
-where
-    M: Mode + CatalogDescribe + MaybeSend + MaybeSync,
-    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-    S: TableNameConfigurable,
-{
-    /// Attach a stable logical table name enforced at build time.
-    #[must_use]
-    pub fn table_name(mut self, name: impl Into<String>) -> Self {
-        *self.state.table_name_slot() = Some(name.into());
-        self
-    }
+
+/// Configures automatic compaction loop spawning for DynMode builds.
+#[derive(Clone)]
+struct CompactionLoopConfig {
+    interval: Duration,
+    sst_config: Arc<SsTableConfig>,
+    start_id: u64,
 }
 
-impl<M, S> DbBuilder<M, S>
+impl<M, FS> DbBuilder<M, StorageConfig<FS>>
 where
     M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
     M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-    S: DurableStorageState,
+    FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     /// Apply a batch of WAL overrides supplied via [`WalConfig`].
     #[cfg(feature = "tokio")]
     #[must_use]
     pub fn wal_config(mut self, overrides: WalConfig) -> Self {
-        self.state.merge_wal_config(overrides);
+        if let Some(ref mut existing) = self.state.wal_config {
+            existing.merge(overrides);
+        } else if self.state.durability.is_durable() {
+            self.state.wal_config = Some(overrides);
+        }
         self
     }
 
     /// Override the WAL segment size without constructing a full override struct.
     #[must_use]
     pub fn wal_segment_bytes(mut self, max_bytes: usize) -> Self {
-        self.state.wal_config_mut().segment_max_bytes = Some(max_bytes);
+        if let Some(ref mut cfg) = self.state.wal_config {
+            cfg.segment_max_bytes = Some(max_bytes);
+        }
         self
     }
 
     /// Override the WAL sync policy.
     #[must_use]
     pub fn wal_sync_policy(mut self, policy: WalSyncPolicy) -> Self {
-        self.state.wal_config_mut().sync = Some(policy);
+        if let Some(ref mut cfg) = self.state.wal_config {
+            cfg.sync = Some(policy);
+        }
         self
     }
 
     /// Override the WAL flush interval.
     #[must_use]
     pub fn wal_flush_interval(mut self, interval: Duration) -> Self {
-        self.state.wal_config_mut().flush_interval = Some(interval);
+        if let Some(ref mut cfg) = self.state.wal_config {
+            cfg.flush_interval = Some(interval);
+        }
         self
     }
 
     /// Override the WAL retention budget (set `None` to disable).
     #[must_use]
     pub fn wal_retention_bytes(mut self, retention: Option<usize>) -> Self {
-        self.state.wal_config_mut().retention_bytes = Some(retention);
+        if let Some(ref mut cfg) = self.state.wal_config {
+            cfg.retention_bytes = Some(retention);
+        }
         self
     }
-}
 
-impl<M, S> DbBuilder<M, S>
-where
-    M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
-    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-    S: TableNameConfigurable,
-{
     /// Attempt to recover from WAL state if present, otherwise build a fresh durable DB.
     #[cfg(feature = "tokio")]
-    pub async fn recover_or_init(self) -> Result<DB<M, S::Fs, TokioExecutor>, DbBuildError>
+    pub async fn recover_or_init(self) -> Result<DB<M, FS, TokioExecutor>, DbBuildError>
     where
-        S::Fs: ManifestFs<TokioExecutor>,
-        <S::Fs as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+        FS: ManifestFs<TokioExecutor>,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         let executor = Arc::new(TokioExecutor::default());
         self.recover_or_init_with_executor(executor).await
@@ -1160,17 +1083,17 @@ where
     pub async fn recover_or_init_with_executor<E>(
         self,
         executor: Arc<E>,
-    ) -> Result<DB<M, S::Fs, E>, DbBuildError>
+    ) -> Result<DB<M, FS, E>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
-        S::Fs: ManifestFs<E>,
-        <S::Fs as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+        FS: ManifestFs<E>,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        self.state.prepare_layout()?;
+        self.state.prepare().await?;
         let layout = self.state.layout()?;
         let mut wal_cfg = RuntimeWalConfig::default();
         layout.apply_wal_defaults(&mut wal_cfg)?;
-        if let Some(overrides) = self.state.wal_config_ref() {
+        if let Some(overrides) = self.state.wal_config() {
             overrides.apply(&mut wal_cfg);
         }
 

@@ -39,6 +39,7 @@ async fn main() {
     let db: DB<DynMode, InMemoryFs, NoopExecutor> = DbBuilder::from_schema_metadata(schema.clone())
         .expect("metadata config")
         .in_memory("dynamic-composite")
+        .expect("in_memory config")
         .build_with_executor(Arc::clone(&executor))
         .await
         .expect("composite ok");

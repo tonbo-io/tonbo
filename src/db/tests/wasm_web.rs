@@ -51,6 +51,7 @@ async fn web_s3_roundtrip_wal_and_sstable() {
     let mut db: DB<DynMode, AmazonS3, WebExecutor> =
         DB::<DynMode, AmazonS3, WebExecutor>::builder(schema_cfg)
             .object_store(ObjectSpec::s3(s3_spec))
+            .expect("object_store config")
             .wal_sync_policy(WalSyncPolicy::Always)
             .build_with_executor(Arc::clone(&exec))
             .await

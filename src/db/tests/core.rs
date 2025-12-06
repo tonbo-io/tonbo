@@ -35,6 +35,7 @@ use crate::{
             CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome,
             LocalCompactionExecutor,
         },
+        orchestrator,
         planner::{
             CompactionInput, CompactionPlanner, CompactionSnapshot, CompactionTask,
             LeveledCompactionPlanner, LeveledPlannerConfig,
@@ -1274,18 +1275,13 @@ fn wal_segments_after_compaction_preserves_manifest_when_metadata_missing() {
         ])
         .expect("apply edits");
 
-    let wal_ids = DB::<DynMode, InMemoryFs, NoopExecutor>::wal_ids_for_remaining_ssts(
-        &version,
-        &HashSet::new(),
-        &[],
-    );
+    let wal_ids = orchestrator::wal_ids_for_remaining_ssts(&version, &HashSet::new(), &[]);
     assert!(
         wal_ids.is_none(),
         "missing wal metadata on a remaining SST should preserve the manifest wal set"
     );
 
-    let filtered =
-        DB::<DynMode, InMemoryFs, NoopExecutor>::wal_segments_after_compaction(&version, &[], &[]);
+    let filtered = orchestrator::wal_segments_after_compaction(&version, &[], &[]);
     assert!(
         filtered.is_none(),
         "compaction should not rewrite wal segments when metadata is absent"
@@ -1345,18 +1341,12 @@ fn wal_segments_after_compaction_filters_and_tracks_obsolete() {
         "second entry should carry wal segments"
     );
     let removed_ids: HashSet<SsTableId> = removed.iter().map(|d| d.id().clone()).collect();
-    let wal_ids = DB::<DynMode, InMemoryFs, NoopExecutor>::wal_ids_for_remaining_ssts(
-        &version,
-        &removed_ids,
-        &added,
-    );
+    let wal_ids = orchestrator::wal_ids_for_remaining_ssts(&version, &removed_ids, &added);
     assert!(
         wal_ids.is_none(),
         "wal ids should be None when any SST lacks wal metadata"
     );
-    let filtered = DB::<DynMode, InMemoryFs, NoopExecutor>::wal_segments_after_compaction(
-        &version, &removed, &added,
-    );
+    let filtered = orchestrator::wal_segments_after_compaction(&version, &removed, &added);
     assert!(
         filtered.is_none(),
         "filtered wal segments should be None when any SST lacks wal metadata"
@@ -1373,7 +1363,7 @@ fn wal_segments_after_compaction_filters_and_tracks_obsolete() {
         wal_floor: None,
         obsolete_wal_segments: vec![wal_a.clone(), wal_b.clone()],
     };
-    let plan = DB::<DynMode, InMemoryFs, NoopExecutor>::gc_plan_from_outcome(&outcome)
+    let plan = orchestrator::gc_plan_from_outcome(&outcome)
         .expect("gc plan")
         .expect("plan present");
     assert_eq!(plan.obsolete_wal_segments.len(), 2);
@@ -2011,9 +2001,7 @@ fn resolve_compaction_inputs_keeps_levels() {
         key_range: None,
     };
 
-    let resolved =
-        DB::<DynMode, InMemoryFs, NoopExecutor>::resolve_compaction_inputs(&version, &task)
-            .expect("resolve");
+    let resolved = orchestrator::resolve_inputs(&version, &task).expect("resolve");
     assert_eq!(resolved.len(), 2);
     assert_eq!(resolved[0].level(), 0);
     assert_eq!(resolved[1].level(), 1);
@@ -2034,7 +2022,7 @@ async fn wal_gc_smoke_prunes_segments_after_flush() -> Result<(), Box<dyn std::e
         .unwrap_or("wal-gc-smoke");
     let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
         DB::<DynMode, InMemoryFs, TokioExecutor>::builder(mode_config)
-            .in_memory(namespace.to_string())
+            .in_memory(namespace.to_string())?
             .build_with_executor(Arc::clone(&executor))
             .await?;
 
@@ -2170,7 +2158,7 @@ async fn wal_gc_dry_run_reports_only() -> Result<(), Box<dyn std::error::Error>>
         .unwrap_or("wal-gc-dry-run");
     let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
         DB::<DynMode, InMemoryFs, TokioExecutor>::builder(mode_config)
-            .in_memory(namespace.to_string())
+            .in_memory(namespace.to_string())?
             .build_with_executor(Arc::clone(&executor))
             .await?;
 
@@ -2262,7 +2250,7 @@ async fn flush_records_manifest_metadata() -> Result<(), Box<dyn std::error::Err
         .unwrap_or("wal-manifest-metadata");
     let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
         DB::<DynMode, InMemoryFs, TokioExecutor>::builder(mode_config)
-            .in_memory(namespace.to_string())
+            .in_memory(namespace.to_string())?
             .build_with_executor(Arc::clone(&executor))
             .await?;
 

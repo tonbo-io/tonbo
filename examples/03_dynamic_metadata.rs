@@ -43,6 +43,7 @@ async fn main() {
     let db: DB<DynMode, InMemoryFs, NoopExecutor> = DbBuilder::from_schema_metadata(schema.clone())
         .expect("metadata config")
         .in_memory("dynamic-metadata")
+        .expect("in_memory config")
         .build_with_executor(Arc::clone(&executor))
         .await
         .expect("metadata ok");

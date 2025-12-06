@@ -88,6 +88,7 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let mut db: DB<DynMode, AmazonS3, TokioExecutor> =
         DB::<DynMode, AmazonS3, TokioExecutor>::builder(config)
             .object_store(ObjectSpec::s3(s3))
+            .map_err(|err| format!("object_store config: {err}"))?
             .wal_sync_policy(WalSyncPolicy::Always)
             .wal_retention_bytes(Some(1 << 20))
             .build()

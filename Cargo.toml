@@ -30,6 +30,8 @@ web = [
 web-opfs = ["fusio/opfs", "web"]
 # Enable this to compile the optional S3 smoke test in `tests/s3_smoke.rs`.
 s3-smoke = []
+# Internal helpers for tests only; keep recognized for check-cfg.
+test-helpers = []
 
 [dependencies]
 anyhow = "1"

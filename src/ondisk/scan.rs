@@ -607,7 +607,7 @@ mod tests {
         arrow_writer.close().await.expect("close");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(feature = "tokio", tokio::test(flavor = "multi_thread"))]
     async fn read_ts_filters_future_data() {
         // Test: rows with commit_ts > read_ts should not be visible
         let tmpdir = tempdir().expect("tempdir");
@@ -670,7 +670,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(feature = "tokio", tokio::test(flavor = "multi_thread"))]
     async fn delete_sidecar_hides_data() {
         // Test: delete_ts >= commit_ts should hide the row
         let tmpdir = tempdir().expect("tempdir");
@@ -773,7 +773,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(feature = "tokio", tokio::test(flavor = "multi_thread"))]
     async fn source_level_dedup_emits_one_version_per_key() {
         // Test: when SSTable has multiple versions of same key, only latest visible is emitted
         let tmpdir = tempdir().expect("tempdir");
@@ -840,7 +840,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(feature = "tokio", tokio::test(flavor = "multi_thread"))]
     async fn tombstone_only_keys_emitted() {
         // Test: keys that exist only in delete sidecar (no data rows) should emit tombstones
         let tmpdir = tempdir().expect("tempdir");

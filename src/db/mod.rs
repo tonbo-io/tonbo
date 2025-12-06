@@ -12,7 +12,6 @@ use std::{
 
 use arrow_array::RecordBatch;
 use arrow_schema::ArrowError;
-use compaction::CompactionLoopHandle;
 use fusio::{
     DynFs,
     executor::{Executor, Timer},
@@ -20,6 +19,8 @@ use fusio::{
 };
 use lockable::LockableHashMap;
 use wal::SealState;
+
+use crate::compaction::CompactionHandle;
 mod builder;
 mod compaction;
 mod error;
@@ -152,8 +153,8 @@ where
     mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
     /// Per-key transactional locks (wired once transactional writes arrive).
     _key_locks: LockMap<M::Key>,
-    /// Optional background compaction driver/handle pair for local loops.
-    compaction_worker: Option<CompactionLoopHandle<M, FS, E>>,
+    /// Optional background compaction worker handle.
+    compaction_worker: Option<CompactionHandle<E>>,
 }
 
 // SAFETY: DB shares internal state behind explicit synchronization. The mode key and executor
@@ -359,7 +360,7 @@ where
         &self.executor
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn manifest_table_id(&self) -> TableId {
         self.manifest_table
     }
@@ -376,7 +377,7 @@ where
         ))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn begin_snapshot_at(
         &self,
         read_ts: Timestamp,
@@ -390,7 +391,7 @@ where
     }
 
     /// Test-only helper to capture a snapshot at an explicit timestamp.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn begin_snapshot_at_for_tests(
         &self,
         read_ts: Timestamp,

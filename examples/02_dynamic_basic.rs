@@ -52,6 +52,7 @@ async fn main() {
         DbBuilder::from_schema_key_name(schema.clone(), "id")
             .expect("key col")
             .in_memory("dynamic-basic")
+            .expect("in_memory config")
             .build()
             .await
             .expect("schema ok");

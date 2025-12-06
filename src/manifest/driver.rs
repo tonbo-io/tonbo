@@ -922,10 +922,6 @@ mod tests {
     async fn catalog_registers_and_validates_tables() {
         let file_ids = FileIdGenerator::default();
         let catalog = bare_catalog_manifest();
-        catalog
-            .init_catalog_root()
-            .await
-            .expect("init catalog root");
 
         let definition = TableDefinition {
             name: "test-table".into(),

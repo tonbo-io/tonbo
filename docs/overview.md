@@ -392,7 +392,7 @@ async fn run_transaction() -> Result<(), Box<dyn std::error::Error>> {
     let executor = Arc::new(BlockingExecutor);
     let mut db: DB<DynMode, _> = DbBuilder::from_schema_key_name(schema.clone(), "id")?
         .with_commit_ack_mode(CommitAckMode::Fast) // optional: trade durability for latency
-        .in_memory("txn")
+        .in_memory("txn")?
         .build_with_executor(executor.clone())
         .await?;
 

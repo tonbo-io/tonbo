@@ -27,6 +27,7 @@ async fn compaction_loop_is_spawned_when_configured() {
 
             let db = DB::<DynMode, InMemoryFs, TokioExecutor>::builder(cfg)
                 .in_memory("compaction-loop")
+                .expect("in_memory config")
                 .with_compaction_strategy(CompactionStrategy::default())
                 .with_compaction_loop(Duration::from_millis(5), Arc::clone(&sst_cfg), 1)
                 .build()

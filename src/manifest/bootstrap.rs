@@ -7,6 +7,8 @@ use fusio::{
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
+#[cfg(feature = "test-helpers")]
+use fusio_manifest::LeaseHandle;
 use fusio_manifest::{
     BackoffPolicy, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, ManifestContext,
     SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
@@ -182,7 +184,7 @@ where
         self.gc_plan.put_gc_plan(table, plan).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn take_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
         self.gc_plan.take_gc_plan(table).await
     }
@@ -291,7 +293,7 @@ where
     Ok(())
 }
 
-async fn ensure_manifest_dirs<FS>(base: &Path) -> ManifestResult<()>
+pub(crate) async fn ensure_manifest_dirs<FS>(base: &Path) -> ManifestResult<()>
 where
     FS: Fs,
 {
