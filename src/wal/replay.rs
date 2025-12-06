@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use fusio::Read;
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 use fusio::{DynFs, fs::FsCas, path::Path as FusioPath};
 
 use crate::{
@@ -31,7 +31,8 @@ impl Replayer {
     }
 
     /// Iterate through WAL segments and produce events.
-    pub async fn scan(&self) -> WalResult<Vec<WalEvent>> {
+    #[allow(dead_code)]
+    pub(crate) async fn scan(&self) -> WalResult<Vec<WalEvent>> {
         self.scan_with_floor(None).await
     }
 

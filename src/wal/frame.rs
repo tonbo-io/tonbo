@@ -295,7 +295,7 @@ impl FrameHeader {
 }
 
 /// Encode a WAL command into one or more frames.
-pub fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
+pub(crate) fn encode_command(command: WalCommand) -> WalResult<Vec<Frame>> {
     match command {
         WalCommand::TxnBegin { provisional_id } => {
             let begin = encode_txn_begin(provisional_id);
@@ -342,7 +342,8 @@ fn encode_txn_append_delete(provisional_id: u64, batch: &RecordBatch) -> WalResu
 }
 
 /// Convenience helper used mainly by tests to encode a single append + commit from raw inputs.
-pub fn encode_autocommit_frames(
+#[allow(dead_code)]
+pub(crate) fn encode_autocommit_frames(
     batch: RecordBatch,
     provisional_id: u64,
     commit_ts: Timestamp,
@@ -400,7 +401,7 @@ fn encode_txn_abort(provisional_id: u64) -> Vec<u8> {
 }
 
 /// Decode a single frame payload into a [`WalEvent`].
-pub fn decode_frame(frame_type: FrameType, payload: &[u8]) -> WalResult<WalEvent> {
+pub(crate) fn decode_frame(frame_type: FrameType, payload: &[u8]) -> WalResult<WalEvent> {
     match frame_type {
         FrameType::TxnBegin => decode_txn_begin(payload),
         FrameType::TxnAppend => decode_txn_append(payload),
@@ -566,34 +567,27 @@ fn extract_delete_commit_hint(batch: &RecordBatch) -> WalResult<Option<Timestamp
 
 /// Dynamic append payload surfaced during WAL replay.
 #[derive(Debug)]
-pub struct DynAppendEvent {
+pub(crate) struct DynAppendEvent {
     /// Record batch payload (without MVCC columns).
-    pub batch: RecordBatch,
+    pub(crate) batch: RecordBatch,
     /// Commit timestamp derived from the append payload (if available).
-    pub commit_ts_hint: Option<Timestamp>,
+    pub(crate) commit_ts_hint: Option<Timestamp>,
     /// Commit timestamp column recovered from the payload.
-    pub commit_ts_column: ArrayRef,
-}
-
-impl DynAppendEvent {
-    /// Number of rows stored in the batch.
-    pub fn num_rows(&self) -> usize {
-        self.batch.num_rows()
-    }
+    pub(crate) commit_ts_column: ArrayRef,
 }
 
 /// Key-only delete payload surfaced during WAL replay.
 #[derive(Debug)]
-pub struct DynDeleteEvent {
+pub(crate) struct DynDeleteEvent {
     /// Delete batch encoded with key columns + `_commit_ts`.
-    pub batch: RecordBatch,
+    pub(crate) batch: RecordBatch,
     /// Commit timestamp derived from the payload (if available).
-    pub commit_ts_hint: Option<Timestamp>,
+    pub(crate) commit_ts_hint: Option<Timestamp>,
 }
 
 /// High-level events produced by the frame decoder during recovery.
 #[derive(Debug)]
-pub enum WalEvent {
+pub(crate) enum WalEvent {
     /// Begin transaction with provisional identifier.
     TxnBegin {
         /// Provisional identifier associated with the transaction.

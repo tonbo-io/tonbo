@@ -4,8 +4,8 @@
 //!
 //! The current focus is the dynamic runtime-schema path: callers work with
 //! Arrow `RecordBatch` values, and the engine derives logical keys at runtime.
-//! The `Mode` trait and surrounding structure keep the door open for
-//! re-introducing compile-time typed dispatch in the future.
+//! The engine is intentionally single-mode: the earlier `Mode` abstraction was
+//! flattened so the dynamic layout is the canonical storage path.
 
 pub mod extractor;
 /// File and object identifiers.

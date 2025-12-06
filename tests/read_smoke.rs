@@ -13,8 +13,7 @@ use tonbo::{
     BatchesThreshold, DB,
     db::{DynDbHandle, DynDbHandleExt},
     key::KeyOwned,
-    mode::{DynMode, DynModeConfig},
-    mvcc::Timestamp,
+    mode::DynModeConfig,
     query::{ColumnRef, Predicate, ScalarValue},
     transaction::Transaction,
     wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
@@ -137,7 +136,7 @@ async fn read_smoke_snapshot_honors_tombstones() {
         "snapshot should see pre-delete values",
     );
 
-    let latest_rows = collect_rows_for_predicate(&db, &predicate, Timestamp::MAX).await;
+    let latest_rows = collect_rows_for_predicate(&db, &predicate).await;
     assert_eq!(
         latest_rows,
         vec![("user-a".to_string(), 99)],
@@ -192,7 +191,7 @@ async fn read_smoke_residual_predicate_filters_rows() {
     let batch = build_batch(schema.clone(), &[("keep", 10), ("drop", -5)]);
     db.ingest(batch).await.expect("ingest rows");
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
-    let rows = collect_rows_for_predicate(&db, &predicate, Timestamp::MAX).await;
+    let rows = collect_rows_for_predicate(&db, &predicate).await;
     assert_eq!(rows, vec![("keep".to_string(), 10)]);
 }
 
@@ -243,8 +242,7 @@ async fn read_smoke_transaction_scan() {
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("config");
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, InMemoryFs, TokioExecutor> =
-        DB::new(config, executor).await.expect("db");
+    let mut db: DB<InMemoryFs, TokioExecutor> = DB::new(config, executor).await.expect("db");
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let mem_fs: Arc<dyn DynFs> = Arc::new(InMemoryFs::new());
@@ -412,7 +410,7 @@ async fn read_smoke_key_range_predicate_filters_rows() {
         Predicate::gte(ColumnRef::new("id", None), ScalarValue::from("k2")),
         Predicate::lt(ColumnRef::new("id", None), ScalarValue::from("k4")),
     ]);
-    let rows = collect_rows_for_predicate(&db, &predicate, Timestamp::MAX).await;
+    let rows = collect_rows_for_predicate(&db, &predicate).await;
     assert_eq!(
         rows,
         vec![("k2".to_string(), 2), ("k3".to_string(), 3)],
@@ -451,7 +449,6 @@ async fn read_smoke_plan_scan_applies_limit() {
 async fn collect_rows_for_predicate(
     db: &DynDbHandle<InMemoryFs, NoopExecutor>,
     predicate: &tonbo::query::Predicate,
-    _read_ts: Timestamp,
 ) -> Vec<(String, i32)> {
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot

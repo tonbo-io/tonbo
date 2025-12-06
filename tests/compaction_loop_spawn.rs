@@ -6,7 +6,7 @@ use arrow_schema::{DataType, Field, Schema};
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs, path::Path};
 use tokio::{task::LocalSet, time::sleep};
 use tonbo::{
-    compaction::planner::CompactionStrategy, db::DB, mode::DynMode, ondisk::sstable::SsTableConfig,
+    compaction::planner::CompactionStrategy, db::DB, ondisk::sstable::SsTableConfig,
     schema::SchemaBuilder,
 };
 
@@ -25,7 +25,7 @@ async fn compaction_loop_is_spawned_when_configured() {
             let root = Path::parse("compaction").expect("path");
             let sst_cfg = Arc::new(SsTableConfig::new(Arc::clone(&schema), fs, root));
 
-            let db = DB::<DynMode, InMemoryFs, TokioExecutor>::builder(cfg)
+            let db = DB::<InMemoryFs, TokioExecutor>::builder(cfg)
                 .in_memory("compaction-loop")
                 .expect("in_memory config")
                 .with_compaction_strategy(CompactionStrategy::default())

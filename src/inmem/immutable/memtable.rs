@@ -55,7 +55,7 @@ impl DeleteSidecar {
         self.commit_ts.is_empty()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub fn commit_ts(&self, idx: usize) -> Timestamp {
         self.commit_ts[idx]
     }
@@ -396,7 +396,7 @@ impl MvccColumns {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) use tests::segment_from_batch_with_key_name;
 
 #[cfg(test)]

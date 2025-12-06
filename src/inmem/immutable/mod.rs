@@ -1,16 +1,15 @@
 //! Read-only immutable memtables.
 //!
-//! Currently only the dynamic runtime-schema layout is wired through. The
-//! `Mode` trait keeps room to add typed immutable storage again later.
+//! Currently only the dynamic runtime-schema layout is wired through.
 
 pub(crate) mod memtable;
 
-/// Convenience alias for the immutable segment associated with a `Mode`.
-pub(crate) type Immutable<M> = memtable::ImmutableMemTable<<M as crate::mode::Mode>::ImmLayout>;
+use arrow_array::RecordBatch;
 
-use crate::mode::Mode;
+/// Immutable segment emitted by sealing the dynamic mutable memtable.
+pub(crate) type ImmutableSegment = memtable::ImmutableMemTable<RecordBatch>;
 
 /// Lightweight pruning helper; currently returns all segment indexes.
-pub(crate) fn prune_segments<M: Mode>(segments: &[&Immutable<M>]) -> Vec<usize> {
+pub(crate) fn prune_segments(segments: &[&ImmutableSegment]) -> Vec<usize> {
     (0..segments.len()).collect()
 }

@@ -10,7 +10,7 @@
 //! `docs/overview.md`/RFC 0005/0006. Readers will stream via Parquet async
 //! reader with projection + page/index pruning; no eager whole-file loads.
 
-use std::{convert::TryFrom, fmt, marker::PhantomData, sync::Arc};
+use std::{convert::TryFrom, fmt, sync::Arc};
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -41,12 +41,11 @@ use crate::{
     extractor::{KeyExtractError, KeyProjection},
     id::FileId,
     inmem::immutable::{
-        Immutable,
+        ImmutableSegment,
         memtable::{DeleteSidecar, MVCC_COMMIT_COL, MvccColumns},
     },
     key::{KeyOwned, KeyOwnedError},
     manifest::ManifestError,
-    mode::Mode,
     mvcc::Timestamp,
     ondisk::merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
     query::Predicate,
@@ -191,18 +190,14 @@ pub enum SsTableCompression {
 
 /// Handle returned by the SSTable builder once data has been flushed.
 #[derive(Debug)]
-pub struct SsTable<M: Mode> {
+pub struct SsTable {
     descriptor: SsTableDescriptor,
-    _mode: PhantomData<M>,
 }
 
-impl<M: Mode> SsTable<M> {
+impl SsTable {
     /// Create a handle for an SSTable that has been persisted.
     pub fn new(descriptor: SsTableDescriptor) -> Self {
-        Self {
-            descriptor,
-            _mode: PhantomData,
-        }
+        Self { descriptor }
     }
 
     /// Access the descriptor metadata for this table.
@@ -296,19 +291,19 @@ impl SsTableDescriptor {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SsTableStats {
     /// Estimated logical row count written to the table.
-    pub rows: usize,
+    pub(crate) rows: usize,
     /// Approximate on-disk byte size of the table payload.
-    pub bytes: usize,
+    pub(crate) bytes: usize,
     /// Number of tombstoned rows recorded in the table.
-    pub tombstones: usize,
+    pub(crate) tombstones: usize,
     /// Minimum key observed across staged segments.
-    pub min_key: Option<KeyOwned>,
+    pub(crate) min_key: Option<KeyOwned>,
     /// Maximum key observed across staged segments.
-    pub max_key: Option<KeyOwned>,
+    pub(crate) max_key: Option<KeyOwned>,
     /// Oldest commit timestamp contained in the table.
-    pub min_commit_ts: Option<Timestamp>,
+    pub(crate) min_commit_ts: Option<Timestamp>,
     /// Newest commit timestamp contained in the table.
-    pub max_commit_ts: Option<Timestamp>,
+    pub(crate) max_commit_ts: Option<Timestamp>,
 }
 
 impl PartialEq for SsTableStats {
@@ -455,19 +450,15 @@ struct StagedSegment {
     deletes: DeleteSidecar,
 }
 
-pub(crate) struct ParquetTableWriter<M: Mode> {
+pub(crate) struct ParquetTableWriter {
     config: Arc<SsTableConfig>,
     descriptor: SsTableDescriptor,
     staged: StagedTableStats,
     segments: Vec<StagedSegment>,
     wal_ids: Option<Vec<FileId>>,
-    _mode: PhantomData<M>,
 }
 
-impl<M> ParquetTableWriter<M>
-where
-    M: Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
-{
+impl ParquetTableWriter {
     pub(crate) fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
         Self {
             config,
@@ -475,7 +466,6 @@ where
             staged: StagedTableStats::new(),
             segments: Vec::new(),
             wal_ids: None,
-            _mode: PhantomData,
         }
     }
 
@@ -483,7 +473,10 @@ where
         self.wal_ids = wal_ids;
     }
 
-    pub(crate) fn stage_immutable(&mut self, segment: &Immutable<M>) -> Result<(), SsTableError> {
+    pub(crate) fn stage_immutable(
+        &mut self,
+        segment: &ImmutableSegment,
+    ) -> Result<(), SsTableError> {
         let data_rows = segment.storage().num_rows();
         let delete_rows = segment.delete_sidecar().len();
         if data_rows == 0 && delete_rows == 0 {
@@ -535,7 +528,7 @@ where
 
     pub(crate) fn stage_stream_batch(
         &mut self,
-        batch: &SsTableStreamBatch<M>,
+        batch: &SsTableStreamBatch,
         extractor: &dyn KeyProjection,
     ) -> Result<(), SsTableError> {
         let data_rows = batch.data.num_rows();
@@ -605,7 +598,7 @@ where
         Ok(())
     }
 
-    pub(crate) async fn finish(self) -> Result<SsTable<M>, SsTableError> {
+    pub(crate) async fn finish(self) -> Result<SsTable, SsTableError> {
         if self.staged.segments == 0 {
             return Err(SsTableError::NoImmutableSegments);
         }
@@ -627,7 +620,7 @@ where
         ))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn plan(&self) -> &StagedTableStats {
         &self.staged
     }
@@ -842,13 +835,10 @@ pub(crate) fn build_table_paths(
 }
 
 /// Planner responsible for turning immutable runs into SSTable files.
-pub struct SsTableBuilder<M: Mode> {
-    writer: ParquetTableWriter<M>,
+pub struct SsTableBuilder {
+    writer: ParquetTableWriter,
 }
-impl<M> SsTableBuilder<M>
-where
-    M: Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
-{
+impl SsTableBuilder {
     /// Create a new builder for the provided descriptor.
     pub fn new(config: Arc<SsTableConfig>, descriptor: SsTableDescriptor) -> Self {
         Self {
@@ -860,40 +850,36 @@ where
         self.writer.set_wal_ids(wal_ids);
     }
     /// Stage an immutable run emitted by the mutable layer.
-    pub(crate) fn add_immutable(&mut self, segment: &Immutable<M>) -> Result<(), SsTableError> {
+    pub(crate) fn add_immutable(&mut self, segment: &ImmutableSegment) -> Result<(), SsTableError> {
         self.writer.stage_immutable(segment)
     }
     /// Finalize the staged runs and flush them to durable storage.
-    pub async fn finish(self) -> Result<SsTable<M>, SsTableError> {
+    pub async fn finish(self) -> Result<SsTable, SsTableError> {
         self.writer.finish().await
     }
 }
 
 /// Handle used by the read path to stream rows from an SSTable.
 #[derive(Debug)]
-pub struct SsTableReader<M: Mode> {
+pub struct SsTableReader {
     descriptor: SsTableDescriptor,
 
     config: Arc<SsTableConfig>,
     // TODO: attach actual Parquet readers when scan/merge lands.
-    _mode: PhantomData<M>,
 }
 
-impl<M: Mode> SsTableReader<M> {
+impl SsTableReader {
     /// Open an SSTable using the supplied descriptor and shared configuration.
     pub async fn open(
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<Self, SsTableError> {
-        Ok(Self {
-            descriptor,
-            config,
-            _mode: PhantomData,
-        })
+        Ok(Self { descriptor, config })
     }
 
     /// Plan a range scan across this table.
-    pub fn plan_scan(
+    #[allow(dead_code)] // API surface for future use
+    pub(crate) fn plan_scan(
         &self,
         _ts: Timestamp,
         _predicate: Option<&Predicate>,
@@ -903,14 +889,11 @@ impl<M: Mode> SsTableReader<M> {
     }
 
     /// Stream all rows for the provided ranges/timestamp/predicate (stub).
-    pub async fn into_stream(
+    pub(crate) async fn into_stream(
         self,
         _ts: Timestamp,
         _predicate: Option<&Predicate>,
-    ) -> Result<BoxStream<'static, Result<SsTableStreamBatch<M>, SsTableError>>, SsTableError>
-    where
-        M: Mode<ImmLayout = RecordBatch> + 'static,
-    {
+    ) -> Result<BoxStream<'static, Result<SsTableStreamBatch, SsTableError>>, SsTableError> {
         let fs = Arc::clone(self.config.fs());
         let data_path =
             self.descriptor.data_path().cloned().ok_or_else(|| {
@@ -1037,7 +1020,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        db::DynMode,
         extractor::{KeyProjection, projection_for_field},
         id::FileIdGenerator,
         inmem::immutable::memtable::{ImmutableIndexEntry, ImmutableMemTable, bundle_mvcc_sidecar},
@@ -1074,7 +1056,7 @@ mod tests {
         let batch1 = append_commit_column(batch1, &mvcc1).expect("commit");
         let batch2 = append_commit_column(batch2, &mvcc2).expect("commit");
 
-        let mut source = SsTableMergeSource::<DynMode>::with_batches(vec![
+        let mut source = SsTableMergeSource::with_batches(vec![
             SsTableStreamBatch {
                 data: batch1.clone(),
                 delete: None,
@@ -1122,7 +1104,7 @@ mod tests {
         let wal_a = vec![FileIdGenerator::default().generate()];
         let wal_b = vec![FileIdGenerator::default().generate(), wal_a[0]]; // include duplicate to ensure dedup
 
-        let mut builder_a = SsTableBuilder::<DynMode>::new(
+        let mut builder_a = SsTableBuilder::new(
             Arc::clone(&config),
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
@@ -1135,7 +1117,7 @@ mod tests {
             .descriptor()
             .clone();
 
-        let mut builder_b = SsTableBuilder::<DynMode>::new(
+        let mut builder_b = SsTableBuilder::new(
             Arc::clone(&config),
             SsTableDescriptor::new(SsTableId::new(2), 0),
         );
@@ -1149,7 +1131,7 @@ mod tests {
             .clone();
 
         let target = SsTableDescriptor::new(SsTableId::new(9), 1);
-        let merger = SsTableMerger::<DynMode>::new(config, vec![input_a, input_b], target)
+        let merger = SsTableMerger::new(config, vec![input_a, input_b], target)
             .with_output_id_allocator(Arc::new(AtomicU64::new(10)));
         let merged = merger.execute().await.expect("merge result");
         assert_eq!(merged.len(), 1);
@@ -1213,7 +1195,7 @@ mod tests {
             vec![true, false],
         );
 
-        let mut builder_old = SsTableBuilder::<DynMode>::new(
+        let mut builder_old = SsTableBuilder::new(
             Arc::clone(&config),
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
@@ -1225,7 +1207,7 @@ mod tests {
             .descriptor()
             .clone();
 
-        let mut builder_new = SsTableBuilder::<DynMode>::new(
+        let mut builder_new = SsTableBuilder::new(
             Arc::clone(&config),
             SsTableDescriptor::new(SsTableId::new(2), 0),
         );
@@ -1238,9 +1220,8 @@ mod tests {
             .clone();
 
         let target = SsTableDescriptor::new(SsTableId::new(9), 1);
-        let merger =
-            SsTableMerger::<DynMode>::new(config.clone(), vec![input_old, input_new], target)
-                .with_output_id_allocator(Arc::new(AtomicU64::new(10)));
+        let merger = SsTableMerger::new(config.clone(), vec![input_old, input_new], target)
+            .with_output_id_allocator(Arc::new(AtomicU64::new(10)));
         let merged = merger.execute().await.expect("merge result");
         assert_eq!(merged.len(), 1);
         let descriptor = merged[0].descriptor();
@@ -1257,7 +1238,7 @@ mod tests {
         );
 
         // Read merged output and validate visible rows/tombstones.
-        let reader = SsTableReader::<DynMode>::open(config, descriptor.clone())
+        let reader = SsTableReader::open(config, descriptor.clone())
             .await
             .expect("reader");
         let mut stream = reader
@@ -1327,7 +1308,7 @@ mod tests {
         );
         let seg_b = sample_segment(vec![("c".to_string(), 3)], vec![3], vec![false]);
 
-        let mut builder_a = SsTableBuilder::<DynMode>::new(
+        let mut builder_a = SsTableBuilder::new(
             Arc::clone(&config),
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
@@ -1339,7 +1320,7 @@ mod tests {
             .descriptor()
             .clone();
 
-        let mut builder_b = SsTableBuilder::<DynMode>::new(
+        let mut builder_b = SsTableBuilder::new(
             Arc::clone(&config),
             SsTableDescriptor::new(SsTableId::new(2), 0),
         );
@@ -1352,7 +1333,7 @@ mod tests {
             .clone();
 
         let target = SsTableDescriptor::new(SsTableId::new(9), 1);
-        let outputs = SsTableMerger::<DynMode>::new(config, vec![input_a, input_b], target)
+        let outputs = SsTableMerger::new(config, vec![input_a, input_b], target)
             .with_output_id_allocator(Arc::new(AtomicU64::new(10)))
             .with_output_caps(Some(1), None)
             .with_chunk_rows(1)
@@ -1466,7 +1447,7 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let descriptor = SsTableDescriptor::new(SsTableId::new(7), 0);
-        let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+        let mut writer: ParquetTableWriter =
             ParquetTableWriter::new(test_config(schema.clone()), descriptor);
 
         let segment1 = sample_segment(
@@ -1511,8 +1492,7 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
-        let writer: ParquetTableWriter<crate::mode::DynMode> =
-            ParquetTableWriter::new(test_config(schema), descriptor);
+        let writer: ParquetTableWriter = ParquetTableWriter::new(test_config(schema), descriptor);
         let result = writer.finish().await;
         assert!(matches!(result, Err(SsTableError::NoImmutableSegments)));
     }
@@ -1526,7 +1506,7 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let descriptor = SsTableDescriptor::new(SsTableId::new(11), 0);
-        let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+        let mut writer: ParquetTableWriter =
             ParquetTableWriter::new(test_config(schema.clone()), descriptor);
 
         let wal_ids = vec![FileId::from_str("01HV6Z2Z8Q4W5X6Y7Z8A9BCDEF").expect("valid ulid")];
@@ -1547,7 +1527,7 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let descriptor = SsTableDescriptor::new(SsTableId::new(21), 0);
-        let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+        let mut writer: ParquetTableWriter =
             ParquetTableWriter::new(test_config(schema.clone()), descriptor);
 
         let segment = sample_segment(vec![("m".into(), 9)], vec![123], vec![false]);
@@ -1567,7 +1547,7 @@ mod tests {
             Field::new("v", DataType::Int32, true),
         ]));
         let descriptor = SsTableDescriptor::new(SsTableId::new(22), 0);
-        let mut writer: ParquetTableWriter<crate::mode::DynMode> =
+        let mut writer: ParquetTableWriter =
             ParquetTableWriter::new(test_config(schema.clone()), descriptor);
 
         let segment = sample_segment(

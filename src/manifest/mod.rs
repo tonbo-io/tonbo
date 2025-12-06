@@ -33,12 +33,12 @@ where
 {
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) use bootstrap::init_fs_manifest_in_memory;
 pub(crate) use bootstrap::{
     TableSnapshot, TonboManifest, init_fs_manifest, init_in_memory_manifest,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) use domain::TableHead;
 pub(crate) use domain::{
     GcPlanState, GcSstRef, SstEntry, TableDefinition, TableId, VersionState, WalSegmentRef,

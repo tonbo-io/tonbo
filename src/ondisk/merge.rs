@@ -6,14 +6,13 @@
 
 use std::{
     collections::BinaryHeap,
-    marker::PhantomData,
     sync::{Arc, atomic::AtomicU64},
 };
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::StreamExt;
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 use futures::stream;
 use parquet::errors::ParquetError;
 
@@ -33,53 +32,44 @@ use crate::{
 const MVCC_SEQUENCE_COL: &str = "_sequence";
 
 /// Combined row payload (data + MVCC + delete sidecar) yielded by an SST reader.
-pub struct SsTableStreamBatch<M: crate::mode::Mode> {
+pub struct SsTableStreamBatch {
     /// User data batch for this SST slice (includes `_commit_ts` column).
-    pub data: M::ImmLayout,
+    pub data: RecordBatch,
     /// Optional delete sidecar batch for tombstones.
     pub delete: Option<RecordBatch>,
 }
 
 /// Merge source that streams ordered batches from a single SST.
-pub struct SsTableMergeSource<M: crate::mode::Mode> {
+pub struct SsTableMergeSource {
     /// Ordered batches produced by the SST reader.
-    stream: futures::stream::BoxStream<'static, Result<SsTableStreamBatch<M>, SsTableError>>,
-    _mode: PhantomData<M>,
+    stream: futures::stream::BoxStream<'static, Result<SsTableStreamBatch, SsTableError>>,
 }
 
-impl<M: crate::mode::Mode> SsTableMergeSource<M> {
+impl SsTableMergeSource {
     /// Create a merge source from an SSTable descriptor and shared config.
     pub async fn new(
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
-    ) -> Result<Self, SsTableError>
-    where
-        M: crate::mode::Mode<ImmLayout = RecordBatch> + 'static,
-    {
-        let reader = SsTableReader::<M>::open(config, descriptor).await?;
+    ) -> Result<Self, SsTableError> {
+        let reader = SsTableReader::open(config, descriptor).await?;
         let stream = reader.into_stream(Timestamp::MAX, None).await?;
-        Ok(Self {
-            stream,
-            _mode: PhantomData,
-        })
+        Ok(Self { stream })
     }
 
     /// Replace the current buffer with pre-fetched batches (useful for tests).
-    #[cfg(test)]
-    pub(crate) fn with_batches(batches: Vec<SsTableStreamBatch<M>>) -> Self
+    #[cfg(all(test, feature = "tokio"))]
+    pub(crate) fn with_batches(batches: Vec<SsTableStreamBatch>) -> Self
     where
-        M: crate::mode::Mode<ImmLayout = RecordBatch> + 'static,
-        SsTableStreamBatch<M>: Send,
+        SsTableStreamBatch: Send,
     {
         let stream = stream::iter(batches.into_iter().map(Ok)).boxed();
         Self {
             stream: Box::pin(stream),
-            _mode: PhantomData,
         }
     }
 
     /// Fetch the next ordered record batch slice for merge consumption.
-    pub async fn next(&mut self) -> Result<Option<SsTableStreamBatch<M>>, SsTableError> {
+    pub async fn next(&mut self) -> Result<Option<SsTableStreamBatch>, SsTableError> {
         self.stream.next().await.transpose()
     }
 }
@@ -140,23 +130,20 @@ impl PartialOrd for HeapEntry {
     }
 }
 
-struct SourceCursor<M: crate::mode::Mode> {
+struct SourceCursor {
     source_idx: usize,
     extractor: Arc<dyn KeyProjection>,
-    source: SsTableMergeSource<M>,
-    batch: Option<SsTableStreamBatch<M>>,
+    source: SsTableMergeSource,
+    batch: Option<SsTableStreamBatch>,
     data_idx: usize,
     delete_idx: usize,
 }
 
-impl<M> SourceCursor<M>
-where
-    M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static,
-{
+impl SourceCursor {
     fn new(
         source_idx: usize,
         extractor: Arc<dyn KeyProjection>,
-        source: SsTableMergeSource<M>,
+        source: SsTableMergeSource,
     ) -> Self {
         Self {
             source_idx,
@@ -271,7 +258,7 @@ where
         }
     }
 
-    fn append_data(&self, row_idx: usize, output: &mut OutputState<M>) -> Result<(), SsTableError> {
+    fn append_data(&self, row_idx: usize, output: &mut OutputState) -> Result<(), SsTableError> {
         let Some(batch) = self.batch.as_ref() else {
             return Ok(());
         };
@@ -281,11 +268,7 @@ where
         Ok(())
     }
 
-    fn append_delete(
-        &self,
-        row_idx: usize,
-        output: &mut OutputState<M>,
-    ) -> Result<(), SsTableError> {
+    fn append_delete(&self, row_idx: usize, output: &mut OutputState) -> Result<(), SsTableError> {
         let Some(batch) = self.batch.as_ref() else {
             return Ok(());
         };
@@ -299,8 +282,8 @@ where
     }
 }
 
-struct OutputState<M: crate::mode::Mode> {
-    batches: Vec<SsTableStreamBatch<M>>,
+struct OutputState {
+    batches: Vec<SsTableStreamBatch>,
     data_parts: Vec<RecordBatch>,
     delete_parts: Vec<RecordBatch>,
     pending_rows: usize,
@@ -313,10 +296,7 @@ struct OutputState<M: crate::mode::Mode> {
     max_commit_ts: Option<Timestamp>,
 }
 
-impl<M> OutputState<M>
-where
-    M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
-{
+impl OutputState {
     fn new() -> Self {
         Self {
             batches: Vec::new(),
@@ -425,7 +405,7 @@ where
         config: &Arc<SsTableConfig>,
         extractor: &Arc<dyn KeyProjection>,
         wal_ids: &[FileId],
-    ) -> Result<SsTable<M>, SsTableError> {
+    ) -> Result<SsTable, SsTableError> {
         self.flush_chunk(config.schema())?;
 
         let mut writer = ParquetTableWriter::new(Arc::clone(config), descriptor);
@@ -459,7 +439,7 @@ where
 }
 
 /// Planner/executor scaffold for K-way merging SSTables into a new output table.
-pub struct SsTableMerger<M: crate::mode::Mode> {
+pub struct SsTableMerger {
     config: Arc<SsTableConfig>,
     inputs: Vec<SsTableDescriptor>,
     target: SsTableDescriptor,
@@ -468,7 +448,6 @@ pub struct SsTableMerger<M: crate::mode::Mode> {
     max_output_bytes: Option<usize>,
     chunk_rows: usize,
     max_iterations: Option<usize>,
-    _mode: PhantomData<M>,
 }
 
 #[cfg(all(test, feature = "tokio"))]
@@ -483,7 +462,6 @@ mod tests {
     use super::*;
     use crate::{
         inmem::immutable::memtable::segment_from_batch_with_key_name,
-        mode::DynMode,
         ondisk::sstable::{SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId},
         schema::SchemaBuilder,
         test::build_batch,
@@ -520,7 +498,7 @@ mod tests {
         .expect("batch");
         let immutable =
             segment_from_batch_with_key_name(batch, "id").expect("immutable segment from batch");
-        let mut builder = SsTableBuilder::<DynMode>::new(
+        let mut builder = SsTableBuilder::new(
             Arc::clone(&cfg),
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
@@ -528,13 +506,9 @@ mod tests {
         let input = builder.finish().await.expect("sst");
 
         let target = SsTableDescriptor::new(SsTableId::new(10), 1);
-        let merger = SsTableMerger::<DynMode>::new(
-            Arc::clone(&cfg),
-            vec![input.descriptor().clone()],
-            target,
-        )
-        .with_output_id_allocator(Arc::new(AtomicU64::new(11)))
-        .with_iteration_budget(1);
+        let merger = SsTableMerger::new(Arc::clone(&cfg), vec![input.descriptor().clone()], target)
+            .with_output_id_allocator(Arc::new(AtomicU64::new(11)))
+            .with_iteration_budget(1);
 
         match merger.execute().await {
             Err(SsTableError::MergeIterationBudgetExceeded { budget }) => {
@@ -575,7 +549,7 @@ mod tests {
         .expect("batch");
         let immutable =
             segment_from_batch_with_key_name(batch, "id").expect("immutable segment from batch");
-        let mut builder = SsTableBuilder::<DynMode>::new(
+        let mut builder = SsTableBuilder::new(
             Arc::clone(&cfg),
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
@@ -584,7 +558,7 @@ mod tests {
 
         // Force an error by using an impossible iteration budget after writing the first row.
         let target = SsTableDescriptor::new(SsTableId::new(10), 1);
-        let merger = SsTableMerger::<DynMode>::new(
+        let merger = SsTableMerger::new(
             Arc::clone(&cfg),
             vec![input.descriptor().clone()],
             target.clone(),
@@ -617,7 +591,7 @@ mod tests {
     }
 }
 
-impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> SsTableMerger<M> {
+impl SsTableMerger {
     /// Create a merger for the provided inputs and target descriptor.
     pub fn new(
         config: Arc<SsTableConfig>,
@@ -637,7 +611,6 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
             max_output_bytes: None,
             chunk_rows: 1024,
             max_iterations,
-            _mode: PhantomData,
         }
     }
 
@@ -667,7 +640,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
     }
 
     /// Execute the merge and return a newly written SSTable.
-    pub async fn execute(self) -> Result<Vec<SsTable<M>>, SsTableError> {
+    pub async fn execute(self) -> Result<Vec<SsTable>, SsTableError> {
         let mut written_desc: Vec<SsTableDescriptor> = Vec::new();
         let config = Arc::clone(&self.config);
         let result = self.execute_inner(&mut written_desc).await;
@@ -683,7 +656,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
     async fn execute_inner(
         self,
         written_desc: &mut Vec<SsTableDescriptor>,
-    ) -> Result<Vec<SsTable<M>>, SsTableError> {
+    ) -> Result<Vec<SsTable>, SsTableError> {
         let extractor = self
             .config
             .key_extractor()
@@ -691,12 +664,12 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
             .ok_or(SsTableError::MissingKeyExtractor)?;
         let mut wal_ids: Vec<FileId> = Vec::new();
 
-        let mut sources: Vec<SourceCursor<M>> = Vec::new();
+        let mut sources: Vec<SourceCursor> = Vec::new();
         for (idx, descriptor) in self.inputs.iter().cloned().enumerate() {
             if let Some(ids) = descriptor.wal_ids() {
                 wal_ids.extend_from_slice(ids);
             }
-            let source = SsTableMergeSource::<M>::new(Arc::clone(&self.config), descriptor).await?;
+            let source = SsTableMergeSource::new(Arc::clone(&self.config), descriptor).await?;
             let mut cursor = SourceCursor::new(idx, Arc::clone(&extractor), source);
             cursor.ensure_batch().await?;
             sources.push(cursor);
@@ -714,7 +687,7 @@ impl<M: crate::mode::Mode<ImmLayout = RecordBatch, Key = KeyOwned> + 'static> Ss
 
         let chunk_rows = self.chunk_rows.max(1);
         let mut output_state = OutputState::new();
-        let mut outputs: Vec<SsTable<M>> = Vec::new();
+        let mut outputs: Vec<SsTable> = Vec::new();
         let mut current_descriptor = Some(self.target.clone());
         let mut iterations = 0usize;
 

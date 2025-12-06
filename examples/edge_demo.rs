@@ -47,14 +47,13 @@ mod wasm_edge {
         let s3_spec = s3_spec(prefix.clone())?;
 
         let exec = Arc::new(WebExecutor::new());
-        let db: DB<DynMode, AmazonS3, WebExecutor> =
-            DB::<DynMode, AmazonS3, WebExecutor>::builder(schema_cfg)
-                .object_store(ObjectSpec::s3(s3_spec))
-                .map_err(|err| format!("object_store config: {err}"))?
-                .wal_sync_policy(WalSyncPolicy::Always)
-                .build_with_executor(Arc::clone(&exec))
-                .await
-                .map_err(|err| format!("build: {err}"))?;
+        let db: DB<AmazonS3, WebExecutor> = DB::<AmazonS3, WebExecutor>::builder(schema_cfg)
+            .object_store(ObjectSpec::s3(s3_spec))
+            .map_err(|err| format!("object_store config: {err}"))?
+            .wal_sync_policy(WalSyncPolicy::Always)
+            .build_with_executor(Arc::clone(&exec))
+            .await
+            .map_err(|err| format!("build: {err}"))?;
 
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -120,6 +119,7 @@ pub use wasm_edge::edge_roundtrip_rows;
 
 // Fallback so native example builds don't fail when this file is compiled outside wasm+web.
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[allow(dead_code)]
 fn main() {}
 
 #[cfg(not(all(target_arch = "wasm32", feature = "web")))]

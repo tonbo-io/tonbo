@@ -4,7 +4,7 @@ use fusio::{
     dynamic::{MaybeSend, MaybeSync},
     executor::{Executor, Timer},
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 use fusio_manifest::snapshot::ScanRange;
 use fusio_manifest::{
     CheckpointStore, HeadStore, LeaseStore, SegmentIo, context::ManifestContext,
@@ -302,7 +302,7 @@ where
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn list_versions(
         &self,
         table: TableId,
@@ -384,7 +384,7 @@ where
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn take_gc_plan(
         &self,
         table_id: TableId,

@@ -512,7 +512,7 @@ pub(crate) fn load_delete_index(
     Ok(index)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 

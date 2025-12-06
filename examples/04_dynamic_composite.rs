@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
 use futures::TryStreamExt;
 use tonbo::{
-    db::{DB, DbBuilder, DynMode},
+    db::{DB, DbBuilder},
     query::{ColumnRef, Predicate, ScalarValue},
 };
 use typed_arrow::{
@@ -36,7 +36,7 @@ async fn main() {
 
     // Create DB from metadata
     let executor = Arc::new(NoopExecutor);
-    let db: DB<DynMode, InMemoryFs, NoopExecutor> = DbBuilder::from_schema_metadata(schema.clone())
+    let db: DB<InMemoryFs, NoopExecutor> = DbBuilder::from_schema_metadata(schema.clone())
         .expect("metadata config")
         .in_memory("dynamic-composite")
         .expect("in_memory config")

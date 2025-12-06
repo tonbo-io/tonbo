@@ -74,7 +74,7 @@ pub(crate) enum WriterMsg {
 }
 
 impl WriterMsg {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     fn queued(
         _submission_seq: u64,
         command: WalCommand,

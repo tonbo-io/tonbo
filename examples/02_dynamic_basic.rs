@@ -5,7 +5,7 @@ use std::sync::Arc;
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
 use futures::TryStreamExt;
 use tonbo::{
-    db::{DB, DbBuilder, DynMode},
+    db::{DB, DbBuilder},
     query::{ColumnRef, Predicate, ScalarValue},
 };
 use typed_arrow::{
@@ -48,14 +48,13 @@ async fn main() {
     let batch: RecordBatch = build_batch(schema.clone(), rows);
 
     // Create a dynamic DB by specifying the key field name
-    let db: DB<DynMode, InMemoryFs, TokioExecutor> =
-        DbBuilder::from_schema_key_name(schema.clone(), "id")
-            .expect("key col")
-            .in_memory("dynamic-basic")
-            .expect("in_memory config")
-            .build()
-            .await
-            .expect("schema ok");
+    let db: DB<InMemoryFs, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")
+        .expect("key col")
+        .in_memory("dynamic-basic")
+        .expect("in_memory config")
+        .build()
+        .await
+        .expect("schema ok");
     db.ingest(batch).await.expect("insert dynamic batch");
 
     let key_col = ColumnRef::new("id", Some(0));
@@ -77,7 +76,7 @@ async fn main() {
 }
 
 async fn scan_pairs(
-    db: &DB<DynMode, InMemoryFs, TokioExecutor>,
+    db: &DB<InMemoryFs, TokioExecutor>,
     predicate: &Predicate,
 ) -> Vec<(String, i32)> {
     let snapshot = db.begin_snapshot().await.expect("snapshot");

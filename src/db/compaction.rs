@@ -2,12 +2,10 @@
 //!
 //! This module provides the bridge between the DB type and the compaction subsystem.
 
-use std::hash::Hash;
-
 use fusio::executor::{Executor, Timer};
 
-use crate::{compaction::CompactionDriver, db::DB, manifest::ManifestFs, mode::Mode};
-#[cfg(test)]
+use crate::{compaction::CompactionDriver, db::DB, manifest::ManifestFs};
+#[cfg(all(test, feature = "tokio"))]
 use crate::{
     compaction::{
         executor::{CompactionError, CompactionExecutor, CompactionOutcome},
@@ -16,10 +14,8 @@ use crate::{
     manifest::ManifestResult,
 };
 
-impl<M, FS, E> DB<M, FS, E>
+impl<FS, E> DB<FS, E>
 where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone + 'static,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
@@ -47,7 +43,7 @@ where
     }
 
     /// Build a compaction plan based on the latest manifest snapshot.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn plan_compaction_task<P>(
         &self,
         planner: &P,
@@ -59,13 +55,13 @@ where
     }
 
     /// Sequence number of the WAL floor currently recorded in the manifest.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn wal_floor_seq(&self) -> Option<u64> {
         self.compaction_driver().wal_floor_seq().await
     }
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn run_compaction_task<CE, P>(
         &self,
         planner: &P,

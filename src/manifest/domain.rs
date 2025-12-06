@@ -18,7 +18,7 @@ use crate::{
 /// Identifier associated with a physical Tonbo table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct TableId(Ulid);
+pub struct TableId(Ulid);
 
 impl TableId {
     /// Create a new identifier using the provided file-id allocator.
@@ -361,7 +361,7 @@ impl VersionState {
         self.commit_timestamp
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn table_id(&self) -> &TableId {
         &self.table_id
     }
@@ -374,7 +374,7 @@ impl VersionState {
         &self.wal_segments
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn wal_floor(&self) -> Option<&WalSegmentRef> {
         self.wal_floor.as_ref()
     }
@@ -383,7 +383,7 @@ impl VersionState {
         self.wal_floor.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn tombstone_watermark(&self) -> Option<u64> {
         self.tombstone_watermark
     }

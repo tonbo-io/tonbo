@@ -5,45 +5,45 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Canonical column name storing MVCC commit timestamps alongside Arrow payloads.
-pub const MVCC_COMMIT_COL: &str = "_commit_ts";
+pub(crate) const MVCC_COMMIT_COL: &str = "_commit_ts";
 
 /// Logical commit timestamp assigned to mutations and read views.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Timestamp(u64);
+pub(crate) struct Timestamp(u64);
 
 impl Timestamp {
     /// Least possible timestamp (used for uninitialised clocks).
-    pub const MIN: Self = Self(0);
+    pub(crate) const MIN: Self = Self(0);
     /// Greatest possible timestamp (used for open-ended visibility).
-    pub const MAX: Self = Self(u64::MAX);
+    pub(crate) const MAX: Self = Self(u64::MAX);
 
     /// Construct a timestamp from a raw `u64`.
     #[inline]
-    pub const fn new(raw: u64) -> Self {
+    pub(crate) const fn new(raw: u64) -> Self {
         Self(raw)
     }
 
     /// Returns the raw `u64` value backing this timestamp.
     #[inline]
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 
     /// Returns the next timestamp after `self`, saturating on overflow.
     #[inline]
-    pub const fn next(self) -> Self {
+    pub(crate) const fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
     /// Add `delta` while saturating on overflow.
     #[inline]
-    pub const fn saturating_add(self, delta: u64) -> Self {
+    pub(crate) const fn saturating_add(self, delta: u64) -> Self {
         Self(self.0.saturating_add(delta))
     }
 
     /// Subtract `delta` while saturating at [`Timestamp::MIN`].
     #[inline]
-    pub const fn saturating_sub(self, delta: u64) -> Self {
+    pub(crate) const fn saturating_sub(self, delta: u64) -> Self {
         Self(self.0.saturating_sub(delta))
     }
 }
@@ -78,7 +78,7 @@ pub struct CommitClock {
 impl CommitClock {
     /// Create a new clock that will hand out timestamps starting from `start`.
     #[inline]
-    pub const fn new(start: Timestamp) -> Self {
+    pub(crate) const fn new(start: Timestamp) -> Self {
         Self {
             next: AtomicU64::new(start.get()),
         }
@@ -86,14 +86,14 @@ impl CommitClock {
 
     /// Allocate and return the next commit timestamp.
     #[inline]
-    pub fn alloc(&self) -> Timestamp {
+    pub(crate) fn alloc(&self) -> Timestamp {
         let current = self.next.fetch_add(1, Ordering::Relaxed);
         Timestamp::new(current)
     }
 
     /// Return the timestamp that will be handed out next.
     #[inline]
-    pub fn peek(&self) -> Timestamp {
+    pub(crate) fn peek(&self) -> Timestamp {
         Timestamp::new(self.next.load(Ordering::Relaxed))
     }
 
@@ -101,7 +101,7 @@ impl CommitClock {
     ///
     /// Useful after recovery where the highest observed commit is already known.
     #[inline]
-    pub fn advance_to_at_least(&self, candidate: Timestamp) {
+    pub(crate) fn advance_to_at_least(&self, candidate: Timestamp) {
         // Use a loop with compare_exchange to avoid losing larger candidates.
         let mut current = self.next.load(Ordering::Relaxed);
         while candidate.get() > current {
@@ -133,13 +133,13 @@ pub struct ReadView {
 impl ReadView {
     /// Build a read view pinned at `read_ts`.
     #[inline]
-    pub const fn new(read_ts: Timestamp) -> Self {
+    pub(crate) const fn new(read_ts: Timestamp) -> Self {
         Self { read_ts }
     }
 
     /// Commit timestamp visible to the view (inclusive).
     #[inline]
-    pub const fn read_ts(&self) -> Timestamp {
+    pub(crate) const fn read_ts(&self) -> Timestamp {
         self.read_ts
     }
 }

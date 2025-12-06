@@ -22,7 +22,6 @@ use ulid::Ulid;
 use crate::{
     compaction::planner::CompactionTask,
     manifest::{ManifestError, SstEntry, VersionEdit, WalSegmentRef},
-    mode::DynMode,
     mvcc::Timestamp,
     ondisk::{
         merge::cleanup_descriptors,
@@ -285,7 +284,7 @@ impl LocalCompactionExecutor {
     }
 
     /// Test-only hook to corrupt descriptors before outcome construction and exercise cleanup.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn with_corrupt_descriptors_for_test(mut self) -> Self {
         self.corrupt_descriptors = true;
         self
@@ -330,10 +329,9 @@ impl CompactionExecutor for LocalCompactionExecutor {
             let _ = job.lease.as_ref();
             let target = self.alloc_descriptor(job.task.target_level);
             let (max_rows, max_bytes) = self.output_caps_for_level(job.task.target_level);
-            let merger =
-                SsTableMerger::<DynMode>::new(Arc::clone(&self.config), job.inputs.clone(), target)
-                    .with_output_id_allocator(Arc::clone(&self.next_id))
-                    .with_output_caps(max_rows, max_bytes);
+            let merger = SsTableMerger::new(Arc::clone(&self.config), job.inputs.clone(), target)
+                .with_output_id_allocator(Arc::clone(&self.next_id))
+                .with_output_caps(max_rows, max_bytes);
             let merged = merger.execute().await?;
             let descriptors: Vec<_> = merged.iter().map(|sst| sst.descriptor().clone()).collect();
             let descriptors_for_outcome = {
@@ -396,7 +394,6 @@ mod tests {
         compaction::planner::{CompactionInput, CompactionTask},
         id::FileIdGenerator,
         inmem::immutable::memtable::segment_from_batch_with_key_name,
-        mode::DynMode,
         ondisk::sstable::{
             SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId, SsTableStats,
         },
@@ -436,7 +433,7 @@ mod tests {
         .expect("batch");
         let immutable =
             segment_from_batch_with_key_name(batch, "id").expect("immutable segment from batch");
-        let mut builder = SsTableBuilder::<DynMode>::new(
+        let mut builder = SsTableBuilder::new(
             Arc::clone(&cfg),
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
@@ -697,7 +694,7 @@ mod tests {
         .expect("batch");
         let immutable =
             segment_from_batch_with_key_name(batch, "id").expect("immutable segment from batch");
-        let mut builder = SsTableBuilder::<DynMode>::new(
+        let mut builder = SsTableBuilder::new(
             Arc::clone(&exec.config),
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );

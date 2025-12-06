@@ -75,7 +75,7 @@ fn single_row_batch(schema: Arc<Schema>, id: &str, value: i32) -> RecordBatch {
     .expect("batch")
 }
 
-async fn rows_from_db(db: &DB<crate::mode::DynMode, LocalFs, TokioExecutor>) -> Vec<(String, i32)> {
+async fn rows_from_db(db: &DB<LocalFs, TokioExecutor>) -> Vec<(String, i32)> {
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
@@ -133,7 +133,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let sst_path = FusioPath::from_filesystem_path(&sst_dir)?;
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_path));
 
-    let mut db = DB::<crate::mode::DynMode, LocalFs, TokioExecutor>::builder(build_config)
+    let mut db = DB::<LocalFs, TokioExecutor>::builder(build_config)
         .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_segment_bytes(512)
@@ -196,7 +196,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let recovery_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
     // Recovery happens before releasing the pinned WAL range: older GC logic
     // would have dropped the segment here which meant WAL replay lost data.
-    let recovered = DB::<crate::mode::DynMode, LocalFs, TokioExecutor>::builder(recovery_config)
+    let recovered = DB::<LocalFs, TokioExecutor>::builder(recovery_config)
         .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_segment_bytes(512)
@@ -213,7 +213,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
 
     // Reopen db to continue testing final flush and GC
     let reopen_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
-    let mut db = DB::<crate::mode::DynMode, LocalFs, TokioExecutor>::builder(reopen_config)
+    let mut db = DB::<LocalFs, TokioExecutor>::builder(reopen_config)
         .on_disk(root_str.clone())?
         .create_dirs(true)
         .wal_segment_bytes(512)

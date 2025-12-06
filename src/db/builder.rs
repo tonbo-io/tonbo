@@ -1,4 +1,4 @@
-use std::{env, hash::Hash, io, sync::Arc, time::Duration};
+use std::{env, io, sync::Arc, time::Duration};
 
 use fusio::{
     DynFs, Fs,
@@ -13,7 +13,7 @@ use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl};
 use thiserror::Error;
 
-use super::{DB, DynMode, Mode};
+use super::DB;
 use crate::{
     compaction::{
         executor::LocalCompactionExecutor,
@@ -24,7 +24,7 @@ use crate::{
     manifest::{
         ManifestError, ManifestFs, TonboManifest, bootstrap::ensure_manifest_dirs, init_fs_manifest,
     },
-    mode::{CatalogDescribe, DynModeConfig},
+    mode::{DynModeConfig, table_definition},
     ondisk::sstable::SsTableConfig,
     transaction::CommitAckMode,
     wal::{
@@ -383,11 +383,8 @@ where
 /// The builder enforces that callers explicitly select a storage backend
 /// (in-memory, local disk, or object storage) before the database can be
 /// materialised.
-pub struct DbBuilder<M, S = Unconfigured>
-where
-    M: Mode + CatalogDescribe,
-{
-    mode_config: M::Config,
+pub struct DbBuilder<S = Unconfigured> {
+    mode_config: DynModeConfig,
     state: S,
     compaction_strategy: CompactionStrategy,
     compaction_interval: Option<Duration>,
@@ -622,6 +619,7 @@ impl<FS> StorageLayout<FS> {
         })
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn apply_wal_defaults(&self, cfg: &mut RuntimeWalConfig) -> Result<(), DbBuildError> {
         let route = self.wal_route()?;
         cfg.dir = route.path.clone();
@@ -634,6 +632,7 @@ impl<FS> StorageLayout<FS> {
     }
 }
 
+#[allow(clippy::arc_with_non_send_sync)]
 fn build_s3_fs(
     spec: S3Spec,
 ) -> Result<(Arc<fusio::impls::remotes::aws::fs::AmazonS3>, Path), DbBuildError> {
@@ -707,11 +706,8 @@ impl<'a, FS> ManifestBootstrap<'a, FS> {
         .map_err(DbBuildError::Manifest)
     }
 }
-impl<M> DbBuilder<M, Unconfigured>
-where
-    M: Mode + CatalogDescribe,
-{
-    pub(super) fn new(mode_config: M::Config) -> Self {
+impl DbBuilder<Unconfigured> {
+    pub(super) fn new(mode_config: DynModeConfig) -> Self {
         Self {
             mode_config,
             state: Unconfigured,
@@ -726,7 +722,7 @@ where
     pub fn in_memory(
         self,
         label: impl Into<String>,
-    ) -> Result<DbBuilder<M, StorageConfig<InMemoryFs>>, DbBuildError> {
+    ) -> Result<DbBuilder<StorageConfig<InMemoryFs>>, DbBuildError> {
         let label_str = label.into();
         let root = Path::parse(&label_str).map_err(|err| DbBuildError::InvalidPath {
             path: label_str,
@@ -748,7 +744,7 @@ where
     pub fn on_disk(
         self,
         root: impl AsRef<std::path::Path>,
-    ) -> Result<DbBuilder<M, StorageConfig<LocalFs>>, DbBuildError> {
+    ) -> Result<DbBuilder<StorageConfig<LocalFs>>, DbBuildError> {
         let root_ref = root.as_ref();
         let path =
             Path::from_filesystem_path(root_ref).map_err(|err| DbBuildError::InvalidPath {
@@ -770,7 +766,7 @@ where
     pub fn object_store(
         self,
         spec: ObjectSpec,
-    ) -> Result<DbBuilder<M, StorageConfig<fusio::impls::remotes::aws::fs::AmazonS3>>, DbBuildError>
+    ) -> Result<DbBuilder<StorageConfig<fusio::impls::remotes::aws::fs::AmazonS3>>, DbBuildError>
     {
         let (fs, root) = match spec {
             ObjectSpec::S3(s3_spec) => build_s3_fs(s3_spec)?,
@@ -783,11 +779,38 @@ where
             compaction_loop_cfg: self.compaction_loop_cfg,
         })
     }
+
+    /// Create a builder from an Arrow schema and single key column name.
+    pub fn from_schema_key_name(
+        schema: arrow_schema::SchemaRef,
+        key_name: impl Into<String>,
+    ) -> Result<Self, DbBuildError> {
+        let key = key_name.into();
+        let cfg = DynModeConfig::from_key_name(schema, key.as_str()).map_err(DbBuildError::Mode)?;
+        Ok(Self::new(cfg))
+    }
+
+    /// Create a builder from an Arrow schema and explicit key column indices.
+    pub fn from_schema_key_indices(
+        schema: arrow_schema::SchemaRef,
+        key_indices: Vec<usize>,
+    ) -> Result<Self, DbBuildError> {
+        let extractor =
+            projection_for_columns(schema.clone(), key_indices).map_err(DbBuildError::Mode)?;
+        let cfg = DynModeConfig::new(schema, extractor).map_err(DbBuildError::Mode)?;
+        Ok(Self::new(cfg))
+    }
+
+    /// Create a builder by reading key metadata from the schema.
+    pub fn from_schema_metadata(schema: arrow_schema::SchemaRef) -> Result<Self, DbBuildError> {
+        let cfg = DynModeConfig::from_metadata(schema).map_err(DbBuildError::Mode)?;
+        Ok(Self::new(cfg))
+    }
 }
 
-impl<M, FS> DbBuilder<M, StorageConfig<FS>>
+impl<FS> DbBuilder<StorageConfig<FS>>
 where
-    M: Mode + CatalogDescribe,
+    FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     /// Enable or disable provisioning of the storage layout prior to build/recovery.
     ///
@@ -799,44 +822,7 @@ where
         self.state.create_layout = enable;
         self
     }
-}
 
-// Convenience constructors for dynamic mode: build configs from schema + key in one step.
-impl DbBuilder<DynMode, Unconfigured> {
-    /// Create a dynamic-mode builder from an Arrow schema and single key column name.
-    pub fn from_schema_key_name(
-        schema: arrow_schema::SchemaRef,
-        key_name: impl Into<String>,
-    ) -> Result<Self, DbBuildError> {
-        let key = key_name.into();
-        let cfg = DynModeConfig::from_key_name(schema, key.as_str()).map_err(DbBuildError::Mode)?;
-        Ok(Self::new(cfg))
-    }
-
-    /// Create a dynamic-mode builder from an Arrow schema and explicit key column indices.
-    pub fn from_schema_key_indices(
-        schema: arrow_schema::SchemaRef,
-        key_indices: Vec<usize>,
-    ) -> Result<Self, DbBuildError> {
-        let extractor =
-            projection_for_columns(schema.clone(), key_indices).map_err(DbBuildError::Mode)?;
-        let cfg = DynModeConfig::new(schema, extractor).map_err(DbBuildError::Mode)?;
-        Ok(Self::new(cfg))
-    }
-
-    /// Create a dynamic-mode builder by reading key metadata from the schema.
-    pub fn from_schema_metadata(schema: arrow_schema::SchemaRef) -> Result<Self, DbBuildError> {
-        let cfg = DynModeConfig::from_metadata(schema).map_err(DbBuildError::Mode)?;
-        Ok(Self::new(cfg))
-    }
-}
-
-impl<M, FS> DbBuilder<M, StorageConfig<FS>>
-where
-    M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
-    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
-    FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
-{
     /// Select a compaction strategy (leveled, tiered, or time-windowed placeholder).
     #[must_use]
     pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
@@ -853,7 +839,7 @@ where
 
     /// Materialise a [`DB`] using the accumulated builder state.
     #[cfg(feature = "tokio")]
-    pub async fn build(self) -> Result<DB<M, FS, TokioExecutor>, DbBuildError>
+    pub async fn build(self) -> Result<DB<FS, TokioExecutor>, DbBuildError>
     where
         FS: ManifestFs<TokioExecutor>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
@@ -867,10 +853,7 @@ where
     }
 
     /// Materialise a [`DB`] using a caller-provided executor implementation.
-    pub async fn build_with_executor<E>(
-        self,
-        executor: Arc<E>,
-    ) -> Result<DB<M, FS, E>, DbBuildError>
+    pub async fn build_with_executor<E>(self, executor: Arc<E>) -> Result<DB<FS, E>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
         FS: ManifestFs<E>,
@@ -889,7 +872,7 @@ where
         self,
         executor: Arc<E>,
         layout: StorageLayout<FS>,
-    ) -> Result<DB<M, FS, E>, DbBuildError>
+    ) -> Result<DB<FS, E>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
         FS: ManifestFs<E> + fusio_manifest::ObjectHead,
@@ -902,9 +885,9 @@ where
             .table_name()
             .cloned()
             .unwrap_or_else(|| DEFAULT_TABLE_NAME.to_string());
-        let table_definition = M::table_definition(&self.mode_config, &table_name);
+        let table_definition = table_definition(&self.mode_config, &table_name);
 
-        let (mode, mem) = M::build(self.mode_config).map_err(DbBuildError::Mode)?;
+        let (mode, mem) = self.mode_config.build().map_err(DbBuildError::Mode)?;
         let manifest = manifest_init
             .init_manifest(executor.as_ref().clone())
             .await?;
@@ -967,7 +950,7 @@ where
     }
 }
 
-impl<S> DbBuilder<DynMode, S> {
+impl<S> DbBuilder<S> {
     /// Override the commit acknowledgement mode for transactional writes.
     #[must_use]
     pub fn with_commit_ack_mode(mut self, mode: CommitAckMode) -> Self {
@@ -976,7 +959,7 @@ impl<S> DbBuilder<DynMode, S> {
     }
 }
 
-impl<FS> DbBuilder<DynMode, StorageConfig<FS>>
+impl<FS> DbBuilder<StorageConfig<FS>>
 where
     FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
@@ -1006,7 +989,7 @@ where
     }
 }
 
-/// Configures automatic compaction loop spawning for DynMode builds.
+/// Configures automatic compaction loop spawning for dynamic builds.
 #[derive(Clone)]
 struct CompactionLoopConfig {
     interval: Duration,
@@ -1014,10 +997,8 @@ struct CompactionLoopConfig {
     start_id: u64,
 }
 
-impl<M, FS> DbBuilder<M, StorageConfig<FS>>
+impl<FS> DbBuilder<StorageConfig<FS>>
 where
-    M: Mode + CatalogDescribe + MaybeSend + MaybeSync + 'static,
-    M::Key: Eq + Hash + Clone + MaybeSend + MaybeSync,
     FS: DynFs + FusioCas + Clone + MaybeSend + MaybeSync + 'static,
 {
     /// Apply a batch of WAL overrides supplied via [`WalConfig`].
@@ -1070,7 +1051,7 @@ where
 
     /// Attempt to recover from WAL state if present, otherwise build a fresh durable DB.
     #[cfg(feature = "tokio")]
-    pub async fn recover_or_init(self) -> Result<DB<M, FS, TokioExecutor>, DbBuildError>
+    pub async fn recover_or_init(self) -> Result<DB<FS, TokioExecutor>, DbBuildError>
     where
         FS: ManifestFs<TokioExecutor>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
@@ -1083,7 +1064,7 @@ where
     pub async fn recover_or_init_with_executor<E>(
         self,
         executor: Arc<E>,
-    ) -> Result<DB<M, FS, E>, DbBuildError>
+    ) -> Result<DB<FS, E>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
         FS: ManifestFs<E>,
@@ -1104,7 +1085,7 @@ where
                 .table_name()
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_TABLE_NAME.to_string());
-            let table_definition = M::table_definition(&self.mode_config, &table_name);
+            let table_definition = table_definition(&self.mode_config, &table_name);
             let file_ids = FileIdGenerator::default();
             let manifest = manifest_init
                 .init_manifest(executor.as_ref().clone())

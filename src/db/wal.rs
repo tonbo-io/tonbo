@@ -4,7 +4,7 @@ use std::{
 };
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
-use arrow_schema::{ArrowError, SchemaRef};
+use arrow_schema::ArrowError;
 use arrow_select::take::take;
 use fusio::executor::{Executor, Instant, Timer};
 
@@ -12,13 +12,12 @@ use crate::{
     db::DB,
     extractor::KeyExtractError,
     inmem::{
-        immutable::{Immutable, memtable::MVCC_COMMIT_COL},
+        immutable::{ImmutableSegment, memtable::MVCC_COMMIT_COL},
         mutable::DynMem,
         policy::{SealDecision, StatsProvider},
     },
     key::KeyOwned,
     manifest::{ManifestFs, TableId, TonboManifest},
-    mode::{DynMode, Mode},
     mvcc::Timestamp,
     wal::{
         WalConfig as RuntimeWalConfig, WalError, WalHandle,
@@ -84,20 +83,11 @@ where
     pub(crate) prev_live_floor: Option<u64>,
 }
 
-pub(crate) struct SealState<M: Mode> {
-    pub(crate) immutables: Vec<Arc<Immutable<M>>>,
+#[derive(Default)]
+pub(crate) struct SealState {
+    pub(crate) immutables: Vec<Arc<ImmutableSegment>>,
     pub(crate) immutable_wal_ranges: Vec<Option<WalFrameRange>>,
     pub(crate) last_seal_at: Option<Instant>,
-}
-
-impl<M: Mode> Default for SealState<M> {
-    fn default() -> Self {
-        Self {
-            immutables: Vec::new(),
-            immutable_wal_ranges: Vec::new(),
-            last_seal_at: None,
-        }
-    }
 }
 
 type PendingWalTxns = HashMap<u64, PendingWalTxn>;
@@ -133,18 +123,14 @@ impl PendingWalTxn {
     }
 }
 
-impl<FS, E> DB<DynMode, FS, E>
+impl<FS, E> DB<FS, E>
 where
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    pub(crate) fn schema(&self) -> &SchemaRef {
-        &self.mode.schema
-    }
-
     /// Wrap this database in an executor-provided read-write lock for shared transactional use.
-    pub fn into_shared(self) -> Arc<DB<DynMode, FS, E>> {
+    pub fn into_shared(self) -> Arc<DB<FS, E>> {
         Arc::new(self)
     }
 
@@ -154,8 +140,97 @@ where
         commit_ts: Timestamp,
     ) -> Result<(), KeyExtractError> {
         self.insert_with_seal_retry(|mem| {
-            mem.insert_batch(self.mode.extractor.as_ref(), batch.clone(), commit_ts)
+            mem.insert_batch(self.extractor.as_ref(), batch.clone(), commit_ts)
         })
+    }
+
+    fn insert_with_seal_retry<F>(&self, mut op: F) -> Result<(), KeyExtractError>
+    where
+        F: FnMut(&mut DynMem) -> Result<(), KeyExtractError>,
+    {
+        loop {
+            let mut mem = self.mem_write();
+            match op(&mut mem) {
+                Ok(()) => return Ok(()),
+                Err(KeyExtractError::MemtableFull { .. }) => {
+                    drop(mem);
+                    self.seal_mutable_now()?;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn seal_mutable_now(&self) -> Result<(), KeyExtractError> {
+        let seg_opt = {
+            let mut mem = self.mem_write();
+            mem.seal_into_immutable(&self.schema, self.extractor.as_ref())?
+        };
+        if let Some(seg) = seg_opt {
+            let wal_range = self.take_mutable_wal_range();
+            self.add_immutable(seg, wal_range);
+            let mut seal = self.seal_state_lock();
+            seal.last_seal_at = Some(self.executor.now());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply_committed_batch(
+        &self,
+        batch: RecordBatch,
+        commit_ts: Timestamp,
+    ) -> Result<(), KeyExtractError> {
+        let commit_array: ArrayRef =
+            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()]));
+        apply_dyn_wal_batch(self, batch, commit_array, commit_ts)
+    }
+
+    pub(crate) fn apply_committed_deletes(
+        &self,
+        batch: RecordBatch,
+    ) -> Result<(), KeyExtractError> {
+        let mut mem = self.mem_write();
+        mem.insert_delete_batch(self.delete_projection.as_ref(), batch)
+    }
+
+    pub(crate) fn mutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
+        self.mem_read().has_conflict(key, snapshot_ts)
+    }
+
+    pub(crate) fn immutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
+        self.seal_state_lock()
+            .immutables
+            .iter()
+            .any(|segment| segment.has_conflict(key, snapshot_ts))
+    }
+
+    pub(crate) fn maybe_seal_after_insert(&self) -> Result<(), KeyExtractError> {
+        let last_seal = { self.seal_state_lock().last_seal_at };
+        let since = last_seal.map(|t| t.elapsed());
+        let stats = { self.mem_read().build_stats(since) };
+
+        if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
+            self.seal_mutable_now()?;
+        }
+        Ok(())
+    }
+
+    /// Ingest a batch along with its tombstone bitmap, routing through the WAL when enabled.
+    pub async fn ingest_with_tombstones(
+        &self,
+        batch: RecordBatch,
+        tombstones: Vec<bool>,
+    ) -> Result<(), KeyExtractError> {
+        insert_dyn_wal_batch(self, batch, tombstones).await
+    }
+
+    /// Ingest multiple batches, each paired with a tombstone bitmap.
+    pub async fn ingest_many_with_tombstones(
+        &self,
+        batches: Vec<(RecordBatch, Vec<bool>)>,
+    ) -> Result<(), KeyExtractError> {
+        insert_dyn_wal_batches(self, batches).await
     }
 
     pub(crate) fn replay_wal_events(
@@ -255,101 +330,10 @@ where
 
         Ok(last_commit_ts)
     }
-
-    fn insert_with_seal_retry<F>(&self, mut op: F) -> Result<(), KeyExtractError>
-    where
-        F: FnMut(&mut DynMem) -> Result<(), KeyExtractError>,
-    {
-        loop {
-            let mut mem = self.mem_write();
-            match op(&mut mem) {
-                Ok(()) => return Ok(()),
-                Err(KeyExtractError::MemtableFull { .. }) => {
-                    drop(mem);
-                    self.seal_mutable_now()?;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-
-    fn seal_mutable_now(&self) -> Result<(), KeyExtractError> {
-        let seg_opt = {
-            let mut mem = self.mem_write();
-            mem.seal_into_immutable(&self.mode.schema, self.mode.extractor.as_ref())?
-        };
-        if let Some(seg) = seg_opt {
-            let wal_range = self.take_mutable_wal_range();
-            self.add_immutable(seg, wal_range);
-            let mut seal = self.seal_state_lock();
-            seal.last_seal_at = Some(self.executor.now());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn apply_committed_batch(
-        &self,
-        batch: RecordBatch,
-        commit_ts: Timestamp,
-    ) -> Result<(), KeyExtractError> {
-        let commit_array: ArrayRef =
-            Arc::new(UInt64Array::from(vec![commit_ts.get(); batch.num_rows()]));
-        apply_dyn_wal_batch(self, batch, commit_array, commit_ts)
-    }
-
-    pub(crate) fn apply_committed_deletes(
-        &self,
-        batch: RecordBatch,
-    ) -> Result<(), KeyExtractError> {
-        let mut mem = self.mem_write();
-        mem.insert_delete_batch(self.mode.delete_projection.as_ref(), batch)
-    }
-
-    pub(crate) fn mutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
-        self.mem_read().has_conflict(key, snapshot_ts)
-    }
-
-    pub(crate) fn immutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
-        self.seal_state_lock()
-            .immutables
-            .iter()
-            .any(|segment| segment.has_conflict(key, snapshot_ts))
-    }
-
-    pub(crate) fn maybe_seal_after_insert(&self) -> Result<(), KeyExtractError> {
-        let last_seal = { self.seal_state_lock().last_seal_at };
-        let since = last_seal.map(|t| t.elapsed());
-        let stats = { self.mem_read().build_stats(since) };
-
-        if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
-            self.seal_mutable_now()?;
-        }
-        Ok(())
-    }
-
-    /// Ingest a batch along with its tombstone bitmap, routing through the WAL when enabled.
-    pub async fn ingest_with_tombstones(
-        &self,
-        batch: RecordBatch,
-        tombstones: Vec<bool>,
-    ) -> Result<(), KeyExtractError> {
-        insert_dyn_wal_batch(self, batch, tombstones).await
-    }
-
-    /// Ingest multiple batches, each paired with a tombstone bitmap.
-    pub async fn ingest_many_with_tombstones(
-        &self,
-        batches: Vec<(RecordBatch, Vec<bool>)>,
-    ) -> Result<(), KeyExtractError> {
-        insert_dyn_wal_batches(self, batches).await
-    }
 }
 
-impl<M, FS, E> DB<M, FS, E>
+impl<FS, E> DB<FS, E>
 where
-    M: Mode,
-    M::Key: Eq + std::hash::Hash + Clone,
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
@@ -429,7 +413,7 @@ where
         self.record_mutable_wal_range(WalFrameRange { first, last });
     }
 
-    pub(crate) fn add_immutable(&self, seg: Immutable<M>, wal_range: Option<WalFrameRange>) {
+    pub(crate) fn add_immutable(&self, seg: ImmutableSegment, wal_range: Option<WalFrameRange>) {
         let mut seal = self.seal_state_lock();
         seal.immutables.push(Arc::new(seg));
         seal.immutable_wal_ranges.push(wal_range);
@@ -469,7 +453,7 @@ where
 }
 
 async fn insert_dyn_wal_batch<FS, E>(
-    db: &DB<DynMode, FS, E>,
+    db: &DB<FS, E>,
     batch: RecordBatch,
     tombstones: Vec<bool>,
 ) -> Result<(), KeyExtractError>
@@ -488,7 +472,7 @@ where
     let commit_ts = db.next_commit_ts();
 
     let (upsert_batch, delete_batch) =
-        partition_batch_for_mutations(&db.mode, batch, &tombstones, commit_ts)?;
+        partition_batch_for_mutations(db, batch, &tombstones, commit_ts)?;
 
     if upsert_batch.is_none() && delete_batch.is_none() {
         return Ok(());
@@ -533,10 +517,10 @@ where
     if mutated {
         db.insert_with_seal_retry(|mem| {
             if let Some(ref batch) = upsert_batch {
-                mem.insert_batch(db.mode.extractor.as_ref(), batch.clone(), commit_ts)?;
+                mem.insert_batch(db.extractor.as_ref(), batch.clone(), commit_ts)?;
             }
             if let Some(ref batch) = delete_batch {
-                mem.insert_delete_batch(db.mode.delete_projection.as_ref(), batch.clone())?;
+                mem.insert_delete_batch(db.delete_projection.as_ref(), batch.clone())?;
             }
             Ok(())
         })?;
@@ -549,7 +533,7 @@ where
 }
 
 async fn insert_dyn_wal_batches<FS, E>(
-    db: &DB<DynMode, FS, E>,
+    db: &DB<FS, E>,
     batches: Vec<(RecordBatch, Vec<bool>)>,
 ) -> Result<(), KeyExtractError>
 where
@@ -564,7 +548,7 @@ where
 }
 
 pub(crate) fn apply_dyn_wal_batch<FS, E>(
-    db: &DB<DynMode, FS, E>,
+    db: &DB<FS, E>,
     batch: RecordBatch,
     commit_ts_column: ArrayRef,
     commit_ts: Timestamp,
@@ -575,7 +559,6 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     let schema_contains_tombstone = db
-        .mode
         .schema
         .fields()
         .iter()
@@ -611,17 +594,13 @@ where
     }
 
     db.insert_with_seal_retry(|mem| {
-        mem.insert_batch_with_mvcc(
-            db.mode.extractor.as_ref(),
-            batch.clone(),
-            commit_array.clone(),
-        )
+        mem.insert_batch_with_mvcc(db.extractor.as_ref(), batch.clone(), commit_array.clone())
     })?;
     Ok(())
 }
 
 fn apply_dyn_delete_wal_batch<FS, E>(
-    db: &DB<DynMode, FS, E>,
+    db: &DB<FS, E>,
     batch: RecordBatch,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
@@ -634,13 +613,13 @@ where
     validate_delete_commit_ts(&batch, commit_ts)?;
     {
         let mut mem = db.mem_write();
-        mem.insert_delete_batch(db.mode.delete_projection.as_ref(), batch)?;
+        mem.insert_delete_batch(db.delete_projection.as_ref(), batch)?;
     }
     Ok(())
 }
 
 fn validate_record_batch_schema<FS, E>(
-    db: &DB<DynMode, FS, E>,
+    db: &DB<FS, E>,
     batch: &RecordBatch,
 ) -> Result<(), KeyExtractError>
 where
@@ -648,9 +627,9 @@ where
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    if db.mode.schema.as_ref() != batch.schema().as_ref() {
+    if db.schema.as_ref() != batch.schema().as_ref() {
         return Err(KeyExtractError::SchemaMismatch {
-            expected: db.mode.schema.clone(),
+            expected: db.schema.clone(),
             actual: batch.schema(),
         });
     }
@@ -671,7 +650,7 @@ fn validate_vec_tombstone_bitmap(
 }
 
 fn validate_delete_batch_schema<FS, E>(
-    db: &DB<DynMode, FS, E>,
+    db: &DB<FS, E>,
     batch: &RecordBatch,
 ) -> Result<(), KeyExtractError>
 where
@@ -679,9 +658,9 @@ where
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    if db.mode.delete_schema.as_ref() != batch.schema().as_ref() {
+    if db.delete_schema.as_ref() != batch.schema().as_ref() {
         return Err(KeyExtractError::SchemaMismatch {
-            expected: db.mode.delete_schema.clone(),
+            expected: db.delete_schema.clone(),
             actual: batch.schema(),
         });
     }
@@ -723,12 +702,17 @@ fn validate_delete_commit_ts(
     Ok(())
 }
 
-fn partition_batch_for_mutations(
-    mode: &DynMode,
+fn partition_batch_for_mutations<FS, E>(
+    db: &DB<FS, E>,
     batch: RecordBatch,
     tombstones: &[bool],
     commit_ts: Timestamp,
-) -> Result<(Option<RecordBatch>, Option<RecordBatch>), KeyExtractError> {
+) -> Result<(Option<RecordBatch>, Option<RecordBatch>), KeyExtractError>
+where
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
     if batch.num_rows() == 0 {
         return Ok((None, None));
     }
@@ -745,7 +729,7 @@ fn partition_batch_for_mutations(
         None
     } else {
         Some(build_delete_batch(
-            mode,
+            db,
             &batch,
             &delete_indices,
             commit_ts,
@@ -762,16 +746,21 @@ fn partition_batch_for_mutations(
     Ok((upsert_batch, delete_batch))
 }
 
-fn build_delete_batch(
-    mode: &DynMode,
+fn build_delete_batch<FS, E>(
+    db: &DB<FS, E>,
     batch: &RecordBatch,
     delete_indices: &[u32],
     commit_ts: Timestamp,
     commit_ts_column: Option<&UInt64Array>,
-) -> Result<RecordBatch, KeyExtractError> {
+) -> Result<RecordBatch, KeyExtractError>
+where
+    FS: ManifestFs<E>,
+    E: Executor + Timer + Clone,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
     let idx_array = UInt32Array::from(delete_indices.to_vec());
-    let mut columns = Vec::with_capacity(mode.extractor.key_indices().len() + 1);
-    for &col_idx in mode.extractor.key_indices() {
+    let mut columns = Vec::with_capacity(db.extractor.key_indices().len() + 1);
+    for &col_idx in db.extractor.key_indices() {
         let column = batch.column(col_idx);
         let taken = take(column.as_ref(), &idx_array, None).map_err(KeyExtractError::Arrow)?;
         columns.push(taken);
@@ -785,7 +774,7 @@ fn build_delete_batch(
         ])) as ArrayRef
     };
     columns.push(commit_values);
-    RecordBatch::try_new(mode.delete_schema.clone(), columns).map_err(KeyExtractError::Arrow)
+    RecordBatch::try_new(db.delete_schema.clone(), columns).map_err(KeyExtractError::Arrow)
 }
 
 fn take_full_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, ArrowError> {

@@ -48,14 +48,13 @@ async fn web_s3_roundtrip_wal_and_sstable() {
     let s3_spec = memory_s3_spec(prefix.clone());
 
     let exec = Arc::new(WebExecutor::new());
-    let mut db: DB<DynMode, AmazonS3, WebExecutor> =
-        DB::<DynMode, AmazonS3, WebExecutor>::builder(schema_cfg)
-            .object_store(ObjectSpec::s3(s3_spec))
-            .expect("object_store config")
-            .wal_sync_policy(WalSyncPolicy::Always)
-            .build_with_executor(Arc::clone(&exec))
-            .await
-            .expect("build web db");
+    let mut db: DB<AmazonS3, WebExecutor> = DB::<AmazonS3, WebExecutor>::builder(schema_cfg)
+        .object_store(ObjectSpec::s3(s3_spec))
+        .expect("object_store config")
+        .wal_sync_policy(WalSyncPolicy::Always)
+        .build_with_executor(Arc::clone(&exec))
+        .await
+        .expect("build web db");
 
     // Seal after every batch so immutables are flushed deterministically in tests.
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
@@ -96,7 +95,7 @@ async fn web_s3_roundtrip_wal_and_sstable() {
         .await
         .expect("flush to sst");
 
-    let reader = SsTableReader::<DynMode>::open(Arc::clone(&sst_cfg), sstable.descriptor().clone())
+    let reader = SsTableReader::open(Arc::clone(&sst_cfg), sstable.descriptor().clone())
         .await
         .expect("open sstable reader");
 

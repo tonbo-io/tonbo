@@ -11,11 +11,10 @@ use crate::{
     db::DB,
     extractor::KeyExtractError,
     inmem::{
-        immutable::{self, Immutable, memtable::ImmutableVisibleEntry},
+        immutable::{self, ImmutableSegment, memtable::ImmutableVisibleEntry},
         mutable::memtable::DynRowScanEntry,
     },
     key::KeyRow,
-    mode::DynMode,
     mvcc::Timestamp,
     ondisk::{
         scan::{SstableScan, load_delete_index},
@@ -38,7 +37,7 @@ impl TxSnapshot {
     /// Plan a scan using this snapshot for MVCC visibility and manifest pinning.
     pub async fn plan_scan<FS, E>(
         &self,
-        db: &DB<DynMode, FS, E>,
+        db: &DB<FS, E>,
         predicate: &Predicate,
         projected_schema: Option<&SchemaRef>,
         limit: Option<usize>,
@@ -51,14 +50,14 @@ impl TxSnapshot {
         let projected_schema = projected_schema.cloned();
         let residual_predicate = Some(predicate.clone());
         let scan_schema = if let Some(projection) = projected_schema.as_ref() {
-            projection_with_predicate(&db.mode.schema, projection, residual_predicate.as_ref())?
+            projection_with_predicate(&db.schema, projection, residual_predicate.as_ref())?
         } else {
-            Arc::clone(&db.mode.schema)
+            Arc::clone(&db.schema)
         };
         let seal = db.seal_state_lock();
-        let prune_input: Vec<&Immutable<DynMode>> =
+        let prune_input: Vec<&ImmutableSegment> =
             seal.immutables.iter().map(|arc| arc.as_ref()).collect();
-        let immutable_indexes = immutable::prune_segments::<DynMode>(&prune_input);
+        let immutable_indexes = immutable::prune_segments(&prune_input);
         let read_ts = self.read_view().read_ts();
         Ok(ScanPlan {
             _predicate: predicate.clone(),
@@ -73,7 +72,7 @@ impl TxSnapshot {
     }
 }
 
-impl<FS, E> DB<DynMode, FS, E>
+impl<FS, E> DB<FS, E>
 where
     FS: crate::manifest::ManifestFs<E>,
     E: Executor + Timer + Clone,
@@ -88,7 +87,7 @@ where
         let result_projection = plan
             .projected_schema
             .clone()
-            .unwrap_or_else(|| Arc::clone(&self.mode.schema));
+            .unwrap_or_else(|| Arc::clone(&self.schema));
         let scan_schema = Arc::clone(&plan.scan_schema);
         let streams = self.build_scan_streams(&plan, None).await?;
 
@@ -142,7 +141,7 @@ where
         )?;
         streams.push(ScanStream::from(mutable_scan));
 
-        let immutables: Vec<Arc<Immutable<DynMode>>> = {
+        let immutables: Vec<Arc<ImmutableSegment>> = {
             let seal = self.seal_state_lock();
             plan.immutable_indexes
                 .iter()
@@ -178,8 +177,8 @@ where
                 while let Some(batch_result) = delete_stream.next().await {
                     let batch = batch_result
                         .map_err(|e| crate::db::DBError::SsTable(SsTableError::Parquet(e)))?;
-                    let batch_index = load_delete_index(&batch, self.mode.extractor.as_ref())
-                        .map_err(|e| {
+                    let batch_index =
+                        load_delete_index(&batch, self.extractor.as_ref()).map_err(|e| {
                             crate::db::DBError::Stream(crate::query::stream::StreamError::SsTable(
                                 e,
                             ))
@@ -202,7 +201,7 @@ where
 
             let sstable_scan = SstableScan::new(
                 data_stream,
-                self.mode.extractor.as_ref(),
+                self.extractor.as_ref(),
                 projection_indices,
                 Some(Order::Asc),
                 plan.read_ts,

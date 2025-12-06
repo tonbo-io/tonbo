@@ -18,7 +18,7 @@ use futures::TryStreamExt;
 use crate::{
     db::{DB, WalConfig as BuilderWalConfig},
     inmem::policy::BatchesThreshold,
-    mode::{DynMode, DynModeConfig},
+    mode::DynModeConfig,
     mvcc::Timestamp,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
     query::{ColumnRef, Predicate},
@@ -60,12 +60,11 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
     let schema = build_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(build_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
+    let mut db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(build_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -86,8 +85,8 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
         ],
         &["id"],
     );
-    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config_recover)
+    let mut recovered: DB<LocalFs, TokioExecutor> =
+        DB::<LocalFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -174,13 +173,12 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
     let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
 
-    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(build_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .wal_config(wal_builder_cfg.clone())
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
+    let mut db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(build_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .wal_config(wal_builder_cfg.clone())
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
     let expected_rows = vec![
@@ -216,8 +214,8 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
         ],
         &["id"],
     );
-    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(recover_config)
+    let mut recovered: DB<LocalFs, TokioExecutor> =
+        DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_builder_cfg)
@@ -280,12 +278,11 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
+    let mut db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -301,8 +298,8 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
     drop(db);
 
     let mode_config_recover = DynModeConfig::from_metadata(schema.clone())?;
-    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config_recover)
+    let mut recovered: DB<LocalFs, TokioExecutor> =
+        DB::<LocalFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -490,12 +487,11 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
     );
     let schema = mode_config.schema();
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
+    let mut db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let live_batch = RecordBatch::try_new(
         schema.clone(),
@@ -525,8 +521,8 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
         ],
         &["id"],
     );
-    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(recover_config)
+    let mut recovered: DB<LocalFs, TokioExecutor> =
+        DB::<LocalFs, TokioExecutor>::builder(recover_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -567,15 +563,14 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
     let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .wal_segment_bytes(1)
-            .wal_flush_interval(Duration::from_millis(0))
-            .wal_sync_policy(WalSyncPolicy::Always)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
+    let mut db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .wal_segment_bytes(1)
+        .wal_flush_interval(Duration::from_millis(0))
+        .wal_sync_policy(WalSyncPolicy::Always)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     for chunk in 0..3 {
         let ids = vec![
@@ -603,8 +598,8 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
         ],
         &["id"],
     );
-    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config_recover)
+    let mut recovered: DB<LocalFs, TokioExecutor> =
+        DB::<LocalFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_segment_bytes(1)
@@ -675,12 +670,11 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     let schema = mode_config.schema();
 
     let executor = Arc::new(TokioExecutor::default());
-    let mut db: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config)
-            .on_disk(root_str.clone())?
-            .create_dirs(true)
-            .recover_or_init_with_executor(Arc::clone(&executor))
-            .await?;
+    let mut db: DB<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(mode_config)
+        .on_disk(root_str.clone())?
+        .create_dirs(true)
+        .recover_or_init_with_executor(Arc::clone(&executor))
+        .await?;
 
     let initial_batch = RecordBatch::try_new(
         schema.clone(),
@@ -701,8 +695,8 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
         ],
         &["id"],
     );
-    let mut recovered: DB<DynMode, LocalFs, TokioExecutor> =
-        DB::<DynMode, LocalFs, TokioExecutor>::builder(mode_config_recover)
+    let mut recovered: DB<LocalFs, TokioExecutor> =
+        DB::<LocalFs, TokioExecutor>::builder(mode_config_recover)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .recover_or_init_with_executor(Arc::clone(&executor))
@@ -716,6 +710,10 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
     recovered.enable_wal(runtime_cfg.clone()).await?;
 
     let wal_handle = recovered.wal().cloned().expect("wal handle");
+    let provisional_id = wal_handle.next_provisional_id();
+    // The initial ingest before disable/enable used provisional_id 1; ensure we continue from it.
+    assert_eq!(provisional_id, INITIAL_FRAME_SEQ.saturating_add(1));
+    let commit_ts = Timestamp::new(777);
     let append_batch = RecordBatch::try_new(
         schema,
         vec![
@@ -723,16 +721,20 @@ async fn wal_reenable_seeds_provisional_sequence() -> Result<(), Box<dyn std::er
             Arc::new(Int32Array::from(vec![5])) as _,
         ],
     )?;
-    let append = wal_handle
-        .append(&append_batch, Timestamp::new(777))
+
+    let append_ack = wal_handle
+        .txn_append(provisional_id, &append_batch, commit_ts)
+        .await?
+        .durable()
         .await?;
-    assert_eq!(
-        append.commit_ticket.seq,
-        INITIAL_FRAME_SEQ.saturating_add(1)
-    );
-    let (append_ack, commit_ack) = append.durable().await?;
+    assert!(append_ack.first_seq >= INITIAL_FRAME_SEQ);
     assert!(append_ack.first_seq <= append_ack.last_seq);
+
+    let commit_ticket = wal_handle.txn_commit(provisional_id, commit_ts).await?;
+    assert_eq!(commit_ticket.seq, provisional_id);
+    let commit_ack = commit_ticket.durable().await?;
     assert!(commit_ack.first_seq <= commit_ack.last_seq);
+    assert_eq!(commit_ack.first_seq, append_ack.last_seq.saturating_add(1));
 
     recovered.disable_wal().await?;
     drop(recovered);

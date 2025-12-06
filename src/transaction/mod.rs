@@ -19,14 +19,13 @@ use typed_arrow_dyn::{
     DynViewError,
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 use crate::manifest::{TableHead, VersionState};
 use crate::{
     db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, DynDbHandle, TxnWalPublishContext, WalFrameRange},
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
     key::{KeyOwned, KeyTsViewRaw},
     manifest::{ManifestError, TableSnapshot, VersionEdit},
-    mode::DynMode,
     mutation::DynMutation,
     mvcc::{ReadView, Timestamp},
     query::stream::{Order, StreamError, merge::MergeStream, package::PackageStream},
@@ -83,13 +82,13 @@ impl Snapshot {
     }
 
     /// Manifest head describing the table state visible to the snapshot.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn head(&self) -> &TableHead {
         &self.manifest.head
     }
 
     /// Latest committed version included in the snapshot, when available.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn latest_version(&self) -> Option<&VersionState> {
         self.manifest.latest_version.as_ref()
     }
@@ -367,7 +366,7 @@ where
     }
 
     /// Snapshot timestamp guarding conflict detection for this transaction.
-    pub fn read_ts(&self) -> Timestamp {
+    pub(crate) fn read_ts(&self) -> Timestamp {
         self.staged.snapshot_ts()
     }
 
@@ -545,7 +544,7 @@ where
 
     fn read_mutable_rows<C>(
         &self,
-        db: &DB<DynMode, C, E>,
+        db: &DB<C, E>,
     ) -> Result<BTreeMap<KeyOwned, DynRow>, TransactionError>
     where
         C: crate::manifest::ManifestFs<E>,
@@ -744,7 +743,7 @@ fn build_delete_batch(
 }
 
 fn apply_staged_payloads<FS, E>(
-    db: &DB<DynMode, FS, E>,
+    db: &DB<FS, E>,
     upserts: Option<RecordBatch>,
     deletes: Option<RecordBatch>,
     commit_ts: Timestamp,

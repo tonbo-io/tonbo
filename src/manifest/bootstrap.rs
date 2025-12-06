@@ -36,11 +36,11 @@ pub(crate) type ManifestInstance<C, FS, E> = Manifest<
 >;
 
 /// In-memory manifest type wired against `fusio`'s memory FS for dev/test flows.
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) type InMemoryManifest<E> = ManifestInstance<VersionCodec, InMemoryFs, E>;
 
 /// In-memory catalog manifest type used for catalog-specific tests.
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) type InMemoryCatalogManifest<E> = ManifestInstance<CatalogCodec, InMemoryFs, E>;
 
 /// Snapshot combining catalog metadata with the latest version state.
@@ -184,14 +184,14 @@ where
         self.gc_plan.put_gc_plan(table, plan).await
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(any(all(test, feature = "tokio"), feature = "test-helpers"))]
     pub(crate) async fn take_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
         self.gc_plan.take_gc_plan(table).await
     }
 }
 
 /// Raw helper used by tests needing direct access to the concrete manifest.
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) async fn init_in_memory_manifest_raw<E>(
     schema_version: u32,
     file_ids: &FileIdGenerator,
@@ -271,7 +271,7 @@ where
 }
 
 /// Convenience wrapper for in-memory manifests (tests/dev).
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub(crate) async fn init_fs_manifest_in_memory<E>(
     fs: InMemoryFs,
     root: &Path,

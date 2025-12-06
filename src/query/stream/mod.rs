@@ -114,7 +114,7 @@ impl<'t, S> OwnedImmutableScan<'t, S>
 where
     S: RecordBatchStorage,
 {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn new(keep: Arc<ImmutableMemTable<S>>, inner: ImmutableVisibleScan<'t, S>) -> Self {
         Self { _keep: keep, inner }
     }

@@ -3,9 +3,12 @@
 //! This module contains internal test utilities available under `#[cfg(test)]`.
 
 use arrow_array::RecordBatch;
-use arrow_schema::{Field, Schema, SchemaRef};
+use arrow_schema::SchemaRef;
+#[cfg(feature = "tokio")]
+use arrow_schema::{Field, Schema};
 use typed_arrow_dyn::{DynBuilders, DynCell, DynError, DynRow};
 
+#[cfg(feature = "tokio")]
 use crate::{mode::DynModeConfig, schema::SchemaBuilder};
 
 /// Trait for types that can be converted into a `DynRow`.
@@ -44,6 +47,7 @@ pub(crate) fn build_batch<R: IntoDynRow>(
 }
 
 /// Convenience helper that builds a DynMode configuration with embedded PK metadata.
+#[cfg(feature = "tokio")]
 pub(crate) fn config_with_pk(fields: Vec<Field>, primary_key: &[&str]) -> DynModeConfig {
     assert!(
         !primary_key.is_empty(),

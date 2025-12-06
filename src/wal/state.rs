@@ -40,13 +40,13 @@ pub struct WalState {
 impl WalState {
     /// Returns the highest durable commit timestamp, if known.
     #[inline]
-    pub fn commit_ts(&self) -> Option<Timestamp> {
+    pub(crate) fn commit_ts(&self) -> Option<Timestamp> {
         self.last_commit_ts.map(Timestamp::new)
     }
 
     /// Record the latest durable commit timestamp.
     #[inline]
-    pub fn set_commit_ts(&mut self, ts: Timestamp) {
+    pub(crate) fn set_commit_ts(&mut self, ts: Timestamp) {
         self.last_commit_ts = Some(ts.get());
     }
 

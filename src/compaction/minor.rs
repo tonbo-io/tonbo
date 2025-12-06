@@ -5,14 +5,11 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use arrow_array::RecordBatch;
 use fusio::executor::{Executor, Timer};
 
 use crate::{
     db::DB,
-    key::KeyOwned,
     manifest::ManifestFs,
-    mode::Mode,
     ondisk::sstable::{SsTable, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
 };
 
@@ -49,13 +46,12 @@ impl MinorCompactor {
     }
 
     /// Flush immutables when the threshold is met, returning the new SST on success.
-    pub async fn maybe_compact<M, FS, E>(
+    pub async fn maybe_compact<FS, E>(
         &self,
-        db: &mut DB<M, FS, E>,
+        db: &mut DB<FS, E>,
         config: Arc<SsTableConfig>,
-    ) -> Result<Option<SsTable<M>>, SsTableError>
+    ) -> Result<Option<SsTable>, SsTableError>
     where
-        M: Mode<ImmLayout = RecordBatch, Key = KeyOwned> + Sized,
         FS: ManifestFs<E>,
         E: Executor + Timer + Clone,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
@@ -81,9 +77,9 @@ mod tests {
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::MinorCompactor;
-    use crate::{db::DB, mode::DynMode, ondisk::sstable::SsTableConfig, test::build_batch};
+    use crate::{db::DB, ondisk::sstable::SsTableConfig, test::build_batch};
 
-    async fn build_db() -> (Arc<SsTableConfig>, DB<DynMode, InMemoryFs, NoopExecutor>) {
+    async fn build_db() -> (Arc<SsTableConfig>, DB<InMemoryFs, NoopExecutor>) {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -95,7 +91,7 @@ mod tests {
             .expect("key field");
         let schema = Arc::clone(&config.schema);
         let executor = Arc::new(NoopExecutor);
-        let db = DB::<DynMode, InMemoryFs, NoopExecutor>::builder(config)
+        let db = DB::<InMemoryFs, NoopExecutor>::builder(config)
             .in_memory("compaction-test")
             .expect("in_memory config")
             .build_with_executor(Arc::clone(&executor))

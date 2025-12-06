@@ -7,7 +7,6 @@
 use std::{
     fmt,
     future::Future,
-    hash::Hash,
     marker::PhantomData,
     sync::{
         Arc, Mutex,
@@ -31,7 +30,6 @@ use futures::{
 use ulid::Ulid;
 
 use crate::{
-    db::Mode,
     id::FileId,
     inmem::immutable::memtable::{MVCC_COMMIT_COL, MVCC_TOMBSTONE_COL},
     mvcc::Timestamp,
@@ -276,7 +274,8 @@ impl DynBatchPayload {
 
 /// Logical commands accepted by the WAL writer queue.
 #[derive(Debug, Clone)]
-pub enum WalCommand {
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum WalCommand {
     /// Open an explicit transaction.
     TxnBegin {
         /// Provisional identifier reserved for this transaction.
@@ -305,6 +304,7 @@ pub enum WalCommand {
 
 impl WalCommand {
     /// Return the provisional identifier carried by this command.
+    #[allow(dead_code)]
     fn provisional_id(&self) -> u64 {
         match self {
             WalCommand::TxnBegin { provisional_id }
@@ -542,7 +542,8 @@ where
     }
 
     /// Enqueue a command to the WAL writer.
-    pub async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
+    #[allow(dead_code)]
+    pub(crate) async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
         let submission_seq = command.provisional_id();
         self.enqueue_command(command, submission_seq).await
     }
@@ -574,28 +575,6 @@ where
             seq: submission_seq,
             receiver: ack_rx,
             _exec: PhantomData,
-        })
-    }
-
-    /// Append a record batch of live rows to the WAL (autocommit helper).
-    ///
-    /// Returns the `WalAck` for the append frame(s) plus the `WalTicket` for
-    /// the commit marker so callers can surface the full WAL span to GC
-    /// pinning (`WalRangeAccumulator`). This avoids the previous footgun where
-    /// the append ack was dropped and the span could not be observed.
-    pub async fn append(
-        &self,
-        batch: &RecordBatch,
-        commit_ts: Timestamp,
-    ) -> WalResult<WalAppendResult<E>> {
-        let provisional_id = self.next_provisional_id();
-        let append_ticket = self.txn_append(provisional_id, batch, commit_ts).await?;
-        let append_ack = append_ticket.durable().await?;
-        let commit_ticket = self.txn_commit(provisional_id, commit_ts).await?;
-
-        Ok(WalAppendResult {
-            append_ack,
-            commit_ticket,
         })
     }
 
@@ -658,7 +637,7 @@ where
         self.inner.metrics()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn test_from_parts(
         sender: mpsc::Sender<writer::WriterMsg>,
         queue_depth: Arc<AtomicUsize>,
@@ -676,7 +655,7 @@ where
     }
 
     /// Log a transaction append frame carrying live rows only.
-    pub async fn txn_append(
+    pub(crate) async fn txn_append(
         &self,
         provisional_id: u64,
         batch: &RecordBatch,
@@ -702,7 +681,7 @@ where
     }
 
     /// Log a transaction commit marker.
-    pub async fn txn_commit(
+    pub(crate) async fn txn_commit(
         &self,
         provisional_id: u64,
         commit_ts: Timestamp,
@@ -749,27 +728,6 @@ pub struct WalTicket<E> {
     pub seq: u64,
     receiver: oneshot::Receiver<WalResult<WalAck>>,
     _exec: PhantomData<E>,
-}
-
-/// Result of the `WalHandle::append` helper.
-#[must_use = "propagate WAL spans into GC pinning before dropping"]
-pub struct WalAppendResult<E> {
-    /// Ack for the append frame(s), required for WAL span tracking.
-    pub append_ack: WalAck,
-    /// Ticket for the commit marker; callers must still await durability.
-    pub commit_ticket: WalTicket<E>,
-}
-
-impl<E> WalAppendResult<E>
-where
-    E: Executor + Timer + Clone,
-{
-    /// Resolve the commit marker and return both acks (append, commit).
-    pub async fn durable(self) -> WalResult<(WalAck, WalAck)> {
-        let append_ack = self.append_ack;
-        let commit_ack = self.commit_ticket.durable().await?;
-        Ok((append_ack, commit_ack))
-    }
 }
 
 impl<E> WalTicket<E>
@@ -948,11 +906,24 @@ mod tests {
         );
 
         let batch = sample_batch();
-        let append = handle
-            .append(&batch, Timestamp::new(1))
+        let provisional_id = handle.next_provisional_id();
+        let commit_ts = Timestamp::new(1);
+
+        let append_ack = handle
+            .txn_append(provisional_id, &batch, commit_ts)
             .await
-            .expect("append result");
-        let (append_ack, commit_ack) = append.durable().await.expect("both acks");
+            .expect("append ticket")
+            .durable()
+            .await
+            .expect("append ack");
+
+        let commit_ack = handle
+            .txn_commit(provisional_id, commit_ts)
+            .await
+            .expect("commit ticket")
+            .durable()
+            .await
+            .expect("commit ack");
 
         assert!(append_ack.first_seq <= append_ack.last_seq);
         assert!(commit_ack.first_seq <= commit_ack.last_seq);
@@ -965,7 +936,7 @@ mod tests {
 }
 
 /// Extension methods on the `DB` to enable/disable the WAL.
-pub trait WalExt<M: Mode, FS, E>
+pub trait WalExt<FS, E>
 where
     FS: crate::manifest::ManifestFs<E>,
     E: Executor + Timer + Clone,
@@ -982,10 +953,8 @@ where
     fn wal(&self) -> Option<&WalHandle<E>>;
 }
 
-impl<M, FS, E> WalExt<M, FS, E> for crate::db::DB<M, FS, E>
+impl<FS, E> WalExt<FS, E> for crate::db::DB<FS, E>
 where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
     FS: crate::manifest::ManifestFs<E>,
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,

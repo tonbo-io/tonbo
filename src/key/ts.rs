@@ -17,35 +17,36 @@ pub struct KeyTsViewRaw {
 
 impl KeyTsViewRaw {
     /// Build a new `(key, timestamp)` view from a key row.
-    pub fn new(key: KeyRow, ts: Timestamp) -> Self {
+    pub(crate) fn new(key: KeyRow, ts: Timestamp) -> Self {
         Self { key, ts }
     }
 
     /// Build a raw view derived from an owned key. Safe because the owned key
     /// retains the backing buffers.
-    pub fn from_owned(key: &KeyOwned, ts: Timestamp) -> Self {
+    pub(crate) fn from_owned(key: &KeyOwned, ts: Timestamp) -> Self {
         let key_row =
             KeyRow::from_owned(key).expect("KeyOwned should only contain supported key components");
         Self::new(key_row, ts)
     }
 
     /// Borrow the key component.
-    pub fn key(&self) -> &KeyRow {
+    pub(crate) fn key(&self) -> &KeyRow {
         &self.key
     }
 
     /// Commit timestamp carried by the entry.
-    pub fn timestamp(&self) -> Timestamp {
+    pub(crate) fn timestamp(&self) -> Timestamp {
         self.ts
     }
 
     /// Decompose the view.
-    pub fn into_parts(self) -> (KeyRow, Timestamp) {
+    pub(crate) fn into_parts(self) -> (KeyRow, Timestamp) {
         (self.key, self.ts)
     }
 
     /// Return an owned counterpart.
-    pub fn to_owned(&self) -> KeyTsOwned {
+    #[allow(dead_code)]
+    pub(crate) fn to_owned(&self) -> KeyTsOwned {
         KeyTsOwned::new(self.key.to_owned(), self.ts)
     }
 }
@@ -89,27 +90,28 @@ pub struct KeyTsOwned {
 
 impl KeyTsOwned {
     /// Construct an owned composite key.
-    pub fn new(key: KeyOwned, ts: Timestamp) -> Self {
+    pub(crate) fn new(key: KeyOwned, ts: Timestamp) -> Self {
         Self { key, ts }
     }
 
     /// Borrow the owned key.
-    pub fn key(&self) -> &KeyOwned {
+    pub(crate) fn key(&self) -> &KeyOwned {
         &self.key
     }
 
     /// Commit timestamp carried by the entry.
-    pub fn timestamp(&self) -> Timestamp {
+    pub(crate) fn timestamp(&self) -> Timestamp {
         self.ts
     }
 
     /// Visit as a borrowed raw view.
-    pub fn as_raw_view(&self) -> KeyTsViewRaw {
+    pub(crate) fn as_raw_view(&self) -> KeyTsViewRaw {
         KeyTsViewRaw::from_owned(&self.key, self.ts)
     }
 
     /// Decompose the pair.
-    pub fn into_parts(self) -> (KeyOwned, Timestamp) {
+    #[allow(dead_code)]
+    pub(crate) fn into_parts(self) -> (KeyOwned, Timestamp) {
         (self.key, self.ts)
     }
 }

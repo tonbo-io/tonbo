@@ -1,17 +1,16 @@
-//! Generic DB parametrized by a `Mode` implementation.
+//! Dynamic DB implementation for Tonbo.
 //!
-//! At the moment Tonbo only ships with the dynamic runtime-schema mode. The
-//! trait-driven structure remains so that compile-time typed dispatch can be
-//! reintroduced without reshaping the API.
+//! The database is now specialised to the dynamic Arrow `RecordBatch` layout;
+//! the earlier `Mode` trait indirection has been removed to simplify the core
+//! engine while we focus on a single runtime representation.
 
 use std::{
     future::Future,
-    hash::Hash,
     sync::{Arc, Mutex, MutexGuard, RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use arrow_array::RecordBatch;
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, SchemaRef};
 use fusio::{
     DynFs,
     executor::{Executor, Timer},
@@ -36,21 +35,22 @@ pub use error::DBError;
 pub use scan::DEFAULT_SCAN_BATCH_ROWS;
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
-pub use crate::mode::{DynMode, DynModeConfig, Mode};
+pub use crate::mode::{DynMode, DynModeConfig};
 use crate::{
-    extractor::KeyExtractError,
+    extractor::{KeyExtractError, KeyProjection},
     id::{FileId, FileIdGenerator},
-    inmem::{mutable::MutableLayout, policy::SealPolicy},
+    inmem::{mutable::DynMem, policy::SealPolicy},
     key::KeyOwned,
     manifest::{
         ManifestError, ManifestFs, SstEntry, TableId, TonboManifest, VersionEdit, WalSegmentRef,
         init_in_memory_manifest,
     },
-    mode::CatalogDescribe,
+    mode::{DynModeState, table_definition},
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     transaction::{
-        Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionDurability, TransactionError,
+        CommitAckMode, Snapshot as TxSnapshot, SnapshotError, Transaction, TransactionDurability,
+        TransactionError,
     },
     wal::{
         WalConfig as RuntimeWalConfig, WalHandle, frame::INITIAL_FRAME_SEQ, manifest_ext,
@@ -58,8 +58,8 @@ use crate::{
     },
 };
 
-/// Shared handle for the dynamic mode database backed by an `Arc`.
-pub type DynDbHandle<FS, E> = Arc<DB<DynMode, FS, E>>;
+/// Shared handle for the dynamic database backed by an `Arc`.
+pub type DynDbHandle<FS, E> = Arc<DB<FS, E>>;
 
 /// Extension methods on dynamic DB handles.
 pub trait DynDbHandleExt<FS, E>
@@ -100,10 +100,10 @@ where
             } else {
                 TransactionDurability::Volatile
             };
-            let schema = handle.mode.schema.clone();
-            let delete_schema = handle.mode.delete_schema.clone();
-            let extractor = Arc::clone(&handle.mode.extractor);
-            let commit_ack_mode = handle.mode.commit_ack_mode;
+            let schema = handle.schema.clone();
+            let delete_schema = handle.delete_schema.clone();
+            let extractor = Arc::clone(&handle.extractor);
+            let commit_ack_mode = handle.commit_ack_mode;
             Ok(Transaction::new(
                 handle,
                 schema,
@@ -121,19 +121,21 @@ fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
 
-/// A DB parametrized by a mode `M`, filesystem `FS`, and executor `E`.
-pub struct DB<M, FS, E>
+/// Database instance bound to a filesystem `FS` and executor `E`.
+pub struct DB<FS, E>
 where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone + 'static,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    mode: M,
-    mem: Arc<StdRwLock<M::Mutable>>,
+    schema: SchemaRef,
+    delete_schema: SchemaRef,
+    extractor: Arc<dyn KeyProjection>,
+    delete_projection: Arc<dyn KeyProjection>,
+    commit_ack_mode: CommitAckMode,
+    mem: Arc<StdRwLock<DynMem>>,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest) plus metadata.
-    seal_state: Mutex<SealState<M>>,
+    seal_state: Mutex<SealState>,
     // Sealing policy (pure/lock-free) and last seal timestamp (held inside seal_state)
     policy: Arc<dyn SealPolicy + Send + Sync>,
     // Executor powering async subsystems such as the WAL.
@@ -152,92 +154,74 @@ where
     /// WAL frame bounds covering the current mutable memtable, if any.
     mutable_wal_range: Arc<Mutex<Option<WalFrameRange>>>,
     /// Per-key transactional locks (wired once transactional writes arrive).
-    _key_locks: LockMap<M::Key>,
+    _key_locks: LockMap<KeyOwned>,
     /// Optional background compaction worker handle.
     compaction_worker: Option<CompactionHandle<E>>,
 }
 
-// SAFETY: DB shares internal state behind explicit synchronization. The mode key and executor
-// bounds ensure the constituent types are safe to send/share across threads when guarded.
-unsafe impl<M, FS, E> Send for DB<M, FS, E>
+// SAFETY: DB shares internal state behind explicit synchronization. The executor bounds ensure
+// the constituent types are safe to send/share across threads when guarded.
+unsafe impl<FS, E> Send for DB<FS, E>
 where
-    M: Mode,
-    M::Key: Eq + Hash + Clone + Send + Sync,
-    M::Mutable: Send + Sync,
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone + Send + Sync,
+    DynMem: Send + Sync,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
 }
 
 // SAFETY: See rationale above for `Send`; read access is synchronized via external locks.
-unsafe impl<M, FS, E> Sync for DB<M, FS, E>
+unsafe impl<FS, E> Sync for DB<FS, E>
 where
-    M: Mode,
-    M::Key: Eq + Hash + Clone + Send + Sync,
-    M::Mutable: Send + Sync,
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone + Send + Sync,
+    DynMem: Send + Sync,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
 }
 
-impl<M, FS, E> DB<M, FS, E>
+impl<FS, E> DB<FS, E>
 where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     #[inline]
-    fn mem_read(&self) -> RwLockReadGuard<'_, M::Mutable> {
+    fn mem_read(&self) -> RwLockReadGuard<'_, DynMem> {
         self.mem.read().expect("mutable mem rwlock poisoned")
     }
 
     #[inline]
-    fn mem_write(&self) -> RwLockWriteGuard<'_, M::Mutable> {
+    fn mem_write(&self) -> RwLockWriteGuard<'_, DynMem> {
         self.mem.write().expect("mutable mem rwlock poisoned")
     }
 
     #[inline]
-    fn seal_state_lock(&self) -> MutexGuard<'_, SealState<M>> {
+    fn seal_state_lock(&self) -> MutexGuard<'_, SealState> {
         self.seal_state.lock().expect("seal_state mutex poisoned")
     }
 
-    /// Begin constructing a DB in mode `M` through the fluent builder API.
-    pub fn builder(config: M::Config) -> DbBuilder<M>
-    where
-        M: Sized + CatalogDescribe,
-    {
+    /// Begin constructing a DB through the fluent builder API.
+    pub fn builder(config: DynModeConfig) -> DbBuilder {
         DbBuilder::new(config)
     }
-}
 
-// Methods common to all modes
-impl<M, FS, E> DB<M, FS, E>
-where
-    M: Mode,
-    M::Key: Eq + Hash + Clone,
-    FS: ManifestFs<E>,
-    E: Executor + Timer + Clone,
-    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-{
     #[allow(clippy::too_many_arguments)]
     fn from_components(
-        mode: M,
-        mem: M::Mutable,
+        mode: DynModeState,
+        mem: DynMem,
         fs: Arc<dyn DynFs>,
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
         wal_config: Option<RuntimeWalConfig>,
         executor: Arc<E>,
-    ) -> Self
-    where
-        M: Sized,
-    {
+    ) -> Self {
         Self {
-            mode,
+            schema: mode.schema,
+            delete_schema: mode.delete_schema,
+            extractor: mode.extractor,
+            delete_projection: mode.delete_projection,
+            commit_ack_mode: mode.commit_ack_mode,
             mem: Arc::new(StdRwLock::new(mem)),
             seal_state: Mutex::new(SealState::default()),
             policy: crate::inmem::policy::default_policy(),
@@ -256,31 +240,25 @@ where
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn recover_with_wal_with_manifest(
-        config: M::Config,
+        config: DynModeConfig,
         executor: Arc<E>,
         fs: Arc<dyn DynFs>,
         wal_cfg: RuntimeWalConfig,
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
-    ) -> Result<Self, KeyExtractError>
-    where
-        M: Sized + CatalogDescribe,
-    {
+    ) -> Result<Self, KeyExtractError> {
         Self::recover_with_wal_inner(config, executor, fs, wal_cfg, manifest, manifest_table).await
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn recover_with_wal_inner(
-        config: M::Config,
+        config: DynModeConfig,
         executor: Arc<E>,
         fs: Arc<dyn DynFs>,
         wal_cfg: RuntimeWalConfig,
         manifest: TonboManifest<FS, E>,
         manifest_table: TableId,
-    ) -> Result<Self, KeyExtractError>
-    where
-        M: Sized + CatalogDescribe,
-    {
+    ) -> Result<Self, KeyExtractError> {
         let state_commit_hint = if let Some(store) = wal_cfg.state_store.as_ref() {
             WalStateHandle::load(Arc::clone(store), &wal_cfg.dir)
                 .await?
@@ -289,7 +267,7 @@ where
         } else {
             None
         };
-        let (mode, mem) = M::build(config)?;
+        let (mode, mem) = config.build()?;
         let mut db = Self::from_components(
             mode,
             mem,
@@ -321,7 +299,7 @@ where
             }));
         }
 
-        let last_commit_ts = M::replay_wal(&mut db, events)?;
+        let last_commit_ts = db.replay_wal_events(events)?;
         let effective_commit = last_commit_ts.or(state_commit_hint);
         if let Some(ts) = effective_commit {
             db.commit_clock.advance_to_at_least(ts.saturating_add(1));
@@ -330,29 +308,54 @@ where
         Ok(db)
     }
 
-    /// Unified ingestion entry point using the mode's insertion contract.
-    pub async fn ingest(&self, input: M::InsertInput) -> Result<(), KeyExtractError>
-    where
-        M: Sized,
-    {
-        M::insert(self, input).await
+    /// Unified ingestion entry point for dynamic batches.
+    pub async fn ingest(&self, batch: RecordBatch) -> Result<(), KeyExtractError> {
+        if self.schema.as_ref() != batch.schema().as_ref() {
+            return Err(KeyExtractError::SchemaMismatch {
+                expected: self.schema.clone(),
+                actual: batch.schema(),
+            });
+        }
+
+        let commit_ts = self.next_commit_ts();
+        let mut wal_spans: Vec<(u64, u64)> = Vec::new();
+        if let Some(handle) = self.wal_handle().cloned() {
+            let provisional_id = handle.next_provisional_id();
+            let append_ticket = handle
+                .txn_append(provisional_id, &batch, commit_ts)
+                .await
+                .map_err(KeyExtractError::from)?;
+            let commit_ticket = handle
+                .txn_commit(provisional_id, commit_ts)
+                .await
+                .map_err(KeyExtractError::from)?;
+            for ticket in [append_ticket, commit_ticket] {
+                let ack = ticket.durable().await.map_err(KeyExtractError::from)?;
+                wal_spans.push((ack.first_seq, ack.last_seq));
+            }
+        }
+        self.insert_into_mutable(batch, commit_ts)?;
+        for (first, last) in wal_spans {
+            self.observe_mutable_wal_span(first, last);
+        }
+        self.maybe_seal_after_insert()?;
+        Ok(())
     }
 
     /// Ingest many inputs sequentially.
     pub async fn ingest_many<I>(&self, inputs: I) -> Result<(), KeyExtractError>
     where
-        I: IntoIterator<Item = M::InsertInput>,
-        M: Sized,
+        I: IntoIterator<Item = RecordBatch>,
     {
         for item in inputs.into_iter() {
-            M::insert(self, item).await?;
+            self.ingest(item).await?;
         }
         Ok(())
     }
 
     /// Approximate bytes used by keys in the mutable memtable.
     pub fn approx_mutable_bytes(&self) -> usize {
-        <M::Mutable as MutableLayout<M::Key>>::approx_bytes(&self.mem_read())
+        self.mem_read().approx_bytes()
     }
 
     /// Access the executor powering async subsystems.
@@ -360,8 +363,8 @@ where
         &self.executor
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn manifest_table_id(&self) -> TableId {
+    /// Table ID registered in the manifest for this DB.
+    pub fn table_id(&self) -> TableId {
         self.manifest_table
     }
 
@@ -390,15 +393,6 @@ where
         ))
     }
 
-    /// Test-only helper to capture a snapshot at an explicit timestamp.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn begin_snapshot_at_for_tests(
-        &self,
-        read_ts: Timestamp,
-    ) -> Result<TxSnapshot, SnapshotError> {
-        self.begin_snapshot_at(read_ts).await
-    }
-
     /// Allocate the next commit timestamp for WAL/autocommit flows.
     pub(crate) fn next_commit_ts(&self) -> Timestamp {
         self.commit_clock.alloc()
@@ -414,10 +408,7 @@ where
         &mut self,
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
-    ) -> Result<SsTable<M>, SsTableError>
-    where
-        M: Sized + Mode<ImmLayout = RecordBatch, Key = KeyOwned>,
-    {
+    ) -> Result<SsTable, SsTableError> {
         let immutables_snapshot = {
             let seal_read = self.seal_state_lock();
             if seal_read.immutables.is_empty() {
@@ -425,7 +416,7 @@ where
             }
             seal_read.immutables.clone()
         };
-        let mut builder = SsTableBuilder::<M>::new(config, descriptor);
+        let mut builder = SsTableBuilder::new(config, descriptor);
         for seg in &immutables_snapshot {
             builder.add_immutable(seg)?;
         }
@@ -520,22 +511,20 @@ where
     }
 
     /// Access the per-key transactional lock map.
-    pub(crate) fn key_locks(&self) -> &LockMap<M::Key> {
+    pub(crate) fn key_locks(&self) -> &LockMap<KeyOwned> {
         &self._key_locks
     }
 }
 
 // In-memory convenience constructors.
-impl<M, E> DB<M, InMemoryFs, E>
+impl<E> DB<InMemoryFs, E>
 where
-    M: Mode + CatalogDescribe,
-    M::Key: Eq + Hash + Clone,
     E: Executor + Timer + Clone + 'static,
 {
-    /// Construct a new in-memory DB in mode `M` using its configuration.
-    pub async fn new(config: M::Config, executor: Arc<E>) -> Result<Self, KeyExtractError> {
-        let table_definition = M::table_definition(&config, builder::DEFAULT_TABLE_NAME);
-        let (mode, mem) = M::build(config)?;
+    /// Construct a new in-memory DB using the dynamic configuration.
+    pub async fn new(config: DynModeConfig, executor: Arc<E>) -> Result<Self, KeyExtractError> {
+        let table_definition = table_definition(&config, builder::DEFAULT_TABLE_NAME);
+        let (mode, mem) = config.build()?;
         let file_ids = FileIdGenerator::default();
         let manifest = init_in_memory_manifest((*executor).clone())
             .await

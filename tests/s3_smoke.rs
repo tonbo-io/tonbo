@@ -85,15 +85,14 @@ async fn s3_smoke() -> Result<(), Box<dyn std::error::Error>> {
     s3.region = Some(region);
     s3.sign_payload = Some(true);
 
-    let mut db: DB<DynMode, AmazonS3, TokioExecutor> =
-        DB::<DynMode, AmazonS3, TokioExecutor>::builder(config)
-            .object_store(ObjectSpec::s3(s3))
-            .map_err(|err| format!("object_store config: {err}"))?
-            .wal_sync_policy(WalSyncPolicy::Always)
-            .wal_retention_bytes(Some(1 << 20))
-            .build()
-            .await
-            .map_err(|err| format!("failed to build S3-backed DB: {err}"))?;
+    let mut db: DB<AmazonS3, TokioExecutor> = DB::<AmazonS3, TokioExecutor>::builder(config)
+        .object_store(ObjectSpec::s3(s3))
+        .map_err(|err| format!("object_store config: {err}"))?
+        .wal_sync_policy(WalSyncPolicy::Always)
+        .wal_retention_bytes(Some(1 << 20))
+        .build()
+        .await
+        .map_err(|err| format!("failed to build S3-backed DB: {err}"))?;
 
     let wal_cfg: WalConfig = db
         .wal_config()

@@ -1,93 +1,38 @@
-//! Mode definitions for Tonbo.
+//! Dynamic mode configuration and helpers.
 //!
-//! The `Mode` trait describes the storage primitives plugged into the core DB,
-//! while concrete mode implementations (today only `DynMode`) live alongside it.
+//! Tonbo previously abstracted storage layouts behind a `Mode` trait so that
+//! multiple implementations could plug into the same `DB` surface. We are
+//! committing to the dynamic, Arrow `RecordBatch` layout as the sole runtime
+//! representation, so this module now only contains the configuration and
+//! helper utilities needed to build that layout.
 
-use std::{hash::Hash, sync::Arc};
+use std::sync::Arc;
 
-use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use fusio::executor::{Executor, Timer};
-use futures::future::LocalBoxFuture;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    db::DB,
     extractor::{KeyExtractError, KeyProjection, projection_for_columns},
-    inmem::{
-        immutable::memtable::MVCC_COMMIT_COL,
-        mutable::{DynMem, MutableLayout},
-    },
-    key::KeyOwned,
+    inmem::{immutable::memtable::MVCC_COMMIT_COL, mutable::DynMem},
     manifest::TableDefinition,
-    mvcc::Timestamp,
     transaction::CommitAckMode,
-    wal::frame::WalEvent,
 };
 
 mod dyn_config;
 
-/// Trait describing how a Tonbo `DB` instance stores and accesses data.
-pub trait Mode {
-    /// Logical key type stored in the memtable.
-    type Key: Ord + Hash + Clone;
-
-    /// Storage type inside the immutable segments for this mode.
-    type ImmLayout;
-
-    /// Mutable memtable implementation used by this mode.
-    type Mutable: MutableLayout<Self::Key>;
-
-    /// Configuration required to instantiate this mode and its mutable layout.
-    type Config;
-
-    /// Input accepted by `DB::ingest` for this mode.
-    type InsertInput;
-
-    /// Build the mode and its mutable layout from `config`.
-    fn build(config: Self::Config) -> Result<(Self, Self::Mutable), KeyExtractError>
-    where
-        Self: Sized;
-
-    /// Insert `value` into the given database instance.
-    fn insert<FS, E>(
-        db: &DB<Self, FS, E>,
-        value: Self::InsertInput,
-    ) -> LocalBoxFuture<'_, Result<(), KeyExtractError>>
-    where
-        Self: Sized,
-        FS: crate::manifest::ManifestFs<E>,
-        E: Executor + Timer + Clone,
-        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit;
-
-    /// Replay WAL events into the database during recovery, returning the last commit timestamp if
-    /// any.
-    fn replay_wal<FS, E>(
-        db: &mut DB<Self, FS, E>,
-        events: Vec<WalEvent>,
-    ) -> Result<Option<Timestamp>, KeyExtractError>
-    where
-        Self: Sized,
-        FS: crate::manifest::ManifestFs<E>,
-        E: Executor + Timer + Clone,
-        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit;
-}
-
-/// Modes capable of describing their catalog metadata for bootstrap.
-pub trait CatalogDescribe: Mode {
-    /// Derive the table definition for the provided config and logical table name.
-    fn table_definition(config: &Self::Config, table_name: &str) -> TableDefinition;
-}
-
-/// Dynamic runtime-schema mode backed by Arrow `RecordBatch` values.
-pub struct DynMode {
+/// Flattened dynamic storage parameters used by the database.
+#[derive(Clone)]
+pub struct DynModeState {
     pub(crate) schema: SchemaRef,
     pub(crate) delete_schema: SchemaRef,
     pub(crate) extractor: Arc<dyn KeyProjection>,
     pub(crate) delete_projection: Arc<dyn KeyProjection>,
     pub(crate) commit_ack_mode: CommitAckMode,
 }
+
+/// Backwards-compatible alias used by examples/tests that referenced the old dynamic mode type.
+pub type DynMode = DynModeState;
 
 /// Configuration bundle for constructing a `DynMode`.
 pub struct DynModeConfig {
@@ -124,22 +69,14 @@ impl DynModeConfig {
     pub fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
-}
 
-impl Mode for DynMode {
-    type Key = KeyOwned;
-    type ImmLayout = RecordBatch;
-    type Mutable = DynMem;
-    type Config = DynModeConfig;
-    type InsertInput = RecordBatch;
-
-    fn build(config: Self::Config) -> Result<(Self, Self::Mutable), KeyExtractError> {
+    /// Build the dynamic storage state and mutable memtable backing the DB.
+    pub(crate) fn build(self) -> Result<(DynModeState, DynMem), KeyExtractError> {
         let DynModeConfig {
             schema,
             extractor,
             commit_ack_mode,
-        } = config;
-        // schema already validated in DynModeConfig::new, but double-check for defensive callers.
+        } = self;
         extractor.validate_schema(&schema)?;
         let key_schema = extractor.key_schema();
         let delete_schema = build_delete_schema(&key_schema);
@@ -150,7 +87,7 @@ impl Mode for DynMode {
 
         let mutable = DynMem::new(schema.clone());
         Ok((
-            Self {
+            DynModeState {
                 schema,
                 delete_schema,
                 extractor,
@@ -159,60 +96,6 @@ impl Mode for DynMode {
             },
             mutable,
         ))
-    }
-
-    fn insert<FS, E>(
-        db: &DB<Self, FS, E>,
-        batch: RecordBatch,
-    ) -> LocalBoxFuture<'_, Result<(), KeyExtractError>>
-    where
-        FS: crate::manifest::ManifestFs<E>,
-        E: Executor + Timer + Clone,
-        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-    {
-        Box::pin(async move {
-            if db.schema().as_ref() != batch.schema().as_ref() {
-                return Err(KeyExtractError::SchemaMismatch {
-                    expected: db.schema().clone(),
-                    actual: batch.schema(),
-                });
-            }
-            let commit_ts = db.next_commit_ts();
-            let mut wal_spans: Vec<(u64, u64)> = Vec::new();
-            if let Some(handle) = db.wal_handle().cloned() {
-                let provisional_id = handle.next_provisional_id();
-                let append_ticket = handle
-                    .txn_append(provisional_id, &batch, commit_ts)
-                    .await
-                    .map_err(KeyExtractError::from)?;
-                let commit_ticket = handle
-                    .txn_commit(provisional_id, commit_ts)
-                    .await
-                    .map_err(KeyExtractError::from)?;
-                for ticket in [append_ticket, commit_ticket] {
-                    let ack = ticket.durable().await.map_err(KeyExtractError::from)?;
-                    wal_spans.push((ack.first_seq, ack.last_seq));
-                }
-            }
-            db.insert_into_mutable(batch, commit_ts)?;
-            for (first, last) in wal_spans {
-                db.observe_mutable_wal_span(first, last);
-            }
-            db.maybe_seal_after_insert()?;
-            Ok(())
-        }) as LocalBoxFuture<'_, Result<(), KeyExtractError>>
-    }
-
-    fn replay_wal<FS, E>(
-        db: &mut DB<Self, FS, E>,
-        events: Vec<WalEvent>,
-    ) -> Result<Option<Timestamp>, KeyExtractError>
-    where
-        FS: crate::manifest::ManifestFs<E>,
-        E: Executor + Timer + Clone,
-        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-    {
-        db.replay_wal_events(events)
     }
 }
 
@@ -226,21 +109,32 @@ fn build_delete_schema(key_schema: &SchemaRef) -> SchemaRef {
     std::sync::Arc::new(Schema::new(fields))
 }
 
-impl CatalogDescribe for DynMode {
-    fn table_definition(config: &Self::Config, table_name: &str) -> TableDefinition {
-        let key_columns = config
-            .extractor
-            .key_indices()
-            .iter()
-            .map(|idx| config.schema.field(*idx).name().clone())
-            .collect();
-        TableDefinition {
-            name: table_name.to_string(),
-            schema_fingerprint: fingerprint_schema(&config.schema),
-            primary_key_columns: key_columns,
-            retention: None,
-            schema_version: 0,
-        }
+/// Derive the table definition used when registering a table in the manifest.
+pub(crate) fn table_definition(config: &DynModeConfig, table_name: &str) -> TableDefinition {
+    let key_columns = config
+        .extractor
+        .key_indices()
+        .iter()
+        .map(|idx| config.schema.field(*idx).name().clone())
+        .collect();
+    TableDefinition {
+        name: table_name.to_string(),
+        schema_fingerprint: fingerprint_schema(&config.schema),
+        primary_key_columns: key_columns,
+        retention: None,
+        schema_version: 0,
+    }
+}
+
+impl DynModeState {
+    /// Convenience wrapper mirroring the previous dynamic mode API.
+    pub fn table_definition(config: &DynModeConfig, table_name: &str) -> TableDefinition {
+        table_definition(config, table_name)
+    }
+
+    /// Build the dynamic mode state and mutable memtable.
+    pub fn build(config: DynModeConfig) -> Result<(Self, DynMem), KeyExtractError> {
+        config.build()
     }
 }
 

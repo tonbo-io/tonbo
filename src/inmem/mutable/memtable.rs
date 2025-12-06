@@ -15,7 +15,7 @@ use arrow_select::concat::concat_batches;
 use crossbeam_skiplist::SkipMap;
 use typed_arrow_dyn::{DynProjection, DynRowRaw, DynSchema, DynViewError};
 
-use super::{MutableLayout, MutableMemTableMetrics};
+use super::MutableMemTableMetrics;
 use crate::{
     extractor::{self, KeyExtractError, KeyProjection, map_view_err},
     inmem::{
@@ -143,7 +143,7 @@ impl DynMem {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     /// Returns the number of batches currently stored.
     pub(crate) fn batch_count(&self) -> usize {
         self.batch_cursor.load(Ordering::Relaxed)
@@ -557,12 +557,6 @@ fn build_projection(
 impl Default for DynMem {
     fn default() -> Self {
         Self::new(Arc::new(Schema::new(Vec::<arrow_schema::Field>::new())))
-    }
-}
-
-impl MutableLayout<KeyOwned> for DynMem {
-    fn approx_bytes(&self) -> usize {
-        self.approx_bytes()
     }
 }
 

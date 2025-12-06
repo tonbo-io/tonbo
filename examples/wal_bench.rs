@@ -4,15 +4,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
-use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
-use arrow_select::take::take;
+use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use clap::{Parser, ValueEnum};
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use tonbo::{
-    db::{DB, DbBuilder, DynMode},
-    mvcc::{MVCC_COMMIT_COL, Timestamp},
-    wal::{WalExt, WalSyncPolicy},
+    db::{DB, DbBuilder},
+    wal::WalSyncPolicy,
 };
 use ulid::Ulid;
 
@@ -101,69 +99,30 @@ async fn bench_wal_append(cfg: &Config, schema: Arc<Schema>) -> (Duration, usize
     let batch = build_batch(Arc::clone(&schema), cfg.rows);
     let tombstones = build_tombstones(cfg.rows, cfg.tombstone_density);
     let bytes_per_batch = batch_size_bytes(&batch, &tombstones);
-    let wal = db.wal().expect("wal").clone();
-    let delete_schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
-    ]));
-    let partitioned = partition_batch(&batch, &tombstones).expect("partition batch");
-    let upserts = partitioned.upsert_batch;
-    let delete_keys = partitioned.delete_keys;
 
     let start = Instant::now();
-    for n in 0..cfg.batches {
-        let commit_ts = Timestamp::new(n as u64);
-        if delete_keys.is_empty() {
-            if let Some(ref upsert_batch) = upserts {
-                let ticket = wal.append(upsert_batch, commit_ts).await.expect("append");
-                ticket.durable().await.expect("durable");
-            }
-        } else {
-            let provisional_id = wal.next_provisional_id();
-            let mut append_tickets = Vec::new();
-            if let Some(ref upsert_batch) = upserts {
-                append_tickets.push(
-                    wal.txn_append(provisional_id, upsert_batch, commit_ts)
-                        .await
-                        .expect("txn append"),
-                );
-            }
-            if !delete_keys.is_empty() {
-                let delete_batch = build_delete_batch(&delete_schema, &delete_keys, commit_ts);
-                append_tickets.push(
-                    wal.txn_append_delete(provisional_id, delete_batch)
-                        .await
-                        .expect("delete append"),
-                );
-            }
-            let commit_ticket = wal
-                .txn_commit(provisional_id, commit_ts)
-                .await
-                .expect("commit");
-            for ticket in append_tickets {
-                ticket.durable().await.expect("append durable");
-            }
-            commit_ticket.durable().await.expect("durable commit");
-        }
+    for _ in 0..cfg.batches {
+        db.ingest_with_tombstones(batch.clone(), tombstones.clone())
+            .await
+            .expect("ingest");
     }
     let elapsed = start.elapsed();
 
     (elapsed, bytes_per_batch * cfg.batches)
 }
 
-async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<DynMode, LocalFs, TokioExecutor> {
+async fn setup_db(schema: Arc<Schema>, sync: WalSyncPolicy) -> DB<LocalFs, TokioExecutor> {
     let label = format!("wal-bench-{}", Ulid::new());
     let root = std::env::temp_dir().join(&label);
     fs::create_dir_all(&root).expect("wal bench dir");
-    let db: DB<DynMode, LocalFs, TokioExecutor> =
-        DbBuilder::from_schema_key_name(schema.clone(), "id")
-            .expect("config")
-            .on_disk(&root)
-            .expect("on_disk")
-            .wal_sync_policy(sync)
-            .build()
-            .await
-            .expect("db");
+    let db: DB<LocalFs, TokioExecutor> = DbBuilder::from_schema_key_name(schema.clone(), "id")
+        .expect("config")
+        .on_disk(&root)
+        .expect("on_disk")
+        .wal_sync_policy(sync)
+        .build()
+        .await
+        .expect("db");
     db
 }
 
@@ -212,62 +171,6 @@ fn batch_size_bytes(batch: &RecordBatch, tombstones: &[bool]) -> usize {
         .sum();
     let tombstone_bytes = (tombstones.len() + 7) / 8;
     column_bytes + tombstone_bytes
-}
-
-struct PartitionedWalBatch {
-    upsert_batch: Option<RecordBatch>,
-    delete_keys: Vec<String>,
-}
-
-fn partition_batch(
-    batch: &RecordBatch,
-    tombstones: &[bool],
-) -> Result<PartitionedWalBatch, ArrowError> {
-    if batch.num_rows() != tombstones.len() {
-        return Err(ArrowError::ComputeError(
-            "tombstone bitmap length mismatch".to_string(),
-        ));
-    }
-    let key_column = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| ArrowError::ComputeError("id column not utf8".to_string()))?;
-    let mut upsert_indices = Vec::new();
-    let mut delete_keys = Vec::new();
-    for (idx, tombstone) in tombstones.iter().enumerate() {
-        if *tombstone {
-            delete_keys.push(key_column.value(idx).to_string());
-        } else {
-            upsert_indices.push(idx as u32);
-        }
-    }
-    let upsert_batch = if upsert_indices.is_empty() {
-        None
-    } else if upsert_indices.len() == batch.num_rows() {
-        Some(batch.clone())
-    } else {
-        Some(take_full_batch(batch, &upsert_indices)?)
-    };
-    Ok(PartitionedWalBatch {
-        upsert_batch,
-        delete_keys,
-    })
-}
-
-fn take_full_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, ArrowError> {
-    let idx_array = UInt32Array::from(indices.to_vec());
-    let mut columns = Vec::with_capacity(batch.num_columns());
-    for column in batch.columns() {
-        columns.push(take(column.as_ref(), &idx_array, None)?);
-    }
-    RecordBatch::try_new(batch.schema(), columns)
-}
-
-fn build_delete_batch(schema: &SchemaRef, keys: &[String], commit_ts: Timestamp) -> RecordBatch {
-    let ids = Arc::new(StringArray::from(keys.to_vec())) as ArrayRef;
-    let commits = Arc::new(UInt64Array::from(vec![commit_ts.get(); keys.len()])) as ArrayRef;
-    RecordBatch::try_new(schema.clone(), vec![ids, commits]).expect("delete batch")
 }
 
 impl fmt::Debug for SyncMode {
