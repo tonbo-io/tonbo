@@ -6,7 +6,7 @@
 
 use std::{
     future::Future,
-    sync::{Arc, Mutex, MutexGuard, RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use arrow_array::RecordBatch;
@@ -32,7 +32,8 @@ pub use builder::{
     AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig,
 };
 pub use error::DBError;
-pub use scan::DEFAULT_SCAN_BATCH_ROWS;
+pub(crate) use scan::ScanContext;
+pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
 pub use crate::mode::{DynMode, DynModeConfig};
@@ -133,7 +134,7 @@ where
     extractor: Arc<dyn KeyProjection>,
     delete_projection: Arc<dyn KeyProjection>,
     commit_ack_mode: CommitAckMode,
-    mem: Arc<StdRwLock<DynMem>>,
+    mem: Arc<RwLock<DynMem>>,
     // Immutable in-memory runs (frozen memtables) in recency order (oldest..newest) plus metadata.
     seal_state: Mutex<SealState>,
     // Sealing policy (pure/lock-free) and last seal timestamp (held inside seal_state)
@@ -222,7 +223,7 @@ where
             extractor: mode.extractor,
             delete_projection: mode.delete_projection,
             commit_ack_mode: mode.commit_ack_mode,
-            mem: Arc::new(StdRwLock::new(mem)),
+            mem: Arc::new(RwLock::new(mem)),
             seal_state: Mutex::new(SealState::default()),
             policy: crate::inmem::policy::default_policy(),
             executor,

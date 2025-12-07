@@ -55,6 +55,7 @@ impl BatchAttachment {
     }
 }
 
+#[derive(Debug)]
 struct DeleteAttachment {
     keys: RecordBatch,
     commit_ts: UInt64Array,
@@ -114,8 +115,10 @@ pub struct DynMem {
     batch_slots: Box<[OnceLock<BatchAttachment>]>,
     /// Atomic cursor for reserving the next available batch slot.
     batch_cursor: AtomicUsize,
-    /// Key-only delete batches tracked separately from value payloads.
-    delete_batches: Vec<DeleteAttachment>,
+    /// Pre-allocated delete slots using write-once semantics (same pattern as batch_slots).
+    delete_slots: Box<[OnceLock<DeleteAttachment>]>,
+    /// Atomic cursor for reserving the next available delete slot.
+    delete_cursor: AtomicUsize,
     metrics: MutableMemTableMetrics,
     schema: SchemaRef,
 }
@@ -128,16 +131,19 @@ impl DynMem {
 
     /// Create an empty columnar mutable table with the specified batch slot capacity.
     ///
-    /// When the capacity is exhausted, [`insert_batch`] returns
+    /// When the capacity is exhausted, [`insert_batch`] or [`insert_delete_batch`] returns
     /// [`KeyExtractError::MemtableFull`], signaling that the memtable should be sealed.
     pub(crate) fn with_capacity(schema: SchemaRef, capacity: usize) -> Self {
         let batch_slots: Vec<OnceLock<BatchAttachment>> =
+            (0..capacity).map(|_| OnceLock::new()).collect();
+        let delete_slots: Vec<OnceLock<DeleteAttachment>> =
             (0..capacity).map(|_| OnceLock::new()).collect();
         Self {
             index: SkipMap::new(),
             batch_slots: batch_slots.into_boxed_slice(),
             batch_cursor: AtomicUsize::new(0),
-            delete_batches: Vec::new(),
+            delete_slots: delete_slots.into_boxed_slice(),
+            delete_cursor: AtomicUsize::new(0),
             metrics: MutableMemTableMetrics::new(32),
             schema,
         }
@@ -231,8 +237,11 @@ impl DynMem {
     }
 
     /// Insert a batch of key-only deletes encoded with the delete schema.
+    ///
+    /// This method is lock-free and uses atomic slot reservation, matching the
+    /// concurrent insertion pattern of [`insert_batch`].
     pub(crate) fn insert_delete_batch(
-        &mut self,
+        &self,
         delete_projection: &dyn KeyProjection,
         batch: RecordBatch,
     ) -> Result<(), crate::extractor::KeyExtractError> {
@@ -274,6 +283,14 @@ impl DynMem {
             ));
         }
 
+        // Reserve a delete slot atomically (lock-free).
+        let slot_idx = self.delete_cursor.fetch_add(1, Ordering::SeqCst);
+        if slot_idx >= self.delete_slots.len() {
+            return Err(crate::extractor::KeyExtractError::MemtableFull {
+                capacity: self.delete_slots.len(),
+            });
+        }
+
         let row_indices: Vec<usize> = (0..batch.num_rows()).collect();
         let key_rows = delete_projection.project_view(&batch, &row_indices)?;
         let key_schema = delete_projection.key_schema();
@@ -284,8 +301,11 @@ impl DynMem {
         let key_batch = RecordBatch::try_new(key_schema, key_columns)
             .map_err(crate::extractor::KeyExtractError::Arrow)?;
         let attachment = DeleteAttachment::new(key_batch, commit_array.clone());
-        let batch_idx = self.delete_batches.len();
-        self.delete_batches.push(attachment);
+
+        // Write once via OnceLock (no concurrent writes to same slot).
+        self.delete_slots[slot_idx]
+            .set(attachment)
+            .expect("delete slot already initialized");
 
         for (row_idx, key_row) in key_rows.into_iter().enumerate() {
             let key_size = key_row.heap_size();
@@ -304,7 +324,7 @@ impl DynMem {
             let composite = KeyTsOwned::new(key_owned.clone(), commit_ts);
             self.index.insert(
                 composite,
-                DynMutation::Delete(DeleteRowLoc::new(batch_idx, row_idx)),
+                DynMutation::Delete(DeleteRowLoc::new(slot_idx, row_idx)),
             );
         }
         Ok(())
@@ -451,7 +471,9 @@ impl DynMem {
                     tombstone.push(false);
                 }
                 EntryKind::Delete(loc) => {
-                    let attachment = &self.delete_batches[loc.batch_idx];
+                    let attachment = self.delete_slots[loc.batch_idx]
+                        .get()
+                        .expect("delete slot must be initialized for indexed entry");
                     let row_batch = attachment.keys().slice(loc.row_idx, 1);
                     delete_slices.push(row_batch);
                     let attachment_commit = attachment.commit_ts(loc.row_idx);
@@ -463,11 +485,18 @@ impl DynMem {
 
         // Reset batch slots by replacing with fresh OnceLocks.
         let capacity = self.batch_slots.len();
-        let fresh_slots: Vec<OnceLock<BatchAttachment>> =
+        let fresh_batch_slots: Vec<OnceLock<BatchAttachment>> =
             (0..capacity).map(|_| OnceLock::new()).collect();
-        self.batch_slots = fresh_slots.into_boxed_slice();
+        self.batch_slots = fresh_batch_slots.into_boxed_slice();
         self.batch_cursor.store(0, Ordering::SeqCst);
-        self.delete_batches.clear();
+
+        // Reset delete slots by replacing with fresh OnceLocks.
+        let delete_capacity = self.delete_slots.len();
+        let fresh_delete_slots: Vec<OnceLock<DeleteAttachment>> =
+            (0..delete_capacity).map(|_| OnceLock::new()).collect();
+        self.delete_slots = fresh_delete_slots.into_boxed_slice();
+        self.delete_cursor.store(0, Ordering::SeqCst);
+
         self.metrics.reset_counters();
 
         let batch = if slices.is_empty() {
@@ -566,6 +595,7 @@ impl StatsProvider for DynMem {
     fn build_stats(&self, since_last_seal: Option<Duration>) -> MemStats {
         let metrics = self.metrics.snapshot();
         let batch_count = self.batch_cursor.load(Ordering::Relaxed);
+        let delete_count = self.delete_cursor.load(Ordering::Relaxed);
         MemStats {
             entries: metrics.entries,
             inserts: metrics.inserts,
@@ -573,7 +603,7 @@ impl StatsProvider for DynMem {
             approx_key_bytes: metrics.approx_key_bytes,
             entry_overhead: metrics.entry_overhead,
             typed_open_rows: None,
-            dyn_batches: Some(batch_count + self.delete_batches.len()),
+            dyn_batches: Some(batch_count + delete_count),
             dyn_approx_batch_bytes: None,
             since_last_seal,
         }
@@ -897,7 +927,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let mut m = DynMem::new(schema.clone());
+        let m = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
@@ -957,7 +987,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let mut m = DynMem::new(schema.clone());
+        let m = DynMem::new(schema.clone());
         let extractor =
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
 
@@ -1317,7 +1347,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("value", DataType::Int32, true),
         ]));
-        let mut layout = DynMem::new(table_schema.clone());
+        let layout = DynMem::new(table_schema.clone());
         let extractor =
             crate::extractor::projection_for_field(table_schema.clone(), 0).expect("extractor");
         let key_schema = extractor.key_schema();

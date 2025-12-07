@@ -31,7 +31,7 @@ impl Replayer {
     }
 
     /// Iterate through WAL segments and produce events.
-    #[allow(dead_code)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn scan(&self) -> WalResult<Vec<WalEvent>> {
         self.scan_with_floor(None).await
     }

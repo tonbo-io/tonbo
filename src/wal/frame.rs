@@ -1,6 +1,8 @@
 //! Frame encoding and decoding primitives for the WAL.
 
-use std::{convert::TryFrom, io::Cursor, mem::size_of, sync::Arc};
+#[cfg(test)]
+use std::sync::Arc;
+use std::{convert::TryFrom, io::Cursor, mem::size_of};
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
@@ -342,7 +344,7 @@ fn encode_txn_append_delete(provisional_id: u64, batch: &RecordBatch) -> WalResu
 }
 
 /// Convenience helper used mainly by tests to encode a single append + commit from raw inputs.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn encode_autocommit_frames(
     batch: RecordBatch,
     provisional_id: u64,

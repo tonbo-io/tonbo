@@ -222,6 +222,7 @@ mod tests {
             leaf: &PredicateNode,
         ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
             let row_set = match leaf {
+                PredicateNode::True => self.universe(),
                 PredicateNode::Compare { left, op, right } => {
                     self.evaluate_compare(left, *op, right)
                 }

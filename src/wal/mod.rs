@@ -302,19 +302,6 @@ pub(crate) enum WalCommand {
     },
 }
 
-impl WalCommand {
-    /// Return the provisional identifier carried by this command.
-    #[allow(dead_code)]
-    fn provisional_id(&self) -> u64 {
-        match self {
-            WalCommand::TxnBegin { provisional_id }
-            | WalCommand::TxnAppend { provisional_id, .. }
-            | WalCommand::TxnCommit { provisional_id, .. }
-            | WalCommand::TxnAbort { provisional_id } => *provisional_id,
-        }
-    }
-}
-
 /// Append the `_commit_ts` column, returning a new batch for WAL storage.
 pub(crate) fn append_commit_column(
     batch: &RecordBatch,
@@ -539,13 +526,6 @@ where
     /// Allocate the next provisional identifier suitable for WAL commands.
     pub fn next_provisional_id(&self) -> u64 {
         self.inner.next_payload_seq()
-    }
-
-    /// Enqueue a command to the WAL writer.
-    #[allow(dead_code)]
-    pub(crate) async fn submit_command(&self, command: WalCommand) -> WalResult<WalTicket<E>> {
-        let submission_seq = command.provisional_id();
-        self.enqueue_command(command, submission_seq).await
     }
 
     async fn enqueue_command(

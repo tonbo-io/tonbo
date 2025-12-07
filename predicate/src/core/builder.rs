@@ -3,6 +3,12 @@ use super::{ComparisonOp, Operand, Predicate, PredicateNode, ScalarValue};
 
 /// Convenience constructors mirroring DataFusion-style expression helpers.
 impl Predicate {
+    /// Returns a predicate that always evaluates to true (matches all rows).
+    #[must_use]
+    pub fn always() -> Self {
+        Predicate::from_kind(PredicateNode::True)
+    }
+
     /// Create a comparison predicate.
     #[must_use]
     pub fn compare<L, R>(left: L, op: ComparisonOp, right: R) -> Self

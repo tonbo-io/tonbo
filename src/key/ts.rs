@@ -43,12 +43,6 @@ impl KeyTsViewRaw {
     pub(crate) fn into_parts(self) -> (KeyRow, Timestamp) {
         (self.key, self.ts)
     }
-
-    /// Return an owned counterpart.
-    #[allow(dead_code)]
-    pub(crate) fn to_owned(&self) -> KeyTsOwned {
-        KeyTsOwned::new(self.key.to_owned(), self.ts)
-    }
 }
 
 impl PartialEq for KeyTsViewRaw {
@@ -107,12 +101,6 @@ impl KeyTsOwned {
     /// Visit as a borrowed raw view.
     pub(crate) fn as_raw_view(&self) -> KeyTsViewRaw {
         KeyTsViewRaw::from_owned(&self.key, self.ts)
-    }
-
-    /// Decompose the pair.
-    #[allow(dead_code)]
-    pub(crate) fn into_parts(self) -> (KeyOwned, Timestamp) {
-        (self.key, self.ts)
     }
 }
 

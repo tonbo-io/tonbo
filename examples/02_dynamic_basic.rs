@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use fusio::{executor::tokio::TokioExecutor, mem::fs::InMemoryFs};
-use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DbBuilder},
     query::{ColumnRef, Predicate, ScalarValue},
@@ -61,36 +60,25 @@ async fn main() {
 
     // Scan for a specific key (id == "carol") using predicate
     let carol_pred = Predicate::eq(key_col.clone(), ScalarValue::from("carol"));
-    let out = scan_pairs(&db, &carol_pred).await;
+    let out = scan_pairs(&db, carol_pred).await;
     println!("dynamic scan rows (carol): {:?}", out);
 
     // Query expression: id == "dave"
-    let expr: Predicate = Predicate::eq(key_col.clone(), ScalarValue::from("dave"));
-    let out_q = scan_pairs(&db, &expr).await;
+    let expr = Predicate::eq(key_col.clone(), ScalarValue::from("dave"));
+    let out_q = scan_pairs(&db, expr).await;
     println!("dynamic query rows (id == dave): {:?}", out_q);
 
     // Scan all dynamic rows (id is not null)
     let all_pred = Predicate::is_not_null(key_col.clone());
-    let all_rows = scan_pairs(&db, &all_pred).await;
+    let all_rows = scan_pairs(&db, all_pred).await;
     println!("dynamic rows (all): {:?}", all_rows);
 }
 
 async fn scan_pairs(
     db: &DB<InMemoryFs, TokioExecutor>,
-    predicate: &Predicate,
+    predicate: Predicate,
 ) -> Vec<(String, i32)> {
-    let snapshot = db.begin_snapshot().await.expect("snapshot");
-    let plan = snapshot
-        .plan_scan(db, predicate, None, None)
-        .await
-        .expect("plan");
-    let batches = db
-        .execute_scan(plan)
-        .await
-        .expect("execute")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("collect");
+    let batches = db.scan().filter(predicate).collect().await.expect("scan");
     batches
         .into_iter()
         .flat_map(|batch| {

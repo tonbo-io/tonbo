@@ -63,6 +63,8 @@ impl fmt::Display for ComparisonOp {
 /// Recursive predicate node; leaf and branch variants coexist.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PredicateNode {
+    /// Always-true literal; matches all rows.
+    True,
     /// Binary comparison.
     Compare {
         /// Left operand.
@@ -102,7 +104,8 @@ impl PredicateNode {
     pub(crate) fn is_leaf(&self) -> bool {
         matches!(
             self,
-            PredicateNode::Compare { .. }
+            PredicateNode::True
+                | PredicateNode::Compare { .. }
                 | PredicateNode::InList { .. }
                 | PredicateNode::IsNull { .. }
         )
@@ -186,7 +189,8 @@ impl Predicate {
     #[must_use]
     pub fn simplify(self) -> Self {
         match self.kind {
-            PredicateNode::Compare { .. }
+            PredicateNode::True
+            | PredicateNode::Compare { .. }
             | PredicateNode::InList { .. }
             | PredicateNode::IsNull { .. } => self,
             PredicateNode::Not(inner) => {
@@ -209,7 +213,8 @@ impl Predicate {
     #[must_use]
     pub fn negate(self) -> Self {
         let negated = match self.kind {
-            PredicateNode::Compare { .. }
+            PredicateNode::True
+            | PredicateNode::Compare { .. }
             | PredicateNode::InList { .. }
             | PredicateNode::IsNull { .. } => Predicate::negate_leaf(self.into_kind()),
             PredicateNode::Not(inner) => *inner,
@@ -271,6 +276,12 @@ impl Predicate {
 
     fn negate_leaf(leaf: PredicateNode) -> Predicate {
         let negated = match leaf {
+            PredicateNode::True => {
+                // NOT TRUE is represented as a wrapped negation
+                return Predicate::from_kind(PredicateNode::Not(Box::new(Predicate::from_kind(
+                    PredicateNode::True,
+                ))));
+            }
             PredicateNode::Compare { left, op, right } => PredicateNode::Compare {
                 left,
                 op: op.negated(),

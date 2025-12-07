@@ -265,6 +265,7 @@ impl<'a> PredicateVisitor for ResidualOwnedRowVisitor<'a> {
         leaf: &PredicateNode,
     ) -> Result<VisitOutcome<Self::Value>, Self::Error> {
         let result = match leaf {
+            PredicateNode::True => true,
             PredicateNode::Compare { left, op, right } => {
                 let lhs = self.resolve_operand(left)?;
                 let rhs = self.resolve_operand(right)?;
@@ -424,7 +425,6 @@ mod tests {
             .expect("scan rows");
         let merge = MergeStream::from_vec(
             vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
-            Timestamp::MAX,
             None,
             Some(Order::Asc),
         )
@@ -493,7 +493,6 @@ mod tests {
             .expect("scan rows");
         let merge = block_on(MergeStream::from_vec(
             vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
-            Timestamp::MAX,
             None,
             Some(Order::Asc),
         ))
@@ -554,7 +553,6 @@ mod tests {
             .expect("scan rows");
         let merge = block_on(MergeStream::from_vec(
             vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
-            Timestamp::MAX,
             None,
             Some(Order::Asc),
         ))

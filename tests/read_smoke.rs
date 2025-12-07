@@ -19,8 +19,30 @@ use tonbo::{
     wal::{WalConfig as RuntimeWalConfig, WalExt, WalSyncPolicy},
 };
 use typed_arrow_dyn::{DynCell, DynRow};
-
 const PACKAGE_ROWS: usize = 1024;
+
+/// Helper to extract (id, value) pairs from scan result batches.
+fn extract_rows_from_batches(batches: &[RecordBatch]) -> Vec<(String, i32)> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("id col");
+        let vals = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("v col");
+        for (id, v) in ids.iter().zip(vals.iter()) {
+            if let (Some(id), Some(v)) = (id, v) {
+                rows.push((id.to_string(), v));
+            }
+        }
+    }
+    rows
+}
 
 fn build_batch(schema: Arc<Schema>, rows: &[(&str, i32)]) -> RecordBatch {
     let ids: Vec<_> = rows.iter().map(|(id, _)| id.to_string()).collect();
@@ -112,24 +134,13 @@ async fn read_smoke_snapshot_honors_tombstones() {
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(-1i64));
 
-    let snapshot_rows = txn
-        .scan(&predicate, None, None)
+    let snapshot_batches = txn
+        .scan()
+        .filter(predicate.clone())
+        .collect()
         .await
         .expect("txn snapshot scan");
-    let snapshot_rows: Vec<(String, i32)> = snapshot_rows
-        .iter()
-        .map(|row| {
-            let id = match &row.0[0] {
-                Some(DynCell::Str(s)) => s.clone(),
-                other => panic!("unexpected id cell {other:?}"),
-            };
-            let v = match &row.0[1] {
-                Some(DynCell::I32(v)) => *v,
-                other => panic!("unexpected value cell {other:?}"),
-            };
-            (id, v)
-        })
-        .collect();
+    let snapshot_rows = extract_rows_from_batches(&snapshot_batches);
     assert_eq!(
         snapshot_rows,
         vec![("user-a".to_string(), 10), ("user-b".to_string(), 20)],
@@ -291,24 +302,13 @@ async fn read_smoke_transaction_scan() {
     .expect("stage insert");
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(-1i64));
-    let rows = tx
-        .scan(&predicate, None, None)
+    let batches = tx
+        .scan()
+        .filter(predicate)
+        .collect()
         .await
         .expect("transaction scan overlays staged rows");
-    let mut entries: Vec<_> = rows
-        .into_iter()
-        .map(|row| {
-            let key = match &row.0[0] {
-                Some(DynCell::Str(value)) => value.clone(),
-                other => panic!("unexpected key cell {other:?}"),
-            };
-            let value = match row.0[1].as_ref() {
-                Some(DynCell::I32(v)) => *v,
-                other => panic!("unexpected value cell {other:?}"),
-            };
-            (key, value)
-        })
-        .collect();
+    let mut entries = extract_rows_from_batches(&batches);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         entries,
@@ -345,21 +345,33 @@ async fn read_smoke_transaction_scan_projection() {
 
     let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
     let projected_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
-    let rows = tx
-        .scan(&predicate, Some(&projected_schema), None)
+    let batches = tx
+        .scan()
+        .filter(predicate)
+        .projection(projected_schema)
+        .collect()
         .await
         .expect("transaction scan projects columns");
-    assert_eq!(rows.len(), 2);
-    let mut ids: Vec<String> = rows
-        .iter()
-        .map(|row| match row.0.get(0).and_then(|cell| cell.as_ref()) {
-            Some(DynCell::Str(value)) => value.clone(),
-            other => panic!("unexpected projected cell {other:?}"),
-        })
-        .collect();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 2);
+    let mut ids: Vec<String> = Vec::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.num_columns(),
+            1,
+            "projection should have single column"
+        );
+        let id_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("id col");
+        for id in id_col.iter().flatten() {
+            ids.push(id.to_string());
+        }
+    }
     ids.sort();
     assert_eq!(ids, vec!["base".to_string(), "txn-only".to_string()]);
-    assert!(rows.iter().all(|row| row.0.len() == 1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

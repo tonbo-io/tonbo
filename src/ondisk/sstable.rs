@@ -878,13 +878,13 @@ impl SsTableReader {
     }
 
     /// Plan a range scan across this table.
-    #[allow(dead_code)] // API surface for future use
+    #[allow(dead_code)]
     pub(crate) fn plan_scan(
         &self,
         _ts: Timestamp,
         _predicate: Option<&Predicate>,
     ) -> Result<(), SsTableError> {
-        // TODO: implement real scan planning when reader lands.
+        // TODO: real scan planning will be implemented when the reader lands.
         Ok(())
     }
 

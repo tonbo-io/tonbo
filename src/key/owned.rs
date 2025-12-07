@@ -133,6 +133,19 @@ impl Hash for KeyOwned {
     }
 }
 
+// Cross-type comparison with KeyRow
+impl PartialEq<KeyRow> for KeyOwned {
+    fn eq(&self, other: &KeyRow) -> bool {
+        other.eq(self)
+    }
+}
+
+impl PartialOrd<KeyRow> for KeyOwned {
+    fn partial_cmp(&self, other: &KeyRow) -> Option<Ordering> {
+        other.partial_cmp(self).map(Ordering::reverse)
+    }
+}
+
 impl From<&KeyRow> for KeyOwned {
     fn from(row: &KeyRow) -> Self {
         KeyOwned::from_key_row(row).expect("key row contains supported components")

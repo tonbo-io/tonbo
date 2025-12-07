@@ -18,13 +18,10 @@ Tonbo’s architecture calls for a manifest-driven, two-phase read pipeline that
 ## Non-goals
 
 - Full end-to-end integration work in external query engines (e.g., query rewrites inside DataFusion or Postgres FDWs).
-- Transactional wiring is temporarily out of scope; this RFC focuses on the read path itself.
 
 ## Background
 
 Tonbo’s current read path exposes ad-hoc helpers such as `scan_mutable_rows` that walk memtables and SSTs directly for every request. Predicate pushdown is best-effort, per-source, and tightly coupled to each iterator. There is no shared `Predicate` representation, no reusable `RowSet` that callers can intersect or union, and no API for planning once then reusing the same row ids for different projections or mutations. This makes it difficult to meet the expectations laid out in the rethink documentation—namely, pushing filters by default, handing back reusable row sets, and separating planning from execution. This RFC proposes the concrete plumbing needed to close that gap.
-
----
 
 ## Predicate
 
@@ -121,7 +118,7 @@ The plan can be cached for reuse across queries. The implementation is Arrow/Par
 
 Before fine-grained predicate evaluation, we can use statistics and metadata to prune entire sources quickly.
 
-- Transactions — **TODO** (captured for completeness; needs revision).
+- Transactions — The staging buffer is always included (highest priority); pruning applies to committed sources only. See "Transaction Read Semantics" for visibility rules.
 - Memtables (mutable and immutable):
   - Use `min_key`/`max_key` to skip sources that fall outside the requested `RangeSet`.
   - Use the underlying `SchemaRef` to drop columns that are not part of the projection, yielding a `projection_indices` vector.
@@ -180,6 +177,70 @@ We need to also implement our own `FilteredAsyncReader` to support pushing down 
 - It applies any residual predicate to finalise each output batch.
 - It consumes the logical row stream produced by MergeStream and materialises batches using Arrow builders.
 
+
+## Transaction Read Semantics
+
+Transactions provide the same two-phase read semantics as database-level reads, with one key difference: transaction reads include uncommitted writes from the transaction's staging buffer.
+
+**Visibility rules for transaction reads:**
+
+1. The transaction's staging buffer has the highest source priority during merge.
+2. Uncommitted inserts in the staging buffer are visible to reads within the same transaction.
+3. Uncommitted deletes in the staging buffer suppress matching rows from other sources.
+4. The read timestamp is captured when the transaction begins; subsequent commits by other transactions are not visible.
+
+**Consistency guarantee:** A transaction observes a consistent snapshot of the database at its start time, plus all of its own uncommitted modifications (read-your-writes).
+
+
+## Filter-Projection Semantics
+
+When a predicate references columns that are not included in the user's projection, the system must ensure correct evaluation while respecting the projection contract.
+
+**Semantic rules:**
+
+1. **Scan schema extension:** During planning, the scan schema is extended to include all columns referenced by the predicate, regardless of whether they appear in the user's projection.
+
+2. **Filter-before-project:** During execution, predicates are evaluated on the extended schema (which includes filter columns), and only rows that satisfy the predicate proceed to projection.
+
+3. **Final projection:** After filtering, rows are projected down to the user's requested schema, excluding any columns that were added solely for predicate evaluation.
+
+**Example:**
+
+```
+User projection: [name, title]
+Predicate: salary > 50000
+
+Phase 1 (Plan):
+  scan_schema = [name, title, salary]  -- extended with predicate column
+
+Phase 2 (Execute):
+  1. Read rows with scan_schema
+  2. Evaluate predicate (salary > 50000)
+  3. Project to [name, title]  -- salary excluded from output
+```
+
+**Error semantics:** If a predicate references a column that does not exist in the base schema, planning fails with an error indicating the missing column.
+
+
+## Point Query Semantics
+
+Point queries retrieve a single row by exact primary key match. While full implementation is deferred, the two-phase architecture must not preclude efficient point lookups.
+
+**Semantic definition:**
+
+A point query is a read where the predicate constrains the primary key to exactly one value:
+```
+predicate = (primary_key = <literal>)
+```
+
+**Expected optimisations (future):**
+
+1. **Index lookup:** When available, an index structure (B-tree, hash) can resolve the key to a specific location, bypassing full scans.
+2. **Bloom filter short-circuit:** During planning, bloom filters can determine that a key definitely does not exist in a source, allowing immediate pruning.
+3. **Single-source resolution:** If the key is found in a higher-priority source (transaction staging, mutable memtable), lower-priority sources need not be consulted.
+
+**Architectural constraint:** The current design supports point queries as a degenerate case of range scans. Future index-based optimisations must integrate at the planning phase, producing a specialised `ScanPlan` that execution honours without architectural changes.
+
 ## Diagram
 
 ### Predicate PushDown
@@ -231,8 +292,6 @@ Following graph shows the predicate and rowset flow in the entire query process.
 - `docs/rfcs/0007-manifest.md` — Manifest integration that supplies versioned source metadata and sessions powering snapshot reads.
 - [parquet-pruning-for-datafusion](https://datafusion.apache.org/blog/2025/03/20/parquet-pruning/)
 - [filter-pushdown-for-datafusion](https://datafusion.apache.org/blog/2025/03/21/parquet-pushdown/)
-
----
 
 ## Appendix
 

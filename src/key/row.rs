@@ -136,6 +136,21 @@ impl Hash for KeyRow {
     }
 }
 
+// Cross-type comparison with KeyOwned
+impl PartialEq<KeyOwned> for KeyRow {
+    fn eq(&self, other: &KeyOwned) -> bool {
+        let right = other.as_raw().expect("owned key must remain convertible");
+        dyn_rows_equal(self.as_dyn(), &right)
+    }
+}
+
+impl PartialOrd<KeyOwned> for KeyRow {
+    fn partial_cmp(&self, other: &KeyOwned) -> Option<Ordering> {
+        let right = other.as_raw().expect("owned key must remain convertible");
+        Some(dyn_rows_cmp(self.as_dyn(), &right))
+    }
+}
+
 pub(crate) fn dyn_rows_equal(lhs: &DynRowRaw, rhs: &DynRowRaw) -> bool {
     if lhs.len() != rhs.len() {
         return false;

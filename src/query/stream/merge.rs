@@ -13,7 +13,6 @@ use pin_project_lite::pin_project;
 use super::Order;
 use crate::{
     inmem::immutable::memtable::RecordBatchStorage,
-    mvcc::Timestamp,
     query::stream::{ScanStream, SourcePriority, StreamEntry, StreamError},
 };
 
@@ -26,7 +25,6 @@ pin_project! {
         streams: Vec<ScanStream<'t, S>>,
         peeked: BinaryHeap<Reverse<HeapEntry>>,
         buf: Option<StreamEntry>,
-        ts: Timestamp,
         limit: Option<usize>,
         order: Option<Order>,
         stream_priority: Vec<SourcePriority>,
@@ -39,7 +37,6 @@ where
 {
     pub(crate) async fn from_vec(
         mut streams: Vec<ScanStream<'t, S>>,
-        ts: Timestamp,
         limit: Option<usize>,
         order: Option<Order>,
     ) -> Result<Self, StreamError> {
@@ -58,7 +55,6 @@ where
             streams,
             peeked,
             buf: None,
-            ts,
             limit,
             order,
             stream_priority,
@@ -78,10 +74,19 @@ where
         if this.limit.as_ref().is_some_and(|limit| *limit == 0) {
             return Poll::Ready(None);
         }
-        while let Some(Reverse(heap_entry)) = this.peeked.pop() {
-            let stream_idx = heap_entry.stream_idx;
-            let entry = heap_entry.entry;
+
+        // Peek→poll→pop: peek to get stream index, poll that stream, then pop only after Ready.
+        // This naturally handles Pending without extra state - the entry stays in heap until
+        // we successfully poll its stream.
+        while let Some(stream_idx) = this.peeked.peek().map(|Reverse(e)| e.stream_idx) {
+            // Poll the stream for its next entry. If Pending, entry remains in heap.
             let next = ready!(Pin::new(&mut this.streams[stream_idx]).poll_next(cx)).transpose()?;
+
+            // Now safe to pop - stream returned Ready
+            let Reverse(heap_entry) = this.peeked.pop().expect("heap non-empty after peek");
+            let entry = heap_entry.entry;
+
+            // Push the stream's next entry back into the heap
             if let Some(next) = next {
                 let priority = this.stream_priority[stream_idx];
                 this.peeked.push(Reverse(HeapEntry::new(
@@ -93,12 +98,8 @@ where
             }
 
             // De-duplicate keys from different streams (timestamps may differ).
-            let duplicate_key = {
-                let entry_key = entry.key_owned();
-                this.buf
-                    .as_ref()
-                    .is_some_and(|buf| buf.key_owned() == entry_key)
-            };
+            // Uses zero-alloc comparison for the common case.
+            let duplicate_key = this.buf.as_ref().is_some_and(|buf| buf.key_eq(&entry));
             if duplicate_key {
                 continue;
             }
@@ -107,20 +108,19 @@ where
                     continue;
                 }
                 decrement_limit(this.limit);
-                if prev.is_tombstone() {
-                    continue;
-                }
                 return Poll::Ready(Some(Ok(prev)));
             }
         }
+
+        // Heap is empty, drain the buffer
         loop {
             match this.buf.take() {
                 Some(entry) if entry.is_tombstone() => continue,
                 Some(entry) => {
                     decrement_limit(this.limit);
-                    return Poll::Ready(Some(Ok(entry)));
+                    break Poll::Ready(Some(Ok(entry)));
                 }
-                None => return Poll::Ready(None),
+                None => break Poll::Ready(None),
             }
         }
     }
@@ -151,17 +151,19 @@ impl HeapEntry {
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Entries are ordered by commit timestamp, then key ordering, followed by source priority
-        // (txn > mutable > immutable > SST).
+        // Entries are ordered by key, then commit timestamp (descending), followed by source
+        // priority (txn > mutable > immutable > SST), and finally stream index for determinism.
+        // Uses zero-alloc key comparison for the common case.
         let ordering = self.order.unwrap_or(Order::Asc);
-        let self_key = self.entry.key_owned();
-        let other_key = other.entry.key_owned();
         let key_cmp = match ordering {
-            Order::Asc => self_key.cmp(&other_key),
+            Order::Asc => self.entry.key_cmp(&other.entry),
         };
         // Timestamps are always ordered descending (latest first) regardless of key order.
         let ts_cmp = other.entry.ts().cmp(&self.entry.ts());
-        key_cmp.then(ts_cmp.then(self.source_priority.cmp(&other.source_priority)))
+        key_cmp
+            .then(ts_cmp)
+            .then(self.source_priority.cmp(&other.source_priority))
+            .then(self.stream_idx.cmp(&other.stream_idx))
     }
 }
 
@@ -286,7 +288,7 @@ mod tests {
                 ScanStream::<'_, RecordBatch>::from(txn_scan2),
             ];
 
-            let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(order))
+            let mut merge = MergeStream::from_vec(streams, None, Some(order))
                 .await
                 .expect("merge built");
 
@@ -404,7 +406,7 @@ mod tests {
             )),
             ScanStream::from(OwnedMutableScan::from_scan(mutable_scan)),
         ];
-        let mut merge = MergeStream::from_vec(streams, Timestamp::MAX, None, Some(Order::Asc))
+        let mut merge = MergeStream::from_vec(streams, None, Some(Order::Asc))
             .await
             .expect("merge built");
 

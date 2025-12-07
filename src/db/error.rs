@@ -1,6 +1,8 @@
+use typed_arrow_dyn::DynViewError;
+
 use crate::{
     db::KeyExtractError, manifest::ManifestError, ondisk::sstable::SsTableError,
-    query::stream::StreamError,
+    query::stream::StreamError, transaction::SnapshotError,
 };
 
 /// Error returned for DB
@@ -18,4 +20,10 @@ pub enum DBError {
     /// SSTable read/write error.
     #[error("sstable error: {0}")]
     SsTable(#[from] SsTableError),
+    /// Snapshot creation error.
+    #[error("snapshot error: {0}")]
+    Snapshot(#[from] SnapshotError),
+    /// Dynamic view error.
+    #[error("dynamic view error: {0}")]
+    DynView(#[from] DynViewError),
 }

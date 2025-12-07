@@ -1,9 +1,9 @@
-use std::{pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, pin::Pin, sync::Arc};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use fusio::executor::{Executor, Timer};
-use futures::{Stream, StreamExt, stream};
+use futures::{Stream, StreamExt, TryStreamExt, stream};
 use predicate::Predicate;
 use typed_arrow_dyn::DynRow;
 
@@ -14,7 +14,8 @@ use crate::{
         immutable::{self, ImmutableSegment, memtable::ImmutableVisibleEntry},
         mutable::memtable::DynRowScanEntry,
     },
-    key::KeyRow,
+    key::{KeyOwned, KeyRow},
+    mutation::DynMutation,
     mvcc::Timestamp,
     ondisk::{
         scan::{SstableScan, load_delete_index},
@@ -102,10 +103,9 @@ where
         let ScanPlan {
             residual_predicate,
             limit,
-            read_ts,
             ..
         } = plan;
-        let merge = MergeStream::from_vec(streams, read_ts, limit, Some(Order::Asc))
+        let merge = MergeStream::from_vec(streams, limit, Some(Order::Asc))
             .await
             .map_err(crate::db::DBError::from)?;
         let package = PackageStream::new(
@@ -265,4 +265,235 @@ where
         }
         Ok(rows)
     }
+
+    /// Begin building a scan query with fluent API.
+    pub fn scan(&self) -> ScanBuilder<'_, FS, E> {
+        ScanBuilder::new(self)
+    }
+}
+
+/// Transaction context for scans that include uncommitted staging buffer.
+pub(crate) struct ScanContext<'a> {
+    /// Snapshot captured when transaction began.
+    pub(crate) snapshot: &'a TxSnapshot,
+    /// Staged mutations (uncommitted writes).
+    pub(crate) staging: &'a BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
+    /// Schema for the staged rows.
+    pub(crate) schema: &'a SchemaRef,
+}
+
+/// Fluent builder for constructing scan queries.
+///
+/// Use [`DB::scan`] or [`Transaction::scan`](crate::transaction::Transaction::scan)
+/// to create a new builder, then chain methods to configure the scan before
+/// executing with [`stream`](ScanBuilder::stream) or [`collect`](ScanBuilder::collect).
+///
+/// When created from a `Transaction`, the scan includes uncommitted writes
+/// from the transaction's staging buffer (read-your-writes semantics).
+///
+/// # Example
+///
+/// ```ignore
+/// // DB scan (implicit snapshot)
+/// let batches = db.scan()
+///     .filter(Predicate::eq(col, value))
+///     .limit(100)
+///     .collect()
+///     .await?;
+///
+/// // Transaction scan (includes uncommitted writes)
+/// let batches = tx.scan()
+///     .filter(Predicate::eq(col, value))
+///     .collect()
+///     .await?;
+/// ```
+pub struct ScanBuilder<'a, FS, E>
+where
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    db: &'a DB<FS, E>,
+    /// Transaction context (snapshot + staging). None for DB-level scans.
+    context: Option<ScanContext<'a>>,
+    predicate: Option<Predicate>,
+    projection: Option<SchemaRef>,
+    limit: Option<usize>,
+}
+
+impl<'a, FS, E> ScanBuilder<'a, FS, E>
+where
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    /// Create a new scan builder for DB-level scans (no staging buffer).
+    pub(crate) fn new(db: &'a DB<FS, E>) -> Self {
+        Self {
+            db,
+            context: None,
+            predicate: None,
+            projection: None,
+            limit: None,
+        }
+    }
+
+    /// Create a new scan builder with transaction context (includes staging buffer).
+    pub(crate) fn with_context(db: &'a DB<FS, E>, context: ScanContext<'a>) -> Self {
+        Self {
+            db,
+            context: Some(context),
+            predicate: None,
+            projection: None,
+            limit: None,
+        }
+    }
+
+    /// Set the filter predicate for this scan.
+    ///
+    /// Only rows matching the predicate will be returned.
+    /// If not called, all rows are returned.
+    #[must_use]
+    pub fn filter(mut self, predicate: Predicate) -> Self {
+        self.predicate = Some(predicate);
+        self
+    }
+
+    /// Set the projection schema for this scan.
+    ///
+    /// Only the specified columns will be returned in the result batches.
+    /// If not called, all columns are returned.
+    #[must_use]
+    pub fn projection(mut self, schema: SchemaRef) -> Self {
+        self.projection = Some(schema);
+        self
+    }
+
+    /// Limit the number of rows returned by this scan.
+    #[must_use]
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Execute the scan and return a stream of record batches.
+    pub async fn stream(
+        self,
+    ) -> Result<impl Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a, crate::db::DBError>
+    {
+        // Take ownership of all fields upfront to avoid partial move issues
+        let Self {
+            db,
+            context,
+            predicate,
+            projection,
+            limit,
+        } = self;
+
+        let predicate = predicate.unwrap_or_else(Predicate::always);
+
+        // Determine snapshot and transaction scan based on context
+        let (snapshot, txn_scan) = match &context {
+            Some(ctx) => {
+                // Transaction scan: use existing snapshot and include staging buffer
+                let snapshot = ctx.snapshot.clone();
+                let txn_scan = if ctx.staging.is_empty() {
+                    None
+                } else {
+                    // We need to plan first to get the scan_schema
+                    let plan = snapshot
+                        .plan_scan(db, &predicate, projection.as_ref(), limit)
+                        .await?;
+                    Some((
+                        TransactionScan::new(
+                            ctx.staging,
+                            ctx.schema,
+                            plan.read_ts,
+                            Some(&plan.scan_schema),
+                        )
+                        .map_err(crate::db::DBError::from)?,
+                        plan,
+                    ))
+                };
+                (snapshot, txn_scan)
+            }
+            None => {
+                // DB scan: create new snapshot, no staging
+                let snapshot = db.begin_snapshot().await?;
+                (snapshot, None)
+            }
+        };
+
+        // Build plan (reuse if already created for transaction scan)
+        let plan = match txn_scan {
+            Some((scan, plan)) => {
+                // Execute with transaction scan
+                return execute_with_txn_scan(db, plan, Some(scan)).await;
+            }
+            None => {
+                snapshot
+                    .plan_scan(db, &predicate, projection.as_ref(), limit)
+                    .await?
+            }
+        };
+
+        execute_with_txn_scan(db, plan, None).await
+    }
+
+    /// Execute the scan and collect all batches into a vector.
+    pub async fn collect(self) -> Result<Vec<RecordBatch>, crate::db::DBError> {
+        self.stream().await?.try_collect().await
+    }
+}
+
+async fn execute_with_txn_scan<'a, FS, E>(
+    db: &'a DB<FS, E>,
+    plan: ScanPlan,
+    txn_scan: Option<TransactionScan<'a>>,
+) -> Result<
+    Pin<Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>>,
+    crate::db::DBError,
+>
+where
+    FS: crate::manifest::ManifestFs<E>,
+    E: Executor + Timer + Clone + 'static,
+    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+{
+    let result_projection = plan
+        .projected_schema
+        .clone()
+        .unwrap_or_else(|| Arc::clone(&db.schema));
+    let scan_schema = Arc::clone(&plan.scan_schema);
+    let streams = db.build_scan_streams(&plan, txn_scan).await?;
+
+    if streams.is_empty() {
+        let stream = stream::empty::<Result<RecordBatch, crate::db::DBError>>();
+        return Ok(Box::pin(stream)
+            as Pin<
+                Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>,
+            >);
+    }
+
+    let ScanPlan {
+        residual_predicate,
+        limit,
+        ..
+    } = plan;
+    let merge = MergeStream::from_vec(streams, limit, Some(Order::Asc))
+        .await
+        .map_err(crate::db::DBError::from)?;
+    let package = PackageStream::new(
+        DEFAULT_SCAN_BATCH_ROWS,
+        merge,
+        Arc::clone(&scan_schema),
+        Arc::clone(&result_projection),
+        residual_predicate,
+    )
+    .map_err(crate::db::DBError::from)?;
+
+    let mapped = package.map(|result| result.map_err(crate::db::DBError::from));
+    Ok(Box::pin(mapped)
+        as Pin<
+            Box<dyn Stream<Item = Result<RecordBatch, crate::db::DBError>> + 'a>,
+        >)
 }

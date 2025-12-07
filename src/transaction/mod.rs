@@ -10,9 +10,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, SchemaRef};
 use fusio::executor::{Executor, Timer};
-use futures::{StreamExt, pin_mut};
 use lockable::AsyncLimit;
-use predicate::Predicate;
 use thiserror::Error;
 use typed_arrow_dyn::{
     DynBuilders, DynCell, DynError, DynProjection, DynRow, DynRowOwned, DynRowRaw, DynSchema,
@@ -22,13 +20,13 @@ use typed_arrow_dyn::{
 #[cfg(all(test, feature = "tokio"))]
 use crate::manifest::{TableHead, VersionState};
 use crate::{
-    db::{DB, DBError, DEFAULT_SCAN_BATCH_ROWS, DynDbHandle, TxnWalPublishContext, WalFrameRange},
+    db::{DB, DBError, DynDbHandle, ScanBuilder, ScanContext, TxnWalPublishContext, WalFrameRange},
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
     key::{KeyOwned, KeyTsViewRaw},
     manifest::{ManifestError, TableSnapshot, VersionEdit},
     mutation::DynMutation,
     mvcc::{ReadView, Timestamp},
-    query::stream::{Order, StreamError, merge::MergeStream, package::PackageStream},
+    query::stream::StreamError,
     wal::{WalError, manifest_ext},
 };
 
@@ -313,6 +311,8 @@ impl From<DBError> for TransactionError {
             DBError::SsTable(sstable) => {
                 TransactionError::Stream(crate::query::stream::StreamError::SsTableIo(sstable))
             }
+            DBError::Snapshot(snapshot) => TransactionError::Snapshot(snapshot),
+            DBError::DynView(view) => TransactionError::DynKey(view),
         }
     }
 }
@@ -444,55 +444,18 @@ where
         Ok(rows.get(key).map(clone_dyn_row))
     }
 
-    /// Scan rows matching `predicate`, returning values visible at the transaction snapshot with
-    /// staged overlays.
-    pub async fn scan(
-        &self,
-        predicate: &Predicate,
-        projected_schema: Option<&SchemaRef>,
-        limit: Option<usize>,
-    ) -> Result<Vec<DynRow>, TransactionError> {
-        let plan = self
-            ._snapshot
-            .plan_scan(&self.handle, predicate, projected_schema, limit)
-            .await
-            .map_err(TransactionError::from)?;
-        let txn_scan = if self.staged.is_empty() {
-            None
-        } else {
-            Some(
-                TransactionScan::new(
-                    self.staged.entries(),
-                    &self.schema,
-                    plan.read_ts,
-                    Some(&plan.scan_schema),
-                )
-                .map_err(TransactionError::DynKey)?,
-            )
+    /// Begin building a scan query with fluent API.
+    ///
+    /// Returns a builder that allows chaining `.filter()`, `.projection()`, `.limit()`
+    /// before executing the scan. The scan includes uncommitted writes from this
+    /// transaction's staging buffer.
+    pub fn scan(&self) -> ScanBuilder<'_, FS, E> {
+        let context = ScanContext {
+            snapshot: &self._snapshot,
+            staging: self.staged.entries(),
+            schema: &self.schema,
         };
-        let streams = self
-            .handle
-            .build_scan_streams(&plan, txn_scan)
-            .await
-            .map_err(TransactionError::from)?;
-        if streams.is_empty() {
-            return Ok(Vec::new());
-        }
-        let merge =
-            MergeStream::from_vec(streams, plan.read_ts, plan.limit, Some(Order::Asc)).await?;
-        let result_schema = plan
-            .projected_schema
-            .clone()
-            .unwrap_or_else(|| Arc::clone(&self.schema));
-        let package = PackageStream::new(
-            DEFAULT_SCAN_BATCH_ROWS,
-            merge,
-            Arc::clone(&plan.scan_schema),
-            Arc::clone(&result_schema),
-            plan.residual_predicate,
-        )
-        .map_err(TransactionError::from)?;
-        Self::collect_rows_from_merge(package, &result_schema).await
+        ScanBuilder::with_context(&self.handle, context)
     }
 
     fn project_key(&self, row: &DynRow) -> Result<KeyOwned, TransactionError> {
@@ -565,24 +528,6 @@ where
             out.entry(key.to_owned()).or_insert(row);
         }
         Ok(out)
-    }
-
-    async fn collect_rows_from_merge(
-        package: PackageStream<'_, RecordBatch>,
-        schema: &SchemaRef,
-    ) -> Result<Vec<DynRow>, TransactionError> {
-        let mut rows = Vec::new();
-        pin_mut!(package);
-        while let Some(entry) = package.next().await {
-            let entry = entry?;
-            let schema: DynSchema = DynSchema::from_ref(schema.clone());
-            let row_view = schema.iter_views(&entry)?;
-            let r = row_view
-                .map(|row| row?.to_owned())
-                .collect::<Result<Vec<_>, _>>()?;
-            rows.extend(r);
-        }
-        Ok(rows)
     }
 
     /// Commit the staged mutations into the supplied DB, ensuring WAL durability first.
@@ -828,6 +773,29 @@ mod tests {
         Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(i64::MIN))
     }
 
+    /// Helper to extract (id, value) pairs from scan result batches.
+    fn extract_rows(batches: &[RecordBatch]) -> Vec<(String, i32)> {
+        let mut rows = Vec::new();
+        for batch in batches {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("id col");
+            let vals = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("v col");
+            for (id, v) in ids.iter().zip(vals.iter()) {
+                if let (Some(id), Some(v)) = (id, v) {
+                    rows.push((id.to_string(), v));
+                }
+            }
+        }
+        rows
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn upsert_batch_stages_rows() {
         let (db, schema) = make_db().await;
@@ -908,20 +876,16 @@ mod tests {
         .expect("stage insert");
 
         let predicate = all_rows_predicate();
-        let rows = tx.scan(&predicate, None, None).await.expect("scan rows");
-        let keys: Vec<String> = rows
-            .iter()
-            .map(|row| match &row.0[0] {
-                Some(DynCell::Str(v)) => v.clone(),
-                other => panic!("unexpected key cell: {other:?}"),
-            })
-            .collect();
+        let batches = tx
+            .scan()
+            .filter(predicate)
+            .collect()
+            .await
+            .expect("scan rows");
+        let rows = extract_rows(&batches);
+        let keys: Vec<String> = rows.iter().map(|(k, _)| k.clone()).collect();
         assert_eq!(keys, vec!["k1".to_string(), "k3".to_string()]);
-
-        match &rows[0].0[1] {
-            Some(DynCell::I32(v)) => assert_eq!(*v, 11),
-            other => panic!("unexpected value: {other:?}"),
-        }
+        assert_eq!(rows[0].1, 11);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -946,12 +910,8 @@ mod tests {
                 .is_none()
         );
         let predicate = all_rows_predicate();
-        assert!(
-            tx.scan(&predicate, None, None)
-                .await
-                .expect("scan")
-                .is_empty()
-        );
+        let batches = tx.scan().filter(predicate).collect().await.expect("scan");
+        assert!(extract_rows(&batches).is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1004,15 +964,15 @@ mod tests {
 
         let tx: TestTx = db.begin_transaction().await.expect("tx");
         let predicate = all_rows_predicate();
-        let rows = tx
-            .scan(&predicate, None, None)
+        let batches = tx
+            .scan()
+            .filter(predicate)
+            .collect()
             .await
             .expect("scan immutables");
+        let rows = extract_rows(&batches);
         assert_eq!(rows.len(), 1);
-        match &rows[0].0[0] {
-            Some(DynCell::Str(value)) => assert_eq!(value, "sealed"),
-            other => panic!("unexpected key cell {other:?}"),
-        }
+        assert_eq!(rows[0].0, "sealed");
     }
 
     #[tokio::test(flavor = "current_thread")]

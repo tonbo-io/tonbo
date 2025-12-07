@@ -26,7 +26,7 @@ use crate::{
         },
         mutable::memtable::{DynMem, DynRowScan, DynRowScanEntry},
     },
-    key::{KeyOwned, KeyTsOwned, KeyTsViewRaw},
+    key::{KeyRow, KeyTsOwned, KeyTsViewRaw},
     mvcc::Timestamp,
     ondisk::{
         scan::{SstableRowRef, SstableScan, SstableScanError},
@@ -214,25 +214,53 @@ impl std::fmt::Debug for StreamEntry {
 }
 
 impl StreamEntry {
-    /// Get the owned key for comparison. Converts borrowed keys to owned.
-    pub(crate) fn key_owned(&self) -> KeyOwned {
-        match self {
-            StreamEntry::Txn((key_ts, _)) => {
-                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
+    /// Compare keys without allocation for the common case.
+    ///
+    /// Most variants hold `KeyTsViewRaw` which contains `KeyRow`, allowing zero-copy
+    /// comparison via `as_dyn()`. Only `SstableTombstone` holds `KeyTsOwned` which
+    /// requires `as_raw()` conversion (rare in practice since tombstones are uncommon).
+    pub(crate) fn key_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        use StreamEntry::*;
+
+        // Helper to get &KeyRow from KeyTsViewRaw variants
+        fn key_row(entry: &StreamEntry) -> Option<&KeyRow> {
+            match entry {
+                Txn((key_ts, _)) => Some(key_ts.key()),
+                TxnTombstone(key_ts) => Some(key_ts.key()),
+                MemTable((key_ts, _)) => Some(key_ts.key()),
+                MemTableTombstone(key_ts) => Some(key_ts.key()),
+                Sstable(row_ref) => Some(row_ref.key_ts().key()),
+                SstableTombstone(_) => None,
             }
-            StreamEntry::TxnTombstone(key_ts) => {
-                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
-            }
-            StreamEntry::MemTable((key_ts, _)) => {
-                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
-            }
-            StreamEntry::MemTableTombstone(key_ts) => {
-                KeyOwned::from_key_row(key_ts.key()).expect("key extraction should succeed")
-            }
-            StreamEntry::Sstable(row_ref) => KeyOwned::from_key_row(row_ref.key_ts().key())
-                .expect("key extraction should succeed"),
-            StreamEntry::SstableTombstone(key_ts) => key_ts.key().clone(),
         }
+
+        // Fast path: both have KeyRow (zero-alloc comparison)
+        if let (Some(left), Some(right)) = (key_row(self), key_row(other)) {
+            return left.cmp(right);
+        }
+
+        // Slow path: at least one is SstableTombstone (rare)
+        match (self, other) {
+            (SstableTombstone(left), SstableTombstone(right)) => left.key().cmp(right.key()),
+            (SstableTombstone(left), _) => {
+                let right = key_row(other).expect("covered by fast path");
+                // KeyOwned compared with KeyRow uses cross-type PartialOrd
+                left.key().partial_cmp(right).unwrap_or(Ordering::Equal)
+            }
+            (_, SstableTombstone(right)) => {
+                let left = key_row(self).expect("covered by fast path");
+                // KeyRow compared with KeyOwned
+                left.partial_cmp(right.key()).unwrap_or(Ordering::Equal)
+            }
+            _ => unreachable!("all non-tombstone cases handled by fast path"),
+        }
+    }
+
+    /// Check if two entries have the same key without allocation.
+    pub(crate) fn key_eq(&self, other: &Self) -> bool {
+        self.key_cmp(other) == std::cmp::Ordering::Equal
     }
 
     pub(crate) fn ts(&self) -> Timestamp {

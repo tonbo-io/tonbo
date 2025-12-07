@@ -84,6 +84,7 @@ fn extend_projection_schema(
 
 fn collect_predicate_columns(predicate: &Predicate, out: &mut BTreeSet<Arc<str>>) {
     match predicate.kind() {
+        PredicateNode::True => {}
         PredicateNode::Compare { left, right, .. } => {
             collect_operand_column(left, out);
             collect_operand_column(right, out);

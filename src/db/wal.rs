@@ -144,21 +144,28 @@ where
         })
     }
 
-    fn insert_with_seal_retry<F>(&self, mut op: F) -> Result<(), KeyExtractError>
+    /// Insert with optimistic read lock, only acquiring write lock for sealing.
+    ///
+    /// This enables concurrent writes when the memtable has capacity. The write lock
+    /// is only acquired when sealing is needed (on `MemtableFull`).
+    fn insert_with_seal_retry<F>(&self, op: F) -> Result<(), KeyExtractError>
     where
-        F: FnMut(&mut DynMem) -> Result<(), KeyExtractError>,
+        F: Fn(&DynMem) -> Result<(), KeyExtractError>,
     {
         loop {
-            let mut mem = self.mem_write();
-            match op(&mut mem) {
-                Ok(()) => return Ok(()),
-                Err(KeyExtractError::MemtableFull { .. }) => {
-                    drop(mem);
-                    self.seal_mutable_now()?;
-                    continue;
+            // Try with read lock first (allows concurrent writes)
+            {
+                let mem = self.mem_read();
+                match op(&mem) {
+                    Ok(()) => return Ok(()),
+                    Err(KeyExtractError::MemtableFull { .. }) => {
+                        // Fall through to seal with write lock
+                    }
+                    Err(err) => return Err(err),
                 }
-                Err(err) => return Err(err),
             }
+            // Only acquire write lock for sealing
+            self.seal_mutable_now()?;
         }
     }
 
@@ -190,8 +197,9 @@ where
         &self,
         batch: RecordBatch,
     ) -> Result<(), KeyExtractError> {
-        let mut mem = self.mem_write();
-        mem.insert_delete_batch(self.delete_projection.as_ref(), batch)
+        self.insert_with_seal_retry(|mem| {
+            mem.insert_delete_batch(self.delete_projection.as_ref(), batch.clone())
+        })
     }
 
     pub(crate) fn mutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
@@ -611,11 +619,9 @@ where
 {
     validate_delete_batch_schema(db, &batch)?;
     validate_delete_commit_ts(&batch, commit_ts)?;
-    {
-        let mut mem = db.mem_write();
-        mem.insert_delete_batch(db.delete_projection.as_ref(), batch)?;
-    }
-    Ok(())
+    db.insert_with_seal_retry(|mem| {
+        mem.insert_delete_batch(db.delete_projection.as_ref(), batch.clone())
+    })
 }
 
 fn validate_record_batch_schema<FS, E>(

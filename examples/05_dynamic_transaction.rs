@@ -7,8 +7,11 @@ use tonbo::{
     query::{ColumnRef, Predicate, ScalarValue},
     transaction::CommitAckMode,
 };
-use typed_arrow::{Record, schema::SchemaMeta};
-use typed_arrow_dyn::DynCell;
+use typed_arrow::{
+    Record,
+    arrow_array::{Int32Array, StringArray},
+    schema::SchemaMeta,
+};
 
 #[derive(Record)]
 struct UserRow {
@@ -56,24 +59,26 @@ async fn main() {
 
     // Read-your-writes inside the transaction.
     let pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("user-1"));
-    let preview = tx.scan(&pred, None, None).await.expect("preview");
-    println!(
-        "preview rows: {:?}",
-        preview
-            .iter()
-            .map(|row| {
-                let key = match row.0[0].clone() {
-                    Some(DynCell::Str(s)) => s.to_owned(),
-                    _ => "<null>".to_string(),
-                };
-                let val = match row.0[1].clone() {
-                    Some(DynCell::I32(v)) => v,
-                    _ => 0,
-                };
-                format!("id={key}, v={val}")
-            })
-            .collect::<Vec<_>>()
-    );
+    let preview_batches = tx.scan().filter(pred).collect().await.expect("preview");
+    let mut preview_rows = Vec::new();
+    for batch in &preview_batches {
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("id col");
+        let vals = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("v col");
+        for (id, v) in ids.iter().zip(vals.iter()) {
+            let key = id.unwrap_or("<null>").to_string();
+            let val = v.unwrap_or(0);
+            preview_rows.push(format!("id={key}, v={val}"));
+        }
+    }
+    println!("preview rows: {:?}", preview_rows);
 
     // Commit with strict WAL durability.
     tx.commit().await.expect("commit");
@@ -100,12 +105,12 @@ async fn scan_pairs(
         let ids = batch
             .column(0)
             .as_any()
-            .downcast_ref::<typed_arrow::arrow_array::StringArray>()
+            .downcast_ref::<StringArray>()
             .expect("id col");
         let vals = batch
             .column(1)
             .as_any()
-            .downcast_ref::<typed_arrow::arrow_array::Int32Array>()
+            .downcast_ref::<Int32Array>()
             .expect("v col");
         for (id, v) in ids.iter().zip(vals.iter()) {
             if let Some(id) = id {
