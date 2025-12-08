@@ -51,7 +51,7 @@ async fn main() {
         .expect("key col")
         .in_memory("dynamic-basic")
         .expect("in_memory config")
-        .build()
+        .open()
         .await
         .expect("schema ok");
     db.ingest(batch).await.expect("insert dynamic batch");

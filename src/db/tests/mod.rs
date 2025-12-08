@@ -1,5 +1,3 @@
-use super::*;
-
 mod core;
 mod wal_gc;
 mod wal_recovery;

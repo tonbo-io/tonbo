@@ -4,7 +4,7 @@
 
 use fusio::executor::{Executor, Timer};
 
-use crate::{compaction::CompactionDriver, db::DB, manifest::ManifestFs};
+use crate::{compaction::CompactionDriver, db::DbInner, manifest::ManifestFs};
 #[cfg(all(test, feature = "tokio"))]
 use crate::{
     compaction::{
@@ -14,7 +14,7 @@ use crate::{
     manifest::ManifestResult,
 };
 
-impl<FS, E> DB<FS, E>
+impl<FS, E> DbInner<FS, E>
 where
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone + 'static,

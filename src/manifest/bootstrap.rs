@@ -7,8 +7,6 @@ use fusio::{
     mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
-#[cfg(feature = "test-helpers")]
-use fusio_manifest::LeaseHandle;
 use fusio_manifest::{
     BackoffPolicy, CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, ManifestContext,
     SegmentStoreImpl, snapshot::Snapshot, types::Error as FusioManifestError,
@@ -54,7 +52,7 @@ pub(crate) struct TableSnapshot {
 }
 
 impl TableSnapshot {
-    fn from_parts(version: VersionSnapshot, table_meta: TableMeta) -> Self {
+    pub(crate) fn from_parts(version: VersionSnapshot, table_meta: TableMeta) -> Self {
         Self {
             _manifest_snapshot: version.manifest_snapshot,
             head: version.head,
@@ -145,6 +143,29 @@ where
         Ok(TableSnapshot::from_parts(version_snapshot, table_meta))
     }
 
+    /// Capture the latest manifest view, optionally falling back to a cached `TableMeta`
+    /// when the catalog entry is missing (e.g. transient object-store visibility gaps).
+    pub(crate) async fn snapshot_latest_with_fallback(
+        &self,
+        table: TableId,
+        fallback: &TableMeta,
+    ) -> ManifestResult<TableSnapshot> {
+        match self.catalog.table_meta(table).await {
+            Ok(meta) => {
+                let version_snapshot = self.version.snapshot_latest(table).await?;
+                Ok(TableSnapshot::from_parts(version_snapshot, meta))
+            }
+            Err(ManifestError::Invariant("catalog metadata missing for table_id")) => {
+                let version_snapshot = self.version.snapshot_latest(table).await?;
+                Ok(TableSnapshot::from_parts(
+                    version_snapshot,
+                    fallback.clone(),
+                ))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub(crate) async fn wal_floor(&self, table: TableId) -> ManifestResult<Option<WalSegmentRef>> {
         self.version.wal_floor(table).await
     }
@@ -184,7 +205,7 @@ where
         self.gc_plan.put_gc_plan(table, plan).await
     }
 
-    #[cfg(any(all(test, feature = "tokio"), feature = "test-helpers"))]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn take_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
         self.gc_plan.take_gc_plan(table).await
     }
@@ -224,6 +245,7 @@ where
 }
 
 /// Construct an in-memory manifest.
+#[allow(dead_code)]
 pub(crate) async fn init_in_memory_manifest<E>(
     executor: E,
 ) -> ManifestResult<TonboManifest<InMemoryFs, E>>

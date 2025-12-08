@@ -11,6 +11,7 @@ use std::{
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use fusio::executor::Executor;
 use futures::StreamExt;
 #[cfg(all(test, feature = "tokio"))]
 use futures::stream;
@@ -47,12 +48,16 @@ pub struct SsTableMergeSource {
 
 impl SsTableMergeSource {
     /// Create a merge source from an SSTable descriptor and shared config.
-    pub async fn new(
+    pub async fn new<E>(
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
-    ) -> Result<Self, SsTableError> {
+        executor: E,
+    ) -> Result<Self, SsTableError>
+    where
+        E: Executor + Clone + 'static,
+    {
         let reader = SsTableReader::open(config, descriptor).await?;
-        let stream = reader.into_stream(Timestamp::MAX, None).await?;
+        let stream = reader.into_stream(Timestamp::MAX, None, executor).await?;
         Ok(Self { stream })
     }
 
@@ -399,13 +404,17 @@ impl OutputState {
         over_rows || over_bytes
     }
 
-    async fn finish(
+    async fn finish<E>(
         &mut self,
         descriptor: SsTableDescriptor,
         config: &Arc<SsTableConfig>,
         extractor: &Arc<dyn KeyProjection>,
         wal_ids: &[FileId],
-    ) -> Result<SsTable, SsTableError> {
+        executor: E,
+    ) -> Result<SsTable, SsTableError>
+    where
+        E: Executor + Clone,
+    {
         self.flush_chunk(config.schema())?;
 
         let mut writer = ParquetTableWriter::new(Arc::clone(config), descriptor);
@@ -420,7 +429,7 @@ impl OutputState {
             writer.stage_stream_batch(batch, extractor.as_ref())?;
         }
 
-        writer.finish().await
+        writer.finish(executor).await
     }
 
     fn reset_for_next(&mut self) {
@@ -455,7 +464,7 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicU64};
 
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::path::Path;
+    use fusio::{executor::NoopExecutor, path::Path};
     use tempfile::tempdir;
     use typed_arrow_dyn::{DynCell, DynRow};
 
@@ -503,14 +512,14 @@ mod tests {
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
         builder.add_immutable(&immutable).expect("stage seg");
-        let input = builder.finish().await.expect("sst");
+        let input = builder.finish(NoopExecutor).await.expect("sst");
 
         let target = SsTableDescriptor::new(SsTableId::new(10), 1);
         let merger = SsTableMerger::new(Arc::clone(&cfg), vec![input.descriptor().clone()], target)
             .with_output_id_allocator(Arc::new(AtomicU64::new(11)))
             .with_iteration_budget(1);
 
-        match merger.execute().await {
+        match merger.execute(NoopExecutor).await {
             Err(SsTableError::MergeIterationBudgetExceeded { budget }) => {
                 assert_eq!(budget, 1);
             }
@@ -554,7 +563,7 @@ mod tests {
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
         builder.add_immutable(&immutable).expect("stage seg");
-        let input = builder.finish().await.expect("sst");
+        let input = builder.finish(NoopExecutor).await.expect("sst");
 
         // Force an error by using an impossible iteration budget after writing the first row.
         let target = SsTableDescriptor::new(SsTableId::new(10), 1);
@@ -565,7 +574,7 @@ mod tests {
         )
         .with_output_caps(Some(1), None)
         .with_chunk_rows(1); // will error when allocator is missing for the second output
-        let result = merger.execute().await;
+        let result = merger.execute(NoopExecutor).await;
         assert!(matches!(result, Err(SsTableError::MissingIdAllocator)));
 
         // All files should be gone after cleanup.
@@ -640,10 +649,13 @@ impl SsTableMerger {
     }
 
     /// Execute the merge and return a newly written SSTable.
-    pub async fn execute(self) -> Result<Vec<SsTable>, SsTableError> {
+    pub async fn execute<E>(self, executor: E) -> Result<Vec<SsTable>, SsTableError>
+    where
+        E: Executor + Clone + 'static,
+    {
         let mut written_desc: Vec<SsTableDescriptor> = Vec::new();
         let config = Arc::clone(&self.config);
-        let result = self.execute_inner(&mut written_desc).await;
+        let result = self.execute_inner(&mut written_desc, executor).await;
         match result {
             Ok(outputs) => Ok(outputs),
             Err(err) => {
@@ -653,10 +665,14 @@ impl SsTableMerger {
         }
     }
 
-    async fn execute_inner(
+    async fn execute_inner<E>(
         self,
         written_desc: &mut Vec<SsTableDescriptor>,
-    ) -> Result<Vec<SsTable>, SsTableError> {
+        executor: E,
+    ) -> Result<Vec<SsTable>, SsTableError>
+    where
+        E: Executor + Clone + 'static,
+    {
         let extractor = self
             .config
             .key_extractor()
@@ -669,7 +685,9 @@ impl SsTableMerger {
             if let Some(ids) = descriptor.wal_ids() {
                 wal_ids.extend_from_slice(ids);
             }
-            let source = SsTableMergeSource::new(Arc::clone(&self.config), descriptor).await?;
+            let source =
+                SsTableMergeSource::new(Arc::clone(&self.config), descriptor, executor.clone())
+                    .await?;
             let mut cursor = SourceCursor::new(idx, Arc::clone(&extractor), source);
             cursor.ensure_batch().await?;
             sources.push(cursor);
@@ -739,7 +757,13 @@ impl SsTableMerger {
                     "missing target descriptor".into(),
                 ))?;
                 let table = output_state
-                    .finish(descriptor, &self.config, &extractor, &wal_ids)
+                    .finish(
+                        descriptor,
+                        &self.config,
+                        &extractor,
+                        &wal_ids,
+                        executor.clone(),
+                    )
                     .await?;
                 written_desc.push(table.descriptor().clone());
                 outputs.push(table);
@@ -755,7 +779,13 @@ impl SsTableMerger {
             ))?;
             outputs.push(
                 output_state
-                    .finish(descriptor, &self.config, &extractor, &wal_ids)
+                    .finish(
+                        descriptor,
+                        &self.config,
+                        &extractor,
+                        &wal_ids,
+                        executor.clone(),
+                    )
                     .await?,
             );
             if let Some(desc) = outputs.last().map(|sst| sst.descriptor().clone()) {

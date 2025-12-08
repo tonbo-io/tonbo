@@ -13,7 +13,7 @@ use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl};
 use thiserror::Error;
 
-use super::DB;
+use super::{DB, DbInner};
 use crate::{
     compaction::{
         executor::LocalCompactionExecutor,
@@ -837,32 +837,46 @@ where
         self
     }
 
-    /// Materialise a [`DB`] using the accumulated builder state.
+    /// Open the database, recovering from existing state if present.
+    ///
+    /// For durable backends (on-disk, S3), this will recover from WAL and manifest
+    /// if they exist, otherwise initialize a fresh database.
+    ///
+    /// For volatile backends (in-memory), this always creates a fresh database.
+    #[cfg(feature = "tokio")]
+    pub async fn open(self) -> Result<DB<FS, TokioExecutor>, DbBuildError>
+    where
+        FS: ManifestFs<TokioExecutor>,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
+        let executor = Arc::new(TokioExecutor::default());
+        self.open_with_executor(executor).await
+    }
+
+    /// Alias for [`open`](Self::open) for backwards compatibility.
     #[cfg(feature = "tokio")]
     pub async fn build(self) -> Result<DB<FS, TokioExecutor>, DbBuildError>
     where
         FS: ManifestFs<TokioExecutor>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
-        let executor = Arc::new(TokioExecutor::default());
-        if self.state.durability().is_durable() {
-            // Default to recovering existing state (manifest + WAL) when present.
-            return self.recover_or_init_with_executor(executor).await;
-        }
-        self.build_with_executor(executor).await
+        self.open().await
     }
 
-    /// Materialise a [`DB`] using a caller-provided executor implementation.
-    pub async fn build_with_executor<E>(self, executor: Arc<E>) -> Result<DB<FS, E>, DbBuildError>
+    /// Open the database using a caller-provided executor implementation.
+    ///
+    /// For durable backends, this recovers from existing state if present.
+    /// For volatile backends, this creates a fresh database.
+    pub async fn open_with_executor<E>(self, executor: Arc<E>) -> Result<DB<FS, E>, DbBuildError>
     where
         E: Executor + Timer + Clone + 'static,
         FS: ManifestFs<E>,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
         if self.state.durability().is_durable() {
-            // Durable backends should reuse existing on-disk state when available.
             return self.recover_or_init_with_executor(executor).await;
         }
+        // Volatile storage: fresh start (nothing to recover)
         self.state.prepare().await?;
         let layout = self.state.layout()?;
         self.build_with_layout(executor, layout).await
@@ -887,7 +901,8 @@ where
             .unwrap_or_else(|| DEFAULT_TABLE_NAME.to_string());
         let table_definition = table_definition(&self.mode_config, &table_name);
 
-        let (mode, mem) = self.mode_config.build().map_err(DbBuildError::Mode)?;
+        let (schema, delete_schema, commit_ack_mode, mem) =
+            self.mode_config.build().map_err(DbBuildError::Mode)?;
         let manifest = manifest_init
             .init_manifest(executor.as_ref().clone())
             .await?;
@@ -908,21 +923,23 @@ where
             None
         };
 
-        let mut db = DB::from_components(
-            mode,
+        let mut inner = DbInner::from_components(
+            schema,
+            delete_schema,
+            commit_ack_mode,
             mem,
             layout.dyn_fs(),
             manifest,
             manifest_table,
+            table_meta,
             wal_cfg.clone(),
             executor,
         );
 
         if let Some(cfg) = wal_cfg.take() {
-            db.enable_wal(cfg).await?;
+            inner.enable_wal(cfg).await?;
         }
 
-        let mut db = db;
         if let Some(loop_cfg) = self.compaction_loop_cfg {
             // Temporary shortcut: spawn a local compaction loop for dyn mode using a
             // caller-provided SST config. This should be replaced by a real
@@ -934,19 +951,19 @@ where
                 .map_err(DbBuildError::CompactionPlanner)?;
             let exec =
                 LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
-            let driver = Arc::new(db.compaction_driver());
+            let driver = Arc::new(inner.compaction_driver());
             let handle = driver.spawn_worker(
-                Arc::clone(&db.executor),
+                Arc::clone(&inner.executor),
                 planner,
                 exec,
                 Some(loop_cfg.sst_config),
                 loop_cfg.interval,
                 1,
             );
-            db.compaction_worker = Some(handle);
+            inner.compaction_worker = Some(handle);
         }
 
-        Ok(db)
+        Ok(DB::from_inner(Arc::new(inner)))
     }
 }
 
@@ -1049,19 +1066,8 @@ where
         self
     }
 
-    /// Attempt to recover from WAL state if present, otherwise build a fresh durable DB.
-    #[cfg(feature = "tokio")]
-    pub async fn recover_or_init(self) -> Result<DB<FS, TokioExecutor>, DbBuildError>
-    where
-        FS: ManifestFs<TokioExecutor>,
-        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-    {
-        let executor = Arc::new(TokioExecutor::default());
-        self.recover_or_init_with_executor(executor).await
-    }
-
-    /// Attempt to recover from WAL state using a caller-provided executor.
-    pub async fn recover_or_init_with_executor<E>(
+    /// Internal: recover from WAL state if present, otherwise build fresh.
+    async fn recover_or_init_with_executor<E>(
         self,
         executor: Arc<E>,
     ) -> Result<DB<FS, E>, DbBuildError>
@@ -1096,18 +1102,19 @@ where
                 .map_err(DbBuildError::Manifest)?;
             let manifest_table = table_meta.table_id;
             let fs_dyn = layout.dyn_fs();
-            let mut db = DB::recover_with_wal_with_manifest(
+            let mut inner = DbInner::recover_with_wal_with_manifest(
                 self.mode_config,
                 Arc::clone(&executor),
                 fs_dyn,
                 wal_cfg.clone(),
                 manifest,
                 manifest_table,
+                table_meta,
             )
             .await
             .map_err(DbBuildError::Mode)?;
-            db.enable_wal(wal_cfg).await?;
-            Ok(db)
+            inner.enable_wal(wal_cfg).await?;
+            Ok(DB::from_inner(Arc::new(inner)))
         } else {
             self.build_with_layout(executor, layout).await
         }

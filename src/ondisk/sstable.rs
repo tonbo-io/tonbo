@@ -18,7 +18,7 @@ use arrow_select::take::take as arrow_take;
 use fusio::{
     DynFs,
     error::Error as FsError,
-    executor::NoopExecutor,
+    executor::Executor,
     fs::OpenOptions,
     path::{Path, PathPart},
 };
@@ -26,8 +26,7 @@ use fusio_parquet::{reader::AsyncReader, writer::AsyncWriter};
 use futures::stream::{self, BoxStream, StreamExt};
 use parquet::{
     arrow::{
-        ProjectionMask,
-        async_reader::{ParquetRecordBatchStream, ParquetRecordBatchStreamBuilder},
+        ProjectionMask, async_reader::ParquetRecordBatchStreamBuilder,
         async_writer::AsyncArrowWriter,
     },
     basic::{Compression, ZstdLevel},
@@ -47,7 +46,10 @@ use crate::{
     key::{KeyOwned, KeyOwnedError},
     manifest::ManifestError,
     mvcc::Timestamp,
-    ondisk::merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
+    ondisk::{
+        merge::{decode_delete_sidecar, extract_delete_key_at, extract_key_at},
+        scan::{ParquetStream, UnpinExec},
+    },
     query::Predicate,
 };
 
@@ -598,12 +600,16 @@ impl ParquetTableWriter {
         Ok(())
     }
 
-    pub(crate) async fn finish(self) -> Result<SsTable, SsTableError> {
+    pub(crate) async fn finish<E>(self, executor: E) -> Result<SsTable, SsTableError>
+    where
+        E: Executor + Clone,
+    {
         if self.staged.segments == 0 {
             return Err(SsTableError::NoImmutableSegments);
         }
 
-        let mut ctx = WriteContext::new(Arc::clone(&self.config), &self.descriptor).await?;
+        let mut ctx =
+            WriteContext::new(Arc::clone(&self.config), &self.descriptor, executor).await?;
         for segment in &self.segments {
             ctx.write_segment(segment).await?;
         }
@@ -686,20 +692,27 @@ fn parse_mvcc_columns_from_data(batch: &RecordBatch) -> Result<MvccColumns, SsTa
     Ok(MvccColumns::new(commits, tombstone))
 }
 
-struct WriteContext {
+struct WriteContext<E>
+where
+    E: Executor + Clone,
+{
     fs: Arc<dyn DynFs>,
     data_path: Path,
     delete_path: Path,
-    data_writer: Option<AsyncArrowWriter<AsyncWriter<NoopExecutor>>>,
-    delete_writer: Option<AsyncArrowWriter<AsyncWriter<NoopExecutor>>>,
+    data_writer: Option<AsyncArrowWriter<AsyncWriter<E>>>,
+    delete_writer: Option<AsyncArrowWriter<AsyncWriter<E>>>,
     delete_written: bool,
     compression: SsTableCompression,
-    executor: NoopExecutor,
+    executor: E,
 }
-impl WriteContext {
+impl<E> WriteContext<E>
+where
+    E: Executor + Clone,
+{
     async fn new(
         config: Arc<SsTableConfig>,
         descriptor: &SsTableDescriptor,
+        executor: E,
     ) -> Result<Self, SsTableError> {
         let fs = Arc::clone(config.fs());
         let (dir_path, data_path, delete_path) =
@@ -720,10 +733,8 @@ impl WriteContext {
             config.schema().metadata().clone(),
         ));
 
-        let executor = NoopExecutor;
-
         let data_writer = AsyncArrowWriter::try_new(
-            AsyncWriter::new(data_file, executor),
+            AsyncWriter::new(data_file, executor.clone()),
             data_schema,
             Some(writer_properties(config.compression())),
         )?;
@@ -764,7 +775,7 @@ impl WriteContext {
                 .truncate(true);
             let file = self.fs.open_options(&self.delete_path, options).await?;
             let writer = AsyncArrowWriter::try_new(
-                AsyncWriter::new(file, self.executor),
+                AsyncWriter::new(file, self.executor.clone()),
                 batch.schema(),
                 Some(writer_properties(self.compression)),
             )?;
@@ -805,7 +816,10 @@ impl WriteContext {
     }
 }
 
-impl Drop for WriteContext {
+impl<E> Drop for WriteContext<E>
+where
+    E: Executor + Clone,
+{
     fn drop(&mut self) {
         debug_assert!(
             self.data_writer.is_none() && self.delete_writer.is_none(),
@@ -854,8 +868,11 @@ impl SsTableBuilder {
         self.writer.stage_immutable(segment)
     }
     /// Finalize the staged runs and flush them to durable storage.
-    pub async fn finish(self) -> Result<SsTable, SsTableError> {
-        self.writer.finish().await
+    pub async fn finish<E>(self, executor: E) -> Result<SsTable, SsTableError>
+    where
+        E: Executor + Clone,
+    {
+        self.writer.finish(executor).await
     }
 }
 
@@ -889,19 +906,25 @@ impl SsTableReader {
     }
 
     /// Stream all rows for the provided ranges/timestamp/predicate (stub).
-    pub(crate) async fn into_stream(
+    pub(crate) async fn into_stream<E>(
         self,
         _ts: Timestamp,
         _predicate: Option<&Predicate>,
-    ) -> Result<BoxStream<'static, Result<SsTableStreamBatch, SsTableError>>, SsTableError> {
+        executor: E,
+    ) -> Result<BoxStream<'static, Result<SsTableStreamBatch, SsTableError>>, SsTableError>
+    where
+        E: Executor + Clone + 'static,
+    {
         let fs = Arc::clone(self.config.fs());
         let data_path =
             self.descriptor.data_path().cloned().ok_or_else(|| {
                 SsTableError::InvalidPath("missing data path on descriptor".into())
             })?;
-        let data_stream = Box::pin(open_parquet_stream(fs.clone(), data_path, None).await?);
+        // ParquetStream<E> is Unpin, so we can use it directly without Box::pin
+        let data_stream =
+            open_parquet_stream(fs.clone(), data_path, None, executor.clone()).await?;
         let delete_stream = if let Some(path) = self.descriptor.delete_path() {
-            Some(Box::pin(open_parquet_stream(fs, path.clone(), None).await?))
+            Some(open_parquet_stream(fs, path.clone(), None, executor).await?)
         } else {
             None
         };
@@ -912,15 +935,14 @@ impl SsTableReader {
             move |(mut data_stream, mut delete_stream)| {
                 let schema = schema.clone();
                 async move {
+                    // ParquetStream<E> is Unpin, so .next() works directly
                     let data_batch = data_stream
-                        .as_mut()
                         .next()
                         .await
                         .transpose()
                         .map_err(SsTableError::Parquet)?;
                     let delete_batch = if let Some(ref mut del_stream) = delete_stream {
                         del_stream
-                            .as_mut()
                             .next()
                             .await
                             .transpose()
@@ -955,31 +977,34 @@ impl SsTableReader {
     }
 }
 
-pub(crate) async fn open_parquet_stream(
+pub(crate) async fn open_parquet_stream<E>(
     fs: Arc<dyn DynFs>,
     path: Path,
     projection: Option<ProjectionMask>,
-) -> Result<ParquetRecordBatchStream<AsyncReader<NoopExecutor>>, SsTableError> {
-    let (stream, _schema) = open_parquet_stream_with_schema(fs, path, projection).await?;
+    executor: E,
+) -> Result<ParquetStream<E>, SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
+    let (stream, _schema) = open_parquet_stream_with_schema(fs, path, projection, executor).await?;
     Ok(stream)
 }
 
 /// Open a Parquet file as an async record batch stream, returning both the stream and
 /// the Arrow schema derived from the Parquet metadata.
-pub(crate) async fn open_parquet_stream_with_schema(
+pub(crate) async fn open_parquet_stream_with_schema<E>(
     fs: Arc<dyn DynFs>,
     path: Path,
     projection: Option<ProjectionMask>,
-) -> Result<
-    (
-        ParquetRecordBatchStream<AsyncReader<NoopExecutor>>,
-        SchemaRef,
-    ),
-    SsTableError,
-> {
+    executor: E,
+) -> Result<(ParquetStream<E>, SchemaRef), SsTableError>
+where
+    E: Executor + Clone + 'static,
+{
     let file = fs.open(&path).await?;
     let size = file.size().await.map_err(SsTableError::Fs)?;
-    let reader = AsyncReader::new(file, size, NoopExecutor)
+    // Wrap executor in UnpinExec to make AsyncReader<UnpinExec<E>> unconditionally Unpin
+    let reader = AsyncReader::new(file, size, UnpinExec(executor))
         .await
         .map_err(SsTableError::Fs)?;
     let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
@@ -1015,7 +1040,7 @@ mod tests {
     };
 
     use arrow_schema::{DataType, Field, Schema};
-    use fusio::{disk::LocalFs, dynamic::DynFs, path::Path};
+    use fusio::{disk::LocalFs, dynamic::DynFs, executor::NoopExecutor, path::Path};
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
@@ -1111,7 +1136,7 @@ mod tests {
         builder_a.set_wal_ids(Some(wal_a.clone()));
         builder_a.add_immutable(&seg_a).expect("stage a");
         let input_a = builder_a
-            .finish()
+            .finish(NoopExecutor)
             .await
             .expect("sst a")
             .descriptor()
@@ -1124,7 +1149,7 @@ mod tests {
         builder_b.set_wal_ids(Some(wal_b.clone()));
         builder_b.add_immutable(&seg_b).expect("stage b");
         let input_b = builder_b
-            .finish()
+            .finish(NoopExecutor)
             .await
             .expect("sst b")
             .descriptor()
@@ -1133,7 +1158,7 @@ mod tests {
         let target = SsTableDescriptor::new(SsTableId::new(9), 1);
         let merger = SsTableMerger::new(config, vec![input_a, input_b], target)
             .with_output_id_allocator(Arc::new(AtomicU64::new(10)));
-        let merged = merger.execute().await.expect("merge result");
+        let merged = merger.execute(NoopExecutor).await.expect("merge result");
         assert_eq!(merged.len(), 1);
         let descriptor = merged[0].descriptor();
         let merged_stats = descriptor.stats().expect("merged stats");
@@ -1201,7 +1226,7 @@ mod tests {
         );
         builder_old.add_immutable(&seg_old).expect("stage old");
         let input_old = builder_old
-            .finish()
+            .finish(NoopExecutor)
             .await
             .expect("sst old")
             .descriptor()
@@ -1213,7 +1238,7 @@ mod tests {
         );
         builder_new.add_immutable(&seg_new).expect("stage new");
         let input_new = builder_new
-            .finish()
+            .finish(NoopExecutor)
             .await
             .expect("sst new")
             .descriptor()
@@ -1222,7 +1247,7 @@ mod tests {
         let target = SsTableDescriptor::new(SsTableId::new(9), 1);
         let merger = SsTableMerger::new(config.clone(), vec![input_old, input_new], target)
             .with_output_id_allocator(Arc::new(AtomicU64::new(10)));
-        let merged = merger.execute().await.expect("merge result");
+        let merged = merger.execute(NoopExecutor).await.expect("merge result");
         assert_eq!(merged.len(), 1);
         let descriptor = merged[0].descriptor();
         let stats = descriptor.stats().expect("stats");
@@ -1242,7 +1267,7 @@ mod tests {
             .await
             .expect("reader");
         let mut stream = reader
-            .into_stream(Timestamp::MAX, None)
+            .into_stream(Timestamp::MAX, None, NoopExecutor)
             .await
             .expect("stream");
         let mut data_keys = Vec::new();
@@ -1314,7 +1339,7 @@ mod tests {
         );
         builder_a.add_immutable(&seg_a).expect("stage a");
         let input_a = builder_a
-            .finish()
+            .finish(NoopExecutor)
             .await
             .expect("sst a")
             .descriptor()
@@ -1326,7 +1351,7 @@ mod tests {
         );
         builder_b.add_immutable(&seg_b).expect("stage b");
         let input_b = builder_b
-            .finish()
+            .finish(NoopExecutor)
             .await
             .expect("sst b")
             .descriptor()
@@ -1337,7 +1362,7 @@ mod tests {
             .with_output_id_allocator(Arc::new(AtomicU64::new(10)))
             .with_output_caps(Some(1), None)
             .with_chunk_rows(1)
-            .execute()
+            .execute(NoopExecutor)
             .await
             .expect("merge result");
 
@@ -1361,7 +1386,7 @@ mod tests {
         rows: Vec<(String, i32)>,
         commits: Vec<u64>,
         tombstones: Vec<bool>,
-    ) -> ImmutableMemTable<arrow_array::RecordBatch> {
+    ) -> ImmutableMemTable {
         assert_eq!(rows.len(), commits.len());
         assert_eq!(rows.len(), tombstones.len());
         let schema = Arc::new(Schema::new(vec![
@@ -1493,7 +1518,7 @@ mod tests {
         ]));
         let descriptor = SsTableDescriptor::new(SsTableId::new(1), 0);
         let writer: ParquetTableWriter = ParquetTableWriter::new(test_config(schema), descriptor);
-        let result = writer.finish().await;
+        let result = writer.finish(NoopExecutor).await;
         assert!(matches!(result, Err(SsTableError::NoImmutableSegments)));
     }
 
@@ -1515,7 +1540,7 @@ mod tests {
         let segment = sample_segment(vec![("k".into(), 1)], vec![42], vec![false]);
         writer.stage_immutable(&segment).expect("stage segment");
 
-        let table = writer.finish().await.expect("finish");
+        let table = writer.finish(NoopExecutor).await.expect("finish");
         let recorded = table.descriptor().wal_ids().expect("descriptor wal ids");
         assert_eq!(recorded, wal_ids.as_slice());
     }
@@ -1533,7 +1558,7 @@ mod tests {
         let segment = sample_segment(vec![("m".into(), 9)], vec![123], vec![false]);
         writer.stage_immutable(&segment).expect("stage segment");
 
-        let table = writer.finish().await.expect("finish table");
+        let table = writer.finish(NoopExecutor).await.expect("finish table");
         let descriptor = table.descriptor();
         let data_path = descriptor.data_path().expect("data path present");
         assert!(data_path.as_ref().ends_with(".parquet"));
@@ -1557,7 +1582,7 @@ mod tests {
         );
         writer.stage_immutable(&segment).expect("stage segment");
 
-        let table = writer.finish().await.expect("finish table");
+        let table = writer.finish(NoopExecutor).await.expect("finish table");
         let descriptor = table.descriptor();
         let delete_path = descriptor.delete_path().expect("delete sidecar present");
         assert!(delete_path.as_ref().ends_with(".delete.parquet"));

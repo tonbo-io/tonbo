@@ -21,19 +21,6 @@ use crate::{
 
 mod dyn_config;
 
-/// Flattened dynamic storage parameters used by the database.
-#[derive(Clone)]
-pub struct DynModeState {
-    pub(crate) schema: SchemaRef,
-    pub(crate) delete_schema: SchemaRef,
-    pub(crate) extractor: Arc<dyn KeyProjection>,
-    pub(crate) delete_projection: Arc<dyn KeyProjection>,
-    pub(crate) commit_ack_mode: CommitAckMode,
-}
-
-/// Backwards-compatible alias used by examples/tests that referenced the old dynamic mode type.
-pub type DynMode = DynModeState;
-
 /// Configuration bundle for constructing a `DynMode`.
 pub struct DynModeConfig {
     /// Arrow schema describing the dynamic table.
@@ -70,8 +57,12 @@ impl DynModeConfig {
         Arc::clone(&self.schema)
     }
 
-    /// Build the dynamic storage state and mutable memtable backing the DB.
-    pub(crate) fn build(self) -> Result<(DynModeState, DynMem), KeyExtractError> {
+    /// Build the dynamic storage parameters and mutable memtable backing the DB.
+    ///
+    /// Returns `(schema, delete_schema, commit_ack_mode, mutable)`.
+    pub(crate) fn build(
+        self,
+    ) -> Result<(SchemaRef, SchemaRef, CommitAckMode, DynMem), KeyExtractError> {
         let DynModeConfig {
             schema,
             extractor,
@@ -85,17 +76,8 @@ impl DynModeConfig {
             projection_for_columns(delete_schema.clone(), (0..key_columns).collect())?;
         let delete_projection: Arc<dyn KeyProjection> = delete_projection.into();
 
-        let mutable = DynMem::new(schema.clone());
-        Ok((
-            DynModeState {
-                schema,
-                delete_schema,
-                extractor,
-                delete_projection,
-                commit_ack_mode,
-            },
-            mutable,
-        ))
+        let mutable = DynMem::new(schema.clone(), extractor, delete_projection);
+        Ok((schema, delete_schema, commit_ack_mode, mutable))
     }
 }
 
@@ -123,18 +105,6 @@ pub(crate) fn table_definition(config: &DynModeConfig, table_name: &str) -> Tabl
         primary_key_columns: key_columns,
         retention: None,
         schema_version: 0,
-    }
-}
-
-impl DynModeState {
-    /// Convenience wrapper mirroring the previous dynamic mode API.
-    pub fn table_definition(config: &DynModeConfig, table_name: &str) -> TableDefinition {
-        table_definition(config, table_name)
-    }
-
-    /// Build the dynamic mode state and mutable memtable.
-    pub fn build(config: DynModeConfig) -> Result<(Self, DynMem), KeyExtractError> {
-        config.build()
     }
 }
 

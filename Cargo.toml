@@ -56,6 +56,7 @@ futures = "0.3"
 http = "0.2"
 lockable = "0.2"
 once_cell = "1"
+parking_lot = "0.12"
 parquet = { version = "56.2.0", default-features = false, features = [
     "async",
     "zstd",
@@ -137,12 +138,12 @@ required-features = ["tokio"]
 [[test]]
 name = "read_smoke"
 path = "tests/read_smoke.rs"
-required-features = ["tokio"]
+required-features = ["tokio", "test-helpers"]
 
 [[test]]
 name = "durability_public"
 path = "tests/durability_public.rs"
-required-features = ["tokio"]
+required-features = ["tokio", "test-helpers"]
 
 [[test]]
 name = "s3_smoke"

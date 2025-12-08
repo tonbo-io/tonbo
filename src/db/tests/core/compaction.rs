@@ -1,0 +1,900 @@
+use std::{collections::HashSet, fs, pin::Pin, sync::Arc};
+
+use arrow_schema::{DataType, Field, Schema};
+use fusio::{
+    DynFs,
+    disk::LocalFs,
+    dynamic::MaybeSendFuture,
+    executor::{NoopExecutor, tokio::TokioExecutor},
+    mem::fs::InMemoryFs,
+    path::Path,
+};
+use tokio::sync::Mutex;
+use typed_arrow_dyn::{DynCell, DynRow};
+
+use super::common::workspace_temp_dir;
+use crate::{
+    compaction::{
+        executor::{
+            CompactionError, CompactionExecutor, CompactionJob, CompactionOutcome,
+            LocalCompactionExecutor,
+        },
+        orchestrator,
+        planner::{
+            CompactionInput, CompactionPlanner, CompactionSnapshot, CompactionTask,
+            LeveledCompactionPlanner, LeveledPlannerConfig,
+        },
+    },
+    db::{DB, DbInner},
+    id::FileIdGenerator,
+    inmem::policy::BatchesThreshold,
+    manifest::{
+        ManifestError, SstEntry, TableId, TonboManifest, VersionEdit, VersionState, WalSegmentRef,
+    },
+    ondisk::sstable::{SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableId},
+    schema::SchemaBuilder,
+    test::build_batch,
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_compaction_returns_task() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let config = SchemaBuilder::from_schema(schema.clone())
+        .primary_key("id")
+        .with_metadata()
+        .build()
+        .expect("schema builder");
+    let schema = Arc::clone(&config.schema);
+    let executor = Arc::new(TokioExecutor::default());
+    let policy = Arc::new(BatchesThreshold { batches: 1 });
+    let mut db: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new_with_policy(config, Arc::clone(&executor), policy)
+            .await?
+            .into_inner();
+
+    let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_cfg = Arc::new(SsTableConfig::new(
+        Arc::clone(&schema),
+        fs,
+        Path::from("/tmp/plan-compaction"),
+    ));
+
+    for pass in 0..2 {
+        let rows = vec![vec![
+            Some(DynCell::Str(format!("comp-{pass}").into())),
+            Some(DynCell::I32(pass as i32)),
+        ]];
+        let batch = build_batch(Arc::clone(&schema), rows).expect("batch");
+        db.ingest(batch).await.expect("ingest");
+        let descriptor = SsTableDescriptor::new(SsTableId::new(pass as u64 + 1), 0);
+        db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor)
+            .await
+            .expect("flush");
+    }
+
+    let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
+        l0_trigger: 1,
+        l0_max_inputs: 2,
+        l0_max_bytes: None,
+        level_thresholds: vec![usize::MAX],
+        level_max_bytes: Vec::new(),
+        max_inputs_per_task: 2,
+        max_task_bytes: None,
+    });
+    let task = db
+        .plan_compaction_task(&planner)
+        .await?
+        .expect("compaction task");
+    assert_eq!(task.source_level, 0);
+    assert_eq!(task.target_level, 1);
+    assert_eq!(task.input.len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_compaction_empty_manifest_is_none() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let config = SchemaBuilder::from_schema(schema.clone())
+        .primary_key("id")
+        .with_metadata()
+        .build()
+        .expect("schema builder");
+    let executor = Arc::new(TokioExecutor::default());
+    let db: DB<InMemoryFs, TokioExecutor> = DB::new(config, Arc::clone(&executor)).await?;
+    let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig::default());
+    let plan = db.inner().plan_compaction_task(&planner).await?;
+    assert!(plan.is_none());
+    Ok(())
+}
+
+#[test]
+fn wal_segments_after_compaction_preserves_manifest_when_metadata_missing() {
+    let generator = FileIdGenerator::default();
+    let table_id = TableId::new(&generator);
+    let mut version = VersionState::empty(table_id);
+
+    let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
+    let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
+
+    let entry_missing_wal = SstEntry::new(SsTableId::new(1), None, None, Path::default(), None);
+    let entry_with_wal = SstEntry::new(
+        SsTableId::new(2),
+        None,
+        Some(vec![wal_b.file_id().clone()]),
+        Path::default(),
+        None,
+    );
+
+    version
+        .apply_edits(&[
+            VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry_missing_wal, entry_with_wal],
+            },
+            VersionEdit::SetWalSegments {
+                segments: vec![wal_a.clone(), wal_b.clone()],
+            },
+        ])
+        .expect("apply edits");
+
+    let wal_ids = orchestrator::wal_ids_for_remaining_ssts(&version, &HashSet::new(), &[]);
+    assert!(
+        wal_ids.is_none(),
+        "missing wal metadata on a remaining SST should preserve the manifest wal set"
+    );
+
+    let filtered = orchestrator::wal_segments_after_compaction(&version, &[], &[]);
+    assert!(
+        filtered.is_none(),
+        "compaction should not rewrite wal segments when metadata is absent"
+    );
+}
+
+#[test]
+fn wal_segments_after_compaction_filters_and_tracks_obsolete() {
+    let generator = FileIdGenerator::default();
+    let table_id = TableId::new(&generator);
+    let mut version = VersionState::empty(table_id);
+
+    let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
+    let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
+    let wal_c = WalSegmentRef::new(3, generator.generate(), 0, 0);
+
+    let entry_a = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
+        Path::default(),
+        None,
+    );
+    let entry_b = SstEntry::new(
+        SsTableId::new(2),
+        None,
+        Some(vec![wal_c.file_id().clone()]),
+        Path::default(),
+        None,
+    );
+
+    version
+        .apply_edits(&[
+            VersionEdit::AddSsts {
+                level: 0,
+                entries: vec![entry_a, entry_b],
+            },
+            VersionEdit::SetWalSegments {
+                segments: vec![wal_a.clone(), wal_b.clone(), wal_c.clone()],
+            },
+        ])
+        .expect("apply edits");
+
+    let removed = vec![
+        SsTableDescriptor::new(SsTableId::new(1), 0)
+            .with_storage_paths(Path::from("L0/1.parquet"), None),
+    ];
+    let added = vec![SsTableDescriptor::new(SsTableId::new(3), 0)];
+
+    assert_eq!(version.wal_segments().len(), 3);
+    assert!(
+        version.ssts()[0][0].wal_segments().is_some(),
+        "entry should carry wal segments"
+    );
+    assert!(
+        version.ssts()[0][1].wal_segments().is_some(),
+        "second entry should carry wal segments"
+    );
+    let removed_ids: HashSet<SsTableId> = removed.iter().map(|d| d.id().clone()).collect();
+    let wal_ids = orchestrator::wal_ids_for_remaining_ssts(&version, &removed_ids, &added);
+    assert!(
+        wal_ids.is_none(),
+        "wal ids should be None when any SST lacks wal metadata"
+    );
+    let filtered = orchestrator::wal_segments_after_compaction(&version, &removed, &added);
+    assert!(
+        filtered.is_none(),
+        "filtered wal segments should be None when any SST lacks wal metadata"
+    );
+
+    let outcome = CompactionOutcome {
+        add_ssts: Vec::new(),
+        remove_ssts: removed,
+        target_level: 0,
+        wal_segments: None,
+        tombstone_watermark: None,
+        outputs: added.clone(),
+        obsolete_sst_ids: Vec::new(),
+        wal_floor: None,
+        obsolete_wal_segments: vec![wal_a.clone(), wal_b.clone()],
+    };
+    let plan = orchestrator::gc_plan_from_outcome(&outcome)
+        .expect("gc plan")
+        .expect("plan present");
+    assert_eq!(plan.obsolete_wal_segments.len(), 2);
+    assert!(plan.obsolete_wal_segments.contains(&wal_a));
+    assert!(plan.obsolete_wal_segments.contains(&wal_b));
+}
+
+#[derive(Clone)]
+struct StaticPlanner {
+    task: CompactionTask,
+}
+
+impl CompactionPlanner for StaticPlanner {
+    fn plan(&self, _snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
+        Some(self.task.clone())
+    }
+}
+
+#[derive(Clone)]
+struct StaticExecutor {
+    outputs: Vec<SsTableDescriptor>,
+    wal_segments: Vec<WalSegmentRef>,
+    target_level: u32,
+}
+
+impl CompactionExecutor for StaticExecutor {
+    fn execute(
+        &self,
+        job: CompactionJob,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
+    {
+        let outputs = self.outputs.clone();
+        let wal_segments = self.wal_segments.clone();
+        let target_level = self.target_level;
+        Box::pin(async move {
+            let mut outcome = CompactionOutcome::from_outputs(
+                outputs.clone(),
+                job.inputs.clone(),
+                target_level,
+                Some(wal_segments),
+            )?;
+            outcome.outputs = outputs;
+            Ok(outcome)
+        })
+    }
+
+    fn cleanup_outputs<'a>(
+        &'a self,
+        _outputs: &'a [SsTableDescriptor],
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_updates_manifest_wal_and_records_gc_plan()
+-> Result<(), Box<dyn std::error::Error>> {
+    let generator = FileIdGenerator::default();
+    let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
+    let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
+
+    let entry_a = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        Some(vec![wal_a.file_id().clone(), wal_b.file_id().clone()]),
+        Path::from("L0/1.parquet"),
+        None,
+    );
+    let entry_b = SstEntry::new(
+        SsTableId::new(2),
+        None,
+        Some(vec![wal_b.file_id().clone()]),
+        Path::from("L0/2.parquet"),
+        None,
+    );
+
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[
+                VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![entry_a, entry_b],
+                },
+                VersionEdit::SetWalSegments {
+                    segments: vec![wal_a.clone(), wal_b.clone()],
+                },
+            ],
+        )
+        .await
+        .expect("apply edits");
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(1),
+            },
+            CompactionInput {
+                level: 0,
+                sst_id: SsTableId::new(2),
+            },
+        ],
+        key_range: None,
+    };
+    let planner = StaticPlanner { task };
+
+    let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
+        .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
+        .with_storage_paths(Path::from("L1/3.parquet"), None);
+    let executor = StaticExecutor {
+        outputs: vec![output_desc],
+        wal_segments: vec![wal_b.clone()],
+        target_level: 1,
+    };
+
+    let outcome = db
+        .inner()
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+
+    let snapshot = db
+        .inner()
+        .manifest
+        .snapshot_latest(db.inner().manifest_table)
+        .await?;
+    let latest = snapshot.latest_version.expect("latest version");
+    assert_eq!(latest.wal_segments().len(), 1);
+    assert_eq!(latest.wal_segments()[0].file_id(), wal_b.file_id());
+    assert_eq!(
+        outcome.obsolete_wal_segments,
+        vec![wal_a.clone()],
+        "should surface obsolete wal segments"
+    );
+
+    let plan = db
+        .inner()
+        .manifest
+        .take_gc_plan(db.inner().manifest_table)
+        .await?
+        .expect("gc plan recorded");
+    assert_eq!(plan.obsolete_wal_segments.len(), 1);
+    assert_eq!(plan.obsolete_wal_segments[0].file_id(), wal_a.file_id());
+    assert_eq!(plan.obsolete_ssts.len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_preserves_manifest_wal_when_metadata_missing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let generator = FileIdGenerator::default();
+    let wal_a = WalSegmentRef::new(1, generator.generate(), 0, 0);
+    let wal_b = WalSegmentRef::new(2, generator.generate(), 0, 0);
+
+    let entry_missing_wal = SstEntry::new(
+        SsTableId::new(1),
+        None,
+        None,
+        Path::from("L0/1.parquet"),
+        None,
+    );
+    let entry_with_wal = SstEntry::new(
+        SsTableId::new(2),
+        None,
+        Some(vec![wal_b.file_id().clone()]),
+        Path::from("L0/2.parquet"),
+        None,
+    );
+
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(
+        SchemaBuilder::from_schema(Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ])))
+        .primary_key("id")
+        .build()
+        .expect("schema builder"),
+        Arc::new(NoopExecutor),
+    )
+    .await
+    .expect("db init");
+
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[
+                VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![entry_missing_wal, entry_with_wal],
+                },
+                VersionEdit::SetWalSegments {
+                    segments: vec![wal_a.clone(), wal_b.clone()],
+                },
+            ],
+        )
+        .await
+        .expect("apply edits");
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![CompactionInput {
+            level: 0,
+            sst_id: SsTableId::new(2),
+        }],
+        key_range: None,
+    };
+    let planner = StaticPlanner { task };
+
+    let output_desc = SsTableDescriptor::new(SsTableId::new(3), 1)
+        .with_wal_ids(Some(vec![wal_b.file_id().clone()]))
+        .with_storage_paths(Path::from("L1/3.parquet"), None);
+    let executor = StaticExecutor {
+        outputs: vec![output_desc],
+        wal_segments: vec![wal_b.clone()],
+        target_level: 1,
+    };
+
+    let outcome = db
+        .inner()
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+
+    let snapshot = db
+        .inner()
+        .manifest
+        .snapshot_latest(db.inner().manifest_table)
+        .await?;
+    let latest = snapshot.latest_version.expect("latest version");
+    assert_eq!(
+        latest.wal_segments(),
+        &[wal_a.clone(), wal_b.clone()],
+        "manifest wal set should remain unchanged when wal metadata is missing",
+    );
+    assert!(
+        outcome.obsolete_wal_segments.is_empty(),
+        "should not surface obsolete wal segments when manifest set is preserved"
+    );
+
+    let plan = db
+        .inner()
+        .manifest
+        .take_gc_plan(db.inner().manifest_table)
+        .await?
+        .expect("gc plan recorded");
+    assert!(
+        plan.obsolete_wal_segments.is_empty(),
+        "gc plan should not mark wal segments obsolete"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_e2e_merges_and_advances_wal_floor() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("compaction-e2e-wal");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let extractor =
+        crate::extractor::projection_for_field(Arc::clone(&schema), 0).expect("extractor");
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+
+    let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_root = temp_root.join("sst");
+    fs::create_dir_all(&sst_root)?;
+    let sst_root = Path::from_filesystem_path(&sst_root)?;
+    let sst_cfg = Arc::new(
+        SsTableConfig::new(Arc::clone(&schema), fs, sst_root).with_key_extractor(extractor.into()),
+    );
+
+    // Build two SSTs with WAL ids.
+    let wal_gen = FileIdGenerator::default();
+    let wal_a = WalSegmentRef::new(10, wal_gen.generate(), 0, 0);
+    let wal_b = WalSegmentRef::new(11, wal_gen.generate(), 0, 0);
+
+    let batch_a = build_batch(
+        Arc::clone(&schema),
+        vec![DynRow(vec![
+            Some(DynCell::Str("a".into())),
+            Some(DynCell::I32(1)),
+        ])],
+    )?;
+    let imm_a = crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_a, "id")?;
+    let mut builder_a = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(1), 0),
+    );
+    builder_a.add_immutable(&imm_a)?;
+    let sst_a = builder_a.finish(NoopExecutor).await?;
+    let desc_a = sst_a
+        .descriptor()
+        .clone()
+        .with_wal_ids(Some(vec![wal_a.file_id().clone()]));
+
+    let batch_b = build_batch(
+        Arc::clone(&schema),
+        vec![DynRow(vec![
+            Some(DynCell::Str("b".into())),
+            Some(DynCell::I32(2)),
+        ])],
+    )?;
+    let imm_b = crate::inmem::immutable::memtable::segment_from_batch_with_key_name(batch_b, "id")?;
+    let mut builder_b = SsTableBuilder::new(
+        Arc::clone(&sst_cfg),
+        SsTableDescriptor::new(SsTableId::new(2), 0),
+    );
+    builder_b.add_immutable(&imm_b)?;
+    let sst_b = builder_b.finish(NoopExecutor).await?;
+    let desc_b = sst_b
+        .descriptor()
+        .clone()
+        .with_wal_ids(Some(vec![wal_b.file_id().clone()]));
+
+    // Seed manifest with the two inputs and WAL set.
+    let db: DB<InMemoryFs, NoopExecutor> = DB::new(mode_cfg, Arc::new(NoopExecutor)).await?;
+    let entry_a = SstEntry::new(
+        desc_a.id().clone(),
+        desc_a.stats().cloned(),
+        desc_a.wal_ids().map(|ids| ids.to_vec()),
+        desc_a
+            .data_path()
+            .expect("input descriptor missing data path")
+            .clone(),
+        desc_a.delete_path().cloned(),
+    );
+    let entry_b = SstEntry::new(
+        desc_b.id().clone(),
+        desc_b.stats().cloned(),
+        desc_b.wal_ids().map(|ids| ids.to_vec()),
+        desc_b
+            .data_path()
+            .expect("input descriptor missing data path")
+            .clone(),
+        desc_b.delete_path().cloned(),
+    );
+    db.inner()
+        .manifest
+        .apply_version_edits(
+            db.inner().manifest_table,
+            &[
+                VersionEdit::AddSsts {
+                    level: 0,
+                    entries: vec![entry_a, entry_b],
+                },
+                VersionEdit::SetWalSegments {
+                    segments: vec![wal_a.clone(), wal_b.clone()],
+                },
+            ],
+        )
+        .await?;
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![
+            CompactionInput {
+                level: 0,
+                sst_id: desc_a.id().clone(),
+            },
+            CompactionInput {
+                level: 0,
+                sst_id: desc_b.id().clone(),
+            },
+        ],
+        key_range: None,
+    };
+    let planner = StaticPlanner { task };
+    let executor = LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100)
+        .with_max_output_bytes(8 * 1024 * 1024);
+
+    let outcome = db
+        .inner()
+        .run_compaction_task(&planner, &executor)
+        .await?
+        .expect("compaction outcome");
+    assert_eq!(outcome.remove_ssts.len(), 2);
+    assert_eq!(outcome.add_ssts.len(), 1);
+    assert_eq!(
+        outcome
+            .add_ssts
+            .first()
+            .and_then(|e| e.wal_segments())
+            .map(|ids| ids.len()),
+        Some(2),
+        "output should aggregate wal ids"
+    );
+    assert_eq!(
+        outcome.wal_segments.as_ref().map(|segments| segments.len()),
+        Some(2),
+        "manifest wal set should retain gap when inputs have discontinuity"
+    );
+    assert_eq!(
+        outcome.wal_floor.as_ref().map(|w| w.seq()),
+        Some(wal_a.seq()),
+        "wal floor should reflect first retained segment when gaps exist"
+    );
+    assert_eq!(
+        outcome.obsolete_wal_segments.len(),
+        0,
+        "no wal segments should be obsolete when gaps are retained"
+    );
+
+    let snapshot = db
+        .inner()
+        .manifest
+        .snapshot_latest(db.inner().manifest_table)
+        .await?;
+    let latest = snapshot.latest_version.expect("latest version");
+    assert_eq!(latest.wal_segments().len(), 2);
+    let wal_ids: HashSet<_> = latest
+        .wal_segments()
+        .iter()
+        .map(|seg| seg.file_id().clone())
+        .collect();
+    assert!(wal_ids.contains(wal_a.file_id()));
+    assert!(wal_ids.contains(wal_b.file_id()));
+    assert_eq!(
+        latest.wal_floor().as_ref().map(|w| w.file_id()),
+        Some(wal_a.file_id()),
+        "wal floor should align to first retained segment"
+    );
+
+    let plan = db
+        .inner()
+        .manifest
+        .take_gc_plan(db.inner().manifest_table)
+        .await?
+        .expect("gc plan recorded");
+    assert_eq!(plan.obsolete_wal_segments.len(), 0);
+    assert!(
+        plan.obsolete_ssts.len() >= 1,
+        "gc plan should record obsolete ssts"
+    );
+
+    fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ConflictingExecutor {
+    inner: LocalCompactionExecutor,
+    manifest: TonboManifest<InMemoryFs, TokioExecutor>,
+    table: TableId,
+    outputs: Arc<Mutex<Vec<SsTableDescriptor>>>,
+}
+
+impl ConflictingExecutor {
+    fn new(
+        inner: LocalCompactionExecutor,
+        manifest: TonboManifest<InMemoryFs, TokioExecutor>,
+        table: TableId,
+        outputs: Arc<Mutex<Vec<SsTableDescriptor>>>,
+    ) -> Self {
+        Self {
+            inner,
+            manifest,
+            table,
+            outputs,
+        }
+    }
+}
+
+impl CompactionExecutor for ConflictingExecutor {
+    fn execute(
+        &self,
+        job: CompactionJob,
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionOutcome, CompactionError>> + '_>>
+    {
+        let inner = self.inner.clone();
+        let manifest = self.manifest.clone();
+        let table = self.table;
+        let outputs = Arc::clone(&self.outputs);
+        Box::pin(async move {
+            let outcome = inner.execute(job).await?;
+            {
+                let mut guard = outputs.lock().await;
+                guard.clear();
+                guard.extend(outcome.outputs.iter().cloned());
+            }
+            manifest
+                .apply_version_edits(
+                    table,
+                    &[VersionEdit::SetWalSegments {
+                        segments: Vec::new(),
+                    }],
+                )
+                .await
+                .map_err(CompactionError::Manifest)?;
+            Ok(outcome)
+        })
+    }
+
+    fn cleanup_outputs<'a>(
+        &'a self,
+        outputs: &'a [SsTableDescriptor],
+    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionError>> + 'a>> {
+        self.inner.cleanup_outputs(outputs)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_cas_conflict_cleans_outputs() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_root = workspace_temp_dir("compaction-cas-cleanup");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let mode_cfg = SchemaBuilder::from_schema(Arc::clone(&schema))
+        .primary_key("id")
+        .build()
+        .expect("schema builder");
+    let extractor = Arc::clone(&mode_cfg.extractor);
+    let schema = Arc::clone(&mode_cfg.schema);
+    let executor = Arc::new(TokioExecutor::default());
+    let policy = Arc::new(BatchesThreshold { batches: 1 });
+    let mut db: DbInner<InMemoryFs, TokioExecutor> =
+        DB::new_with_policy(mode_cfg, Arc::clone(&executor), policy)
+            .await?
+            .into_inner();
+
+    let sst_root = temp_root.join("sst");
+    fs::create_dir_all(&sst_root)?;
+    let sst_root = Path::from_filesystem_path(&sst_root)?;
+    let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
+    let sst_cfg = Arc::new(
+        SsTableConfig::new(Arc::clone(&schema), sst_fs.clone(), sst_root)
+            .with_key_extractor(extractor),
+    );
+
+    for idx in 0..2 {
+        let rows = vec![vec![
+            Some(DynCell::Str(format!("ck-{idx}").into())),
+            Some(DynCell::I32(idx as i32)),
+        ]];
+        let batch = build_batch(Arc::clone(&schema), rows)?;
+        db.ingest(batch).await?;
+        let descriptor = SsTableDescriptor::new(SsTableId::new(idx as u64 + 1), 0);
+        db.flush_immutables_with_descriptor(Arc::clone(&sst_cfg), descriptor)
+            .await?;
+    }
+
+    let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig {
+        l0_trigger: 1,
+        l0_max_inputs: 2,
+        l0_max_bytes: None,
+        level_thresholds: vec![usize::MAX],
+        level_max_bytes: Vec::new(),
+        max_inputs_per_task: 2,
+        max_task_bytes: None,
+    });
+    let recorded_outputs = Arc::new(Mutex::new(Vec::new()));
+    let conflicting_executor = ConflictingExecutor::new(
+        LocalCompactionExecutor::new(Arc::clone(&sst_cfg), 100),
+        db.manifest.clone(),
+        db.manifest_table,
+        Arc::clone(&recorded_outputs),
+    );
+
+    let result = db
+        .run_compaction_task(&planner, &conflicting_executor)
+        .await;
+    match result {
+        Err(CompactionError::Manifest(ManifestError::CasConflict(_)))
+        | Err(CompactionError::CasConflict) => {}
+        other => panic!("expected CAS conflict, got {other:?}"),
+    }
+
+    let outputs = recorded_outputs.lock().await.clone();
+    assert!(
+        !outputs.is_empty(),
+        "compaction should have produced outputs before CAS conflict"
+    );
+    for desc in outputs {
+        if let Some(path) = desc.data_path() {
+            assert!(
+                sst_fs.open(path).await.is_err(),
+                "data file should be cleaned up"
+            );
+        }
+        if let Some(path) = desc.delete_path() {
+            assert!(
+                sst_fs.open(path).await.is_err(),
+                "delete file should be cleaned up"
+            );
+        }
+    }
+
+    fs::remove_dir_all(&temp_root)?;
+    Ok(())
+}
+
+#[test]
+fn resolve_compaction_inputs_keeps_levels() {
+    let file_ids = FileIdGenerator::default();
+    let table_id = TableId::new(&file_ids);
+    let mut version = VersionState::empty(table_id);
+    let l0_id = SsTableId::new(1);
+    let l1_id = SsTableId::new(2);
+    let edits = vec![
+        VersionEdit::AddSsts {
+            level: 0,
+            entries: vec![SstEntry::new(
+                l0_id.clone(),
+                None,
+                None,
+                Path::from("L0/000.parquet"),
+                None,
+            )],
+        },
+        VersionEdit::AddSsts {
+            level: 1,
+            entries: vec![SstEntry::new(
+                l1_id.clone(),
+                None,
+                None,
+                Path::from("L1/001.parquet"),
+                None,
+            )],
+        },
+    ];
+    version.apply_edits(&edits).expect("apply edits");
+
+    let task = CompactionTask {
+        source_level: 0,
+        target_level: 1,
+        input: vec![
+            CompactionInput {
+                level: 0,
+                sst_id: l0_id,
+            },
+            CompactionInput {
+                level: 1,
+                sst_id: l1_id,
+            },
+        ],
+        key_range: None,
+    };
+
+    let resolved = orchestrator::resolve_inputs(&version, &task).expect("resolve");
+    assert_eq!(resolved.len(), 2);
+    assert_eq!(resolved[0].level(), 0);
+    assert_eq!(resolved[1].level(), 1);
+}

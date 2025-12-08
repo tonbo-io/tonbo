@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DbBuilder},
     query::{ColumnRef, Predicate},
@@ -44,23 +43,17 @@ async fn main() {
         .expect("metadata config")
         .in_memory("dynamic-metadata")
         .expect("in_memory config")
-        .build_with_executor(Arc::clone(&executor))
+        .open_with_executor(Arc::clone(&executor))
         .await
         .expect("metadata ok");
     db.ingest(batch).await.expect("insert");
 
     // Scan all rows using a trivial predicate
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
-    let snapshot = db.begin_snapshot().await.expect("snapshot");
-    let plan = snapshot
-        .plan_scan(&db, &pred, None, None)
-        .await
-        .expect("plan");
     let rows: Vec<(String, i32)> = db
-        .execute_scan(plan)
-        .await
-        .expect("execute")
-        .try_collect::<Vec<_>>()
+        .scan()
+        .filter(pred)
+        .collect()
         .await
         .expect("collect")
         .into_iter()

@@ -20,7 +20,10 @@ use typed_arrow_dyn::{
 #[cfg(all(test, feature = "tokio"))]
 use crate::manifest::{TableHead, VersionState};
 use crate::{
-    db::{DB, DBError, DynDbHandle, ScanBuilder, ScanContext, TxnWalPublishContext, WalFrameRange},
+    db::{
+        DBError, DbInner, DynDbHandle, ScanBuilder, ScanContext, TxnWalPublishContext,
+        WalFrameRange,
+    },
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
     key::{KeyOwned, KeyTsViewRaw},
     manifest::{ManifestError, TableSnapshot, VersionEdit},
@@ -338,7 +341,7 @@ where
 impl<FS, E> Transaction<FS, E>
 where
     FS: crate::manifest::ManifestFs<E>,
-    E: Executor + Timer + Clone,
+    E: Executor + Timer + Clone + 'static,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     pub(crate) fn new(
@@ -440,7 +443,7 @@ where
                 DynMutation::Delete(_) => None,
             });
         }
-        let rows = self.read_mutable_rows(&self.handle)?;
+        let rows = self.read_mutable_rows(&*self.handle)?;
         Ok(rows.get(key).map(clone_dyn_row))
     }
 
@@ -507,7 +510,7 @@ where
 
     fn read_mutable_rows<C>(
         &self,
-        db: &DB<C, E>,
+        db: &DbInner<C, E>,
     ) -> Result<BTreeMap<KeyOwned, DynRow>, TransactionError>
     where
         C: crate::manifest::ManifestFs<E>,
@@ -604,17 +607,24 @@ where
                 CommitAckMode::Strict => {
                     let publish_ctx = db.txn_publish_context(prev_live_floor);
                     let wal_range = tickets.await_range().await?;
+                    // Record WAL range BEFORE apply that may trigger auto-seal.
+                    // If we record after, a sealed segment would miss this transaction's frames.
+                    publish_ctx.record_wal_range(&wal_range);
                     apply_staged_payloads(
-                        &db,
+                        &*db,
                         upsert_payload.take(),
                         delete_payload.take(),
                         commit_ts,
                     )?;
-                    publish_ctx.finalize(wal_range).await?;
+                    publish_ctx.finalize_manifest(wal_range).await?;
                 }
                 CommitAckMode::Fast => {
+                    // NOTE: Fast mode has a known limitation - if auto-seal triggers during
+                    // apply_staged_payloads, the sealed segment's WAL range won't include this
+                    // transaction's frames (they're recorded asynchronously). This is acceptable
+                    // for Fast mode as it prioritizes latency over strict durability ordering.
                     apply_staged_payloads(
-                        &db,
+                        &*db,
                         upsert_payload.take(),
                         delete_payload.take(),
                         commit_ts,
@@ -636,7 +646,12 @@ where
                      exits"
                 );
             }
-            apply_staged_payloads(&db, upsert_payload.take(), delete_payload.take(), commit_ts)?;
+            apply_staged_payloads(
+                &*db,
+                upsert_payload.take(),
+                delete_payload.take(),
+                commit_ts,
+            )?;
         }
 
         drop(key_guards);
@@ -688,7 +703,7 @@ fn build_delete_batch(
 }
 
 fn apply_staged_payloads<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     upserts: Option<RecordBatch>,
     deletes: Option<RecordBatch>,
     commit_ts: Timestamp,
@@ -720,12 +735,11 @@ mod tests {
     use arrow_array::{Int32Array, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-    use futures::TryStreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        db::{DynDbHandle, DynDbHandleExt},
+        db::DB,
         inmem::policy::BatchesThreshold,
         mode::DynModeConfig,
         mvcc::Timestamp,
@@ -734,14 +748,15 @@ mod tests {
     };
 
     type TestTx = Transaction<InMemoryFs, NoopExecutor>;
+    type TestDb = DB<InMemoryFs, NoopExecutor>;
 
-    async fn make_db() -> (DynDbHandle<InMemoryFs, NoopExecutor>, SchemaRef) {
+    async fn make_db() -> (TestDb, SchemaRef) {
         make_db_with_policy(None).await
     }
 
     async fn make_db_with_policy(
         policy: Option<Arc<dyn crate::inmem::policy::SealPolicy + Send + Sync>>,
-    ) -> (DynDbHandle<InMemoryFs, NoopExecutor>, SchemaRef) {
+    ) -> (TestDb, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -750,21 +765,18 @@ mod tests {
             crate::extractor::projection_for_field(schema.clone(), 0).expect("extractor");
         let config = DynModeConfig::new(schema.clone(), extractor).expect("config");
         let executor = Arc::new(NoopExecutor);
-        let mut db = DB::new(config, executor).await.expect("db");
-        if let Some(policy) = policy {
-            db.set_seal_policy(policy);
-        }
-        (db.into_shared(), schema)
+        let db = match policy {
+            Some(p) => DB::new_with_policy(config, executor, p).await.expect("db"),
+            None => DB::new(config, executor).await.expect("db"),
+        };
+        (db, schema)
     }
 
-    async fn ingest_rows(
-        db: &DynDbHandle<InMemoryFs, NoopExecutor>,
-        schema: &SchemaRef,
-        rows: Vec<DynRow>,
-    ) {
+    async fn ingest_rows(db: &TestDb, schema: &SchemaRef, rows: Vec<DynRow>) {
         let tombstones = vec![false; rows.len()];
         let batch = build_batch(schema.clone(), rows).expect("batch");
-        db.ingest_with_tombstones(batch, tombstones)
+        db.inner()
+            .ingest_with_tombstones(batch, tombstones)
             .await
             .expect("ingest");
     }
@@ -960,7 +972,7 @@ mod tests {
             ])],
         )
         .await;
-        assert!(db.num_immutable_segments() >= 1);
+        assert!(db.inner().num_immutable_segments() >= 1);
 
         let tx: TestTx = db.begin_transaction().await.expect("tx");
         let predicate = all_rows_predicate();
@@ -1034,16 +1046,10 @@ mod tests {
             .expect("commit should succeed without wal");
 
         let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
-        let snapshot = db.begin_snapshot().await.expect("snapshot");
-        let plan = snapshot
-            .plan_scan(&db, &predicate, None, None)
-            .await
-            .expect("plan");
         let batches = db
-            .execute_scan(plan)
-            .await
-            .expect("execute")
-            .try_collect::<Vec<_>>()
+            .scan()
+            .filter(predicate)
+            .collect()
             .await
             .expect("collect");
 
@@ -1279,18 +1285,28 @@ where
     E: Executor + Timer + Clone + 'static,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    async fn finalize(&self, wal_range: WalFrameRange) -> Result<(), TransactionCommitError> {
-        {
-            let mut guard = self
-                .mutable_wal_range
-                .lock()
-                .expect("mutable wal range lock poisoned");
-            match &mut *guard {
-                Some(existing) => existing.extend(&wal_range),
-                None => *guard = Some(wal_range),
-            }
+    /// Record WAL range to the mutable memtable's accumulated range.
+    ///
+    /// This must be called BEFORE any operation that may trigger auto-seal,
+    /// otherwise the sealed segment's WAL range would be incomplete.
+    fn record_wal_range(&self, wal_range: &WalFrameRange) {
+        let mut guard = self
+            .mutable_wal_range
+            .lock()
+            .expect("mutable wal range lock poisoned");
+        match &mut *guard {
+            Some(existing) => existing.extend(wal_range),
+            None => *guard = Some(*wal_range),
         }
+    }
 
+    /// Update manifest with WAL segment information.
+    ///
+    /// Call this after memtable operations to persist WAL segment metadata.
+    async fn finalize_manifest(
+        &self,
+        wal_range: WalFrameRange,
+    ) -> Result<(), TransactionCommitError> {
         let live_floor = match (self.prev_live_floor, Some(wal_range.first)) {
             (Some(prev), Some(current)) => Some(prev.min(current)),
             (Some(prev), None) => Some(prev),
@@ -1333,6 +1349,15 @@ where
         }
 
         Ok(())
+    }
+
+    /// Combined record and finalize for async publish tasks.
+    ///
+    /// This is used by the Fast mode async task which handles both
+    /// WAL range recording and manifest update together.
+    async fn finalize(&self, wal_range: WalFrameRange) -> Result<(), TransactionCommitError> {
+        self.record_wal_range(&wal_range);
+        self.finalize_manifest(wal_range).await
     }
 }
 

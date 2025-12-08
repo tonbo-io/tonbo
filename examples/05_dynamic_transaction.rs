@@ -3,7 +3,7 @@
 use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use futures::StreamExt;
 use tonbo::{
-    db::{DbBuilder, DynDbHandle, DynDbHandleExt},
+    db::{DB, DbBuilder},
     query::{ColumnRef, Predicate, ScalarValue},
     transaction::CommitAckMode,
 };
@@ -32,10 +32,9 @@ async fn main() {
         .on_disk("/tmp/tonbo")
         .expect("on_disk")
         .create_dirs(true)
-        .recover_or_init()
+        .open()
         .await
-        .expect("build db")
-        .into_shared();
+        .expect("open db");
 
     // // Build a RecordBatch using typed-arrow row builders.
     // let rows = vec![
@@ -89,16 +88,13 @@ async fn main() {
     println!("committed rows: {:?}", committed);
 }
 
-async fn scan_pairs(
-    db: &DynDbHandle<LocalFs, TokioExecutor>,
-    predicate: &Predicate,
-) -> Vec<(String, i32)> {
-    let snapshot = db.begin_snapshot().await.expect("snapshot");
-    let plan = snapshot
-        .plan_scan(db, predicate, None, None)
+async fn scan_pairs(db: &DB<LocalFs, TokioExecutor>, predicate: &Predicate) -> Vec<(String, i32)> {
+    let mut stream = db
+        .scan()
+        .filter(predicate.clone())
+        .stream()
         .await
-        .expect("plan");
-    let mut stream = db.execute_scan(plan).await.expect("exec");
+        .expect("scan");
     let mut out = Vec::new();
     while let Some(batch) = stream.next().await {
         let batch = batch.expect("batch");

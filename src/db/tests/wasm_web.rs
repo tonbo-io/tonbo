@@ -12,7 +12,6 @@ use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 use super::{AwsCreds, DB, ObjectSpec, S3Spec};
 use crate::{
     inmem::policy::BatchesThreshold,
-    mode::DynMode,
     mvcc::Timestamp,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId, SsTableReader},
     schema::SchemaBuilder,
@@ -52,7 +51,7 @@ async fn web_s3_roundtrip_wal_and_sstable() {
         .object_store(ObjectSpec::s3(s3_spec))
         .expect("object_store config")
         .wal_sync_policy(WalSyncPolicy::Always)
-        .build_with_executor(Arc::clone(&exec))
+        .open_with_executor(Arc::clone(&exec))
         .await
         .expect("build web db");
 
@@ -100,7 +99,7 @@ async fn web_s3_roundtrip_wal_and_sstable() {
         .expect("open sstable reader");
 
     let mut stream = reader
-        .into_stream(Timestamp::MAX, None)
+        .into_stream(Timestamp::MAX, None, Arc::clone(&exec))
         .await
         .expect("open stream");
 

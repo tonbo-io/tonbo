@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{Schema, SchemaRef};
@@ -15,8 +15,8 @@ pub(crate) const MVCC_TOMBSTONE_COL: &str = "_tombstone";
 
 /// Read-only immutable memtable backed by Arrow storage and MVCC metadata.
 #[derive(Debug)]
-pub(crate) struct ImmutableMemTable<S> {
-    storage: S,
+pub(crate) struct ImmutableMemTable {
+    storage: RecordBatch,
     index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry>,
     mvcc: MvccColumns,
     deletes: DeleteSidecar,
@@ -87,9 +87,9 @@ impl DeleteSidecar {
     }
 }
 
-impl<S> ImmutableMemTable<S> {
+impl ImmutableMemTable {
     pub(crate) fn new(
-        storage: S,
+        storage: RecordBatch,
         index: BTreeMap<KeyTsViewRaw, ImmutableIndexEntry>,
         mvcc: MvccColumns,
         deletes: DeleteSidecar,
@@ -107,7 +107,7 @@ impl<S> ImmutableMemTable<S> {
         self.index.len()
     }
 
-    pub(crate) fn storage(&self) -> &S {
+    pub(crate) fn storage(&self) -> &RecordBatch {
         &self.storage
     }
 
@@ -124,7 +124,7 @@ impl<S> ImmutableMemTable<S> {
             .any(|(view, _)| view.timestamp() > snapshot_ts)
     }
 
-    pub(crate) fn row_iter(&self) -> ImmutableRowIter<'_, S> {
+    pub(crate) fn row_iter(&self) -> ImmutableRowIter {
         ImmutableRowIter::new(self)
     }
 
@@ -152,10 +152,7 @@ impl<S> ImmutableMemTable<S> {
         &'t self,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
-    ) -> Result<ImmutableVisibleScan<'t, S>, KeyExtractError>
-    where
-        S: RecordBatchStorage,
-    {
+    ) -> Result<ImmutableVisibleScan<'t>, KeyExtractError> {
         ImmutableVisibleScan::new(self, projection_schema, read_ts)
     }
 }
@@ -182,8 +179,8 @@ pub(crate) fn bundle_mvcc_sidecar(
     Ok((batch, mvcc))
 }
 
-pub(crate) struct ImmutableVisibleScan<'t, S> {
-    table: &'t ImmutableMemTable<S>,
+pub(crate) struct ImmutableVisibleScan<'t> {
+    table: &'t ImmutableMemTable,
     iter: std::collections::btree_map::Iter<'t, KeyTsViewRaw, ImmutableIndexEntry>,
     read_ts: Timestamp,
     current_key: Option<KeyRow>,
@@ -207,7 +204,7 @@ impl ImmutableVisibleEntry {
     }
 }
 
-impl<'t, S> fmt::Debug for ImmutableVisibleScan<'t, S> {
+impl fmt::Debug for ImmutableVisibleScan<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ImmutableVisibleScan")
             .field("read_ts", &self.read_ts)
@@ -216,16 +213,13 @@ impl<'t, S> fmt::Debug for ImmutableVisibleScan<'t, S> {
     }
 }
 
-impl<'t, S> ImmutableVisibleScan<'t, S>
-where
-    S: RecordBatchStorage,
-{
+impl<'t> ImmutableVisibleScan<'t> {
     fn new(
-        table: &'t ImmutableMemTable<S>,
+        table: &'t ImmutableMemTable,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<Self, KeyExtractError> {
-        let base_schema = table.storage.as_record_batch().schema();
+        let base_schema = table.storage.schema();
         let dyn_schema = DynSchema::from_ref(base_schema.clone());
         let projection = build_projection(&base_schema, projection_schema.as_ref())?;
         Ok(Self {
@@ -240,10 +234,7 @@ where
     }
 }
 
-impl<'t, S> Iterator for ImmutableVisibleScan<'t, S>
-where
-    S: RecordBatchStorage,
-{
+impl<'t> Iterator for ImmutableVisibleScan<'t> {
     type Item = Result<ImmutableVisibleEntry, DynViewError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -282,7 +273,7 @@ where
                         self.emitted_for_key = true;
                         return Some(Ok(ImmutableVisibleEntry::Tombstone(view.clone())));
                     }
-                    let batch = self.table.storage.as_record_batch();
+                    let batch = &self.table.storage;
                     let row_idx = *row_idx as usize;
                     let row =
                         match self
@@ -339,9 +330,8 @@ fn build_projection(
     DynProjection::from_schema(schema.as_ref(), logical_schema.as_ref()).map_err(map_view_err)
 }
 
-pub(crate) struct ImmutableRowIter<'t, S> {
+pub(crate) struct ImmutableRowIter {
     iter: std::vec::IntoIter<ImmutableRowEntry>,
-    _marker: PhantomData<&'t S>,
 }
 
 pub(crate) struct ImmutableRowEntry {
@@ -350,8 +340,8 @@ pub(crate) struct ImmutableRowEntry {
     pub tombstone: bool,
 }
 
-impl<'t, S> ImmutableRowIter<'t, S> {
-    fn new(table: &'t ImmutableMemTable<S>) -> Self {
+impl ImmutableRowIter {
+    fn new(table: &ImmutableMemTable) -> Self {
         let mut rows: Vec<ImmutableRowEntry> = table
             .index
             .iter()
@@ -367,12 +357,11 @@ impl<'t, S> ImmutableRowIter<'t, S> {
         });
         Self {
             iter: rows.into_iter(),
-            _marker: PhantomData,
         }
     }
 }
 
-impl<'t, S> Iterator for ImmutableRowIter<'t, S> {
+impl Iterator for ImmutableRowIter {
     type Item = ImmutableRowEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -415,7 +404,7 @@ mod tests {
     pub(crate) fn segment_from_batch_with_extractor(
         batch: RecordBatch,
         extractor: &dyn KeyProjection,
-    ) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
+    ) -> Result<ImmutableMemTable, KeyExtractError> {
         extractor.validate_schema(&batch.schema())?;
         let len = batch.num_rows();
         let commit_ts = vec![Timestamp::MIN; len];
@@ -445,7 +434,7 @@ mod tests {
     pub(crate) fn segment_from_batch_with_key_col(
         batch: RecordBatch,
         key_col: usize,
-    ) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
+    ) -> Result<ImmutableMemTable, KeyExtractError> {
         let schema = batch.schema();
         let fields = schema.fields();
         if key_col >= fields.len() {
@@ -459,7 +448,7 @@ mod tests {
     pub(crate) fn segment_from_batch_with_key_name(
         batch: RecordBatch,
         key_field: &str,
-    ) -> Result<ImmutableMemTable<RecordBatch>, KeyExtractError> {
+    ) -> Result<ImmutableMemTable, KeyExtractError> {
         let schema = batch.schema();
         let fields = schema.fields();
         let Some((idx, _)) = fields
@@ -649,42 +638,44 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
         ]));
-        let mut mutable = DynMem::new(schema.clone());
-        let extractor =
-            projection_for_field(schema.clone(), 0).expect("mutable delete test extractor");
+        let extractor: std::sync::Arc<dyn crate::extractor::KeyProjection> =
+            projection_for_field(schema.clone(), 0)
+                .expect("mutable delete test extractor")
+                .into();
+        let delete_schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
+        ]));
+        let delete_projection: std::sync::Arc<dyn crate::extractor::KeyProjection> =
+            projection_for_columns(delete_schema.clone(), vec![0])
+                .expect("delete projection")
+                .into();
+        let mutable = DynMem::new(schema.clone(), extractor, delete_projection);
 
-        let insert_value = |mem: &mut DynMem, value: i32, ts: u64| {
+        let insert_value = |mem: &DynMem, value: i32, ts: u64| {
             let rows = vec![DynRow(vec![
                 Some(DynCell::Str("k".into())),
                 Some(DynCell::I32(value)),
             ])];
             let batch: RecordBatch = build_batch(schema.clone(), rows).expect("insert batch");
-            mem.insert_batch(extractor.as_ref(), batch, Timestamp::new(ts))
+            mem.insert_batch(batch, Timestamp::new(ts))
                 .expect("insert value");
         };
 
-        insert_value(&mut mutable, 1, 10);
+        insert_value(&mutable, 1, 10);
 
-        let delete_schema = std::sync::Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
-        ]));
-        let delete_projection =
-            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
         let delete_rows = vec![DynRow(vec![
             Some(DynCell::Str("k".into())),
             Some(DynCell::U64(20)),
         ])];
         let delete_batch: RecordBatch =
             build_batch(delete_schema.clone(), delete_rows).expect("delete batch");
-        mutable
-            .insert_delete_batch(delete_projection.as_ref(), delete_batch)
-            .expect("delete");
+        mutable.insert_delete_batch(delete_batch).expect("delete");
 
-        insert_value(&mut mutable, 3, 30);
+        insert_value(&mutable, 3, 30);
 
         let segment = mutable
-            .seal_into_immutable(&schema, extractor.as_ref())
+            .seal_now()
             .expect("seal immutable")
             .expect("segment");
 
@@ -715,7 +706,7 @@ mod tests {
             .collect();
         assert_eq!(rows_after_reinsert.len(), 1);
         match rows_after_reinsert[0].0[1].as_ref() {
-            Some(DynCell::I32(v)) => assert_eq!(*v, 3),
+            Some(DynCell::I32(v)) => assert_eq!(v, &3),
             other => panic!("unexpected cell {other:?}"),
         }
     }
@@ -821,14 +812,5 @@ mod tests {
         assert_eq!(min_key.as_deref(), Some("a"));
         assert_eq!(max_key.as_deref(), Some("b"));
         assert_eq!(seg.len(), 3);
-    }
-}
-pub(crate) trait RecordBatchStorage {
-    fn as_record_batch(&self) -> &RecordBatch;
-}
-
-impl RecordBatchStorage for RecordBatch {
-    fn as_record_batch(&self) -> &RecordBatch {
-        self
     }
 }

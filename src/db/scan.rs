@@ -8,7 +8,7 @@ use predicate::Predicate;
 use typed_arrow_dyn::DynRow;
 
 use crate::{
-    db::DB,
+    db::DbInner,
     extractor::KeyExtractError,
     inmem::{
         immutable::{self, ImmutableSegment, memtable::ImmutableVisibleEntry},
@@ -18,8 +18,8 @@ use crate::{
     mutation::DynMutation,
     mvcc::Timestamp,
     ondisk::{
-        scan::{SstableScan, load_delete_index},
-        sstable::{SsTableError, open_parquet_stream},
+        scan::{DeleteStreamWithExtractor, SstableScan},
+        sstable::open_parquet_stream,
     },
     query::{
         scan::{ScanPlan, projection_with_predicate},
@@ -36,9 +36,9 @@ pub const DEFAULT_SCAN_BATCH_ROWS: usize = 1024;
 
 impl TxSnapshot {
     /// Plan a scan using this snapshot for MVCC visibility and manifest pinning.
-    pub async fn plan_scan<FS, E>(
+    pub(crate) async fn plan_scan<FS, E>(
         &self,
-        db: &DB<FS, E>,
+        db: &DbInner<FS, E>,
         predicate: &Predicate,
         projected_schema: Option<&SchemaRef>,
         limit: Option<usize>,
@@ -73,13 +73,14 @@ impl TxSnapshot {
     }
 }
 
-impl<FS, E> DB<FS, E>
+impl<FS, E> DbInner<FS, E>
 where
     FS: crate::manifest::ManifestFs<E>,
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Execute the scan plan with MVCC visibility
+    #[allow(dead_code)]
     pub async fn execute_scan<'a>(
         &'a self,
         plan: ScanPlan,
@@ -128,14 +129,14 @@ where
         &'a self,
         plan: &ScanPlan,
         txn_scan: Option<TransactionScan<'a>>,
-    ) -> Result<Vec<ScanStream<'a, RecordBatch>>, crate::db::DBError> {
+    ) -> Result<Vec<ScanStream<'a, E>>, crate::db::DBError> {
         let mut streams = Vec::new();
         if let Some(txn_scan) = txn_scan {
             streams.push(ScanStream::from(txn_scan));
         }
         let projection_schema = Arc::clone(&plan.scan_schema);
         let mutable_scan = OwnedMutableScan::from_guard(
-            self.mem_read(),
+            self.mem.read(),
             Some(Arc::clone(&projection_schema)),
             plan.read_ts,
         )?;
@@ -160,40 +161,29 @@ where
         // Add SSTable scans for each SST entry in the plan
         for sst_entry in plan.sst_entries() {
             let data_path = sst_entry.data_path().clone();
-            let data_stream = open_parquet_stream(Arc::clone(&self.fs), data_path, None)
+            let executor: E = (**self.executor()).clone();
+            let data_stream =
+                open_parquet_stream(Arc::clone(&self.fs), data_path, None, executor.clone())
+                    .await
+                    .map_err(crate::db::DBError::SsTable)?;
+
+            // Open delete sidecar stream if present (streaming merge, no eager loading)
+            let delete_stream_with_extractor = if let Some(delete_path) = sst_entry.delete_path() {
+                let stream = open_parquet_stream(
+                    Arc::clone(&self.fs),
+                    delete_path.clone(),
+                    None,
+                    executor.clone(),
+                )
                 .await
                 .map_err(crate::db::DBError::SsTable)?;
-
-            // Load delete sidecar if present
-            let delete_index = if let Some(delete_path) = sst_entry.delete_path() {
-                let delete_stream =
-                    open_parquet_stream(Arc::clone(&self.fs), delete_path.clone(), None)
-                        .await
-                        .map_err(crate::db::DBError::SsTable)?;
-                // Collect all delete batches and build index
-                use futures::StreamExt;
-                let mut delete_stream = std::pin::pin!(delete_stream);
-                let mut index = std::collections::BTreeMap::new();
-                while let Some(batch_result) = delete_stream.next().await {
-                    let batch = batch_result
-                        .map_err(|e| crate::db::DBError::SsTable(SsTableError::Parquet(e)))?;
-                    let batch_index =
-                        load_delete_index(&batch, self.extractor.as_ref()).map_err(|e| {
-                            crate::db::DBError::Stream(crate::query::stream::StreamError::SsTable(
-                                e,
-                            ))
-                        })?;
-                    for (key, ts) in batch_index {
-                        // Keep the latest (max) delete timestamp for each key across batches
-                        index
-                            .entry(key)
-                            .and_modify(|cur: &mut crate::mvcc::Timestamp| *cur = (*cur).max(ts))
-                            .or_insert(ts);
-                    }
-                }
-                index
+                // Delete sidecar uses key-only schema
+                Some(DeleteStreamWithExtractor {
+                    stream,
+                    extractor: self.delete_extractor().as_ref(),
+                })
             } else {
-                std::collections::BTreeMap::new()
+                None
             };
 
             // Calculate projection indices for user columns (exclude _commit_ts)
@@ -201,11 +191,11 @@ where
 
             let sstable_scan = SstableScan::new(
                 data_stream,
-                self.extractor.as_ref(),
+                delete_stream_with_extractor,
+                self.extractor().as_ref(),
                 projection_indices,
                 Some(Order::Asc),
                 plan.read_ts,
-                delete_index,
             );
 
             streams.push(ScanStream::from(sstable_scan));
@@ -246,7 +236,7 @@ where
         read_ts: Timestamp,
     ) -> Result<Vec<(KeyRow, DynRow)>, KeyExtractError> {
         let mut rows = Vec::new();
-        let mem = self.mem_read();
+        let mem = self.mem.read();
         let scan = mem.scan_visible(None, read_ts)?;
         for entry in scan {
             match entry {
@@ -267,6 +257,7 @@ where
     }
 
     /// Begin building a scan query with fluent API.
+    #[allow(dead_code)]
     pub fn scan(&self) -> ScanBuilder<'_, FS, E> {
         ScanBuilder::new(self)
     }
@@ -313,7 +304,7 @@ where
     E: Executor + Timer + Clone + 'static,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    db: &'a DB<FS, E>,
+    db: &'a DbInner<FS, E>,
     /// Transaction context (snapshot + staging). None for DB-level scans.
     context: Option<ScanContext<'a>>,
     predicate: Option<Predicate>,
@@ -328,7 +319,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Create a new scan builder for DB-level scans (no staging buffer).
-    pub(crate) fn new(db: &'a DB<FS, E>) -> Self {
+    pub(crate) fn new(db: &'a DbInner<FS, E>) -> Self {
         Self {
             db,
             context: None,
@@ -339,7 +330,7 @@ where
     }
 
     /// Create a new scan builder with transaction context (includes staging buffer).
-    pub(crate) fn with_context(db: &'a DB<FS, E>, context: ScanContext<'a>) -> Self {
+    pub(crate) fn with_context(db: &'a DbInner<FS, E>, context: ScanContext<'a>) -> Self {
         Self {
             db,
             context: Some(context),
@@ -447,7 +438,7 @@ where
 }
 
 async fn execute_with_txn_scan<'a, FS, E>(
-    db: &'a DB<FS, E>,
+    db: &'a DbInner<FS, E>,
     plan: ScanPlan,
     txn_scan: Option<TransactionScan<'a>>,
 ) -> Result<

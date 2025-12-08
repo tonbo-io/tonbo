@@ -8,7 +8,7 @@ use std::sync::{
 use fusio::executor::{Executor, Timer};
 
 use crate::{
-    db::DB,
+    db::DbInner,
     manifest::ManifestFs,
     ondisk::sstable::{SsTable, SsTableConfig, SsTableDescriptor, SsTableError, SsTableId},
 };
@@ -17,6 +17,7 @@ use crate::{
 pub struct MinorCompactor {
     segment_threshold: usize,
     target_level: usize,
+    #[allow(dead_code)]
     next_id: AtomicU64,
 }
 
@@ -40,15 +41,34 @@ impl MinorCompactor {
         self.target_level
     }
 
+    #[allow(dead_code)]
     fn next_descriptor(&self) -> SsTableDescriptor {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         SsTableDescriptor::new(SsTableId::new(id), self.target_level)
     }
 
     /// Flush immutables when the threshold is met, returning the new SST on success.
+    ///
+    /// This method is exposed publicly via `test-helpers` feature for testing.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn maybe_compact<FS, E>(
         &self,
-        db: &mut DB<FS, E>,
+        db: &mut DbInner<FS, E>,
+        config: Arc<SsTableConfig>,
+    ) -> Result<Option<SsTable>, SsTableError>
+    where
+        FS: ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
+        self.maybe_compact_inner(db, config).await
+    }
+
+    /// Internal implementation of maybe_compact.
+    #[allow(dead_code)]
+    pub(crate) async fn maybe_compact_inner<FS, E>(
+        &self,
+        db: &mut DbInner<FS, E>,
         config: Arc<SsTableConfig>,
     ) -> Result<Option<SsTable>, SsTableError>
     where
@@ -77,9 +97,13 @@ mod tests {
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::MinorCompactor;
-    use crate::{db::DB, ondisk::sstable::SsTableConfig, test::build_batch};
+    use crate::{
+        db::{DB, DbInner},
+        ondisk::sstable::SsTableConfig,
+        test::build_batch,
+    };
 
-    async fn build_db() -> (Arc<SsTableConfig>, DB<InMemoryFs, NoopExecutor>) {
+    async fn build_db() -> (Arc<SsTableConfig>, DbInner<InMemoryFs, NoopExecutor>) {
         let schema = std::sync::Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -94,9 +118,10 @@ mod tests {
         let db = DB::<InMemoryFs, NoopExecutor>::builder(config)
             .in_memory("compaction-test")
             .expect("in_memory config")
-            .build_with_executor(Arc::clone(&executor))
+            .open_with_executor(Arc::clone(&executor))
             .await
-            .expect("db init");
+            .expect("db init")
+            .into_inner();
 
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
         let cfg = Arc::new(SsTableConfig::new(

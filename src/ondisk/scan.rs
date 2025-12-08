@@ -1,20 +1,82 @@
 //! SSTable scan with MVCC visibility filtering.
 
 use std::{
-    collections::BTreeMap,
+    cmp::Ordering,
+    future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
 use arrow_array::{Array, RecordBatch, UInt64Array};
-use fusio::executor::NoopExecutor;
+use fusio::executor::Executor;
 use fusio_parquet::reader::AsyncReader;
 use futures::{Stream, ready};
 use parquet::{arrow::async_reader::ParquetRecordBatchStream, errors::ParquetError};
 use pin_project_lite::pin_project;
 use thiserror::Error;
 use typed_arrow_dyn::{DynProjection, DynRow, DynRowRaw, DynSchema, DynViewError};
+
+/// Wrapper around an executor that unconditionally implements `Unpin`.
+///
+/// # Safety
+///
+/// All practical executor implementations (tokio Handle, NoopExecutor, etc.) are `Unpin`.
+/// Executors are lightweight handles to runtime state and do not contain self-referential
+/// data. This wrapper allows `AsyncReader<UnpinExec<E>>` to be `Unpin` unconditionally,
+/// which is required by `ParquetRecordBatchStream`'s `Stream` impl.
+#[repr(transparent)]
+pub(crate) struct UnpinExec<E>(pub E);
+
+impl<E> Unpin for UnpinExec<E> {}
+
+impl<E: Clone> Clone for UnpinExec<E> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<E: Executor> Executor for UnpinExec<E> {
+    type JoinHandle<R>
+        = E::JoinHandle<R>
+    where
+        R: fusio::MaybeSend;
+
+    type Mutex<T>
+        = E::Mutex<T>
+    where
+        T: fusio::MaybeSend + fusio::MaybeSync;
+
+    type RwLock<T>
+        = E::RwLock<T>
+    where
+        T: fusio::MaybeSend + fusio::MaybeSync;
+
+    fn spawn<F>(&self, future: F) -> Self::JoinHandle<F::Output>
+    where
+        F: Future + fusio::MaybeSend + 'static,
+        F::Output: fusio::MaybeSend,
+    {
+        self.0.spawn(future)
+    }
+
+    fn mutex<T>(value: T) -> Self::Mutex<T>
+    where
+        T: fusio::MaybeSend + fusio::MaybeSync,
+    {
+        E::mutex(value)
+    }
+
+    fn rw_lock<T>(value: T) -> Self::RwLock<T>
+    where
+        T: fusio::MaybeSend + fusio::MaybeSync,
+    {
+        E::rw_lock(value)
+    }
+}
+
+/// Type alias for a parquet stream using our Unpin executor wrapper.
+pub(crate) type ParquetStream<E> = ParquetRecordBatchStream<AsyncReader<UnpinExec<E>>>;
 
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
@@ -109,236 +171,388 @@ impl std::fmt::Debug for SstableVisibleEntry {
     }
 }
 
-// SSTable scan with MVCC visibility filtering.
+/// Holds a peeked data entry for merge comparison.
+struct DataEntry {
+    batch: Arc<RecordBatch>,
+    key_ts: KeyTsViewRaw,
+    row: DynRowRaw,
+    key_owned: KeyOwned,
+}
+
+/// Holds a peeked delete entry for merge comparison.
+struct DeleteEntry {
+    key: KeyOwned,
+    ts: Timestamp,
+}
+
+/// Delete stream with its extractor (key-only schema).
+pub(crate) struct DeleteStreamWithExtractor<'t, E: Executor> {
+    pub stream: ParquetStream<E>,
+    pub extractor: &'t dyn KeyProjection,
+}
+
+// SSTable scan with MVCC visibility filtering using streaming merge.
 //
-// This scan:
+// This scan merges two sorted streams (data + optional delete sidecar) in O(1) memory:
 // 1. Filters rows by `read_ts` - only rows with `commit_ts <= read_ts` are visible
-// 2. Handles delete sidecar - tombstones override data rows with older timestamps
-// 3. Deduplicates by key - emits only the latest visible version per key
+// 2. Merges data and delete streams by key order
+// 3. When keys match, higher timestamp wins; on tie, delete wins
+// 4. Deduplicates by key - emits only the latest visible version per key
 pin_project! {
-    pub(crate) struct SstableScan<'t> {
+    pub(crate) struct SstableScan<'t, E>
+    where
+        E: Executor,
+    {
         #[pin]
-        data_stream: ParquetRecordBatchStream<AsyncReader<NoopExecutor>>,
-        iter: Option<RecordBatchIterator<'t>>,
+        data_stream: ParquetStream<E>,
+        #[pin]
+        delete_stream: Option<ParquetStream<E>>,
+        data_iter: Option<DataBatchIterator<'t>>,
+        delete_iter: Option<DeleteBatchIterator<'t>>,
+        // Peeked entries for merge comparison
+        peeked_data: Option<DataEntry>,
+        peeked_delete: Option<DeleteEntry>,
         projection_indices: Vec<usize>,
-        extractor: &'t dyn KeyProjection,
+        data_extractor: &'t dyn KeyProjection,
+        delete_extractor: Option<&'t dyn KeyProjection>,
         order: Option<Order>,
         read_ts: Timestamp,
-        // Delete index: key -> delete timestamp
-        delete_index: BTreeMap<KeyOwned, Timestamp>,
-        // Pending deletes to emit (keys with deletes but no data rows seen yet)
-        pending_deletes: Vec<(KeyOwned, Timestamp)>,
-        pending_delete_idx: usize,
         // Current key being processed (for dedup)
         current_key: Option<KeyOwned>,
         // Whether we've emitted an entry for the current key
         emitted_for_key: bool,
-        // Data stream exhausted, now emitting remaining deletes
-        data_exhausted: bool,
-        // Deferred entry to re-process after emitting pending tombstones
-        deferred_entry: Option<(Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw)>,
     }
 }
 
-impl<'t> SstableScan<'t> {
+impl<'t, E> SstableScan<'t, E>
+where
+    E: Executor + Clone + 'static,
+{
     /// Create a new SSTable scan with MVCC visibility filtering.
+    ///
+    /// Uses streaming merge of data and delete streams - O(1) memory, no blocking I/O.
     ///
     /// # Arguments
     /// * `data_stream` - Parquet stream for data rows
-    /// * `extractor` - Key extractor for identifying primary keys
+    /// * `delete_stream` - Optional delete sidecar with its own extractor
+    /// * `data_extractor` - Key extractor for data file (user schema)
     /// * `projection_indices` - Column indices to project
     /// * `order` - Scan order (Asc/Desc)
     /// * `read_ts` - Snapshot timestamp for visibility filtering
-    /// * `delete_sidecar` - Pre-loaded delete entries (key -> delete timestamp)
     pub fn new(
-        data_stream: ParquetRecordBatchStream<AsyncReader<NoopExecutor>>,
-        extractor: &'t dyn KeyProjection,
+        data_stream: ParquetStream<E>,
+        delete_stream: Option<DeleteStreamWithExtractor<'t, E>>,
+        data_extractor: &'t dyn KeyProjection,
         projection_indices: Vec<usize>,
         order: Option<Order>,
         read_ts: Timestamp,
-        delete_sidecar: BTreeMap<KeyOwned, Timestamp>,
     ) -> Self {
-        // Collect visible deletes sorted by key for later emission
-        let pending_deletes: Vec<_> = delete_sidecar
-            .iter()
-            .filter(|(_, ts)| **ts <= read_ts)
-            .map(|(k, ts)| (k.clone(), *ts))
-            .collect();
-
+        let (delete_stream, delete_extractor) = match delete_stream {
+            Some(d) => (Some(d.stream), Some(d.extractor)),
+            None => (None, None),
+        };
         Self {
             data_stream,
-            iter: None,
+            delete_stream,
+            data_iter: None,
+            delete_iter: None,
+            peeked_data: None,
+            peeked_delete: None,
             projection_indices,
-            extractor,
+            data_extractor,
+            delete_extractor,
             order,
             read_ts,
-            delete_index: delete_sidecar,
-            pending_deletes,
-            pending_delete_idx: 0,
             current_key: None,
             emitted_for_key: false,
-            data_exhausted: false,
-            deferred_entry: None,
         }
     }
 }
 
-impl<'t> Stream for SstableScan<'t> {
+impl<'t, E> Stream for SstableScan<'t, E>
+where
+    E: Executor + Clone + 'static,
+{
     type Item = Result<SstableVisibleEntry, SstableScanError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut this = self.as_mut().project();
-
-        // If data is exhausted, emit remaining visible deletes as tombstones
-        if *this.data_exhausted {
-            while *this.pending_delete_idx < this.pending_deletes.len() {
-                let (key, ts) = &this.pending_deletes[*this.pending_delete_idx];
-                *this.pending_delete_idx += 1;
-
-                // Skip if not visible
-                if *ts > *this.read_ts {
-                    continue;
-                }
-
-                // Create tombstone entry (owned since delete sidecar data is stable)
-                let key_ts_owned = KeyTsOwned::new(key.clone(), *ts);
-                return Poll::Ready(Some(Ok(SstableVisibleEntry::Tombstone(key_ts_owned))));
-            }
-            return Poll::Ready(None);
-        }
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
 
         loop {
-            // First check if we have a deferred entry from a previous tombstone emission
-            let next_entry = if let Some(deferred) = this.deferred_entry.take() {
-                Some(Ok(deferred))
-            } else if let Some(iter) = this.iter.as_mut() {
-                iter.next()
-            } else {
-                None
-            };
-
-            // Try to get next entry from current batch iterator or deferred
-            match next_entry {
-                Some(Ok((batch, key_ts, row))) => {
-                    let commit_ts = key_ts.timestamp();
-
-                    // Visibility check: skip if not visible at read_ts
-                    if commit_ts > *this.read_ts {
-                        continue;
-                    }
-
-                    // Extract owned key for comparison
-                    let key_owned = match KeyOwned::from_key_row(key_ts.key()) {
-                        Ok(k) => k,
-                        Err(e) => return Poll::Ready(Some(Err(SstableScanError::KeyOwned(e)))),
-                    };
-
-                    // Check if this is a new key
-                    let is_new_key = this
-                        .current_key
-                        .as_ref()
-                        .map(|k| k != &key_owned)
-                        .unwrap_or(true);
-
-                    if is_new_key {
-                        // Before processing new key, emit any pending deletes that come before
-                        // it
-                        while *this.pending_delete_idx < this.pending_deletes.len() {
-                            let (pending_key, pending_ts) =
-                                &this.pending_deletes[*this.pending_delete_idx];
-
-                            if pending_key < &key_owned {
-                                // This delete key comes before current data key
-                                *this.pending_delete_idx += 1;
-
-                                if *pending_ts <= *this.read_ts {
-                                    let tombstone_key =
-                                        KeyTsOwned::new(pending_key.clone(), *pending_ts);
-                                    // Save current entry for next poll
-                                    *this.deferred_entry = Some((batch, key_ts, row));
-                                    *this.current_key = Some(key_owned);
-                                    *this.emitted_for_key = false;
-                                    return Poll::Ready(Some(Ok(SstableVisibleEntry::Tombstone(
-                                        tombstone_key,
-                                    ))));
-                                }
-                            } else if pending_key == &key_owned {
-                                // Key matches - will be handled below
-                                *this.pending_delete_idx += 1;
-                                break;
-                            } else {
-                                // Delete key is after current data key
-                                break;
-                            }
-                        }
-
-                        *this.current_key = Some(key_owned.clone());
-                        *this.emitted_for_key = false;
-                    }
-
-                    // Dedup: skip if already emitted for this key
-                    if *this.emitted_for_key {
-                        continue;
-                    }
-
-                    // Check if this row is superseded by a delete
-                    // Use >= to handle ties: if delete_ts == commit_ts, delete wins
-                    // (e.g., insert+delete in same transaction yields no visible row)
-                    if let Some(delete_ts) = this.delete_index.get(&key_owned)
-                        && *delete_ts <= *this.read_ts
-                        && *delete_ts >= commit_ts
-                    {
-                        // Delete wins - emit tombstone
-                        *this.emitted_for_key = true;
-                        let tombstone_key = KeyTsOwned::new(key_owned, *delete_ts);
-                        return Poll::Ready(Some(Ok(SstableVisibleEntry::Tombstone(
-                            tombstone_key,
-                        ))));
-                    }
-
-                    // Data wins - emit row with Arc-backed reference for zero-copy
-                    *this.emitted_for_key = true;
-                    let row_ref = SstableRowRef::new(batch, key_ts, row);
-                    return Poll::Ready(Some(Ok(SstableVisibleEntry::Row(row_ref))));
-                }
-                Some(Err(err)) => return Poll::Ready(Some(Err(err))),
-                None => {
-                    // No deferred entry and iterator exhausted (or no iterator yet)
-                    if this.iter.is_some() {
-                        *this.iter = None;
-                        continue;
-                    }
+            // Step 1: Ensure we have peeked entries from both streams (if available)
+            // Advance data stream if needed
+            if this.peeked_data.is_none() {
+                match poll_next_data_entry(
+                    this.data_stream.as_mut(),
+                    this.data_iter,
+                    *this.data_extractor,
+                    this.projection_indices,
+                    *this.order,
+                    *this.read_ts,
+                    cx,
+                ) {
+                    Poll::Ready(Some(Ok(entry))) => *this.peeked_data = Some(entry),
+                    Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                    Poll::Ready(None) => {} // Data exhausted
+                    Poll::Pending => return Poll::Pending,
                 }
             }
 
-            // Need to fetch next batch (no iterator exists)
-            // Fetch next batch from data stream
-            let data = ready!(this.data_stream.as_mut().poll_next(cx)).transpose()?;
-            let data = match data {
-                Some(d) => d,
-                None => {
-                    // Data stream exhausted, switch to emitting remaining deletes
-                    *this.data_exhausted = true;
-                    return self.poll_next(cx);
+            // Advance delete stream if needed
+            if this.peeked_delete.is_none()
+                && let Some(delete_stream_pin) = this.delete_stream.as_mut().as_pin_mut()
+            {
+                let delete_extractor = this
+                    .delete_extractor
+                    .expect("delete extractor must be set when delete stream exists");
+                match poll_next_delete_entry(
+                    delete_stream_pin,
+                    this.delete_iter,
+                    delete_extractor,
+                    *this.read_ts,
+                    cx,
+                ) {
+                    Poll::Ready(Some(Ok(entry))) => *this.peeked_delete = Some(entry),
+                    Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                    Poll::Ready(None) => {
+                        // Delete stream exhausted, drop it
+                        this.delete_stream.set(None);
+                    }
+                    Poll::Pending => return Poll::Pending,
                 }
-            };
-            let mvcc = decode_mvcc_from_data(&data)?;
-            let projection_indices = this.projection_indices.clone();
-            let extractor = *this.extractor;
-            let order = *this.order;
-            *this.iter = Some(RecordBatchIterator::new(
-                data,
-                projection_indices,
-                extractor,
-                mvcc,
-                order,
-            )?);
-            continue;
+            }
+
+            // Step 2: Merge logic - compare peeked entries and emit winner
+            // Take ownership of peeked values to avoid borrow-then-unwrap pattern
+            let peeked_data = this.peeked_data.take();
+            let peeked_delete = this.peeked_delete.take();
+
+            match (peeked_data, peeked_delete) {
+                (None, None) => {
+                    // Both streams exhausted
+                    return Poll::Ready(None);
+                }
+                (Some(data), None) => {
+                    // Only data remains
+                    if let Some(entry) =
+                        process_data_entry(data, this.current_key, this.emitted_for_key)
+                    {
+                        return Poll::Ready(Some(Ok(entry)));
+                    }
+                    // Skipped (dedup), continue loop
+                }
+                (None, Some(delete)) => {
+                    // Only deletes remain
+                    if let Some(entry) =
+                        process_delete_entry(delete, this.current_key, this.emitted_for_key)
+                    {
+                        return Poll::Ready(Some(Ok(entry)));
+                    }
+                    // Skipped (dedup), continue loop
+                }
+                (Some(data), Some(delete)) => {
+                    // Both have entries - compare keys
+                    match data.key_owned.cmp(&delete.key) {
+                        Ordering::Less => {
+                            // Data key comes first, put delete back
+                            *this.peeked_delete = Some(delete);
+                            if let Some(entry) =
+                                process_data_entry(data, this.current_key, this.emitted_for_key)
+                            {
+                                return Poll::Ready(Some(Ok(entry)));
+                            }
+                        }
+                        Ordering::Greater => {
+                            // Delete key comes first, put data back
+                            *this.peeked_data = Some(data);
+                            if let Some(entry) =
+                                process_delete_entry(delete, this.current_key, this.emitted_for_key)
+                            {
+                                return Poll::Ready(Some(Ok(entry)));
+                            }
+                        }
+                        Ordering::Equal => {
+                            // Same key - compare timestamps, higher wins; on tie delete wins
+                            let data_ts = data.key_ts.timestamp();
+                            if delete.ts >= data_ts {
+                                // Delete wins (or tie) - consume both
+                                if let Some(entry) = process_delete_entry(
+                                    delete,
+                                    this.current_key,
+                                    this.emitted_for_key,
+                                ) {
+                                    return Poll::Ready(Some(Ok(entry)));
+                                }
+                            } else {
+                                // Data wins (newer timestamp) - consume both
+                                if let Some(entry) =
+                                    process_data_entry(data, this.current_key, this.emitted_for_key)
+                                {
+                                    return Poll::Ready(Some(Ok(entry)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-struct RecordBatchIterator<'t> {
+/// Process a data entry, handling deduplication.
+/// Returns Some(entry) if should emit, None if should skip (dedup).
+fn process_data_entry(
+    data: DataEntry,
+    current_key: &mut Option<KeyOwned>,
+    emitted_for_key: &mut bool,
+) -> Option<SstableVisibleEntry> {
+    let is_new_key = current_key
+        .as_ref()
+        .map(|k| k != &data.key_owned)
+        .unwrap_or(true);
+
+    if is_new_key {
+        *current_key = Some(data.key_owned.clone());
+        *emitted_for_key = false;
+    }
+
+    if *emitted_for_key {
+        return None; // Skip duplicate
+    }
+
+    *emitted_for_key = true;
+    let row_ref = SstableRowRef::new(data.batch, data.key_ts, data.row);
+    Some(SstableVisibleEntry::Row(row_ref))
+}
+
+/// Process a delete entry, handling deduplication.
+/// Returns Some(entry) if should emit, None if should skip (dedup).
+fn process_delete_entry(
+    delete: DeleteEntry,
+    current_key: &mut Option<KeyOwned>,
+    emitted_for_key: &mut bool,
+) -> Option<SstableVisibleEntry> {
+    let is_new_key = current_key
+        .as_ref()
+        .map(|k| k != &delete.key)
+        .unwrap_or(true);
+
+    if is_new_key {
+        *current_key = Some(delete.key.clone());
+        *emitted_for_key = false;
+    }
+
+    if *emitted_for_key {
+        return None; // Skip duplicate
+    }
+
+    *emitted_for_key = true;
+    let key_ts_owned = KeyTsOwned::new(delete.key, delete.ts);
+    Some(SstableVisibleEntry::Tombstone(key_ts_owned))
+}
+
+/// Poll for the next visible data entry from the data stream.
+fn poll_next_data_entry<'t, E: Executor + Clone + 'static>(
+    mut data_stream: Pin<&mut ParquetStream<E>>,
+    data_iter: &mut Option<DataBatchIterator<'t>>,
+    extractor: &'t dyn KeyProjection,
+    projection_indices: &[usize],
+    order: Option<Order>,
+    read_ts: Timestamp,
+    cx: &mut Context<'_>,
+) -> Poll<Option<Result<DataEntry, SstableScanError>>> {
+    loop {
+        // Try to get next entry from current batch iterator
+        if let Some(iter) = data_iter.as_mut() {
+            match iter.next() {
+                Some(Ok((batch, key_ts, row, key_owned))) => {
+                    // Visibility check
+                    if key_ts.timestamp() > read_ts {
+                        continue; // Skip invisible
+                    }
+                    return Poll::Ready(Some(Ok(DataEntry {
+                        batch,
+                        key_ts,
+                        row,
+                        key_owned,
+                    })));
+                }
+                Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+                None => {
+                    // Iterator exhausted
+                    *data_iter = None;
+                }
+            }
+        }
+
+        // Need to fetch next batch
+        let batch = match ready!(data_stream.as_mut().poll_next(cx)).transpose() {
+            Ok(Some(b)) => b,
+            Ok(None) => return Poll::Ready(None), // Stream exhausted
+            Err(e) => return Poll::Ready(Some(Err(SstableScanError::Parquet(e)))),
+        };
+
+        let mvcc = match decode_mvcc_from_data(&batch) {
+            Ok(m) => m,
+            Err(e) => return Poll::Ready(Some(Err(e))),
+        };
+
+        *data_iter = match DataBatchIterator::new(
+            batch,
+            projection_indices.to_vec(),
+            extractor,
+            mvcc,
+            order,
+        ) {
+            Ok(iter) => Some(iter),
+            Err(e) => return Poll::Ready(Some(Err(e))),
+        };
+    }
+}
+
+/// Poll for the next visible delete entry from the delete stream.
+fn poll_next_delete_entry<'t, E: Executor + Clone + 'static>(
+    mut delete_stream: Pin<&mut ParquetStream<E>>,
+    delete_iter: &mut Option<DeleteBatchIterator<'t>>,
+    extractor: &'t dyn KeyProjection,
+    read_ts: Timestamp,
+    cx: &mut Context<'_>,
+) -> Poll<Option<Result<DeleteEntry, SstableScanError>>> {
+    loop {
+        // Try to get next entry from current batch iterator
+        if let Some(iter) = delete_iter.as_mut() {
+            match iter.next() {
+                Some(Ok((key, ts))) => {
+                    // Visibility check
+                    if ts > read_ts {
+                        continue; // Skip invisible
+                    }
+                    return Poll::Ready(Some(Ok(DeleteEntry { key, ts })));
+                }
+                Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+                None => {
+                    // Iterator exhausted
+                    *delete_iter = None;
+                }
+            }
+        }
+
+        // Need to fetch next batch
+        let batch = match ready!(delete_stream.as_mut().poll_next(cx)).transpose() {
+            Ok(Some(b)) => b,
+            Ok(None) => return Poll::Ready(None), // Stream exhausted
+            Err(e) => return Poll::Ready(Some(Err(SstableScanError::Parquet(e)))),
+        };
+
+        *delete_iter = match DeleteBatchIterator::new(batch, extractor) {
+            Ok(iter) => Some(iter),
+            Err(e) => return Poll::Ready(Some(Err(e))),
+        };
+    }
+}
+
+/// Iterator over data rows in a RecordBatch.
+struct DataBatchIterator<'t> {
     /// Arc-wrapped batch to allow sharing with yielded entries.
     batch: Arc<RecordBatch>,
     extractor: &'t dyn KeyProjection,
@@ -347,10 +561,9 @@ struct RecordBatchIterator<'t> {
     mvcc: MvccColumns,
     offset: usize,
     remaining: usize,
-    step: isize,
 }
 
-impl<'t> RecordBatchIterator<'t> {
+impl<'t> DataBatchIterator<'t> {
     pub(crate) fn new(
         record_batch: RecordBatch,
         projection_indices: Vec<usize>,
@@ -368,11 +581,8 @@ impl<'t> RecordBatchIterator<'t> {
                 },
             ));
         }
-        let offset = 0;
-        let step = 1;
 
         // Build dyn_schema and projection from the actual batch schema
-        // to ensure they match exactly with the data we're reading
         let batch_schema = record_batch.schema();
         let dyn_schema = DynSchema::from_ref(batch_schema.clone());
         let projection = DynProjection::from_indices(batch_schema.as_ref(), projection_indices)
@@ -384,17 +594,15 @@ impl<'t> RecordBatchIterator<'t> {
             dyn_schema,
             projection,
             mvcc,
-            offset,
+            offset: 0,
             remaining: num_rows,
-            step,
         })
     }
 }
 
-impl<'t> Iterator for RecordBatchIterator<'t> {
-    /// Yields (Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw) - the Arc keeps the batch alive
-    /// while the views reference it.
-    type Item = Result<(Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw), SstableScanError>;
+impl<'t> Iterator for DataBatchIterator<'t> {
+    /// Yields (Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw, KeyOwned).
+    type Item = Result<(Arc<RecordBatch>, KeyTsViewRaw, DynRowRaw, KeyOwned), SstableScanError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
@@ -403,15 +611,7 @@ impl<'t> Iterator for RecordBatchIterator<'t> {
 
         let row_idx = self.offset;
         self.remaining -= 1;
-        if self.step < 0 {
-            let magnitude = (-self.step) as usize;
-            self.offset = self.offset.saturating_sub(magnitude);
-        } else if self.step > 0 {
-            self.offset = self.offset.saturating_add(self.step as usize);
-        }
-
-        // Note: tombstone check not needed here - data file doesn't contain tombstones,
-        // they're in the delete sidecar which is handled by SstableScan
+        self.offset += 1;
 
         let key_rows = match self.extractor.project_view(&self.batch, &[row_idx]) {
             Ok(rows) => rows,
@@ -425,6 +625,11 @@ impl<'t> Iterator for RecordBatchIterator<'t> {
                     self.batch.num_rows(),
                 ))));
             }
+        };
+
+        let key_owned = match KeyOwned::from_key_row(&key_row) {
+            Ok(k) => k,
+            Err(e) => return Some(Err(SstableScanError::KeyOwned(e))),
         };
 
         let commit_ts = match self.mvcc.commit_ts.get(row_idx).copied() {
@@ -445,8 +650,80 @@ impl<'t> Iterator for RecordBatchIterator<'t> {
             Err(err) => return Some(Err(SstableScanError::DynView(err))),
         };
 
-        let key = KeyTsViewRaw::new(key_row, commit_ts);
-        Some(Ok((Arc::clone(&self.batch), key, row)))
+        let key_ts = KeyTsViewRaw::new(key_row, commit_ts);
+        Some(Ok((Arc::clone(&self.batch), key_ts, row, key_owned)))
+    }
+}
+
+/// Iterator over delete entries in a RecordBatch (delete sidecar).
+struct DeleteBatchIterator<'t> {
+    batch: RecordBatch,
+    extractor: &'t dyn KeyProjection,
+    commit_col: UInt64Array,
+    offset: usize,
+    remaining: usize,
+}
+
+impl<'t> DeleteBatchIterator<'t> {
+    pub(crate) fn new(
+        batch: RecordBatch,
+        extractor: &'t dyn KeyProjection,
+    ) -> Result<Self, SstableScanError> {
+        let commit_col = batch
+            .column_by_name(MVCC_COMMIT_COL)
+            .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| {
+                SstableScanError::Parquet(ParquetError::ArrowError(
+                    "delete sidecar missing commit_ts column".into(),
+                ))
+            })?
+            .clone();
+
+        let num_rows = batch.num_rows();
+        Ok(Self {
+            batch,
+            extractor,
+            commit_col,
+            offset: 0,
+            remaining: num_rows,
+        })
+    }
+}
+
+impl<'t> Iterator for DeleteBatchIterator<'t> {
+    /// Yields (KeyOwned, Timestamp) for each delete entry.
+    type Item = Result<(KeyOwned, Timestamp), SstableScanError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let row_idx = self.offset;
+        self.remaining -= 1;
+        self.offset += 1;
+
+        let key_rows = match self.extractor.project_view(&self.batch, &[row_idx]) {
+            Ok(rows) => rows,
+            Err(err) => return Some(Err(SstableScanError::Key(err))),
+        };
+        let key_row = match key_rows.into_iter().next() {
+            Some(row) => row,
+            None => {
+                return Some(Err(SstableScanError::Key(KeyExtractError::RowOutOfBounds(
+                    row_idx,
+                    self.batch.num_rows(),
+                ))));
+            }
+        };
+
+        let key = match KeyOwned::from_key_row(&key_row) {
+            Ok(k) => k,
+            Err(e) => return Some(Err(SstableScanError::KeyOwned(e))),
+        };
+
+        let ts = Timestamp::new(self.commit_col.value(row_idx));
+        Some(Ok((key, ts)))
     }
 }
 
@@ -474,47 +751,9 @@ fn decode_mvcc_from_data(batch: &RecordBatch) -> Result<MvccColumns, SstableScan
     Ok(MvccColumns::new(commit_ts, tombstones))
 }
 
-/// Load delete sidecar from a Parquet batch into a BTreeMap for efficient lookup.
-pub(crate) fn load_delete_index(
-    batch: &RecordBatch,
-    extractor: &dyn KeyProjection,
-) -> Result<BTreeMap<KeyOwned, Timestamp>, SstableScanError> {
-    let mut index = BTreeMap::new();
-
-    let commit_col = batch
-        .column_by_name(MVCC_COMMIT_COL)
-        .and_then(|arr| arr.as_any().downcast_ref::<UInt64Array>())
-        .ok_or_else(|| {
-            SstableScanError::Parquet(ParquetError::ArrowError(
-                "delete sidecar missing commit_ts column".into(),
-            ))
-        })?;
-
-    for row_idx in 0..batch.num_rows() {
-        let key_rows = extractor.project_view(batch, &[row_idx])?;
-        let key_row = key_rows.into_iter().next().ok_or(SstableScanError::Key(
-            KeyExtractError::RowOutOfBounds(row_idx, batch.num_rows()),
-        ))?;
-        let key = KeyOwned::from_key_row(&key_row)?;
-        let ts = Timestamp::new(commit_col.value(row_idx));
-
-        // Keep the latest delete timestamp for each key
-        index
-            .entry(key)
-            .and_modify(|existing: &mut Timestamp| {
-                if ts > *existing {
-                    *existing = ts;
-                }
-            })
-            .or_insert(ts);
-    }
-
-    Ok(index)
-}
-
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::sync::Arc;
 
     use arrow_array::{Int32Array, RecordBatch, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
@@ -526,8 +765,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        inmem::immutable::memtable::MVCC_COMMIT_COL, mvcc::Timestamp,
-        ondisk::sstable::open_parquet_stream,
+        inmem::immutable::memtable::MVCC_COMMIT_COL, ondisk::sstable::open_parquet_stream,
     };
 
     /// Helper to write a data Parquet file directly with custom commit timestamps
@@ -635,21 +873,20 @@ mod tests {
         )
         .await;
 
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None)
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
             .await
             .expect("open stream");
 
         let read_ts = Timestamp::new(20);
-        let delete_index = BTreeMap::new();
         let projection_indices = vec![0, 1];
 
-        let mut scan = SstableScan::new(
+        let mut scan = SstableScan::<NoopExecutor>::new(
             data_stream,
+            None, // no delete sidecar
             extractor.as_ref(),
             projection_indices,
             Some(Order::Asc),
             read_ts,
-            delete_index,
         );
 
         let mut keys = Vec::new();
@@ -677,7 +914,7 @@ mod tests {
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
         let root = Path::from(tmpdir.path().to_string_lossy().to_string());
 
-        // User schema for data file extractor (matches data columns minus _commit_ts)
+        // User schema for data extractor
         let user_schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -685,7 +922,7 @@ mod tests {
         let data_extractor =
             crate::extractor::projection_for_field(Arc::clone(&user_schema), 0).expect("extractor");
 
-        // Key-only schema for delete sidecar extractor
+        // Key-only schema for delete extractor
         let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
         let delete_extractor = crate::extractor::projection_for_field(Arc::clone(&key_schema), 0)
             .expect("delete extractor");
@@ -715,37 +952,27 @@ mod tests {
         )
         .await;
 
-        // Load delete index with key-only extractor
-        let mut delete_index = BTreeMap::new();
-        let del_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None)
-            .await
-            .expect("delete stream");
-        let mut del_stream = std::pin::pin!(del_stream);
-        while let Some(batch) = del_stream.next().await {
-            let batch = batch.expect("batch");
-            let batch_index = load_delete_index(&batch, delete_extractor.as_ref()).expect("index");
-            for (k, ts) in batch_index {
-                delete_index
-                    .entry(k)
-                    .and_modify(|cur: &mut Timestamp| *cur = (*cur).max(ts))
-                    .or_insert(ts);
-            }
-        }
-
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None)
+        // Open both streams for streaming merge
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
             .await
             .expect("open stream");
+        let delete_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor)
+            .await
+            .expect("delete stream");
 
         let read_ts = Timestamp::MAX;
         let projection_indices = vec![0, 1];
 
-        let mut scan = SstableScan::new(
+        let mut scan = SstableScan::<NoopExecutor>::new(
             data_stream,
+            Some(DeleteStreamWithExtractor {
+                stream: delete_stream,
+                extractor: delete_extractor.as_ref(),
+            }),
             data_extractor.as_ref(),
             projection_indices,
             Some(Order::Asc),
             read_ts,
-            delete_index,
         );
 
         let mut keys = Vec::new();
@@ -802,21 +1029,20 @@ mod tests {
         )
         .await;
 
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None)
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
             .await
             .expect("open stream");
 
         let read_ts = Timestamp::MAX;
-        let delete_index = BTreeMap::new();
         let projection_indices = vec![0, 1];
 
-        let mut scan = SstableScan::new(
+        let mut scan = SstableScan::<NoopExecutor>::new(
             data_stream,
+            None, // no delete sidecar
             extractor.as_ref(),
             projection_indices,
             Some(Order::Asc),
             read_ts,
-            delete_index,
         );
 
         let mut results: Vec<(String, i32)> = Vec::new();
@@ -847,7 +1073,7 @@ mod tests {
         let fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
         let root = Path::from(tmpdir.path().to_string_lossy().to_string());
 
-        // User schema for data file extractor (matches data columns minus _commit_ts)
+        // User schema for data extractor
         let user_schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int32, false),
@@ -855,7 +1081,7 @@ mod tests {
         let data_extractor =
             crate::extractor::projection_for_field(Arc::clone(&user_schema), 0).expect("extractor");
 
-        // Key-only schema for delete sidecar extractor
+        // Key-only schema for delete extractor
         let key_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
         let delete_extractor = crate::extractor::projection_for_field(Arc::clone(&key_schema), 0)
             .expect("delete extractor");
@@ -882,37 +1108,27 @@ mod tests {
         )
         .await;
 
-        // Load delete index with key-only extractor
-        let mut delete_index = BTreeMap::new();
-        let del_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None)
-            .await
-            .expect("delete stream");
-        let mut del_stream = std::pin::pin!(del_stream);
-        while let Some(batch) = del_stream.next().await {
-            let batch = batch.expect("batch");
-            let batch_index = load_delete_index(&batch, delete_extractor.as_ref()).expect("index");
-            for (k, ts) in batch_index {
-                delete_index
-                    .entry(k)
-                    .and_modify(|cur: &mut Timestamp| *cur = (*cur).max(ts))
-                    .or_insert(ts);
-            }
-        }
-
-        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None)
+        // Open both streams for streaming merge
+        let data_stream = open_parquet_stream(Arc::clone(&fs), data_path, None, NoopExecutor)
             .await
             .expect("open stream");
+        let delete_stream = open_parquet_stream(Arc::clone(&fs), delete_path, None, NoopExecutor)
+            .await
+            .expect("delete stream");
 
         let read_ts = Timestamp::MAX;
         let projection_indices = vec![0, 1];
 
-        let mut scan = SstableScan::new(
+        let mut scan = SstableScan::<NoopExecutor>::new(
             data_stream,
+            Some(DeleteStreamWithExtractor {
+                stream: delete_stream,
+                extractor: delete_extractor.as_ref(),
+            }),
             data_extractor.as_ref(),
             projection_indices,
             Some(Order::Asc),
             read_ts,
-            delete_index,
         );
 
         let mut data_keys = Vec::new();

@@ -7,11 +7,12 @@ use core::fmt;
 use std::{
     mem,
     pin::Pin,
-    sync::{Arc, RwLockReadGuard},
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use arrow_schema::SchemaRef;
+use fusio::executor::Executor;
 use futures::{Stream, ready, stream};
 pub use package::ResidualError;
 use pin_project_lite::pin_project;
@@ -21,10 +22,8 @@ use typed_arrow_dyn::{DynError, DynRow, DynRowRaw, DynViewError};
 use crate::{
     extractor::KeyExtractError,
     inmem::{
-        immutable::memtable::{
-            ImmutableMemTable, ImmutableVisibleEntry, ImmutableVisibleScan, RecordBatchStorage,
-        },
-        mutable::memtable::{DynMem, DynRowScan, DynRowScanEntry},
+        immutable::memtable::{ImmutableMemTable, ImmutableVisibleEntry, ImmutableVisibleScan},
+        mutable::memtable::{DynMemReadGuard, DynRowScan, DynRowScanEntry},
     },
     key::{KeyRow, KeyTsOwned, KeyTsViewRaw},
     mvcc::Timestamp,
@@ -59,12 +58,12 @@ pub(crate) enum SourcePriority {
 /// Iterator wrapper that keeps a mutable memtable read guard alive while streaming it.
 pub(crate) struct OwnedMutableScan<'t> {
     inner: DynRowScan<'t>,
-    _guard: Option<RwLockReadGuard<'t, DynMem>>,
+    _guard: Option<DynMemReadGuard<'t>>,
 }
 
 impl<'t> OwnedMutableScan<'t> {
     pub(crate) fn from_guard(
-        guard: RwLockReadGuard<'t, DynMem>,
+        guard: DynMemReadGuard<'t>,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<Self, KeyExtractError> {
@@ -102,34 +101,26 @@ impl fmt::Debug for OwnedMutableScan<'_> {
 }
 
 /// Iterator wrapper that keeps an immutable segment alive while streaming it.
-pub(crate) struct OwnedImmutableScan<'t, S>
-where
-    S: RecordBatchStorage,
-{
-    _keep: Arc<ImmutableMemTable<S>>,
-    inner: ImmutableVisibleScan<'t, S>,
+pub(crate) struct OwnedImmutableScan<'t> {
+    _keep: Arc<ImmutableMemTable>,
+    inner: ImmutableVisibleScan<'t>,
 }
 
-impl<'t, S> OwnedImmutableScan<'t, S>
-where
-    S: RecordBatchStorage,
-{
+impl<'t> OwnedImmutableScan<'t> {
     #[cfg(all(test, feature = "tokio"))]
-    pub(crate) fn new(keep: Arc<ImmutableMemTable<S>>, inner: ImmutableVisibleScan<'t, S>) -> Self {
+    pub(crate) fn new(keep: Arc<ImmutableMemTable>, inner: ImmutableVisibleScan<'t>) -> Self {
         Self { _keep: keep, inner }
     }
 
     pub(crate) fn from_arc(
-        segment: Arc<ImmutableMemTable<S>>,
+        segment: Arc<ImmutableMemTable>,
         projection_schema: Option<SchemaRef>,
         read_ts: Timestamp,
     ) -> Result<Self, KeyExtractError> {
         let inner = {
             let scan = segment.scan_visible(projection_schema, read_ts)?;
             // SAFETY: `scan` borrows from `segment`, which is kept alive by `_keep`.
-            unsafe {
-                mem::transmute::<ImmutableVisibleScan<'_, S>, ImmutableVisibleScan<'t, S>>(scan)
-            }
+            unsafe { mem::transmute::<ImmutableVisibleScan<'_>, ImmutableVisibleScan<'t>>(scan) }
         };
         Ok(Self {
             _keep: Arc::clone(&segment),
@@ -138,10 +129,7 @@ where
     }
 }
 
-impl<'t, S> Iterator for OwnedImmutableScan<'t, S>
-where
-    S: RecordBatchStorage,
-{
+impl<'t> Iterator for OwnedImmutableScan<'t> {
     type Item = Result<ImmutableVisibleEntry, DynViewError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -149,10 +137,7 @@ where
     }
 }
 
-impl<S> fmt::Debug for OwnedImmutableScan<'_, S>
-where
-    S: RecordBatchStorage,
-{
+impl fmt::Debug for OwnedImmutableScan<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OwnedImmutableScan").finish()
     }
@@ -301,9 +286,9 @@ impl StreamEntry {
 
 pin_project! {
     #[project = ScanStreamProject]
-    pub(crate) enum ScanStream<'t, S>
+    pub(crate) enum ScanStream<'t, E>
     where
-        S: RecordBatchStorage,
+        E: Executor,
     {
         Txn {
             #[pin]
@@ -315,24 +300,24 @@ pin_project! {
         },
         Immutable {
             #[pin]
-            inner: stream::Iter<OwnedImmutableScan<'t, S>>,
+            inner: stream::Iter<OwnedImmutableScan<'t>>,
         },
         SsTable {
             #[pin]
-            inner: SstableScan<'t>,
+            inner: SstableScan<'t, E>,
         },
     }
 }
 
-impl<'t, S: RecordBatchStorage> From<OwnedImmutableScan<'t, S>> for ScanStream<'t, S> {
-    fn from(inner: OwnedImmutableScan<'t, S>) -> Self {
+impl<'t, E: Executor> From<OwnedImmutableScan<'t>> for ScanStream<'t, E> {
+    fn from(inner: OwnedImmutableScan<'t>) -> Self {
         ScanStream::Immutable {
             inner: stream::iter(inner),
         }
     }
 }
 
-impl<'t, S: RecordBatchStorage> From<OwnedMutableScan<'t>> for ScanStream<'t, S> {
+impl<'t, E: Executor> From<OwnedMutableScan<'t>> for ScanStream<'t, E> {
     fn from(inner: OwnedMutableScan<'t>) -> Self {
         ScanStream::Mutable {
             inner: stream::iter(inner),
@@ -340,7 +325,7 @@ impl<'t, S: RecordBatchStorage> From<OwnedMutableScan<'t>> for ScanStream<'t, S>
     }
 }
 
-impl<'t, S: RecordBatchStorage> From<DynRowScan<'t>> for ScanStream<'t, S> {
+impl<'t, E: Executor> From<DynRowScan<'t>> for ScanStream<'t, E> {
     fn from(inner: DynRowScan<'t>) -> Self {
         ScanStream::Mutable {
             inner: stream::iter(OwnedMutableScan::from_scan(inner)),
@@ -348,13 +333,13 @@ impl<'t, S: RecordBatchStorage> From<DynRowScan<'t>> for ScanStream<'t, S> {
     }
 }
 
-impl<'t, S: RecordBatchStorage> From<SstableScan<'t>> for ScanStream<'t, S> {
-    fn from(inner: SstableScan<'t>) -> Self {
+impl<'t, E: Executor> From<SstableScan<'t, E>> for ScanStream<'t, E> {
+    fn from(inner: SstableScan<'t, E>) -> Self {
         ScanStream::SsTable { inner }
     }
 }
 
-impl<'t, S: RecordBatchStorage> From<TransactionScan<'t>> for ScanStream<'t, S> {
+impl<'t, E: Executor> From<TransactionScan<'t>> for ScanStream<'t, E> {
     fn from(inner: TransactionScan<'t>) -> Self {
         ScanStream::Txn {
             inner: stream::iter(inner),
@@ -362,7 +347,7 @@ impl<'t, S: RecordBatchStorage> From<TransactionScan<'t>> for ScanStream<'t, S> 
     }
 }
 
-impl<'t, S: std::fmt::Debug + RecordBatchStorage> fmt::Debug for ScanStream<'t, S> {
+impl<'t, E: Executor> fmt::Debug for ScanStream<'t, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Txn { inner } => f
@@ -382,7 +367,7 @@ impl<'t, S: std::fmt::Debug + RecordBatchStorage> fmt::Debug for ScanStream<'t, 
     }
 }
 
-impl<'t, S: RecordBatchStorage> ScanStream<'t, S> {
+impl<'t, E: Executor> ScanStream<'t, E> {
     pub(crate) fn priority(&self) -> SourcePriority {
         match self {
             ScanStream::Txn { .. } => SourcePriority::Txn,
@@ -393,9 +378,9 @@ impl<'t, S: RecordBatchStorage> ScanStream<'t, S> {
     }
 }
 
-impl<'t, S> Stream for ScanStream<'t, S>
+impl<'t, E> Stream for ScanStream<'t, E>
 where
-    S: RecordBatchStorage,
+    E: Executor + Clone + 'static,
 {
     type Item = Result<StreamEntry, StreamError>;
 
@@ -450,14 +435,13 @@ where
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
-    use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use futures::StreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        extractor::{KeyProjection, projection_for_field},
+        extractor::{KeyProjection, projection_for_columns, projection_for_field},
         inmem::{immutable::memtable::ImmutableMemTable, mutable::memtable::DynMem},
         key::KeyOwned,
         mutation::DynMutation,
@@ -466,10 +450,23 @@ mod tests {
         transaction::TransactionScan,
     };
 
+    fn make_test_mem(schema: SchemaRef) -> DynMem {
+        let extractor: Arc<dyn KeyProjection> = projection_for_field(schema.clone(), 0)
+            .expect("extractor")
+            .into();
+        let delete_projection: Arc<dyn KeyProjection> = projection_for_columns(
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)])),
+            vec![0],
+        )
+        .expect("delete projection")
+        .into();
+        DynMem::new(schema, extractor, delete_projection)
+    }
+
     struct ScanStreamFixture {
         schema: SchemaRef,
         mutable: DynMem,
-        immutable: ImmutableMemTable<RecordBatch>,
+        immutable: ImmutableMemTable,
         staged: BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
     }
 
@@ -479,35 +476,27 @@ mod tests {
                 Field::new("id", DataType::Utf8, false),
                 Field::new("v", DataType::Int64, true),
             ]));
-            let extractor = Arc::new(projection_for_field(schema.clone(), 0).expect("extractor"));
-            let mut mutable = DynMem::new(schema.clone());
-            let mut immutable_builder = DynMem::new(schema.clone());
+            let mutable = make_test_mem(schema.clone());
+            let immutable_builder = make_test_mem(schema.clone());
 
-            fn insert_row(
-                table: &mut DynMem,
-                schema: &SchemaRef,
-                extractor: &Arc<Box<dyn KeyProjection>>,
-                key: &str,
-                value: i64,
-                ts: u64,
-            ) {
+            let insert_row = |table: &DynMem, key: &str, value: i64, ts: u64| {
                 let rows = vec![DynRow(vec![
                     Some(DynCell::Str(key.into())),
                     Some(DynCell::I64(value)),
                 ])];
                 let batch = build_batch(schema.clone(), rows).expect("batch");
                 table
-                    .insert_batch(extractor.as_ref().as_ref(), batch, Timestamp::new(ts))
+                    .insert_batch(batch, Timestamp::new(ts))
                     .expect("insert row");
-            }
+            };
 
-            insert_row(&mut mutable, &schema, &extractor, "m1", 10, 5);
-            insert_row(&mut mutable, &schema, &extractor, "m2", 20, 7);
-            insert_row(&mut immutable_builder, &schema, &extractor, "i1", 1, 2);
-            insert_row(&mut immutable_builder, &schema, &extractor, "i2", 2, 3);
+            insert_row(&mutable, "m1", 10, 5);
+            insert_row(&mutable, "m2", 20, 7);
+            insert_row(&immutable_builder, "i1", 1, 2);
+            insert_row(&immutable_builder, "i2", 2, 3);
 
             let immutable = immutable_builder
-                .seal_into_immutable(&schema, extractor.as_ref().as_ref())
+                .seal_now()
                 .expect("seal immutable")
                 .expect("segment");
 
@@ -539,11 +528,10 @@ mod tests {
     #[tokio::test]
     async fn scan_stream_mutable_variant_yields_entries() {
         let setup = ScanStreamFixture::new();
-        let scan = setup
-            .mutable
-            .scan_visible(None, Timestamp::MAX)
+        let mutable_guard = setup.mutable.read();
+        let scan = OwnedMutableScan::from_guard(mutable_guard, None, Timestamp::MAX)
             .expect("scan rows produces iterator");
-        let mut stream = ScanStream::<RecordBatch>::from(scan);
+        let mut stream = ScanStream::<fusio::executor::NoopExecutor>::from(scan);
         let next = stream.next().await.expect("entry present");
         assert!(matches!(next, Ok(StreamEntry::MemTable(_))));
     }
@@ -555,8 +543,9 @@ mod tests {
         let scan = immutable
             .scan_visible(None, Timestamp::MAX)
             .expect("scan immutables");
-        let mut stream =
-            ScanStream::<RecordBatch>::from(OwnedImmutableScan::new(Arc::clone(&immutable), scan));
+        let mut stream = ScanStream::<fusio::executor::NoopExecutor>::from(
+            OwnedImmutableScan::new(Arc::clone(&immutable), scan),
+        );
         let next = stream.next().await.expect("entry present");
         assert!(matches!(next, Ok(StreamEntry::MemTable(_))));
     }
@@ -566,7 +555,7 @@ mod tests {
         let setup = ScanStreamFixture::new();
         let txn_scan = TransactionScan::new(&setup.staged, &setup.schema, Timestamp::new(5), None)
             .expect("txn scan");
-        let mut stream = Box::pin(ScanStream::<RecordBatch>::from(txn_scan));
+        let mut stream = Box::pin(ScanStream::<fusio::executor::NoopExecutor>::from(txn_scan));
         let entry = stream.next().await.expect("entry present");
         assert!(matches!(entry, Ok(StreamEntry::Txn(_))));
     }

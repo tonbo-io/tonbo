@@ -9,11 +9,10 @@ use arrow_select::take::take;
 use fusio::executor::{Executor, Instant, Timer};
 
 use crate::{
-    db::DB,
+    db::DbInner,
     extractor::KeyExtractError,
     inmem::{
         immutable::{ImmutableSegment, memtable::MVCC_COMMIT_COL},
-        mutable::DynMem,
         policy::{SealDecision, StatsProvider},
     },
     key::KeyOwned,
@@ -123,58 +122,28 @@ impl PendingWalTxn {
     }
 }
 
-impl<FS, E> DB<FS, E>
+impl<FS, E> DbInner<FS, E>
 where
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    /// Wrap this database in an executor-provided read-write lock for shared transactional use.
-    pub fn into_shared(self) -> Arc<DB<FS, E>> {
-        Arc::new(self)
-    }
-
     pub(crate) fn insert_into_mutable(
         &self,
         batch: RecordBatch,
         commit_ts: Timestamp,
     ) -> Result<(), KeyExtractError> {
-        self.insert_with_seal_retry(|mem| {
-            mem.insert_batch(self.extractor.as_ref(), batch.clone(), commit_ts)
-        })
-    }
-
-    /// Insert with optimistic read lock, only acquiring write lock for sealing.
-    ///
-    /// This enables concurrent writes when the memtable has capacity. The write lock
-    /// is only acquired when sealing is needed (on `MemtableFull`).
-    fn insert_with_seal_retry<F>(&self, op: F) -> Result<(), KeyExtractError>
-    where
-        F: Fn(&DynMem) -> Result<(), KeyExtractError>,
-    {
-        loop {
-            // Try with read lock first (allows concurrent writes)
-            {
-                let mem = self.mem_read();
-                match op(&mem) {
-                    Ok(()) => return Ok(()),
-                    Err(KeyExtractError::MemtableFull { .. }) => {
-                        // Fall through to seal with write lock
-                    }
-                    Err(err) => return Err(err),
-                }
-            }
-            // Only acquire write lock for sealing
-            self.seal_mutable_now()?;
+        if let Some(sealed) = self.mem.insert_batch(batch, commit_ts)? {
+            let wal_range = self.take_mutable_wal_range();
+            self.add_immutable(sealed, wal_range);
+            let mut seal = self.seal_state_lock();
+            seal.last_seal_at = Some(self.executor.now());
         }
+        Ok(())
     }
 
     fn seal_mutable_now(&self) -> Result<(), KeyExtractError> {
-        let seg_opt = {
-            let mut mem = self.mem_write();
-            mem.seal_into_immutable(&self.schema, self.extractor.as_ref())?
-        };
-        if let Some(seg) = seg_opt {
+        if let Some(seg) = self.mem.seal_now()? {
             let wal_range = self.take_mutable_wal_range();
             self.add_immutable(seg, wal_range);
             let mut seal = self.seal_state_lock();
@@ -197,13 +166,17 @@ where
         &self,
         batch: RecordBatch,
     ) -> Result<(), KeyExtractError> {
-        self.insert_with_seal_retry(|mem| {
-            mem.insert_delete_batch(self.delete_projection.as_ref(), batch.clone())
-        })
+        if let Some(sealed) = self.mem.insert_delete_batch(batch)? {
+            let wal_range = self.take_mutable_wal_range();
+            self.add_immutable(sealed, wal_range);
+            let mut seal = self.seal_state_lock();
+            seal.last_seal_at = Some(self.executor.now());
+        }
+        Ok(())
     }
 
     pub(crate) fn mutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
-        self.mem_read().has_conflict(key, snapshot_ts)
+        self.mem.has_conflict(key, snapshot_ts)
     }
 
     pub(crate) fn immutable_has_conflict(&self, key: &KeyOwned, snapshot_ts: Timestamp) -> bool {
@@ -216,7 +189,7 @@ where
     pub(crate) fn maybe_seal_after_insert(&self) -> Result<(), KeyExtractError> {
         let last_seal = { self.seal_state_lock().last_seal_at };
         let since = last_seal.map(|t| t.elapsed());
-        let stats = { self.mem_read().build_stats(since) };
+        let stats = { self.mem.build_stats(since) };
 
         if let SealDecision::Seal(_reason) = self.policy.evaluate(&stats) {
             self.seal_mutable_now()?;
@@ -234,6 +207,7 @@ where
     }
 
     /// Ingest multiple batches, each paired with a tombstone bitmap.
+    #[allow(dead_code)]
     pub async fn ingest_many_with_tombstones(
         &self,
         batches: Vec<(RecordBatch, Vec<bool>)>,
@@ -340,19 +314,14 @@ where
     }
 }
 
-impl<FS, E> DB<FS, E>
+impl<FS, E> DbInner<FS, E>
 where
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    /// Attach WAL configuration prior to enabling durability.
-    pub fn with_wal_config(mut self, cfg: RuntimeWalConfig) -> Self {
-        self.wal_config = Some(cfg);
-        self
-    }
-
     /// Access the configured WAL settings, if any.
+    #[allow(dead_code)]
     pub fn wal_config(&self) -> Option<&RuntimeWalConfig> {
         self.wal_config.as_ref()
     }
@@ -461,7 +430,7 @@ where
 }
 
 async fn insert_dyn_wal_batch<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batch: RecordBatch,
     tombstones: Vec<bool>,
 ) -> Result<(), KeyExtractError>
@@ -523,25 +492,32 @@ where
 
     let mutated = upsert_batch.is_some() || delete_batch.is_some();
     if mutated {
-        db.insert_with_seal_retry(|mem| {
-            if let Some(ref batch) = upsert_batch {
-                mem.insert_batch(db.extractor.as_ref(), batch.clone(), commit_ts)?;
-            }
-            if let Some(ref batch) = delete_batch {
-                mem.insert_delete_batch(db.delete_projection.as_ref(), batch.clone())?;
-            }
-            Ok(())
-        })?;
+        // Record WAL range BEFORE inserts that may trigger auto-seal.
+        // If we record after, a sealed segment would miss the current batch's frames,
+        // causing WAL GC to prematurely delete frames needed for recovery.
         if let Some(range) = wal_range {
             db.record_mutable_wal_range(range);
+        }
+        if let Some(batch) = upsert_batch
+            && let Some(sealed) = db.mem.insert_batch(batch, commit_ts)?
+        {
+            let wal_range_take = db.take_mutable_wal_range();
+            db.add_immutable(sealed, wal_range_take);
+        }
+        if let Some(batch) = delete_batch
+            && let Some(sealed) = db.mem.insert_delete_batch(batch)?
+        {
+            let wal_range_take = db.take_mutable_wal_range();
+            db.add_immutable(sealed, wal_range_take);
         }
         db.maybe_seal_after_insert()?;
     }
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn insert_dyn_wal_batches<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batches: Vec<(RecordBatch, Vec<bool>)>,
 ) -> Result<(), KeyExtractError>
 where
@@ -556,7 +532,7 @@ where
 }
 
 pub(crate) fn apply_dyn_wal_batch<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batch: RecordBatch,
     commit_ts_column: ArrayRef,
     commit_ts: Timestamp,
@@ -601,14 +577,15 @@ where
         )));
     }
 
-    db.insert_with_seal_retry(|mem| {
-        mem.insert_batch_with_mvcc(db.extractor.as_ref(), batch.clone(), commit_array.clone())
-    })?;
+    if let Some(sealed) = db.mem.insert_batch_with_mvcc(batch, commit_array)? {
+        let wal_range = db.take_mutable_wal_range();
+        db.add_immutable(sealed, wal_range);
+    }
     Ok(())
 }
 
 fn apply_dyn_delete_wal_batch<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batch: RecordBatch,
     commit_ts: Timestamp,
 ) -> Result<(), KeyExtractError>
@@ -619,13 +596,15 @@ where
 {
     validate_delete_batch_schema(db, &batch)?;
     validate_delete_commit_ts(&batch, commit_ts)?;
-    db.insert_with_seal_retry(|mem| {
-        mem.insert_delete_batch(db.delete_projection.as_ref(), batch.clone())
-    })
+    if let Some(sealed) = db.mem.insert_delete_batch(batch)? {
+        let wal_range = db.take_mutable_wal_range();
+        db.add_immutable(sealed, wal_range);
+    }
+    Ok(())
 }
 
 fn validate_record_batch_schema<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batch: &RecordBatch,
 ) -> Result<(), KeyExtractError>
 where
@@ -656,7 +635,7 @@ fn validate_vec_tombstone_bitmap(
 }
 
 fn validate_delete_batch_schema<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batch: &RecordBatch,
 ) -> Result<(), KeyExtractError>
 where
@@ -709,7 +688,7 @@ fn validate_delete_commit_ts(
 }
 
 fn partition_batch_for_mutations<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batch: RecordBatch,
     tombstones: &[bool],
     commit_ts: Timestamp,
@@ -753,7 +732,7 @@ where
 }
 
 fn build_delete_batch<FS, E>(
-    db: &DB<FS, E>,
+    db: &DbInner<FS, E>,
     batch: &RecordBatch,
     delete_indices: &[u32],
     commit_ts: Timestamp,
@@ -765,8 +744,8 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     let idx_array = UInt32Array::from(delete_indices.to_vec());
-    let mut columns = Vec::with_capacity(db.extractor.key_indices().len() + 1);
-    for &col_idx in db.extractor.key_indices() {
+    let mut columns = Vec::with_capacity(db.extractor().key_indices().len() + 1);
+    for &col_idx in db.extractor().key_indices() {
         let column = batch.column(col_idx);
         let taken = take(column.as_ref(), &idx_array, None).map_err(KeyExtractError::Arrow)?;
         columns.push(taken);

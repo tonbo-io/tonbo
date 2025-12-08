@@ -9,10 +9,8 @@ mod wasm_edge {
     use fusio::{executor::web::WebExecutor, impls::remotes::aws::fs::AmazonS3};
     use futures::StreamExt;
     use js_sys::Date;
-    use predicate::ScalarValue;
     use tonbo::{
-        db::{AwsCreds, DB, DynMode, ObjectSpec, S3Spec},
-        query::Predicate,
+        db::{AwsCreds, DB, ObjectSpec, S3Spec},
         schema::SchemaBuilder,
         wal::WalSyncPolicy,
     };
@@ -51,7 +49,7 @@ mod wasm_edge {
             .object_store(ObjectSpec::s3(s3_spec))
             .map_err(|err| format!("object_store config: {err}"))?
             .wal_sync_policy(WalSyncPolicy::Always)
-            .build_with_executor(Arc::clone(&exec))
+            .open_with_executor(Arc::clone(&exec))
             .await
             .map_err(|err| format!("build: {err}"))?;
 
@@ -68,22 +66,10 @@ mod wasm_edge {
             .await
             .map_err(|err| format!("ingest: {err}"))?;
 
-        // Plan a full-range scan and stream Arrow batches back through the DB API.
-        let snapshot = db
-            .begin_snapshot()
-            .await
-            .map_err(|err| format!("snapshot: {err}"))?;
-        let plan = snapshot
-            .plan_scan(
-                &db,
-                &Predicate::eq(ScalarValue::from(1_i64), ScalarValue::from(1_i64)),
-                None,
-                None,
-            )
-            .await
-            .map_err(|err| format!("plan: {err}"))?;
+        // Full-range scan via the public builder.
         let mut stream = db
-            .execute_scan(plan)
+            .scan()
+            .stream()
             .await
             .map_err(|err| format!("scan: {err}"))?;
 

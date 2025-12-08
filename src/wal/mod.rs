@@ -933,7 +933,7 @@ where
     fn wal(&self) -> Option<&WalHandle<E>>;
 }
 
-impl<FS, E> WalExt<FS, E> for crate::db::DB<FS, E>
+impl<FS, E> WalExt<FS, E> for crate::db::DbInner<FS, E>
 where
     FS: crate::manifest::ManifestFs<E>,
     E: Executor + Timer + Clone,

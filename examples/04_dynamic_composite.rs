@@ -3,7 +3,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use fusio::{executor::NoopExecutor, mem::fs::InMemoryFs};
-use futures::TryStreamExt;
 use tonbo::{
     db::{DB, DbBuilder},
     query::{ColumnRef, Predicate, ScalarValue},
@@ -40,7 +39,7 @@ async fn main() {
         .expect("metadata config")
         .in_memory("dynamic-composite")
         .expect("in_memory config")
-        .build_with_executor(Arc::clone(&executor))
+        .open_with_executor(Arc::clone(&executor))
         .await
         .expect("composite ok");
 
@@ -74,16 +73,10 @@ async fn main() {
         ]),
     ]);
 
-    let snapshot = db.begin_snapshot().await.expect("snapshot");
-    let plan = snapshot
-        .plan_scan(&db, &pred, None, None)
-        .await
-        .expect("plan");
     let got: Vec<(String, i64)> = db
-        .execute_scan(plan)
-        .await
-        .expect("execute")
-        .try_collect::<Vec<_>>()
+        .scan()
+        .filter(pred)
+        .collect()
         .await
         .expect("collect")
         .into_iter()

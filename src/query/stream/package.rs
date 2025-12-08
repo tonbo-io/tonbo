@@ -9,6 +9,7 @@ use std::{
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
+use fusio::executor::Executor;
 use futures::Stream;
 use pin_project_lite::pin_project;
 use predicate::{
@@ -17,21 +18,18 @@ use predicate::{
 use thiserror::Error;
 use typed_arrow_dyn::{DynBuilders, DynProjection, DynRow, DynSchema};
 
-use crate::{
-    inmem::immutable::memtable::RecordBatchStorage,
-    query::stream::{StreamError, merge::MergeStream},
-};
+use crate::query::stream::{StreamError, merge::MergeStream};
 
 pin_project! {
     /// Stream adapter that batches merged rows into `RecordBatch` chunks.
-    pub struct PackageStream<'t, S>
+    pub struct PackageStream<'t, E>
     where
-        S: RecordBatchStorage,
+        E: Executor,
     {
         row_count: usize,
         batch_size: usize,
         #[pin]
-        inner: MergeStream<'t, S>,
+        inner: MergeStream<'t, E>,
         builder: DynRecordBatchBuilder,
     residual_predicate: Option<Predicate>,
     residual: Option<ResidualEvaluator>,
@@ -41,13 +39,13 @@ pin_project! {
     }
 }
 
-impl<'t, S> PackageStream<'t, S>
+impl<'t, E> PackageStream<'t, E>
 where
-    S: RecordBatchStorage,
+    E: Executor + Clone + 'static,
 {
     pub(crate) fn new(
         batch_size: usize,
-        merge: MergeStream<'t, S>,
+        merge: MergeStream<'t, E>,
         scan_schema: SchemaRef,
         result_schema: SchemaRef,
         residual_predicate: Option<Predicate>,
@@ -78,9 +76,9 @@ where
     }
 }
 
-impl<'t, S> Stream for PackageStream<'t, S>
+impl<'t, E> Stream for PackageStream<'t, E>
 where
-    S: RecordBatchStorage,
+    E: Executor + Clone + 'static,
 {
     type Item = Result<RecordBatch, StreamError>;
 
@@ -381,22 +379,35 @@ fn convert_owned_cell(cell: &typed_arrow_dyn::DynCell) -> Result<ScalarValue, Re
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_array::{Array, Int64Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use futures::{StreamExt, executor::block_on};
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        extractor::projection_for_field,
+        extractor::{KeyProjection, projection_for_columns, projection_for_field},
         inmem::mutable::memtable::DynMem,
         mvcc::Timestamp,
         query::{
             ColumnRef, Predicate, ScalarValue,
-            stream::{Order, ScanStream, merge::MergeStream},
+            stream::{Order, OwnedMutableScan, ScanStream, merge::MergeStream},
         },
         test::build_batch,
     };
+
+    fn make_test_mem(schema: SchemaRef) -> DynMem {
+        let extractor: Arc<dyn KeyProjection> = projection_for_field(schema.clone(), 0)
+            .expect("extractor")
+            .into();
+        let delete_projection: Arc<dyn KeyProjection> = projection_for_columns(
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)])),
+            vec![0],
+        )
+        .expect("delete projection")
+        .into();
+        DynMem::new(schema, extractor, delete_projection)
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn package_stream_emits_multiple_batches() {
@@ -404,8 +415,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int64, true),
         ]));
-        let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
-        let mutable = DynMem::new(schema.clone());
+        let mutable = make_test_mem(schema.clone());
 
         let rows = (0..5)
             .map(|idx| {
@@ -417,14 +427,16 @@ mod tests {
             .collect();
         let batch = build_batch(schema.clone(), rows).expect("batch");
         mutable
-            .insert_batch(extractor.as_ref(), batch, Timestamp::new(1))
+            .insert_batch(batch, Timestamp::new(1))
             .expect("insert batch");
 
-        let mutable_scan = mutable
-            .scan_visible(None, Timestamp::MAX)
-            .expect("scan rows");
+        let mutable_guard = mutable.read();
+        let mutable_scan =
+            OwnedMutableScan::from_guard(mutable_guard, None, Timestamp::MAX).expect("scan rows");
         let merge = MergeStream::from_vec(
-            vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
+            vec![ScanStream::<'_, fusio::executor::NoopExecutor>::from(
+                mutable_scan,
+            )],
             None,
             Some(Order::Asc),
         )
@@ -468,8 +480,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int64, true),
         ]));
-        let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
-        let mutable = DynMem::new(schema.clone());
+        let mutable = make_test_mem(schema.clone());
 
         let rows = vec![
             DynRow(vec![
@@ -483,16 +494,18 @@ mod tests {
         ];
         let batch = build_batch(schema.clone(), rows).expect("batch");
         mutable
-            .insert_batch(extractor.as_ref(), batch, Timestamp::new(1))
+            .insert_batch(batch, Timestamp::new(1))
             .expect("insert batch");
 
         let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
 
-        let mutable_scan = mutable
-            .scan_visible(None, Timestamp::MAX)
-            .expect("scan rows");
+        let mutable_guard = mutable.read();
+        let mutable_scan =
+            OwnedMutableScan::from_guard(mutable_guard, None, Timestamp::MAX).expect("scan rows");
         let merge = block_on(MergeStream::from_vec(
-            vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
+            vec![ScanStream::<'_, fusio::executor::NoopExecutor>::from(
+                mutable_scan,
+            )],
             None,
             Some(Order::Asc),
         ))
@@ -533,8 +546,7 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int64, true),
         ]));
-        let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
-        let mutable = DynMem::new(schema.clone());
+        let mutable = make_test_mem(schema.clone());
 
         let rows = vec![DynRow(vec![
             Some(DynCell::Str("only".into())),
@@ -542,17 +554,19 @@ mod tests {
         ])];
         let batch = build_batch(schema.clone(), rows).expect("batch");
         mutable
-            .insert_batch(extractor.as_ref(), batch, Timestamp::new(1))
+            .insert_batch(batch, Timestamp::new(1))
             .expect("insert batch");
 
         // Predicate references a missing column.
         let predicate = Predicate::gt(ColumnRef::new("missing", None), ScalarValue::from(0i64));
 
-        let mutable_scan = mutable
-            .scan_visible(None, Timestamp::MAX)
-            .expect("scan rows");
+        let mutable_guard = mutable.read();
+        let mutable_scan =
+            OwnedMutableScan::from_guard(mutable_guard, None, Timestamp::MAX).expect("scan rows");
         let merge = block_on(MergeStream::from_vec(
-            vec![ScanStream::<'_, RecordBatch>::from(mutable_scan)],
+            vec![ScanStream::<'_, fusio::executor::NoopExecutor>::from(
+                mutable_scan,
+            )],
             None,
             Some(Order::Asc),
         ))

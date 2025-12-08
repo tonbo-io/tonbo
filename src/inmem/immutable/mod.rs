@@ -4,10 +4,8 @@
 
 pub(crate) mod memtable;
 
-use arrow_array::RecordBatch;
-
 /// Immutable segment emitted by sealing the dynamic mutable memtable.
-pub(crate) type ImmutableSegment = memtable::ImmutableMemTable<RecordBatch>;
+pub(crate) type ImmutableSegment = memtable::ImmutableMemTable;
 
 /// Lightweight pruning helper; currently returns all segment indexes.
 pub(crate) fn prune_segments(segments: &[&ImmutableSegment]) -> Vec<usize> {

@@ -7,22 +7,20 @@ use std::{
     task::{Context, Poll},
 };
 
+use fusio::executor::Executor;
 use futures::{Stream, StreamExt, ready};
 use pin_project_lite::pin_project;
 
 use super::Order;
-use crate::{
-    inmem::immutable::memtable::RecordBatchStorage,
-    query::stream::{ScanStream, SourcePriority, StreamEntry, StreamError},
-};
+use crate::query::stream::{ScanStream, SourcePriority, StreamEntry, StreamError};
 
 pin_project! {
     /// Stream that merges multiple ordered sources respecting MVCC ordering semantics.
-    pub struct MergeStream<'t, S>
+    pub struct MergeStream<'t, E>
     where
-        S: RecordBatchStorage,
+        E: Executor,
     {
-        streams: Vec<ScanStream<'t, S>>,
+        streams: Vec<ScanStream<'t, E>>,
         peeked: BinaryHeap<Reverse<HeapEntry>>,
         buf: Option<StreamEntry>,
         limit: Option<usize>,
@@ -31,12 +29,12 @@ pin_project! {
     }
 }
 
-impl<'t, S> MergeStream<'t, S>
+impl<'t, E> MergeStream<'t, E>
 where
-    S: RecordBatchStorage,
+    E: Executor + Clone + 'static,
 {
     pub(crate) async fn from_vec(
-        mut streams: Vec<ScanStream<'t, S>>,
+        mut streams: Vec<ScanStream<'t, E>>,
         limit: Option<usize>,
         order: Option<Order>,
     ) -> Result<Self, StreamError> {
@@ -63,9 +61,9 @@ where
     }
 }
 
-impl<'t, S> Stream for MergeStream<'t, S>
+impl<'t, E> Stream for MergeStream<'t, E>
 where
-    S: RecordBatchStorage,
+    E: Executor + Clone + 'static,
 {
     type Item = Result<StreamEntry, StreamError>;
 
@@ -191,14 +189,13 @@ fn decrement_limit(limit: &mut Option<usize>) {
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
-    use arrow_array::RecordBatch;
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_schema::{DataType, Field, Schema, SchemaRef};
     use futures::StreamExt;
     use typed_arrow_dyn::{DynCell, DynRow};
 
     use super::*;
     use crate::{
-        extractor::{projection_for_columns, projection_for_field},
+        extractor::{KeyProjection, projection_for_columns, projection_for_field},
         inmem::{immutable::memtable::ImmutableMemTable, mutable::memtable::DynMem},
         key::KeyOwned,
         mutation::DynMutation,
@@ -208,6 +205,19 @@ mod tests {
         transaction::TransactionScan,
     };
 
+    fn make_test_mem(schema: SchemaRef) -> DynMem {
+        let extractor: Arc<dyn KeyProjection> = projection_for_field(schema.clone(), 0)
+            .expect("extractor")
+            .into();
+        let delete_projection: Arc<dyn KeyProjection> = projection_for_columns(
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)])),
+            vec![0],
+        )
+        .expect("delete projection")
+        .into();
+        DynMem::new(schema, extractor, delete_projection)
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn merge_stream_prefers_higher_priority_for_same_key() {
         async fn run_merge(order: Order) -> Vec<(String, i64, u64)> {
@@ -215,11 +225,10 @@ mod tests {
                 Field::new("id", DataType::Utf8, false),
                 Field::new("v", DataType::Int64, true),
             ]));
-            let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
 
-            let mut mutable = DynMem::new(schema.clone());
-            let mut immutable_builder = DynMem::new(schema.clone());
-            let insert_row = |table: &mut DynMem, key: &str, value: i64, ts: u64| {
+            let mutable = make_test_mem(schema.clone());
+            let immutable_builder = make_test_mem(schema.clone());
+            let insert_row = |table: &DynMem, key: &str, value: i64, ts: u64| {
                 let batch = build_batch(
                     schema.clone(),
                     vec![DynRow(vec![
@@ -229,28 +238,29 @@ mod tests {
                 )
                 .expect("batch");
                 table
-                    .insert_batch(extractor.as_ref(), batch, Timestamp::new(ts))
+                    .insert_batch(batch, Timestamp::new(ts))
                     .expect("insert");
             };
 
-            insert_row(&mut mutable, "a", 2, 50);
-            insert_row(&mut mutable, "b", 5, 20);
-            insert_row(&mut mutable, "c", 10, 10);
+            insert_row(&mutable, "a", 2, 50);
+            insert_row(&mutable, "b", 5, 20);
+            insert_row(&mutable, "c", 10, 10);
             // Mutable + immutable both expose ("d", ts=60); mutable should win via source priority.
-            insert_row(&mut mutable, "d", 100, 60);
+            insert_row(&mutable, "d", 100, 60);
 
-            insert_row(&mut immutable_builder, "a", 1, 50);
-            insert_row(&mut immutable_builder, "c", 40, 40);
-            insert_row(&mut immutable_builder, "d", 25, 60);
+            insert_row(&immutable_builder, "a", 1, 50);
+            insert_row(&immutable_builder, "c", 40, 40);
+            insert_row(&immutable_builder, "d", 25, 60);
 
-            let immutable_segment: ImmutableMemTable<RecordBatch> = immutable_builder
-                .seal_into_immutable(&schema, extractor.as_ref())
+            let immutable_segment: ImmutableMemTable = immutable_builder
+                .seal_now()
                 .expect("seal ok")
                 .expect("segment");
 
-            let mutable_scan = mutable
-                .scan_visible(None, Timestamp::MAX)
-                .expect("mutable scan");
+            let mutable_guard = mutable.read();
+            let mutable_owned_scan =
+                OwnedMutableScan::from_guard(mutable_guard, None, Timestamp::MAX)
+                    .expect("mutable scan");
             let immutable_segment = Arc::new(immutable_segment);
             let immutable_scan = immutable_segment
                 .scan_visible(None, Timestamp::MAX)
@@ -279,13 +289,13 @@ mod tests {
                 .expect("txn scan");
 
             let streams = vec![
-                ScanStream::<'_, RecordBatch>::from(OwnedImmutableScan::new(
+                ScanStream::<'_, fusio::executor::NoopExecutor>::from(OwnedImmutableScan::new(
                     Arc::clone(&immutable_segment),
                     immutable_scan,
                 )),
-                ScanStream::<'_, RecordBatch>::from(OwnedMutableScan::from_scan(mutable_scan)),
-                ScanStream::<'_, RecordBatch>::from(txn_scan1),
-                ScanStream::<'_, RecordBatch>::from(txn_scan2),
+                ScanStream::<'_, fusio::executor::NoopExecutor>::from(mutable_owned_scan),
+                ScanStream::<'_, fusio::executor::NoopExecutor>::from(txn_scan1),
+                ScanStream::<'_, fusio::executor::NoopExecutor>::from(txn_scan2),
             ];
 
             let mut merge = MergeStream::from_vec(streams, None, Some(order))
@@ -351,11 +361,10 @@ mod tests {
             Field::new("id", DataType::Utf8, false),
             Field::new("v", DataType::Int64, false),
         ]));
-        let extractor = projection_for_field(schema.clone(), 0).expect("extractor");
 
-        let mut mutable = DynMem::new(schema.clone());
-        let mut immutable_builder = DynMem::new(schema.clone());
-        let insert_row = |table: &mut DynMem, key: &str, value: i64, ts: u64| {
+        let mutable = make_test_mem(schema.clone());
+        let immutable_builder = make_test_mem(schema.clone());
+        let insert_row = |table: &DynMem, key: &str, value: i64, ts: u64| {
             let batch = build_batch(
                 schema.clone(),
                 vec![DynRow(vec![
@@ -365,46 +374,44 @@ mod tests {
             )
             .expect("batch");
             table
-                .insert_batch(extractor.as_ref(), batch, Timestamp::new(ts))
+                .insert_batch(batch, Timestamp::new(ts))
                 .expect("insert");
         };
 
-        insert_row(&mut immutable_builder, "ghost", 10, 10);
-        insert_row(&mut immutable_builder, "keep-immutable", 25, 12);
-        let immutable_segment: ImmutableMemTable<RecordBatch> = immutable_builder
-            .seal_into_immutable(&schema, extractor.as_ref())
+        insert_row(&immutable_builder, "ghost", 10, 10);
+        insert_row(&immutable_builder, "keep-immutable", 25, 12);
+        let immutable_segment: ImmutableMemTable = immutable_builder
+            .seal_now()
             .expect("seal ok")
             .expect("segment");
 
-        insert_row(&mut mutable, "mutable-only", 99, 40);
+        insert_row(&mutable, "mutable-only", 99, 40);
         let delete_schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new(MVCC_COMMIT_COL, DataType::UInt64, false),
         ]));
-        let delete_projection =
-            projection_for_columns(delete_schema.clone(), vec![0]).expect("delete projection");
         let delete_rows = vec![DynRow(vec![
             Some(DynCell::Str("ghost".into())),
             Some(DynCell::U64(30)),
         ])];
         let delete_batch = build_batch(delete_schema, delete_rows).expect("delete batch");
         mutable
-            .insert_delete_batch(delete_projection.as_ref(), delete_batch)
+            .insert_delete_batch(delete_batch)
             .expect("delete row");
 
         let immutable_segment = Arc::new(immutable_segment);
         let immutable_scan = immutable_segment
             .scan_visible(None, Timestamp::MAX)
             .expect("immutable scan");
-        let mutable_scan = mutable
-            .scan_visible(None, Timestamp::MAX)
+        let mutable_guard = mutable.read();
+        let mutable_owned_scan = OwnedMutableScan::from_guard(mutable_guard, None, Timestamp::MAX)
             .expect("mutable scan");
         let streams = vec![
-            ScanStream::from(OwnedImmutableScan::new(
+            ScanStream::<'_, fusio::executor::NoopExecutor>::from(OwnedImmutableScan::new(
                 Arc::clone(&immutable_segment),
                 immutable_scan,
             )),
-            ScanStream::from(OwnedMutableScan::from_scan(mutable_scan)),
+            ScanStream::<'_, fusio::executor::NoopExecutor>::from(mutable_owned_scan),
         ];
         let mut merge = MergeStream::from_vec(streams, None, Some(Order::Asc))
             .await

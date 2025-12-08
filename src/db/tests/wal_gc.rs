@@ -11,7 +11,7 @@ use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{
     DynFs,
-    disk::LocalFs,
+    disk::{LocalFs, TokioFs},
     executor::tokio::TokioExecutor,
     path::{Path as FusioPath, path_to_local},
 };
@@ -20,7 +20,7 @@ use tokio::time::sleep;
 use typed_arrow_dyn::{DynCell, DynRow};
 
 use crate::{
-    db::{DB, DynDbHandleExt},
+    db::{DB, DbInner},
     inmem::policy::{BatchesThreshold, NeverSeal},
     mode::DynModeConfig,
     ondisk::sstable::{SsTableConfig, SsTableDescriptor, SsTableId},
@@ -79,10 +79,10 @@ async fn rows_from_db(db: &DB<LocalFs, TokioExecutor>) -> Vec<(String, i32)> {
     let pred = Predicate::is_not_null(ColumnRef::new("id", None));
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
-        .plan_scan(db, &pred, None, None)
+        .plan_scan(&**db.inner(), &pred, None, None)
         .await
         .expect("plan");
-    let stream = db.execute_scan(plan).await.expect("execute");
+    let stream = db.inner().execute_scan(plan).await.expect("execute");
     let batches = stream
         .try_collect::<Vec<_>>()
         .await
@@ -133,14 +133,16 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
     let sst_path = FusioPath::from_filesystem_path(&sst_dir)?;
     let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_path));
 
-    let mut db = DB::<LocalFs, TokioExecutor>::builder(build_config)
-        .on_disk(root_str.clone())?
-        .create_dirs(true)
-        .wal_segment_bytes(512)
-        .wal_flush_interval(Duration::from_millis(1))
-        .wal_sync_policy(WalSyncPolicy::Disabled)
-        .recover_or_init_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DbInner<TokioFs, TokioExecutor> =
+        DB::<TokioFs, TokioExecutor>::builder(build_config)
+            .on_disk(root_str.clone())?
+            .create_dirs(true)
+            .wal_segment_bytes(512)
+            .wal_flush_interval(Duration::from_millis(1))
+            .wal_sync_policy(WalSyncPolicy::Disabled)
+            .open_with_executor(Arc::clone(&executor))
+            .await?
+            .into_inner();
 
     let wal_dir_local = path_to_local(&db.wal_config().expect("wal").dir).expect("local wal dir");
 
@@ -202,7 +204,7 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
         .wal_segment_bytes(512)
         .wal_flush_interval(Duration::from_millis(1))
         .wal_sync_policy(WalSyncPolicy::Disabled)
-        .recover_or_init_with_executor(Arc::clone(&executor))
+        .open_with_executor(Arc::clone(&executor))
         .await?;
     assert_eq!(rows_from_db(&recovered).await, {
         let mut rows = ingested_rows.clone();
@@ -213,14 +215,16 @@ async fn wal_gc_respects_pinned_segments() -> Result<(), Box<dyn std::error::Err
 
     // Reopen db to continue testing final flush and GC
     let reopen_config = DynModeConfig::from_key_name(schema.clone(), "id")?;
-    let mut db = DB::<LocalFs, TokioExecutor>::builder(reopen_config)
-        .on_disk(root_str.clone())?
-        .create_dirs(true)
-        .wal_segment_bytes(512)
-        .wal_flush_interval(Duration::from_millis(1))
-        .wal_sync_policy(WalSyncPolicy::Disabled)
-        .recover_or_init_with_executor(Arc::clone(&executor))
-        .await?;
+    let mut db: DbInner<TokioFs, TokioExecutor> =
+        DB::<TokioFs, TokioExecutor>::builder(reopen_config)
+            .on_disk(root_str.clone())?
+            .create_dirs(true)
+            .wal_segment_bytes(512)
+            .wal_flush_interval(Duration::from_millis(1))
+            .wal_sync_policy(WalSyncPolicy::Disabled)
+            .open_with_executor(Arc::clone(&executor))
+            .await?
+            .into_inner();
 
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
     let final_id = "flushed".to_string();
@@ -266,10 +270,10 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
     wal_cfg.flush_interval = Duration::from_millis(1);
     wal_cfg.sync = WalSyncPolicy::Always;
 
-    let mut db = DB::new(config, Arc::clone(&executor)).await?;
+    let mut db = DB::new(config, Arc::clone(&executor)).await?.into_inner();
     db.enable_wal(wal_cfg.clone()).await?;
-    let db = db.into_shared();
-    assert!(db.wal_floor_seq().await.is_none());
+    let db = DB::from_inner(Arc::new(db));
+    assert!(db.inner().wal_floor_seq().await.is_none());
 
     let mut tx = db.begin_transaction().await?;
     tx.upsert(DynRow(vec![
@@ -279,12 +283,13 @@ async fn strict_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error
     tx.commit().await?;
 
     let floor = db
+        .inner()
         .wal_floor_seq()
         .await
         .expect("transaction commit should publish wal floor");
-    db.prune_wal_segments_below_floor().await;
+    db.inner().prune_wal_segments_below_floor().await;
 
-    let wal_dir_local = { path_to_local(&db.wal_config().expect("wal").dir)? };
+    let wal_dir_local = { path_to_local(&db.inner().wal_config().expect("wal").dir)? };
     let pinned = wal_file_for_seq(&wal_dir_local, floor);
     assert!(pinned.exists(), "floor segment must remain on disk");
     Ok(())
@@ -310,9 +315,9 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
     wal_cfg.flush_interval = Duration::from_millis(1);
     wal_cfg.sync = WalSyncPolicy::Disabled;
 
-    let mut db = DB::new(config, Arc::clone(&executor)).await?;
+    let mut db = DB::new(config, Arc::clone(&executor)).await?.into_inner();
     db.enable_wal(wal_cfg.clone()).await?;
-    let db = db.into_shared();
+    let db = DB::from_inner(Arc::new(db));
 
     let mut tx = db.begin_transaction().await?;
     tx.upsert(DynRow(vec![
@@ -323,13 +328,13 @@ async fn fast_transaction_updates_wal_floor() -> Result<(), Box<dyn std::error::
 
     let start = Instant::now();
     let timeout = Duration::from_secs(5);
-    while db.wal_floor_seq().await.is_none() {
+    while db.inner().wal_floor_seq().await.is_none() {
         if start.elapsed() > timeout {
             panic!("wal floor never published for fast commit");
         }
         sleep(Duration::from_millis(10)).await;
     }
 
-    db.prune_wal_segments_below_floor().await;
+    db.inner().prune_wal_segments_below_floor().await;
     Ok(())
 }

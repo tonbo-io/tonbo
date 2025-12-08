@@ -332,7 +332,7 @@ impl CompactionExecutor for LocalCompactionExecutor {
             let merger = SsTableMerger::new(Arc::clone(&self.config), job.inputs.clone(), target)
                 .with_output_id_allocator(Arc::clone(&self.next_id))
                 .with_output_caps(max_rows, max_bytes);
-            let merged = merger.execute().await?;
+            let merged = merger.execute(fusio::executor::NoopExecutor).await?;
             let descriptors: Vec<_> = merged.iter().map(|sst| sst.descriptor().clone()).collect();
             let descriptors_for_outcome = {
                 #[cfg(test)]
@@ -438,7 +438,10 @@ mod tests {
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
         builder.add_immutable(&immutable).expect("stage seg");
-        let input = builder.finish().await.expect("sst");
+        let input = builder
+            .finish(fusio::executor::NoopExecutor)
+            .await
+            .expect("sst");
 
         let task = CompactionTask {
             source_level: 0,
@@ -699,7 +702,12 @@ mod tests {
             SsTableDescriptor::new(SsTableId::new(1), 0),
         );
         builder.add_immutable(&immutable).expect("stage seg");
-        let input = builder.finish().await.expect("sst").descriptor().clone();
+        let input = builder
+            .finish(fusio::executor::NoopExecutor)
+            .await
+            .expect("sst")
+            .descriptor()
+            .clone();
         let job = CompactionJob {
             task: CompactionTask {
                 source_level: 0,

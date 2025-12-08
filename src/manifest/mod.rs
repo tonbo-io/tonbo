@@ -41,7 +41,8 @@ pub(crate) use bootstrap::{
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) use domain::TableHead;
 pub(crate) use domain::{
-    GcPlanState, GcSstRef, SstEntry, TableDefinition, TableId, VersionState, WalSegmentRef,
+    GcPlanState, GcSstRef, SstEntry, TableDefinition, TableId, TableMeta, VersionState,
+    WalSegmentRef,
 };
 pub(crate) use driver::{ManifestError, ManifestResult};
 pub(crate) use version::VersionEdit;
