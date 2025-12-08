@@ -31,7 +31,7 @@ const MAX_COMPACTION_APPLY_RETRIES: usize = 2;
 ///
 /// Unlike the previous design, this driver does not carry a phantom `M` generic.
 /// It only needs filesystem and executor types to interact with manifest and WAL.
-pub struct CompactionDriver<FS, E>
+pub(crate) struct CompactionDriver<FS, E>
 where
     FS: ManifestFs<E>,
     E: Executor + Timer + Clone + 'static,
@@ -50,7 +50,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Create a new compaction driver with the given manifest and configuration.
-    pub fn new(
+    pub(crate) fn new(
         manifest: TonboManifest<FS, E>,
         table_id: TableId,
         wal_config: Option<RuntimeWalConfig>,
@@ -65,7 +65,7 @@ where
     }
 
     /// Remove WAL segments whose sequence is older than the manifest floor.
-    pub async fn prune_wal_below_floor(&self) {
+    pub(crate) async fn prune_wal_below_floor(&self) {
         let Some(cfg) = self.wal_config.as_ref() else {
             return;
         };
@@ -113,18 +113,18 @@ where
     }
 
     /// Get the WAL floor currently recorded in the manifest.
-    pub async fn manifest_wal_floor(&self) -> Option<WalSegmentRef> {
+    async fn manifest_wal_floor(&self) -> Option<WalSegmentRef> {
         self.manifest.wal_floor(self.table_id).await.ok().flatten()
     }
 
     /// Sequence number of the WAL floor currently recorded in the manifest.
     #[cfg(all(test, feature = "tokio"))]
-    pub async fn wal_floor_seq(&self) -> Option<u64> {
+    pub(crate) async fn wal_floor_seq(&self) -> Option<u64> {
         self.manifest_wal_floor().await.map(|ref_| ref_.seq())
     }
 
     /// Build a compaction plan based on the latest manifest snapshot.
-    pub async fn plan_compaction_task<P>(
+    pub(crate) async fn plan_compaction_task<P>(
         &self,
         planner: &P,
     ) -> ManifestResult<Option<CompactionTask>>
@@ -141,7 +141,7 @@ where
 
     /// End-to-end compaction orchestrator (plan -> resolve -> execute -> apply manifest).
     #[cfg(all(test, feature = "tokio"))]
-    pub async fn run_compaction<CE, P>(
+    pub(crate) async fn run_compaction<CE, P>(
         &self,
         planner: &P,
         executor: &CE,
@@ -223,7 +223,7 @@ where
     }
 
     /// Execute a pre-scheduled compaction task with lease validation.
-    pub async fn run_scheduled_compaction<CE>(
+    async fn run_scheduled_compaction<CE>(
         &self,
         scheduled: ScheduledCompaction,
         executor: &CE,
@@ -306,7 +306,7 @@ where
     }
 
     /// Spawn a background compaction worker that plans and executes compactions.
-    pub fn spawn_worker<CE, P>(
+    pub(crate) fn spawn_worker<CE, P>(
         self: &Arc<Self>,
         runtime: Arc<E>,
         planner: P,

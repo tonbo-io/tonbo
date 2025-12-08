@@ -109,10 +109,10 @@ async fn dynamic_composite_from_field_ordinals_and_scan() {
     db.ingest(batch).await.expect("insert batch");
 
     let pred = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("a")),
+        Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a")),
         Predicate::and(vec![
-            Predicate::gte(ColumnRef::new("ts", None), ScalarValue::from(5i64)),
-            Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
+            Predicate::gte(ColumnRef::new("ts"), ScalarValue::from(5i64)),
+            Predicate::lte(ColumnRef::new("ts"), ScalarValue::from(10i64)),
         ]),
     ]);
     let batches = db.scan().filter(pred).collect().await.expect("collect");
@@ -172,10 +172,10 @@ async fn dynamic_composite_from_schema_list_and_scan() {
     db.ingest(batch).await.expect("insert batch");
 
     let pred = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("a")),
+        Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a")),
         Predicate::and(vec![
-            Predicate::gte(ColumnRef::new("ts", None), ScalarValue::from(1i64)),
-            Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
+            Predicate::gte(ColumnRef::new("ts"), ScalarValue::from(1i64)),
+            Predicate::lte(ColumnRef::new("ts"), ScalarValue::from(10i64)),
         ]),
     ]);
     let batches = db.scan().filter(pred).collect().await.expect("collect");

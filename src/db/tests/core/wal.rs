@@ -134,7 +134,7 @@ async fn ingest_waits_for_wal_durable_ack() {
     release_ack_tx.send(()).expect("release ack");
     ingest_future.await.expect("ingest after ack");
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&db, &pred, None, None)

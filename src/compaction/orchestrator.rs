@@ -18,7 +18,7 @@ use crate::{
 /// Plan compaction from a version snapshot.
 ///
 /// Returns `None` if the snapshot is empty or the planner finds no work to do.
-pub fn plan_from_version<P>(planner: &P, version: &VersionState) -> Option<CompactionTask>
+pub(crate) fn plan_from_version<P>(planner: &P, version: &VersionState) -> Option<CompactionTask>
 where
     P: CompactionPlanner,
 {
@@ -33,7 +33,7 @@ where
 ///
 /// Looks up each input SST in the version state and builds full descriptors
 /// with stats, WAL IDs, and storage paths.
-pub fn resolve_inputs(
+pub(crate) fn resolve_inputs(
     version: &VersionState,
     task: &CompactionTask,
 ) -> Result<Vec<SsTableDescriptor>, CompactionError> {
@@ -66,7 +66,7 @@ pub fn resolve_inputs(
 ///
 /// Returns `None` if any SST lacks WAL metadata, signaling that the existing
 /// manifest WAL set should be preserved.
-pub fn wal_ids_for_remaining_ssts(
+pub(crate) fn wal_ids_for_remaining_ssts(
     version: &VersionState,
     removed: &HashSet<SsTableId>,
     added: &[SsTableDescriptor],
@@ -98,7 +98,7 @@ pub fn wal_ids_for_remaining_ssts(
 ///
 /// Filters the existing WAL segments to only those still referenced by
 /// remaining SSTs. Handles sequence gaps conservatively.
-pub fn wal_segments_after_compaction(
+pub(crate) fn wal_segments_after_compaction(
     version: &VersionState,
     removed_ssts: &[SsTableDescriptor],
     added_ssts: &[SsTableDescriptor],
@@ -144,7 +144,7 @@ pub fn wal_segments_after_compaction(
 /// Reconcile WAL segments in the compaction outcome.
 ///
 /// Updates the outcome with the final WAL segment list, floor, and obsolete segments.
-pub fn reconcile_wal_segments(
+pub(crate) fn reconcile_wal_segments(
     version: &VersionState,
     outcome: &mut CompactionOutcome,
     existing_wal_segments: &[WalSegmentRef],
@@ -181,7 +181,7 @@ pub fn reconcile_wal_segments(
 /// Build a GC plan from a compaction outcome.
 ///
 /// Returns `None` if there are no obsolete SSTs or WAL segments to clean up.
-pub fn gc_plan_from_outcome(
+pub(crate) fn gc_plan_from_outcome(
     outcome: &CompactionOutcome,
 ) -> Result<Option<GcPlanState>, CompactionError> {
     if outcome.remove_ssts.is_empty() && outcome.obsolete_wal_segments.is_empty() {

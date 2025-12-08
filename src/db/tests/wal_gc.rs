@@ -76,7 +76,7 @@ fn single_row_batch(schema: Arc<Schema>, id: &str, value: i32) -> RecordBatch {
 }
 
 async fn rows_from_db(db: &DB<LocalFs, TokioExecutor>) -> Vec<(String, i32)> {
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let snapshot = db.begin_snapshot().await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&**db.inner(), &pred, None, None)

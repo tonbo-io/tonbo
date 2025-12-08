@@ -2,8 +2,6 @@
 
 use std::cmp::Ordering;
 
-use thiserror::Error;
-
 use crate::{
     key::KeyOwned,
     manifest::VersionState,
@@ -11,7 +9,7 @@ use crate::{
 };
 
 /// Abstract compaction planner interface to support selectable strategies.
-pub trait CompactionPlanner {
+pub(crate) trait CompactionPlanner {
     /// Examine the snapshot of levels and return the next compaction task, if any.
     fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask>;
 }
@@ -21,10 +19,6 @@ pub trait CompactionPlanner {
 pub enum CompactionStrategy {
     /// Leveled compaction (tiered levels, non-overlapping within a level).
     Leveled(LeveledPlannerConfig),
-    /// Size-tiered/universal-style compaction (reserved).
-    Tiered(TieredPlannerConfig),
-    /// Time-windowed compaction (reserved).
-    TimeWindow(TimeWindowPlannerConfig),
 }
 
 impl Default for CompactionStrategy {
@@ -35,7 +29,7 @@ impl Default for CompactionStrategy {
 
 /// Planner enum used to keep a concrete planner instance around even as strategy becomes pluggable.
 #[derive(Clone, Debug)]
-pub enum CompactionPlannerKind {
+pub(crate) enum CompactionPlannerKind {
     /// Leveled planner implementation.
     Leveled(LeveledCompactionPlanner),
 }
@@ -48,105 +42,71 @@ impl CompactionPlanner for CompactionPlannerKind {
     }
 }
 
-/// Placeholder config for size-tiered planning (not implemented yet).
-#[derive(Clone, Debug, Default)]
-pub struct TieredPlannerConfig;
-
-/// Placeholder config for time-windowed planning (not implemented yet).
-#[derive(Clone, Debug, Default)]
-pub struct TimeWindowPlannerConfig;
-
-/// Errors raised when building a planner from a strategy selection.
-#[derive(Debug, Error)]
-pub enum PlannerInitError {
-    /// Strategy variant exists but does not have an implementation yet.
-    #[error("compaction strategy `{strategy}` not implemented yet")]
-    Unsupported {
-        /// Name of the unimplemented strategy.
-        strategy: String,
-    },
-}
-
 impl CompactionStrategy {
     /// Build a concrete planner for the selected strategy.
-    pub fn build(self) -> Result<CompactionPlannerKind, PlannerInitError> {
+    pub(crate) fn build(self) -> CompactionPlannerKind {
         match self {
-            Self::Leveled(cfg) => Ok(CompactionPlannerKind::Leveled(
-                LeveledCompactionPlanner::new(cfg),
-            )),
-            Self::Tiered(_) => Err(PlannerInitError::Unsupported {
-                strategy: "tiered".into(),
-            }),
-            Self::TimeWindow(_) => Err(PlannerInitError::Unsupported {
-                strategy: "time-window".into(),
-            }),
+            Self::Leveled(cfg) => {
+                CompactionPlannerKind::Leveled(LeveledCompactionPlanner::new(cfg))
+            }
         }
     }
 }
 
 /// Snapshot of SST layout across levels used for leveled compaction planning.
 #[derive(Clone, Debug, Default)]
-pub struct CompactionSnapshot {
+pub(crate) struct CompactionSnapshot {
     levels: Vec<LevelInfo>,
 }
 
 impl CompactionSnapshot {
     /// Build a snapshot from the provided levels.
-    pub fn new(levels: Vec<LevelInfo>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(levels: Vec<LevelInfo>) -> Self {
         Self { levels }
     }
 
     /// Access the recorded levels.
-    pub fn levels(&self) -> &[LevelInfo] {
+    pub(crate) fn levels(&self) -> &[LevelInfo] {
         &self.levels
     }
 
     /// Access a specific level by its numeric identifier.
-    pub fn level(&self, level: usize) -> Option<&LevelInfo> {
+    pub(crate) fn level(&self, level: usize) -> Option<&LevelInfo> {
         self.levels.iter().find(|info| info.level == level)
     }
 
     /// Returns true when no levels/files have been recorded.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.levels.iter().all(LevelInfo::is_empty)
     }
 }
 
 /// Metadata about a single compaction level.
 #[derive(Clone, Debug)]
-pub struct LevelInfo {
+pub(crate) struct LevelInfo {
     level: usize,
     files: Vec<LevelFile>,
 }
 
 impl LevelInfo {
     /// Create a new level with the provided files.
-    pub fn new(level: usize, files: Vec<LevelFile>) -> Self {
+    pub(crate) fn new(level: usize, files: Vec<LevelFile>) -> Self {
         Self { level, files }
     }
 
-    /// Level number (0 == L0).
-    pub fn level(&self) -> usize {
-        self.level
-    }
-
     /// Files recorded for this level.
-    pub fn files(&self) -> &[LevelFile] {
+    pub(crate) fn files(&self) -> &[LevelFile] {
         &self.files
     }
 
-    /// Mutable access to files (useful for tests/builders).
-    pub fn files_mut(&mut self) -> &mut Vec<LevelFile> {
-        &mut self.files
-    }
-
     /// Number of files stored in this level.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.files.len()
     }
 
     /// Returns `true` if the level has no files.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
 }
@@ -170,16 +130,16 @@ impl From<&VersionState> for CompactionSnapshot {
 
 /// Metadata for an individual SST tracked by the planner.
 #[derive(Clone, Debug)]
-pub struct LevelFile {
+pub(crate) struct LevelFile {
     /// Identifier of the SSTable represented by this entry.
-    pub sst_id: SsTableId,
+    pub(crate) sst_id: SsTableId,
     /// Persisted statistics (key bounds, row counts, etc.) for the table.
-    pub stats: Option<SsTableStats>,
+    stats: Option<SsTableStats>,
 }
 
 impl LevelFile {
     /// Construct a new entry.
-    pub fn new(sst_id: SsTableId, stats: Option<SsTableStats>) -> Self {
+    pub(crate) fn new(sst_id: SsTableId, stats: Option<SsTableStats>) -> Self {
         Self { sst_id, stats }
     }
 }
@@ -220,40 +180,40 @@ impl Default for LeveledPlannerConfig {
 
 /// Description of a scheduled compaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompactionInput {
+pub(crate) struct CompactionInput {
     /// Level that currently owns the SST being compacted.
-    pub level: usize,
+    pub(crate) level: usize,
     /// Identifier of the SST.
-    pub sst_id: SsTableId,
+    pub(crate) sst_id: SsTableId,
 }
 
 /// Description of a scheduled compaction.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompactionTask {
+pub(crate) struct CompactionTask {
     /// Level from which input SSTs are being compacted.
-    pub source_level: usize,
+    pub(crate) source_level: usize,
     /// Level that will receive the compacted output.
-    pub target_level: usize,
+    pub(crate) target_level: usize,
     /// Identifiers of SSTs that must be compacted together, tagged with their owning level.
-    pub input: Vec<CompactionInput>,
+    pub(crate) input: Vec<CompactionInput>,
     /// Aggregated key range covered by the selected SSTs (when stats are available).
-    pub key_range: Option<(KeyOwned, KeyOwned)>,
+    pub(crate) key_range: Option<(KeyOwned, KeyOwned)>,
 }
 
 /// Simple leveled compaction planner that enforces fan-in thresholds per level.
 #[derive(Clone, Debug)]
-pub struct LeveledCompactionPlanner {
+pub(crate) struct LeveledCompactionPlanner {
     cfg: LeveledPlannerConfig,
 }
 
 impl LeveledCompactionPlanner {
     /// Create a planner using the provided configuration.
-    pub fn new(cfg: LeveledPlannerConfig) -> Self {
+    pub(crate) fn new(cfg: LeveledPlannerConfig) -> Self {
         Self { cfg }
     }
 
     /// Examine the snapshot of levels and return the next compaction task, if any.
-    pub fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
+    fn plan(&self, snapshot: &CompactionSnapshot) -> Option<CompactionTask> {
         if let Some(task) = self.plan_l0(snapshot) {
             return Some(task);
         }

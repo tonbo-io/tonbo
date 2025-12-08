@@ -56,7 +56,7 @@ async fn main() {
         .expect("schema ok");
     db.ingest(batch).await.expect("insert dynamic batch");
 
-    let key_col = ColumnRef::new("id", Some(0));
+    let key_col = ColumnRef::new("id");
 
     // Scan for a specific key (id == "carol") using predicate
     let carol_pred = Predicate::eq(key_col.clone(), ScalarValue::from("carol"));

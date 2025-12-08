@@ -49,7 +49,7 @@ async fn main() {
     db.ingest(batch).await.expect("insert");
 
     // Scan all rows using a trivial predicate
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let rows: Vec<(String, i32)> = db
         .scan()
         .filter(pred)

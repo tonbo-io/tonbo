@@ -31,52 +31,32 @@ use crate::{
 
 /// Lease/ownership token used when delegating compaction to a remote worker.
 #[derive(Debug, Clone)]
-pub struct CompactionLease {
+#[allow(dead_code)]
+pub(crate) struct CompactionLease {
     /// Unique identifier for the leased job.
-    pub id: Ulid,
+    pub(crate) id: Ulid,
     /// Human-readable owner/worker identifier for observability.
-    pub owner: String,
+    pub(crate) owner: String,
     /// Lease time-to-live in milliseconds; renew before expiry to retain ownership.
-    pub ttl_ms: u64,
-}
-
-/// API for acquiring/renewing/releasing compaction leases (placeholder for remote executors).
-pub trait CompactionLeaseManager {
-    /// Acquire a lease for the given task.
-    fn acquire(
-        &self,
-        task: &CompactionTask,
-    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<CompactionLease, CompactionLeaseError>> + '_>>;
-
-    /// Renew an existing lease to extend its TTL.
-    fn renew(
-        &self,
-        lease: &CompactionLease,
-    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionLeaseError>> + '_>>;
-
-    /// Release a lease after completion.
-    fn release(
-        &self,
-        lease: CompactionLease,
-    ) -> Pin<Box<dyn MaybeSendFuture<Output = Result<(), CompactionLeaseError>> + '_>>;
+    pub(crate) ttl_ms: u64,
 }
 
 /// Execution context for a single planned compaction.
 
 #[derive(Debug, Clone)]
-pub struct CompactionJob {
+pub(crate) struct CompactionJob {
     /// Planner output describing which level/inputs to merge.
-    pub task: CompactionTask,
+    pub(crate) task: CompactionTask,
     /// Resolved input SST descriptors (including stats/paths) for the task.
-    pub inputs: Vec<SsTableDescriptor>,
+    pub(crate) inputs: Vec<SsTableDescriptor>,
     /// Optional lease token when jobs are handed out to remote executors.
-    pub lease: Option<CompactionLease>,
+    pub(crate) lease: Option<CompactionLease>,
 }
 
 /// Outcome of a successful compaction run.
 
 #[derive(Debug, Clone)]
-pub struct CompactionOutcome {
+pub(crate) struct CompactionOutcome {
     /// Newly produced SST entries to be added to the target level.
     pub(crate) add_ssts: Vec<SstEntry>,
     /// SST identifiers that should be removed once compaction finishes.
@@ -196,13 +176,10 @@ impl CompactionOutcome {
 
 /// Errors that can surface while executing compaction.
 #[derive(Debug, thiserror::Error)]
-pub enum CompactionError {
+pub(crate) enum CompactionError {
     /// Planner or manifest interaction failed.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
-    /// Lease validation failed or no lease was supplied when required.
-    #[error("compaction lease missing or invalid")]
-    LeaseMissing,
     /// CAS conflict while publishing manifest edits.
     #[error("manifest CAS conflict")]
     CasConflict,
@@ -215,20 +192,6 @@ pub enum CompactionError {
     /// Executor invoked without any inputs to merge.
     #[error("compaction executor received no inputs")]
     NoInputs,
-    /// Output would exceed configured size cap.
-    #[error("compaction output rows {0} exceed cap {1}")]
-    OutputTooLarge(usize, usize),
-    /// Placeholder until the executor is implemented.
-    #[error("compaction executor not implemented")]
-    Unimplemented,
-}
-
-/// Errors that can occur while acquiring or renewing compaction leases.
-#[derive(Debug, thiserror::Error)]
-pub enum CompactionLeaseError {
-    /// Lease operations are not supported by the current executor/scheduler.
-    #[error("compaction leases are not supported")]
-    Unsupported,
 }
 
 /// Async trait for orchestrating a major compaction over SST inputs.
@@ -249,7 +212,7 @@ pub(crate) trait CompactionExecutor {
 
 /// Local executor that merges SST inputs on the current host.
 #[derive(Debug, Clone)]
-pub struct LocalCompactionExecutor {
+pub(crate) struct LocalCompactionExecutor {
     config: Arc<SsTableConfig>,
     next_id: Arc<AtomicU64>,
     max_output_rows: Option<usize>,
@@ -265,7 +228,7 @@ const DEFAULT_OUTPUT_HARD_CAP_BYTES: usize = 512 * 1024 * 1024; // 512 MiB safet
 impl LocalCompactionExecutor {
     /// Build a local executor that will use `config` for outputs and allocate SST ids starting at
     /// `start_id`.
-    pub fn new(config: Arc<SsTableConfig>, start_id: u64) -> Self {
+    pub(crate) fn new(config: Arc<SsTableConfig>, start_id: u64) -> Self {
         Self {
             config,
             next_id: Arc::new(AtomicU64::new(start_id)),
@@ -277,8 +240,8 @@ impl LocalCompactionExecutor {
     }
 
     /// Cap the number of bytes per output SST. Prevents oversized single files when splitting.
-    #[cfg(test)]
-    pub fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
+    #[cfg(all(test, feature = "tokio"))]
+    pub(crate) fn with_max_output_bytes(mut self, max_output_bytes: usize) -> Self {
         self.max_output_bytes = Some(max_output_bytes.max(1));
         self
     }

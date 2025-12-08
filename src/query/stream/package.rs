@@ -229,9 +229,10 @@ impl<'a> ResidualOwnedRowVisitor<'a> {
         match operand {
             Operand::Literal(literal) => Ok(literal.clone()),
             Operand::Column(column) => {
-                let idx = column
-                    .index
-                    .or_else(|| self.column_map.get(column.name.as_ref()).copied())
+                let idx = self
+                    .column_map
+                    .get(column.name.as_ref())
+                    .copied()
                     .ok_or_else(|| ResidualError::MissingColumn(Arc::clone(&column.name)))?;
                 let cell = self
                     .row
@@ -497,7 +498,7 @@ mod tests {
             .insert_batch(batch, Timestamp::new(1))
             .expect("insert batch");
 
-        let predicate = Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(0i64));
+        let predicate = Predicate::gt(ColumnRef::new("v"), ScalarValue::from(0i64));
 
         let mutable_guard = mutable.read();
         let mutable_scan =
@@ -558,7 +559,7 @@ mod tests {
             .expect("insert batch");
 
         // Predicate references a missing column.
-        let predicate = Predicate::gt(ColumnRef::new("missing", None), ScalarValue::from(0i64));
+        let predicate = Predicate::gt(ColumnRef::new("missing"), ScalarValue::from(0i64));
 
         let mutable_guard = mutable.read();
         let mutable_scan =

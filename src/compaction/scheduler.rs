@@ -13,15 +13,15 @@ use crate::{
 
 /// Single scheduled compaction task bundled with CAS context and a lease token.
 #[derive(Debug, Clone)]
-pub(crate) struct ScheduledCompaction {
-    pub task: CompactionTask,
-    pub manifest_head: Option<Timestamp>,
-    pub lease: CompactionLease,
+pub(super) struct ScheduledCompaction {
+    pub(super) task: CompactionTask,
+    pub(super) manifest_head: Option<Timestamp>,
+    pub(super) lease: CompactionLease,
 }
 
 /// Errors that can surface while scheduling or draining compaction jobs.
 #[derive(Debug, Error)]
-pub enum CompactionScheduleError {
+pub(super) enum CompactionScheduleError {
     /// Scheduler channel closed.
     #[error("compaction scheduler closed")]
     Closed,
@@ -29,7 +29,7 @@ pub enum CompactionScheduleError {
 
 /// In-process scheduler that hands out leases and enqueues compaction tasks.
 #[derive(Debug)]
-pub(crate) struct CompactionScheduler {
+pub(super) struct CompactionScheduler {
     tx: mpsc::Sender<ScheduledCompaction>,
     budget: usize,
 }
@@ -37,7 +37,10 @@ pub(crate) struct CompactionScheduler {
 impl CompactionScheduler {
     /// Create a scheduler with bounded capacity and a per-cycle drain budget.
     #[must_use]
-    pub fn new(capacity: usize, budget: usize) -> (Self, mpsc::Receiver<ScheduledCompaction>) {
+    pub(super) fn new(
+        capacity: usize,
+        budget: usize,
+    ) -> (Self, mpsc::Receiver<ScheduledCompaction>) {
         let (tx, rx) = mpsc::channel(capacity.max(1));
         (
             Self {
@@ -49,7 +52,7 @@ impl CompactionScheduler {
     }
 
     /// Enqueue a planned compaction task with an issued lease.
-    pub async fn enqueue(
+    pub(super) async fn enqueue(
         &self,
         task: CompactionTask,
         manifest_head: Option<Timestamp>,
@@ -72,7 +75,7 @@ impl CompactionScheduler {
     }
 
     /// Drain up to the configured budget of scheduled jobs, invoking `f` per job.
-    pub async fn drain_with_budget<F, Fut>(
+    pub(super) async fn drain_with_budget<F, Fut>(
         &self,
         rx: &mut mpsc::Receiver<ScheduledCompaction>,
         mut f: F,

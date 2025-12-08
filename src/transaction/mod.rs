@@ -782,7 +782,7 @@ mod tests {
     }
 
     fn all_rows_predicate() -> Predicate {
-        Predicate::gt(ColumnRef::new("v", None), ScalarValue::from(i64::MIN))
+        Predicate::gt(ColumnRef::new("v"), ScalarValue::from(i64::MIN))
     }
 
     /// Helper to extract (id, value) pairs from scan result batches.
@@ -1045,7 +1045,7 @@ mod tests {
             .await
             .expect("commit should succeed without wal");
 
-        let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
+        let predicate = Predicate::is_not_null(ColumnRef::new("id"));
         let batches = db
             .scan()
             .filter(predicate)

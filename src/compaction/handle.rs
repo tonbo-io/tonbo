@@ -9,7 +9,7 @@ use futures::future::AbortHandle;
 ///
 /// Provides control over the worker lifecycle. The worker is automatically
 /// aborted when the handle is dropped.
-pub struct CompactionHandle<E: Executor> {
+pub(crate) struct CompactionHandle<E: Executor> {
     abort: AbortHandle,
     _marker: PhantomData<E>,
 }

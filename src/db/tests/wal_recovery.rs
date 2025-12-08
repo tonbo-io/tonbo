@@ -94,7 +94,7 @@ async fn wal_recovers_rows_across_restart() -> Result<(), Box<dyn std::error::Er
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let batches = recovered
         .scan()
         .filter(pred)
@@ -219,7 +219,7 @@ async fn flush_then_restart_replays_via_manifest_and_wal() -> Result<(), Box<dyn
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
-    let predicate = Predicate::is_not_null(ColumnRef::new("id", None));
+    let predicate = Predicate::is_not_null(ColumnRef::new("id"));
     let batches = recovered.scan().filter(predicate).collect().await?;
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()
@@ -293,7 +293,7 @@ async fn wal_recovers_composite_keys_in_order() -> Result<(), Box<dyn std::error
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
-    let pred = Predicate::is_not_null(ColumnRef::new("tenant", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("tenant"));
     let snapshot = recovered.begin_snapshot().await?;
     let plan = snapshot
         .plan_scan(&**recovered.inner(), &pred, None, None)
@@ -519,7 +519,7 @@ async fn wal_recovery_preserves_deletes() -> Result<(), Box<dyn std::error::Erro
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let batches = recovered.scan().filter(pred).collect().await?;
     let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(row_count, 0, "delete should survive recovery");
@@ -591,7 +591,7 @@ async fn wal_recovery_survives_segment_rotations() -> Result<(), Box<dyn std::er
             .open_with_executor(Arc::clone(&executor))
             .await?;
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let batches = recovered.scan().filter(pred).collect().await?;
     let mut rows: Vec<(String, i32)> = batches
         .into_iter()

@@ -15,11 +15,7 @@ use thiserror::Error;
 
 use super::{DB, DbInner, MinorCompactionState};
 use crate::{
-    compaction::{
-        MinorCompactor,
-        executor::LocalCompactionExecutor,
-        planner::{CompactionStrategy, PlannerInitError},
-    },
+    compaction::{MinorCompactor, executor::LocalCompactionExecutor, planner::CompactionStrategy},
     extractor::{KeyExtractError, projection_for_columns},
     id::FileIdGenerator,
     manifest::{
@@ -440,9 +436,6 @@ pub enum DbBuildError {
         #[source]
         source: std::io::Error,
     },
-    /// Compaction strategy selection is not yet supported.
-    #[error(transparent)]
-    CompactionPlanner(#[from] PlannerInitError),
 }
 
 /// High-level durability specification for object-store backed builders.
@@ -1004,11 +997,7 @@ where
             // Temporary shortcut: spawn a local compaction loop for dyn mode using a
             // caller-provided SST config. This should be replaced by a real
             // scheduler/lease + executor selection.
-            let planner = self
-                .compaction_strategy
-                .clone()
-                .build()
-                .map_err(DbBuildError::CompactionPlanner)?;
+            let planner = self.compaction_strategy.clone().build();
             let exec =
                 LocalCompactionExecutor::new(Arc::clone(&loop_cfg.sst_config), loop_cfg.start_id);
             let driver = Arc::new(inner.compaction_driver());

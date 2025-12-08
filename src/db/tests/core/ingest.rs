@@ -88,7 +88,7 @@ async fn ingest_batch_with_tombstones_marks_versions_and_visibility() {
     assert_eq!(chain_k2.len(), 1);
     assert!(chain_k2[0].1);
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let snapshot = block_on(db.begin_snapshot()).expect("snapshot");
     let plan = block_on(snapshot.plan_scan(&db, &pred, None, None)).expect("plan");
     let stream = block_on(db.execute_scan(plan)).expect("exec");

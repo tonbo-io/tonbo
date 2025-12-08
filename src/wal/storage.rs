@@ -19,7 +19,7 @@ use crate::wal::{
 
 /// Shared storage facade for WAL segments backed by fusio.
 #[derive(Clone)]
-pub struct WalStorage {
+pub(crate) struct WalStorage {
     /// Filesystem implementation used for segment operations.
     fs: Arc<dyn DynFs>,
     /// Root directory under which WAL segments are stored.
@@ -28,22 +28,22 @@ pub struct WalStorage {
 
 impl WalStorage {
     /// Create a new storage facade over the provided filesystem.
-    pub fn new(fs: Arc<dyn DynFs>, root: Path) -> Self {
+    pub(crate) fn new(fs: Arc<dyn DynFs>, root: Path) -> Self {
         Self { fs, root }
     }
 
     /// Access the underlying filesystem.
-    pub fn fs(&self) -> &Arc<dyn DynFs> {
+    pub(crate) fn fs(&self) -> &Arc<dyn DynFs> {
         &self.fs
     }
 
     /// Root directory for WAL segments.
-    pub fn root(&self) -> &Path {
+    pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
     /// Open (or create) a WAL segment starting at the provided sequence.
-    pub async fn open_segment(&self, seq: u64) -> WalResult<WalSegment> {
+    pub(crate) async fn open_segment(&self, seq: u64) -> WalResult<WalSegment> {
         self.ensure_dir(self.root()).await?;
 
         let segment_path = self.segment_path(seq)?;
@@ -64,21 +64,21 @@ impl WalStorage {
     }
 
     /// Remove an existing WAL segment by path.
-    pub async fn remove_segment(&self, path: &Path) -> WalResult<()> {
+    pub(crate) async fn remove_segment(&self, path: &Path) -> WalResult<()> {
         self.fs.remove(path).await.map_err(|err| {
             WalError::Storage(format!("failed to remove wal segment {}: {}", path, err))
         })
     }
 
     /// Expose convenience to create the WAL directory structure.
-    pub async fn ensure_dir(&self, path: &Path) -> WalResult<()> {
+    pub(crate) async fn ensure_dir(&self, path: &Path) -> WalResult<()> {
         self.fs.create_dir_all(path).await.map_err(|err| {
             WalError::Storage(format!("failed to ensure wal directory {}: {}", path, err))
         })
     }
 
     /// Provide default open options for writable segments.
-    pub fn write_options() -> OpenOptions {
+    pub(crate) fn write_options() -> OpenOptions {
         // `OpenOptions::truncate(false)` (the default) instructs the concrete backend to open
         // the handle in append mode (see fusio's disk adapters), so subsequent writes extend
         // the segment instead of clobbering existing frames.
@@ -90,7 +90,7 @@ impl WalStorage {
     }
 
     /// Provide default options for read-only access.
-    pub fn read_options() -> OpenOptions {
+    pub(crate) fn read_options() -> OpenOptions {
         OpenOptions::default().read(true).write(false)
     }
 
@@ -103,12 +103,12 @@ impl WalStorage {
     }
 
     /// Enumerate existing WAL segments along with their sizes.
-    pub async fn list_segments(&self) -> WalResult<Vec<SegmentDescriptor>> {
+    pub(crate) async fn list_segments(&self) -> WalResult<Vec<SegmentDescriptor>> {
         self.list_segments_with_hint(None).await
     }
 
     /// Enumerate WAL segments while optionally hinting at the highest expected sequence.
-    pub async fn list_segments_with_hint(
+    pub(crate) async fn list_segments_with_hint(
         &self,
         wal_state_hint: Option<u64>,
     ) -> WalResult<Vec<SegmentDescriptor>> {
@@ -151,7 +151,7 @@ impl WalStorage {
     }
 
     /// Remove all WAL segments whose sequence is strictly below `floor_seq`.
-    pub async fn prune_below(&self, floor_seq: u64) -> WalResult<usize> {
+    pub(crate) async fn prune_below(&self, floor_seq: u64) -> WalResult<usize> {
         if floor_seq == 0 {
             return Ok(0);
         }
@@ -171,7 +171,10 @@ impl WalStorage {
     ///
     /// Returns `Ok(None)` if the segment contains no frames. Callers should treat a `None` result
     /// as an empty segment and typically skip emitting a manifest reference.
-    pub async fn segment_frame_bounds(&self, path: &Path) -> WalResult<Option<SegmentFrameBounds>> {
+    pub(crate) async fn segment_frame_bounds(
+        &self,
+        path: &Path,
+    ) -> WalResult<Option<SegmentFrameBounds>> {
         let mut file = self
             .fs
             .open_options(path, Self::read_options())
@@ -209,7 +212,7 @@ impl WalStorage {
     }
 
     /// Load the persisted WAL state handle, if a store has been configured.
-    pub async fn load_state_handle(
+    pub(crate) async fn load_state_handle(
         &self,
         store: Option<&Arc<dyn WalStateStore>>,
     ) -> WalResult<Option<WalStateHandle>> {
@@ -255,7 +258,7 @@ impl WalStorage {
     }
 
     /// Inspect the WAL tail while hinting at the highest expected sealed segment.
-    pub async fn tail_metadata_with_hint(
+    pub(crate) async fn tail_metadata_with_hint(
         &self,
         wal_state_hint: Option<u64>,
     ) -> WalResult<Option<TailMetadata>> {
@@ -307,8 +310,6 @@ impl WalStorage {
             completed,
             last_frame_seq,
             last_provisional_id,
-            last_valid_offset,
-            truncated_tail,
         }))
     }
 
@@ -471,7 +472,7 @@ struct TailScan {
 }
 
 /// Handle representing an opened WAL segment file.
-pub struct WalSegment {
+pub(crate) struct WalSegment {
     path: Path,
     file: Box<dyn DynFile>,
 }
@@ -482,34 +483,34 @@ impl WalSegment {
     }
 
     /// Return the path to the underlying segment.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     /// Access the writable segment handle.
-    pub fn file_mut(&mut self) -> &mut Box<dyn DynFile> {
+    pub(crate) fn file_mut(&mut self) -> &mut Box<dyn DynFile> {
         &mut self.file
     }
 }
 
 /// Descriptor describing an on-disk WAL segment.
 #[derive(Clone, Debug)]
-pub struct SegmentDescriptor {
+pub(crate) struct SegmentDescriptor {
     /// Sequence embedded in the file name.
-    pub seq: u64,
+    pub(super) seq: u64,
     /// Path to the segment file.
-    pub path: Path,
+    pub(super) path: Path,
     /// Reported size of the segment in bytes.
-    pub bytes: usize,
+    pub(super) bytes: usize,
 }
 
 /// Inclusive frame sequence bounds for a WAL segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SegmentFrameBounds {
+pub(crate) struct SegmentFrameBounds {
     /// First frame sequence stored in the segment.
-    pub first_seq: u64,
+    pub(super) first_seq: u64,
     /// Last frame sequence stored in the segment.
-    pub last_seq: u64,
+    pub(super) last_seq: u64,
 }
 
 /// Snapshot describing the WAL tail state.
@@ -518,19 +519,15 @@ pub struct SegmentFrameBounds {
 /// is the segment it should keep appending to, `completed` lists older
 /// segments so retention can trim them, and `last_frame_seq` records the last
 /// fully decoded frame so new writes continue with the next sequence number.
-pub struct TailMetadata {
+pub(crate) struct TailMetadata {
     /// Active segment that new frames will append to.
-    pub active: SegmentDescriptor,
+    pub(super) active: SegmentDescriptor,
     /// Completed segments ordered from oldest to newest.
-    pub completed: Vec<SegmentDescriptor>,
+    pub(super) completed: Vec<SegmentDescriptor>,
     /// Sequence of the last fully decoded frame (if any).
-    pub last_frame_seq: Option<u64>,
+    pub(super) last_frame_seq: Option<u64>,
     /// Provisional ID carried by the last complete frame (if any).
-    pub last_provisional_id: Option<u64>,
-    /// Byte offset immediately after the last fully decoded frame within the active segment.
-    pub last_valid_offset: Option<usize>,
-    /// Indicates whether truncated bytes were observed (and repaired) at the tail.
-    pub truncated_tail: bool,
+    pub(super) last_provisional_id: Option<u64>,
 }
 
 fn decode_frame_bounds(data: &[u8]) -> WalResult<Option<SegmentFrameBounds>> {

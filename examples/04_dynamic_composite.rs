@@ -66,10 +66,10 @@ async fn main() {
 
     // Predicate over composite key: id = 'a' AND ts BETWEEN 5 AND 10
     let pred = Predicate::and(vec![
-        Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("a")),
+        Predicate::eq(ColumnRef::new("id"), ScalarValue::from("a")),
         Predicate::and(vec![
-            Predicate::gte(ColumnRef::new("ts", None), ScalarValue::from(5i64)),
-            Predicate::lte(ColumnRef::new("ts", None), ScalarValue::from(10i64)),
+            Predicate::gte(ColumnRef::new("ts"), ScalarValue::from(5i64)),
+            Predicate::lte(ColumnRef::new("ts"), ScalarValue::from(10i64)),
         ]),
     ]);
 

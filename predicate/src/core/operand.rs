@@ -3,25 +3,24 @@ use std::sync::Arc;
 use super::ScalarValue;
 
 /// Reference identifying a column used inside predicates.
+///
+/// This is a logical column reference using only the column name.
+/// Physical binding (resolving to schema indices) happens during
+/// query planning, not at predicate construction time.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ColumnRef {
-    /// Optional ordinal of the column within the projected schema.
-    pub index: Option<usize>,
     /// Canonical column name.
     pub name: Arc<str>,
 }
 
 impl ColumnRef {
-    /// Creates a new column reference from a name and optional index.
+    /// Creates a new column reference from a name.
     #[must_use]
-    pub fn new<N>(name: N, index: Option<usize>) -> Self
+    pub fn new<N>(name: N) -> Self
     where
         N: Into<Arc<str>>,
     {
-        Self {
-            name: name.into(),
-            index,
-        }
+        Self { name: name.into() }
     }
 }
 

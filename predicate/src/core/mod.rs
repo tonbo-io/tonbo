@@ -55,12 +55,12 @@ mod tests {
 
     fn sample_predicate() -> Predicate {
         Predicate::and(vec![
-            Predicate::gt(ColumnRef::new("a", None), ScalarValue::from(1i64)),
+            Predicate::gt(ColumnRef::new("a"), ScalarValue::from(1i64)),
             Predicate::or(vec![
-                Predicate::eq(ColumnRef::new("b", None), ScalarValue::from(2i64)),
-                Predicate::eq(ColumnRef::new("b", None), ScalarValue::from(3i64)),
+                Predicate::eq(ColumnRef::new("b"), ScalarValue::from(2i64)),
+                Predicate::eq(ColumnRef::new("b"), ScalarValue::from(3i64)),
             ]),
-            Predicate::is_null(ColumnRef::new("a", None)).not(),
+            Predicate::is_null(ColumnRef::new("a")).not(),
         ])
     }
 

@@ -57,7 +57,7 @@ async fn main() {
     // tx.delete("ghost").expect("stage delete");
 
     // Read-your-writes inside the transaction.
-    let pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("user-1"));
+    let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("user-1"));
     let preview_batches = tx.scan().filter(pred).collect().await.expect("preview");
     let mut preview_rows = Vec::new();
     for batch in &preview_batches {
@@ -83,7 +83,7 @@ async fn main() {
     tx.commit().await.expect("commit");
 
     // Post-commit read via the public scan path.
-    let all_pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let all_pred = Predicate::is_not_null(ColumnRef::new("id"));
     let committed = scan_pairs(&db, &all_pred).await;
     println!("committed rows: {:?}", committed);
 }

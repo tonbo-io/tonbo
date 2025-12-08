@@ -127,7 +127,7 @@ async fn recover_with_manifest_preserves_table_id() -> Result<(), Box<dyn std::e
 
     assert_eq!(recovered.table_id(), manifest_table);
 
-    let pred = Predicate::is_not_null(ColumnRef::new("id", None));
+    let pred = Predicate::is_not_null(ColumnRef::new("id"));
     let snapshot = block_on(recovered.begin_snapshot()).expect("snapshot");
     let plan = block_on(snapshot.plan_scan(&recovered, &pred, None, None)).expect("plan");
     let stream = block_on(recovered.execute_scan(plan)).expect("execute");
@@ -247,7 +247,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
         .expect("chain");
     assert_eq!(chain, vec![(Timestamp::new(42), true)]);
 
-    let pred = Predicate::eq(ColumnRef::new("id", None), ScalarValue::from("k"));
+    let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("k"));
     let snapshot = db
         .begin_snapshot_at(Timestamp::new(50))
         .await
