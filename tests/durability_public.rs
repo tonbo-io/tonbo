@@ -3,12 +3,9 @@ use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 use arrow_array::{Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fusio::{DynFs, disk::LocalFs, executor::tokio::TokioExecutor, path::Path as FusioPath};
-use futures::TryStreamExt;
 use tonbo::{
     BatchesThreshold, DB, NeverSeal,
-    compaction::MinorCompactor,
     db::{DbInner, WalConfig as BuilderWalConfig},
-    ondisk::sstable::SsTableConfig,
     query::{ColumnRef, Predicate},
     wal::{WalExt, WalSyncPolicy, state::FsWalStateStore},
 };
@@ -127,18 +124,14 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
     let wal_dir = temp_root.join("wal");
     let wal_cfg = wal_cfg_with_backend(&wal_dir, true)?;
 
-    // SST config for compaction flush.
-    let sst_dir = temp_root.join("sst");
-    fs::create_dir_all(&sst_dir)?;
-    let sst_root = FusioPath::from_filesystem_path(&sst_dir)?;
-    let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
-    let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
-
+    // Use builder with minor compaction configured (threshold=1, level=0, start_id=1).
+    // SST files will be written to <root>/sst/ automatically.
     let mut db: DbInner<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg.clone())
+            .with_minor_compaction(1, 0, 1)
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
@@ -157,16 +150,9 @@ async fn durability_restart_via_public_compaction_path() -> Result<(), Box<dyn s
                 Arc::new(Int32Array::from(vec![*value])) as _,
             ],
         )?;
+        // Ingest triggers seal (due to BatchesThreshold) and then minor compaction flushes.
         db.ingest(batch).await?;
     }
-
-    // Use the public MinorCompactor to flush immutables to SSTs.
-    let compactor = MinorCompactor::new(1, 0, 1);
-    let flushed = compactor
-        .maybe_compact(&mut db, Arc::clone(&sst_cfg))
-        .await?
-        .expect("compaction should flush immutables");
-    assert_eq!(flushed.descriptor().level(), 0);
 
     drop(db);
 
@@ -288,24 +274,19 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
     let wal_dir = temp_root.join("wal");
     let wal_cfg = wal_cfg_with_backend(&wal_dir, true)?;
 
-    // SST config.
-    let sst_dir = temp_root.join("sst");
-    fs::create_dir_all(&sst_dir)?;
-    let sst_root = FusioPath::from_filesystem_path(&sst_dir)?;
-    let sst_fs: Arc<dyn DynFs> = Arc::new(LocalFs {});
-    let sst_cfg = Arc::new(SsTableConfig::new(schema.clone(), sst_fs, sst_root));
-
+    // Use builder with minor compaction configured (threshold=1, level=0, start_id=10).
     let mut db: DbInner<LocalFs, TokioExecutor> =
         DB::<LocalFs, TokioExecutor>::builder(build_config)
             .on_disk(root_str.clone())?
             .create_dirs(true)
             .wal_config(wal_cfg.clone())
+            .with_minor_compaction(1, 0, 10)
             .open_with_executor(Arc::clone(&executor))
             .await?
             .into_inner();
     db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
 
-    // First batch: will be sealed + flushed.
+    // First batch: will be sealed + flushed automatically by minor compaction.
     let flushed_rows = vec![("f1".to_string(), 1), ("f2".to_string(), 2)];
     for (id, value) in &flushed_rows {
         let batch = RecordBatch::try_new(
@@ -317,13 +298,8 @@ async fn durability_restart_mixed_sst_and_wal() -> Result<(), Box<dyn std::error
         )?;
         db.ingest(batch).await?;
     }
-    let compactor = MinorCompactor::new(1, 0, 10);
-    compactor
-        .maybe_compact(&mut db, Arc::clone(&sst_cfg))
-        .await?
-        .expect("compaction should flush immutables");
 
-    // Second batch: stays mutable/WAL only.
+    // Second batch: stays mutable/WAL only (disable sealing).
     let wal_only_rows = vec![("w1".to_string(), 100), ("w2".to_string(), 200)];
     db.set_seal_policy(Arc::new(NeverSeal::default()));
     for (id, value) in &wal_only_rows {

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-helpers"))]
+use fusio::mem::fs::InMemoryFs;
 use fusio::{
     dynamic::{MaybeSend, MaybeSync},
     executor::{Executor, Timer},
     fs::{Fs, FsCas},
-    mem::fs::InMemoryFs,
     path::{Path, PathPart},
 };
 use fusio_manifest::{
@@ -245,7 +246,7 @@ where
 }
 
 /// Construct an in-memory manifest.
-#[allow(dead_code)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) async fn init_in_memory_manifest<E>(
     executor: E,
 ) -> ManifestResult<TonboManifest<InMemoryFs, E>>

@@ -475,12 +475,6 @@ impl DynMemInner {
             .unwrap_or(false)
     }
 
-    /// Approximate memory usage for keys stored in the mutable table.
-    #[allow(dead_code)]
-    pub(crate) fn approx_bytes(&self) -> usize {
-        self.metrics.approx_bytes()
-    }
-
     /// Build stats snapshot.
     pub(crate) fn build_stats(&self, since_last_seal: Option<Duration>) -> MemStats {
         let metrics = self.metrics.snapshot();
@@ -499,7 +493,7 @@ impl DynMemInner {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
         let key_owned = key.clone();
         let mut out = Vec::new();
@@ -695,12 +689,6 @@ impl DynMem {
         self.inner.read().has_conflict(key, snapshot_ts)
     }
 
-    /// Approximate memory usage for keys stored in the mutable table.
-    #[allow(dead_code)]
-    pub(crate) fn approx_bytes(&self) -> usize {
-        self.inner.read().approx_bytes()
-    }
-
     /// Access the extractor.
     pub(crate) fn extractor(&self) -> &Arc<dyn KeyProjection> {
         &self.extractor
@@ -726,7 +714,7 @@ impl DynMem {
             .collect()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
         self.inner.read().inspect_versions(key)
     }
@@ -756,10 +744,10 @@ impl<'a> DynMemReadGuard<'a> {
 }
 
 /// A lightweight reference wrapper for testing that delegates to DynMem's test methods.
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 pub struct TestMemRef<'a>(pub(crate) &'a DynMem);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 impl<'a> TestMemRef<'a> {
     /// Inspect all versions of a key in the memtable.
     pub fn inspect_versions(&self, key: &KeyOwned) -> Option<Vec<(Timestamp, bool)>> {
@@ -767,7 +755,6 @@ impl<'a> TestMemRef<'a> {
     }
 
     /// Return the number of batches in the memtable.
-    #[cfg(feature = "tokio")]
     pub fn batch_count(&self) -> usize {
         self.0.batch_count()
     }

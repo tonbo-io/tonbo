@@ -1,5 +1,5 @@
 #![deny(missing_docs)]
-#![deny(clippy::unwrap_used)]
+#![deny(clippy::unwrap_used, dead_code)]
 //! Arrow-based, in-memory building blocks for Tonbo.
 //!
 //! The current focus is the dynamic runtime-schema path: callers work with

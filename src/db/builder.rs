@@ -13,9 +13,10 @@ use fusio::{disk::LocalFs, executor::tokio::TokioExecutor};
 use fusio_manifest::{CheckpointStoreImpl, HeadStoreImpl, LeaseStoreImpl, SegmentStoreImpl};
 use thiserror::Error;
 
-use super::{DB, DbInner};
+use super::{DB, DbInner, MinorCompactionState};
 use crate::{
     compaction::{
+        MinorCompactor,
         executor::LocalCompactionExecutor,
         planner::{CompactionStrategy, PlannerInitError},
     },
@@ -389,6 +390,7 @@ pub struct DbBuilder<S = Unconfigured> {
     compaction_strategy: CompactionStrategy,
     compaction_interval: Option<Duration>,
     compaction_loop_cfg: Option<CompactionLoopConfig>,
+    minor_compaction: Option<MinorCompactionOptions>,
 }
 
 /// Error returned when building a [`DB`] through [`DbBuilder`].
@@ -619,6 +621,20 @@ impl<FS> StorageLayout<FS> {
         })
     }
 
+    fn sst_route(&self) -> Result<StorageRoute, DbBuildError> {
+        let mut current = self.root.clone();
+        let sst = PathPart::parse("sst").map_err(|err| DbBuildError::InvalidPath {
+            path: "sst".into(),
+            reason: err.to_string(),
+        })?;
+        current = current.child(sst);
+        Ok(StorageRoute {
+            fs: Arc::clone(&self.dyn_fs),
+            path: current,
+            cas: self.cas.clone(),
+        })
+    }
+
     #[allow(clippy::arc_with_non_send_sync)]
     fn apply_wal_defaults(&self, cfg: &mut RuntimeWalConfig) -> Result<(), DbBuildError> {
         let route = self.wal_route()?;
@@ -714,6 +730,7 @@ impl DbBuilder<Unconfigured> {
             compaction_strategy: CompactionStrategy::default(),
             compaction_interval: None,
             compaction_loop_cfg: None,
+            minor_compaction: None,
         }
     }
 
@@ -735,6 +752,7 @@ impl DbBuilder<Unconfigured> {
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
+            minor_compaction: self.minor_compaction,
         })
     }
 
@@ -759,6 +777,7 @@ impl DbBuilder<Unconfigured> {
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
+            minor_compaction: self.minor_compaction,
         })
     }
 
@@ -777,6 +796,7 @@ impl DbBuilder<Unconfigured> {
             compaction_strategy: self.compaction_strategy,
             compaction_interval: self.compaction_interval,
             compaction_loop_cfg: self.compaction_loop_cfg,
+            minor_compaction: self.minor_compaction,
         })
     }
 
@@ -828,6 +848,43 @@ where
     pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
         self.compaction_strategy = strategy;
         self
+    }
+
+    /// Configure minor compaction (immutable flush) with a simple segment-count trigger.
+    #[must_use]
+    pub fn with_minor_compaction(
+        mut self,
+        segment_threshold: usize,
+        target_level: usize,
+        start_id: u64,
+    ) -> Self {
+        self.minor_compaction = Some(MinorCompactionOptions {
+            segment_threshold,
+            target_level,
+            start_id,
+        });
+        self
+    }
+
+    fn build_minor_compaction_state(
+        &self,
+        layout: &StorageLayout<FS>,
+    ) -> Result<Option<MinorCompactionState>, DbBuildError>
+    where
+        FS: DynFs + FusioCas + 'static,
+    {
+        let Some(cfg) = &self.minor_compaction else {
+            return Ok(None);
+        };
+        let route = layout.sst_route()?;
+        let extractor = Arc::clone(&self.mode_config.extractor);
+        let config = Arc::new(
+            SsTableConfig::new(self.mode_config.schema(), route.fs, route.path.clone())
+                .with_key_extractor(extractor)
+                .with_target_level(cfg.target_level),
+        );
+        let compactor = MinorCompactor::new(cfg.segment_threshold, cfg.target_level, cfg.start_id);
+        Ok(Some(MinorCompactionState::new(compactor, config)))
     }
 
     /// Attach a stable logical table name enforced at build time.
@@ -892,6 +949,7 @@ where
         FS: ManifestFs<E> + fusio_manifest::ObjectHead,
         <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
     {
+        let minor_compaction = self.build_minor_compaction_state(&layout)?;
         let manifest_init = ManifestBootstrap::new(&layout);
         let file_ids = FileIdGenerator::default();
         let table_name = self
@@ -935,6 +993,8 @@ where
             wal_cfg.clone(),
             executor,
         );
+
+        inner.minor_compaction = minor_compaction;
 
         if let Some(cfg) = wal_cfg.take() {
             inner.enable_wal(cfg).await?;
@@ -1011,6 +1071,13 @@ where
 struct CompactionLoopConfig {
     interval: Duration,
     sst_config: Arc<SsTableConfig>,
+    start_id: u64,
+}
+
+#[derive(Clone, Debug)]
+struct MinorCompactionOptions {
+    segment_threshold: usize,
+    target_level: usize,
     start_id: u64,
 }
 
@@ -1102,6 +1169,7 @@ where
                 .map_err(DbBuildError::Manifest)?;
             let manifest_table = table_meta.table_id;
             let fs_dyn = layout.dyn_fs();
+            let minor_compaction = self.build_minor_compaction_state(&layout)?;
             let mut inner = DbInner::recover_with_wal_with_manifest(
                 self.mode_config,
                 Arc::clone(&executor),
@@ -1113,6 +1181,7 @@ where
             )
             .await
             .map_err(DbBuildError::Mode)?;
+            inner.minor_compaction = minor_compaction;
             inner.enable_wal(wal_cfg).await?;
             Ok(DB::from_inner(Arc::new(inner)))
         } else {

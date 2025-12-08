@@ -80,7 +80,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Execute the scan plan with MVCC visibility
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn execute_scan<'a>(
         &'a self,
         plan: ScanPlan,
@@ -257,7 +257,7 @@ where
     }
 
     /// Begin building a scan query with fluent API.
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn scan(&self) -> ScanBuilder<'_, FS, E> {
         ScanBuilder::new(self)
     }

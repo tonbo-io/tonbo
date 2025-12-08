@@ -14,16 +14,16 @@ use crate::{
 };
 
 /// Naïve minor-compaction driver that flushes once a segment threshold is hit.
-pub struct MinorCompactor {
+pub(crate) struct MinorCompactor {
     segment_threshold: usize,
     target_level: usize,
-    #[allow(dead_code)]
+
     next_id: AtomicU64,
 }
 
 impl MinorCompactor {
     /// Build a compactor that flushes after `segment_threshold` immutable runs.
-    pub fn new(segment_threshold: usize, target_level: usize, start_id: u64) -> Self {
+    pub(crate) fn new(segment_threshold: usize, target_level: usize, start_id: u64) -> Self {
         Self {
             segment_threshold: segment_threshold.max(1),
             target_level,
@@ -31,44 +31,15 @@ impl MinorCompactor {
         }
     }
 
-    /// Threshold configured for flushing.
-    pub fn segment_threshold(&self) -> usize {
-        self.segment_threshold
-    }
-
-    /// Target level applied to generated descriptors.
-    pub fn target_level(&self) -> usize {
-        self.target_level
-    }
-
-    #[allow(dead_code)]
     fn next_descriptor(&self) -> SsTableDescriptor {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         SsTableDescriptor::new(SsTableId::new(id), self.target_level)
     }
 
     /// Flush immutables when the threshold is met, returning the new SST on success.
-    ///
-    /// This method is exposed publicly via `test-helpers` feature for testing.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn maybe_compact<FS, E>(
+    pub(crate) async fn maybe_compact<FS, E>(
         &self,
-        db: &mut DbInner<FS, E>,
-        config: Arc<SsTableConfig>,
-    ) -> Result<Option<SsTable>, SsTableError>
-    where
-        FS: ManifestFs<E>,
-        E: Executor + Timer + Clone,
-        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-    {
-        self.maybe_compact_inner(db, config).await
-    }
-
-    /// Internal implementation of maybe_compact.
-    #[allow(dead_code)]
-    pub(crate) async fn maybe_compact_inner<FS, E>(
-        &self,
-        db: &mut DbInner<FS, E>,
+        db: &DbInner<FS, E>,
         config: Arc<SsTableConfig>,
     ) -> Result<Option<SsTable>, SsTableError>
     where
@@ -134,9 +105,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn below_threshold_noop() {
-        let (cfg, mut db) = build_db().await;
+        let (cfg, db) = build_db().await;
         let compactor = MinorCompactor::new(2, 0, 7);
-        let result = compactor.maybe_compact(&mut db, cfg).await;
+        let result = compactor.maybe_compact(&db, cfg).await;
         assert!(matches!(result, Ok(None)));
         assert_eq!(db.num_immutable_segments(), 0);
     }
@@ -157,7 +128,7 @@ mod tests {
 
         let compactor = MinorCompactor::new(1, 0, 9);
         let table = compactor
-            .maybe_compact(&mut db, cfg)
+            .maybe_compact(&db, cfg)
             .await
             .expect("flush result")
             .expect("sstable");

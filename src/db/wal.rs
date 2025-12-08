@@ -18,6 +18,7 @@ use crate::{
     key::KeyOwned,
     manifest::{ManifestFs, TableId, TonboManifest},
     mvcc::Timestamp,
+    ondisk::sstable::SsTableError,
     wal::{
         WalConfig as RuntimeWalConfig, WalError, WalHandle,
         frame::{DynAppendEvent, WalEvent},
@@ -206,15 +207,6 @@ where
         insert_dyn_wal_batch(self, batch, tombstones).await
     }
 
-    /// Ingest multiple batches, each paired with a tombstone bitmap.
-    #[allow(dead_code)]
-    pub async fn ingest_many_with_tombstones(
-        &self,
-        batches: Vec<(RecordBatch, Vec<bool>)>,
-    ) -> Result<(), KeyExtractError> {
-        insert_dyn_wal_batches(self, batches).await
-    }
-
     pub(crate) fn replay_wal_events(
         &mut self,
         events: Vec<WalEvent>,
@@ -321,7 +313,7 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     /// Access the configured WAL settings, if any.
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn wal_config(&self) -> Option<&RuntimeWalConfig> {
         self.wal_config.as_ref()
     }
@@ -511,24 +503,17 @@ where
             db.add_immutable(sealed, wal_range_take);
         }
         db.maybe_seal_after_insert()?;
+        db.maybe_run_minor_compaction()
+            .await
+            .map_err(compaction_as_key_extract_error)?;
     }
     Ok(())
 }
 
-#[allow(dead_code)]
-async fn insert_dyn_wal_batches<FS, E>(
-    db: &DbInner<FS, E>,
-    batches: Vec<(RecordBatch, Vec<bool>)>,
-) -> Result<(), KeyExtractError>
-where
-    FS: ManifestFs<E>,
-    E: Executor + Timer + Clone,
-    <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
-{
-    for (batch, tombstones) in batches {
-        insert_dyn_wal_batch(db, batch, tombstones).await?;
-    }
-    Ok(())
+fn compaction_as_key_extract_error(err: SsTableError) -> KeyExtractError {
+    KeyExtractError::Arrow(ArrowError::ComputeError(format!(
+        "minor compaction failed: {err}"
+    )))
 }
 
 pub(crate) fn apply_dyn_wal_batch<FS, E>(

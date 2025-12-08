@@ -13,10 +13,11 @@ use fusio::{
     executor::{Executor, Timer},
     mem::fs::InMemoryFs,
 };
+use futures::lock::Mutex as AsyncMutex;
 use lockable::LockableHashMap;
 use wal::SealState;
 
-use crate::compaction::CompactionHandle;
+use crate::compaction::{CompactionHandle, MinorCompactor};
 mod builder;
 mod compaction;
 mod error;
@@ -36,14 +37,13 @@ pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 pub use crate::mode::DynModeConfig;
 use crate::{
     extractor::{KeyExtractError, KeyProjection},
-    id::{FileId, FileIdGenerator},
+    id::FileId,
     inmem::{mutable::DynMem, policy::SealPolicy},
     key::KeyOwned,
     manifest::{
         ManifestError, ManifestFs, SstEntry, TableId, TableMeta, TonboManifest, VersionEdit,
-        WalSegmentRef, init_in_memory_manifest,
+        WalSegmentRef,
     },
-    mode::table_definition,
     mvcc::{CommitClock, ReadView, Timestamp},
     ondisk::sstable::{SsTable, SsTableBuilder, SsTableConfig, SsTableDescriptor, SsTableError},
     transaction::{
@@ -58,6 +58,38 @@ use crate::{
 
 /// Internal shared handle for the database backed by an `Arc`.
 pub(crate) type DynDbHandle<FS, E> = Arc<DbInner<FS, E>>;
+
+/// State bundle for opportunistic minor compaction.
+struct MinorCompactionState {
+    compactor: MinorCompactor,
+    config: Arc<SsTableConfig>,
+    lock: AsyncMutex<()>,
+}
+
+impl MinorCompactionState {
+    fn new(compactor: MinorCompactor, config: Arc<SsTableConfig>) -> Self {
+        Self {
+            compactor,
+            config,
+            lock: AsyncMutex::new(()),
+        }
+    }
+
+    async fn maybe_compact<FS, E>(
+        &self,
+        db: &DbInner<FS, E>,
+    ) -> Result<Option<SsTable>, SsTableError>
+    where
+        FS: ManifestFs<E>,
+        E: Executor + Timer + Clone,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
+        let _guard = self.lock.lock().await;
+        self.compactor
+            .maybe_compact(db, Arc::clone(&self.config))
+            .await
+    }
+}
 
 /// Database handle with shared ownership.
 ///
@@ -121,12 +153,6 @@ where
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
     pub fn inner(&self) -> &Arc<DbInner<FS, E>> {
-        &self.inner
-    }
-
-    #[cfg(not(any(test, feature = "test-helpers")))]
-    #[allow(dead_code)]
-    pub(crate) fn inner(&self) -> &Arc<DbInner<FS, E>> {
         &self.inner
     }
 
@@ -237,7 +263,7 @@ where
 
 type LockMap<K> = Arc<LockableHashMap<K, ()>>;
 
-#[allow(dead_code)]
+#[cfg(any(test, feature = "test-helpers"))]
 fn manifest_error_as_key_extract(err: ManifestError) -> KeyExtractError {
     KeyExtractError::Arrow(ArrowError::ComputeError(format!("manifest error: {err}")))
 }
@@ -285,6 +311,10 @@ where
     _key_locks: LockMap<KeyOwned>,
     /// Optional background compaction worker handle.
     compaction_worker: Option<CompactionHandle<E>>,
+    /// Async gate to serialize flushes triggered by minor compaction or manual calls.
+    flush_lock: AsyncMutex<()>,
+    /// Optional minor compaction hook.
+    minor_compaction: Option<MinorCompactionState>,
 }
 
 /// Internal database instance bound to a filesystem `FS` and executor `E`.
@@ -328,6 +358,10 @@ where
     _key_locks: LockMap<KeyOwned>,
     /// Optional background compaction worker handle.
     compaction_worker: Option<CompactionHandle<E>>,
+    /// Async gate to serialize flushes triggered by minor compaction or manual calls.
+    flush_lock: AsyncMutex<()>,
+    /// Optional minor compaction hook.
+    minor_compaction: Option<MinorCompactionState>,
 }
 
 // SAFETY: DbInner shares internal state behind explicit synchronization.
@@ -375,13 +409,13 @@ where
     }
 
     /// Acquire a read guard to the mutable memtable (for testing/inspection).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn mem_read(&self) -> crate::inmem::mutable::memtable::TestMemRef<'_> {
         crate::inmem::mutable::memtable::TestMemRef(&self.mem)
     }
 
     /// Replace the mutable memtable with one that has specified batch capacity (for testing).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn set_mem_capacity(&mut self, capacity: usize) {
         self.mem = DynMem::with_capacity(
             self.schema.clone(),
@@ -392,7 +426,7 @@ where
     }
 
     /// Seal the mutable memtable and return the sealed segment (for testing).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn seal_mutable(
         &self,
     ) -> Option<crate::inmem::immutable::memtable::ImmutableMemTable> {
@@ -430,6 +464,8 @@ where
             mutable_wal_range: Arc::new(Mutex::new(None)),
             _key_locks: Arc::new(LockableHashMap::new()),
             compaction_worker: None,
+            flush_lock: AsyncMutex::new(()),
+            minor_compaction: None,
         }
     }
 
@@ -551,25 +587,12 @@ where
         }
         self.insert_into_mutable(batch, commit_ts)?;
         self.maybe_seal_after_insert()?;
+        self.maybe_run_minor_compaction().await.map_err(|err| {
+            KeyExtractError::Arrow(ArrowError::ComputeError(format!(
+                "minor compaction failed: {err}"
+            )))
+        })?;
         Ok(())
-    }
-
-    /// Ingest many inputs sequentially.
-    #[allow(dead_code)]
-    pub async fn ingest_many<I>(&self, inputs: I) -> Result<(), KeyExtractError>
-    where
-        I: IntoIterator<Item = RecordBatch>,
-    {
-        for item in inputs.into_iter() {
-            self.ingest(item).await?;
-        }
-        Ok(())
-    }
-
-    /// Approximate bytes used by keys in the mutable memtable.
-    #[allow(dead_code)]
-    pub fn approx_mutable_bytes(&self) -> usize {
-        self.mem.approx_bytes()
     }
 
     /// Access the executor powering async subsystems.
@@ -578,7 +601,7 @@ where
     }
 
     /// Table ID registered in the manifest for this DB.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn table_id(&self) -> TableId {
         self.manifest_table
     }
@@ -598,7 +621,7 @@ where
         ))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio"))]
     pub(crate) async fn begin_snapshot_at(
         &self,
         read_ts: Timestamp,
@@ -620,24 +643,32 @@ where
     }
 
     /// Number of immutable segments attached to this DB (oldest..newest).
-    #[allow(dead_code)]
-    pub fn num_immutable_segments(&self) -> usize {
+    pub(crate) fn num_immutable_segments(&self) -> usize {
         self.seal_state_lock().immutables.len()
     }
 
+    /// Best-effort minor compaction trigger based on configured policy.
+    pub(crate) async fn maybe_run_minor_compaction(&self) -> Result<Option<SsTable>, SsTableError> {
+        if let Some(compaction) = &self.minor_compaction {
+            compaction.maybe_compact(self).await
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Plan and flush immutable segments into a Parquet-backed SSTable.
-    #[allow(dead_code)]
     pub(crate) async fn flush_immutables_with_descriptor(
-        &mut self,
+        &self,
         config: Arc<SsTableConfig>,
         descriptor: SsTableDescriptor,
     ) -> Result<SsTable, SsTableError> {
-        let immutables_snapshot = {
+        let _guard = self.flush_lock.lock().await;
+        let (immutables_snapshot, flush_count) = {
             let seal_read = self.seal_state_lock();
             if seal_read.immutables.is_empty() {
                 return Err(SsTableError::NoImmutableSegments);
             }
-            seal_read.immutables.clone()
+            (seal_read.immutables.clone(), seal_read.immutables.len())
         };
         let mut builder = SsTableBuilder::new(config, descriptor);
         for seg in &immutables_snapshot {
@@ -711,9 +742,22 @@ where
 
                 self.prune_wal_segments_below_floor().await;
 
+                // Only remove the segments we actually flushed (the first `flush_count`).
+                // New segments may have been appended concurrently; those must be preserved.
                 let mut seal = self.seal_state_lock();
-                seal.immutables = Vec::new();
-                seal.immutable_wal_ranges.clear();
+                let actual_len = seal.immutables.len();
+                if actual_len >= flush_count {
+                    seal.immutables.drain(0..flush_count);
+                } else {
+                    // Defensive: should not happen, but clear if state is inconsistent.
+                    seal.immutables.clear();
+                }
+                let wal_ranges_len = seal.immutable_wal_ranges.len();
+                if wal_ranges_len >= flush_count {
+                    seal.immutable_wal_ranges.drain(0..flush_count);
+                } else {
+                    seal.immutable_wal_ranges.clear();
+                }
                 seal.last_seal_at = Some(self.executor.now());
                 Ok(table)
             }
@@ -730,7 +774,7 @@ where
     }
 
     /// Set or replace the sealing policy used by this DB.
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_seal_policy(&mut self, policy: Arc<dyn SealPolicy + Send + Sync>) {
         self.policy = policy;
     }
@@ -742,16 +786,20 @@ where
 }
 
 // In-memory convenience constructors.
+#[cfg(any(test, feature = "test-helpers"))]
 impl<E> DbInner<InMemoryFs, E>
 where
     E: Executor + Timer + Clone + 'static,
 {
     /// Construct a new in-memory DbInner using the dynamic configuration.
-    #[allow(dead_code)]
     pub(crate) async fn new(
         config: DynModeConfig,
         executor: Arc<E>,
     ) -> Result<Self, KeyExtractError> {
+        use crate::{
+            id::FileIdGenerator, manifest::init_in_memory_manifest, mode::table_definition,
+        };
+
         let table_definition = table_definition(&config, builder::DEFAULT_TABLE_NAME);
         let (schema, delete_schema, commit_ack_mode, mem) = config.build()?;
         let file_ids = FileIdGenerator::default();

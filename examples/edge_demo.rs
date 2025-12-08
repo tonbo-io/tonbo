@@ -105,7 +105,7 @@ pub use wasm_edge::edge_roundtrip_rows;
 
 // Fallback so native example builds don't fail when this file is compiled outside wasm+web.
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
-#[allow(dead_code)]
+
 fn main() {}
 
 #[cfg(not(all(target_arch = "wasm32", feature = "web")))]

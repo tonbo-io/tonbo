@@ -42,7 +42,7 @@ async fn plan_compaction_returns_task() -> Result<(), Box<dyn std::error::Error>
         Field::new("id", DataType::Utf8, false),
         Field::new("v", DataType::Int32, false),
     ]));
-    let config = SchemaBuilder::from_schema(schema.clone())
+    let config = SchemaBuilder::from_schema(schema)
         .primary_key("id")
         .with_metadata()
         .build()
@@ -50,7 +50,7 @@ async fn plan_compaction_returns_task() -> Result<(), Box<dyn std::error::Error>
     let schema = Arc::clone(&config.schema);
     let executor = Arc::new(TokioExecutor::default());
     let policy = Arc::new(BatchesThreshold { batches: 1 });
-    let mut db: DbInner<InMemoryFs, TokioExecutor> =
+    let db: DbInner<InMemoryFs, TokioExecutor> =
         DB::new_with_policy(config, Arc::clone(&executor), policy)
             .await?
             .into_inner();
@@ -110,6 +110,51 @@ async fn plan_compaction_empty_manifest_is_none() -> Result<(), Box<dyn std::err
     let planner = LeveledCompactionPlanner::new(LeveledPlannerConfig::default());
     let plan = db.inner().plan_compaction_task(&planner).await?;
     assert!(plan.is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn minor_compaction_flushes_after_seal() -> Result<(), Box<dyn std::error::Error>> {
+    let db_root = workspace_temp_dir("minor-compaction-flush");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("v", DataType::Int32, false),
+    ]));
+    let config = SchemaBuilder::from_schema(schema.clone())
+        .primary_key("id")
+        .with_metadata()
+        .build()
+        .expect("schema builder");
+    let batch_schema = Arc::clone(&config.schema);
+
+    let mut db: DbInner<LocalFs, TokioExecutor> = DB::<LocalFs, TokioExecutor>::builder(config)
+        .on_disk(&db_root)?
+        .with_minor_compaction(1, 0, 5)
+        .build()
+        .await?
+        .into_inner();
+    db.set_seal_policy(Arc::new(BatchesThreshold { batches: 1 }));
+
+    let rows = vec![DynRow(vec![
+        Some(DynCell::Str("k".into())),
+        Some(DynCell::I32(1)),
+    ])];
+    let batch = build_batch(batch_schema, rows).expect("batch");
+    db.ingest(batch)
+        .await
+        .expect("ingest triggers seal + flush");
+
+    assert_eq!(db.num_immutable_segments(), 0);
+    let sst_path = db_root
+        .join("sst")
+        .join("L0")
+        .join("00000000000000000005.parquet");
+    assert!(
+        sst_path.exists(),
+        "expected SST at {:?} to be created",
+        sst_path
+    );
     Ok(())
 }
 
@@ -770,7 +815,7 @@ async fn compaction_cas_conflict_cleans_outputs() -> Result<(), Box<dyn std::err
     let schema = Arc::clone(&mode_cfg.schema);
     let executor = Arc::new(TokioExecutor::default());
     let policy = Arc::new(BatchesThreshold { batches: 1 });
-    let mut db: DbInner<InMemoryFs, TokioExecutor> =
+    let db: DbInner<InMemoryFs, TokioExecutor> =
         DB::new_with_policy(mode_cfg, Arc::clone(&executor), policy)
             .await?
             .into_inner();

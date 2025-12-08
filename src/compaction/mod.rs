@@ -20,4 +20,4 @@ pub mod scheduler;
 
 pub(crate) use driver::CompactionDriver;
 pub(crate) use handle::CompactionHandle;
-pub use minor::MinorCompactor;
+pub(crate) use minor::MinorCompactor;

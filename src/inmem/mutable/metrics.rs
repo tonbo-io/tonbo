@@ -18,13 +18,6 @@ pub(crate) struct MutableMemTableMetricsSnapshot {
     pub entry_overhead: usize,
 }
 
-impl MutableMemTableMetricsSnapshot {
-    #[allow(dead_code)]
-    pub(crate) fn approx_bytes(&self) -> usize {
-        self.approx_key_bytes + self.entries * self.entry_overhead
-    }
-}
-
 impl MutableMemTableMetrics {
     pub(crate) fn new(entry_overhead: usize) -> Self {
         Self {
@@ -62,11 +55,6 @@ impl MutableMemTableMetrics {
         self.inserts.store(0, Ordering::Relaxed);
         self.replaces.store(0, Ordering::Relaxed);
         self.approx_key_bytes.store(0, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn approx_bytes(&self) -> usize {
-        self.snapshot().approx_bytes()
     }
 }
 

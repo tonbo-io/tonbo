@@ -894,17 +894,6 @@ impl SsTableReader {
         Ok(Self { descriptor, config })
     }
 
-    /// Plan a range scan across this table.
-    #[allow(dead_code)]
-    pub(crate) fn plan_scan(
-        &self,
-        _ts: Timestamp,
-        _predicate: Option<&Predicate>,
-    ) -> Result<(), SsTableError> {
-        // TODO: real scan planning will be implemented when the reader lands.
-        Ok(())
-    }
-
     /// Stream all rows for the provided ranges/timestamp/predicate (stub).
     pub(crate) async fn into_stream<E>(
         self,

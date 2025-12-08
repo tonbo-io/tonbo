@@ -22,7 +22,7 @@ async fn flush_without_immutables_errors() {
     ]));
     let config = DynModeConfig::from_key_name(schema.clone(), "id").expect("key name config");
     let executor = Arc::new(NoopExecutor);
-    let mut db: DbInner<InMemoryFs, NoopExecutor> = DB::new(config, executor)
+    let db: DbInner<InMemoryFs, NoopExecutor> = DB::new(config, executor)
         .await
         .expect("db init")
         .into_inner();
