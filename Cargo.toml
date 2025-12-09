@@ -74,9 +74,7 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "time",
 ], optional = true }
-typed-arrow-dyn = { git = "https://github.com/tonbo-io/typed-arrow.git", package = "typed-arrow-dyn", features = [
-    "serde",
-] }
+typed-arrow-dyn = { version = "0.0.6", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
 
 
@@ -84,7 +82,7 @@ ulid = { version = "1", features = ["serde"] }
 clap = { version = "4.5.4", features = ["derive"] }
 futures = "0.3"
 tempfile = "3"
-typed-arrow = { version = "0.5.0", features = ["ext-hooks"] }
+typed-arrow = { version = "0.5.1", features = ["ext-hooks"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1", default-features = false, features = [
@@ -95,36 +93,6 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "time",
 ] }
-
-[[example]]
-name = "02_dynamic_basic"
-path = "examples/02_dynamic_basic.rs"
-required-features = ["tokio"]
-
-[[example]]
-name = "03_dynamic_metadata"
-path = "examples/03_dynamic_metadata.rs"
-required-features = ["tokio"]
-
-[[example]]
-name = "04_dynamic_composite"
-path = "examples/04_dynamic_composite.rs"
-required-features = ["tokio"]
-
-[[example]]
-name = "05_dynamic_transaction"
-path = "examples/05_dynamic_transaction.rs"
-required-features = ["tokio"]
-
-[[example]]
-name = "edge_worker"
-path = "examples/edge_worker.rs"
-required-features = ["web"]
-
-[[example]]
-name = "wal_bench"
-path = "examples/wal_bench.rs"
-required-features = ["tokio"]
 
 [[test]]
 name = "read_smoke"

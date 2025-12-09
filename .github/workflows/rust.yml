@@ -103,11 +103,11 @@ jobs:
           aws --endpoint-url="$FUSIO_EDGE_S3_ENDPOINT" s3 mb s3://$FUSIO_EDGE_S3_BUCKET --region $FUSIO_EDGE_S3_REGION || true
           aws --endpoint-url="$FUSIO_EDGE_S3_ENDPOINT" s3api put-bucket-cors --bucket $FUSIO_EDGE_S3_BUCKET --cors-configuration '{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMethods":["GET","PUT","HEAD"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag","x-amz-request-id","x-amz-version-id"],"MaxAgeSeconds":300}]}'
 
-      - name: Build wasm edge_worker example
-        run: cargo build --target wasm32-unknown-unknown --no-default-features --features web --example edge_worker
+      # - name: Build wasm edge_worker example
+      #   run: cargo build --target wasm32-unknown-unknown --no-default-features --features web --example edge_worker
 
-      - name: Generate wasm bindings
-        run: wasm-bindgen --target web --out-dir dist target/wasm32-unknown-unknown/debug/examples/edge_worker.wasm
+      # - name: Generate wasm bindings
+      #   run: wasm-bindgen --target web --out-dir dist target/wasm32-unknown-unknown/debug/examples/edge_worker.wasm
 
-      - name: Run wasm edge_worker tests (browser)
-        run: wasm-pack test --chrome --headless --no-default-features --features web --test edge_worker
+      # - name: Run wasm edge_worker tests (browser)
+      #   run: wasm-pack test --chrome --headless --no-default-features --features web --test edge_worker

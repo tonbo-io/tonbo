@@ -107,15 +107,18 @@ where
             limit,
             ..
         } = plan;
-        let merge = MergeStream::from_vec(streams, limit, Some(Order::Asc))
+        // Don't pass limit to MergeStream - it should be applied after predicate
+        // evaluation in PackageStream.
+        let merge = MergeStream::from_vec(streams, None, Some(Order::Asc))
             .await
             .map_err(crate::db::DBError::from)?;
-        let package = PackageStream::new(
+        let package = PackageStream::with_limit(
             DEFAULT_SCAN_BATCH_ROWS,
             merge,
             Arc::clone(&scan_schema),
             Arc::clone(&result_projection),
             residual_predicate,
+            limit,
         )
         .map_err(crate::db::DBError::from)?;
 
@@ -264,10 +267,18 @@ where
     }
 }
 
-/// Transaction context for scans that include uncommitted staging buffer.
-pub(crate) struct ScanContext<'a> {
-    /// Snapshot captured when transaction began.
-    pub(crate) snapshot: &'a TxSnapshot,
+/// Snapshot source for scan operations.
+///
+/// Controls whether a scan uses a pre-existing snapshot or creates one lazily.
+pub(crate) enum SnapshotSource<'a> {
+    /// Create a new snapshot when the scan executes (DB-level scan).
+    Lazy,
+    /// Use a pre-existing snapshot (Snapshot::scan or Transaction::scan).
+    Preexisting(&'a TxSnapshot),
+}
+
+/// Staged mutations to overlay on scan results (for Transaction::scan).
+pub(crate) struct StagedOverlay<'a> {
     /// Staged mutations (uncommitted writes).
     pub(crate) staging: &'a BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
     /// Schema for the staged rows.
@@ -276,16 +287,28 @@ pub(crate) struct ScanContext<'a> {
 
 /// Fluent builder for constructing scan queries.
 ///
-/// Use [`DB::scan`] or [`Transaction::scan`](crate::transaction::Transaction::scan)
+/// Use [`DB::scan`], [`Snapshot::scan`](crate::transaction::Snapshot::scan),
+/// or [`Transaction::scan`](crate::transaction::Transaction::scan)
 /// to create a new builder, then chain methods to configure the scan before
 /// executing with [`stream`](ScanBuilder::stream) or [`collect`](ScanBuilder::collect).
 ///
-/// When created from a `Transaction`, the scan includes uncommitted writes
-/// from the transaction's staging buffer (read-your-writes semantics).
+/// # Scan Hierarchy
+///
+/// All scans ultimately use `Snapshot` for MVCC visibility:
+/// - `Snapshot::scan()` - Core implementation using a pre-existing snapshot
+/// - `Transaction::scan()` - Wraps snapshot scan + overlays uncommitted writes
+/// - `DB::scan()` - Creates an ephemeral snapshot internally
 ///
 /// # Example
 ///
 /// ```ignore
+/// // Snapshot scan (explicit snapshot, read-only)
+/// let snapshot = db.begin_snapshot().await?;
+/// let batches = snapshot.scan(&db)
+///     .filter(predicate)
+///     .collect()
+///     .await?;
+///
 /// // DB scan (implicit snapshot)
 /// let batches = db.scan()
 ///     .filter(Predicate::eq(col, value))
@@ -306,8 +329,10 @@ where
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
     db: &'a DbInner<FS, E>,
-    /// Transaction context (snapshot + staging). None for DB-level scans.
-    context: Option<ScanContext<'a>>,
+    /// Snapshot source: lazy (DB scan) or pre-existing (Snapshot/Transaction scan).
+    snapshot_source: SnapshotSource<'a>,
+    /// Optional staged mutations overlay (Transaction scan only).
+    staged_overlay: Option<StagedOverlay<'a>>,
     predicate: Option<Predicate>,
     projection: Option<SchemaRef>,
     limit: Option<usize>,
@@ -319,22 +344,55 @@ where
     E: Executor + Timer + Clone + 'static,
     <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
 {
-    /// Create a new scan builder for DB-level scans (no staging buffer).
+    /// Create a new scan builder for DB-level scans (lazy snapshot, no staging).
     pub(crate) fn new(db: &'a DbInner<FS, E>) -> Self {
         Self {
             db,
-            context: None,
+            snapshot_source: SnapshotSource::Lazy,
+            staged_overlay: None,
             predicate: None,
             projection: None,
             limit: None,
         }
     }
 
-    /// Create a new scan builder with transaction context (includes staging buffer).
-    pub(crate) fn with_context(db: &'a DbInner<FS, E>, context: ScanContext<'a>) -> Self {
+    /// Create a scan builder from an existing snapshot (core scan implementation).
+    ///
+    /// This is used by `Snapshot::scan()` and forms the basis for all other scans.
+    pub(crate) fn from_snapshot(db: &'a DbInner<FS, E>, snapshot: &'a TxSnapshot) -> Self {
         Self {
             db,
-            context: Some(context),
+            snapshot_source: SnapshotSource::Preexisting(snapshot),
+            staged_overlay: None,
+            predicate: None,
+            projection: None,
+            limit: None,
+        }
+    }
+
+    /// Create a scan builder from an existing snapshot using the public DB handle.
+    ///
+    /// This is the public entry point for `Snapshot::scan(&db)`.
+    pub(crate) fn from_snapshot_with_db(
+        db: &'a super::DB<FS, E>,
+        snapshot: &'a TxSnapshot,
+    ) -> Self {
+        Self::from_snapshot(&db.inner, snapshot)
+    }
+
+    /// Create a new scan builder with transaction context (includes staging buffer).
+    ///
+    /// Used by `Transaction::scan()` to include uncommitted writes.
+    pub(crate) fn with_transaction_overlay(
+        db: &'a DbInner<FS, E>,
+        snapshot: &'a TxSnapshot,
+        staging: &'a BTreeMap<KeyOwned, DynMutation<DynRow, ()>>,
+        schema: &'a SchemaRef,
+    ) -> Self {
+        Self {
+            db,
+            snapshot_source: SnapshotSource::Preexisting(snapshot),
+            staged_overlay: Some(StagedOverlay { staging, schema }),
             predicate: None,
             projection: None,
             limit: None,
@@ -376,7 +434,8 @@ where
         // Take ownership of all fields upfront to avoid partial move issues
         let Self {
             db,
-            context,
+            snapshot_source,
+            staged_overlay,
             predicate,
             projection,
             limit,
@@ -384,42 +443,37 @@ where
 
         let predicate = predicate.unwrap_or_else(Predicate::always);
 
-        // Determine snapshot and transaction scan based on context
-        let (snapshot, txn_scan) = match &context {
-            Some(ctx) => {
-                // Transaction scan: use existing snapshot and include staging buffer
-                let snapshot = ctx.snapshot.clone();
-                let txn_scan = if ctx.staging.is_empty() {
-                    None
-                } else {
-                    // We need to plan first to get the scan_schema
-                    let plan = snapshot
-                        .plan_scan(db, &predicate, projection.as_ref(), limit)
-                        .await?;
-                    Some((
-                        TransactionScan::new(
-                            ctx.staging,
-                            ctx.schema,
-                            plan.read_ts,
-                            Some(&plan.scan_schema),
-                        )
-                        .map_err(crate::db::DBError::from)?,
-                        plan,
-                    ))
-                };
-                (snapshot, txn_scan)
+        // Resolve snapshot: use pre-existing or create new one
+        let snapshot = match snapshot_source {
+            SnapshotSource::Preexisting(snap) => snap.clone(),
+            SnapshotSource::Lazy => db.begin_snapshot().await?,
+        };
+
+        // Build transaction scan if we have staged mutations
+        let txn_scan = match staged_overlay {
+            Some(overlay) if !overlay.staging.is_empty() => {
+                // We need to plan first to get the scan_schema
+                let plan = snapshot
+                    .plan_scan(db, &predicate, projection.as_ref(), limit)
+                    .await?;
+                Some((
+                    TransactionScan::new(
+                        overlay.staging,
+                        overlay.schema,
+                        plan.read_ts,
+                        Some(&plan.scan_schema),
+                    )
+                    .map_err(crate::db::DBError::from)?,
+                    plan,
+                ))
             }
-            None => {
-                // DB scan: create new snapshot, no staging
-                let snapshot = db.begin_snapshot().await?;
-                (snapshot, None)
-            }
+            _ => None,
         };
 
         // Build plan (reuse if already created for transaction scan)
         let plan = match txn_scan {
             Some((scan, plan)) => {
-                // Execute with transaction scan
+                // Execute with transaction scan overlay
                 return execute_with_txn_scan(db, plan, Some(scan)).await;
             }
             None => {
@@ -471,15 +525,18 @@ where
         limit,
         ..
     } = plan;
-    let merge = MergeStream::from_vec(streams, limit, Some(Order::Asc))
+    // Don't pass limit to MergeStream - it should be applied after predicate
+    // evaluation in PackageStream. Otherwise, limit counts rows before filtering.
+    let merge = MergeStream::from_vec(streams, None, Some(Order::Asc))
         .await
         .map_err(crate::db::DBError::from)?;
-    let package = PackageStream::new(
+    let package = PackageStream::with_limit(
         DEFAULT_SCAN_BATCH_ROWS,
         merge,
         Arc::clone(&scan_schema),
         Arc::clone(&result_projection),
         residual_predicate,
+        limit,
     )
     .map_err(crate::db::DBError::from)?;
 

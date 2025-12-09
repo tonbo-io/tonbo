@@ -8,24 +8,29 @@ use serde::{Deserialize, Serialize};
 pub(crate) const MVCC_COMMIT_COL: &str = "_commit_ts";
 
 /// Logical commit timestamp assigned to mutations and read views.
+///
+/// Timestamps are monotonically increasing `u64` values that identify
+/// each committed version of the database. They can be used for:
+/// - Point-in-time queries via [`DB::snapshot_at`](crate::db::DB::snapshot_at)
+/// - Listing historical versions via [`DB::list_versions`](crate::db::DB::list_versions)
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub(crate) struct Timestamp(u64);
+pub struct Timestamp(u64);
 
 impl Timestamp {
     /// Least possible timestamp (used for uninitialised clocks).
-    pub(crate) const MIN: Self = Self(0);
+    pub const MIN: Self = Self(0);
     /// Greatest possible timestamp (used for open-ended visibility).
-    pub(crate) const MAX: Self = Self(u64::MAX);
+    pub const MAX: Self = Self(u64::MAX);
 
     /// Construct a timestamp from a raw `u64`.
     #[inline]
-    pub(crate) const fn new(raw: u64) -> Self {
+    pub const fn new(raw: u64) -> Self {
         Self(raw)
     }
 
     /// Returns the raw `u64` value backing this timestamp.
     #[inline]
-    pub(crate) const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 

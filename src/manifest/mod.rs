@@ -40,9 +40,10 @@ pub(crate) use bootstrap::init_in_memory_manifest;
 pub(crate) use bootstrap::{TableSnapshot, TonboManifest, init_fs_manifest};
 #[cfg(all(test, feature = "tokio"))]
 pub(crate) use domain::TableHead;
+pub use domain::VersionState;
 pub(crate) use domain::{
-    GcPlanState, GcSstRef, SstEntry, TableDefinition, TableId, TableMeta, VersionState,
-    WalSegmentRef,
+    GcPlanState, GcSstRef, SstEntry, TableDefinition, TableId, TableMeta, WalSegmentRef,
 };
-pub(crate) use driver::{ManifestError, ManifestResult};
+pub use driver::ManifestError;
+pub(crate) use driver::ManifestResult;
 pub(crate) use version::VersionEdit;

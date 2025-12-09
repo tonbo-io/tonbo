@@ -248,10 +248,7 @@ async fn recover_replays_commit_timestamps_and_advances_clock() {
     assert_eq!(chain, vec![(Timestamp::new(42), true)]);
 
     let pred = Predicate::eq(ColumnRef::new("id"), ScalarValue::from("k"));
-    let snapshot = db
-        .begin_snapshot_at(Timestamp::new(50))
-        .await
-        .expect("snapshot");
+    let snapshot = db.snapshot_at(Timestamp::new(50)).await.expect("snapshot");
     let plan = snapshot
         .plan_scan(&db, &pred, None, None)
         .await

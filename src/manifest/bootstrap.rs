@@ -210,6 +210,31 @@ where
     pub(crate) async fn take_gc_plan(&self, table: TableId) -> ManifestResult<Option<GcPlanState>> {
         self.gc_plan.take_gc_plan(table).await
     }
+
+    /// List committed versions of a table, ordered newest-first.
+    ///
+    /// Returns up to `limit` versions for time travel queries.
+    pub async fn list_versions(
+        &self,
+        table: TableId,
+        limit: usize,
+    ) -> ManifestResult<Vec<VersionState>> {
+        self.version.list_versions(table, limit).await
+    }
+
+    /// Snapshot a specific historical version by its manifest timestamp.
+    ///
+    /// Unlike `snapshot_latest` which always returns the current head version,
+    /// this method loads the exact version that was committed at `manifest_ts`.
+    pub(crate) async fn snapshot_at_version(
+        &self,
+        table: TableId,
+        manifest_ts: Timestamp,
+    ) -> ManifestResult<TableSnapshot> {
+        let version_snapshot = self.version.snapshot_at_version(table, manifest_ts).await?;
+        let table_meta = self.catalog.table_meta(table).await?;
+        Ok(TableSnapshot::from_parts(version_snapshot, table_meta))
+    }
 }
 
 /// Raw helper used by tests needing direct access to the concrete manifest.

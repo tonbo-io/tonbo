@@ -30,7 +30,6 @@ pub use builder::{
     AwsCreds, AwsCredsError, DbBuildError, DbBuilder, ObjectSpec, S3Spec, WalConfig,
 };
 pub use error::DBError;
-pub(crate) use scan::ScanContext;
 pub use scan::{DEFAULT_SCAN_BATCH_ROWS, ScanBuilder};
 pub(crate) use wal::{TxnWalPublishContext, WalFrameRange};
 
@@ -58,6 +57,21 @@ use crate::{
 
 /// Internal shared handle for the database backed by an `Arc`.
 pub(crate) type DynDbHandle<FS, E> = Arc<DbInner<FS, E>>;
+
+/// Metadata about a committed database version.
+///
+/// Each time data is committed (via transaction or ingest), a new version is created
+/// with a unique timestamp. Use [`DB::list_versions`] to enumerate historical versions,
+/// and [`DB::snapshot_at`] to query the database state at a specific version.
+#[derive(Debug, Clone)]
+pub struct Version {
+    /// The commit timestamp identifying this version.
+    pub timestamp: Timestamp,
+    /// Number of SST files in this version.
+    pub sst_count: usize,
+    /// Number of compaction levels with data.
+    pub level_count: usize,
+}
 
 /// State bundle for opportunistic minor compaction.
 struct MinorCompactionState {
@@ -230,6 +244,47 @@ where
     /// Whether a background compaction worker was spawned for this DB.
     pub fn has_compaction_worker(&self) -> bool {
         self.inner.has_compaction_worker()
+    }
+
+    /// Open a read-only snapshot pinned to a specific historical timestamp.
+    ///
+    /// This enables "time travel" queries: you can read the database state as it
+    /// existed at any previously committed version. Use [`list_versions`](Self::list_versions)
+    /// to discover available timestamps.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Get available versions
+    /// let versions = db.list_versions(10).await?;
+    ///
+    /// // Query at an older version
+    /// if let Some(old_version) = versions.last() {
+    ///     let snapshot = db.snapshot_at(old_version.timestamp).await?;
+    ///     let old_data = snapshot.scan(&db).collect().await?;
+    /// }
+    /// ```
+    pub async fn snapshot_at(&self, timestamp: Timestamp) -> Result<TxSnapshot, SnapshotError> {
+        self.inner.snapshot_at(timestamp).await
+    }
+
+    /// List committed versions of the database, ordered newest-first.
+    ///
+    /// Each commit (via transaction or ingest) creates a new version with a unique
+    /// timestamp. This method returns metadata about up to `limit` recent versions.
+    ///
+    /// Use the returned timestamps with [`snapshot_at`](Self::snapshot_at) to query
+    /// historical data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // List the 5 most recent versions
+    /// let versions = db.list_versions(5).await?;
+    /// for v in &versions {
+    ///     println!("Version {} has {} SSTs", v.timestamp.get(), v.sst_count);
+    /// }
+    /// ```
+    pub async fn list_versions(&self, limit: usize) -> Result<Vec<Version>, ManifestError> {
+        self.inner.list_versions(limit).await
     }
 }
 
@@ -621,20 +676,86 @@ where
         ))
     }
 
-    #[cfg(all(test, feature = "tokio"))]
-    pub(crate) async fn begin_snapshot_at(
-        &self,
-        read_ts: Timestamp,
-    ) -> Result<TxSnapshot, SnapshotError> {
-        let manifest_snapshot = self
+    /// Open a read-only snapshot pinned to a specific historical timestamp.
+    ///
+    /// This enables "time travel" queries: you can read the database state as it
+    /// existed at any previously committed version. Use [`list_versions`](Self::list_versions)
+    /// to discover available timestamps.
+    ///
+    /// The snapshot will load the exact SST files that existed at that version,
+    /// allowing queries to see historical data even if files were later compacted away.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Get available versions
+    /// let versions = db.list_versions(10).await?;
+    ///
+    /// // Query at an older version
+    /// if let Some(old_version) = versions.last() {
+    ///     let snapshot = db.snapshot_at(old_version.timestamp).await?;
+    ///     let old_data = snapshot.scan(&db).collect().await?;
+    /// }
+    /// ```
+    pub async fn snapshot_at(&self, timestamp: Timestamp) -> Result<TxSnapshot, SnapshotError> {
+        // Find the version that was active at the requested timestamp.
+        // List versions to find one with commit_timestamp <= requested timestamp.
+        let versions = self
             .manifest
-            .snapshot_latest_with_fallback(self.manifest_table, &self.table_meta)
+            .list_versions(self.manifest_table, 0) // 0 = unlimited
             .await?;
-        let read_view = ReadView::new(read_ts);
+
+        // Find the version at or before the requested timestamp (versions are newest-first)
+        let target_version = versions.iter().find(|v| v.commit_timestamp <= timestamp);
+
+        let manifest_snapshot = if let Some(version) = target_version {
+            // Load the historical version from manifest
+            self.manifest
+                .snapshot_at_version(self.manifest_table, version.commit_timestamp)
+                .await?
+        } else {
+            // No version at or before the timestamp - use latest with MVCC filtering
+            self.manifest
+                .snapshot_latest_with_fallback(self.manifest_table, &self.table_meta)
+                .await?
+        };
+
+        let read_view = ReadView::new(timestamp);
         Ok(TxSnapshot::from_table_snapshot(
             read_view,
             manifest_snapshot,
         ))
+    }
+
+    /// List committed versions of the database, ordered newest-first.
+    ///
+    /// Each commit (via transaction or ingest) creates a new version with a unique
+    /// timestamp. This method returns metadata about up to `limit` recent versions.
+    ///
+    /// Use the returned timestamps with [`snapshot_at`](Self::snapshot_at) to query
+    /// historical data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // List the 5 most recent versions
+    /// let versions = db.list_versions(5).await?;
+    /// for v in &versions {
+    ///     println!("Version {} has {} SSTs", v.timestamp.get(), v.sst_count);
+    /// }
+    /// ```
+    pub async fn list_versions(&self, limit: usize) -> Result<Vec<Version>, ManifestError> {
+        let states = self
+            .manifest
+            .list_versions(self.manifest_table, limit)
+            .await?;
+
+        Ok(states
+            .into_iter()
+            .map(|s| Version {
+                timestamp: s.commit_timestamp,
+                sst_count: s.ssts.iter().map(|level| level.len()).sum(),
+                level_count: s.ssts.iter().filter(|level| !level.is_empty()).count(),
+            })
+            .collect())
     }
 
     /// Allocate the next commit timestamp for WAL/autocommit flows.

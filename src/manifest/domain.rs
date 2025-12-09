@@ -267,13 +267,13 @@ pub(crate) struct TableHead {
 
 /// Immutable version payload describing a committed state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct VersionState {
+pub struct VersionState {
     /// Table identifier.
     pub(super) table_id: TableId,
-    /// Commit timestamp in milliseconds since the Unix epoch.
-    pub(super) commit_timestamp: Timestamp,
+    /// Commit timestamp when this version was created.
+    pub(crate) commit_timestamp: Timestamp,
     /// SST entries materialised for this version, grouped by compaction level.
-    pub(super) ssts: Vec<Vec<SstEntry>>,
+    pub(crate) ssts: Vec<Vec<SstEntry>>,
     /// WAL segments referenced by this version.
     #[serde(default)]
     pub(super) wal_segments: Vec<WalSegmentRef>,

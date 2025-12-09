@@ -31,11 +31,15 @@ pin_project! {
         #[pin]
         inner: MergeStream<'t, E>,
         builder: DynRecordBatchBuilder,
-    residual_predicate: Option<Predicate>,
-    residual: Option<ResidualEvaluator>,
+        residual_predicate: Option<Predicate>,
+        residual: Option<ResidualEvaluator>,
         scan_schema: SchemaRef,
         scan_dyn_schema: DynSchema,
         projection: Option<DynProjection>,
+        // Row limit applied after predicate evaluation.
+        limit: Option<usize>,
+        // Total rows emitted across all batches (for limit tracking).
+        total_emitted: usize,
     }
 }
 
@@ -43,12 +47,32 @@ impl<'t, E> PackageStream<'t, E>
 where
     E: Executor + Clone + 'static,
 {
+    #[cfg(test)]
     pub(crate) fn new(
         batch_size: usize,
         merge: MergeStream<'t, E>,
         scan_schema: SchemaRef,
         result_schema: SchemaRef,
         residual_predicate: Option<Predicate>,
+    ) -> Result<Self, StreamError> {
+        Self::with_limit(
+            batch_size,
+            merge,
+            scan_schema,
+            result_schema,
+            residual_predicate,
+            None,
+        )
+    }
+
+    /// Create a PackageStream with an optional row limit applied after predicate evaluation.
+    pub(crate) fn with_limit(
+        batch_size: usize,
+        merge: MergeStream<'t, E>,
+        scan_schema: SchemaRef,
+        result_schema: SchemaRef,
+        residual_predicate: Option<Predicate>,
+        limit: Option<usize>,
     ) -> Result<Self, StreamError> {
         assert!(batch_size > 0, "batch size must be greater than zero");
         let residual = residual_predicate
@@ -72,6 +96,8 @@ where
             scan_schema: Arc::clone(&scan_schema),
             scan_dyn_schema: DynSchema::from_ref(scan_schema),
             projection,
+            limit,
+            total_emitted: 0,
         })
     }
 }
@@ -84,9 +110,24 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+
+        // Check if we've already hit the limit
+        if let Some(limit) = *this.limit
+            && *this.total_emitted >= limit
+        {
+            return Poll::Ready(None);
+        }
+
         let mut upstream_done = false;
 
-        while *this.row_count < *this.batch_size {
+        // Calculate effective batch size considering remaining limit
+        let remaining_limit = this
+            .limit
+            .map(|l| l.saturating_sub(*this.total_emitted))
+            .unwrap_or(usize::MAX);
+        let effective_batch_size = (*this.batch_size).min(remaining_limit);
+
+        while *this.row_count < effective_batch_size {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(entry))) => {
                     if let Some(row) = entry.into_row() {
@@ -141,6 +182,7 @@ where
             Ok(batch) => batch,
             Err(err) => return Poll::Ready(Some(Err(err))),
         };
+        *this.total_emitted += batch.num_rows();
         *this.row_count = 0;
 
         Poll::Ready(Some(Ok(batch)))

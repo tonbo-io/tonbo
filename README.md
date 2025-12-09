@@ -23,7 +23,7 @@
 Tonbo is an embedded database for serverless data-intensive applications.
 - Arrow-native schemas with rich, typed structures
 - Stores data as Parquet directly on object storage
-- Runs anywhere: browsers, edge functions, or inside other databases
+- Fully asynchronouse and can run in lots of runtimes: browsers, edge functions, or inside other databases
 
 No server process to manage. Each database is just a manifest on S3, adding more is trivial.
 

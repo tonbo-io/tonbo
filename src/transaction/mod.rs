@@ -20,10 +20,7 @@ use typed_arrow_dyn::{
 #[cfg(all(test, feature = "tokio"))]
 use crate::manifest::{TableHead, VersionState};
 use crate::{
-    db::{
-        DBError, DbInner, DynDbHandle, ScanBuilder, ScanContext, TxnWalPublishContext,
-        WalFrameRange,
-    },
+    db::{DBError, DbInner, DynDbHandle, ScanBuilder, TxnWalPublishContext, WalFrameRange},
     extractor::{KeyExtractError, KeyProjection, row_from_batch},
     key::{KeyOwned, KeyTsViewRaw},
     manifest::{ManifestError, TableSnapshot, VersionEdit},
@@ -97,6 +94,29 @@ impl Snapshot {
     /// Full manifest payload retained by the snapshot for downstream consumers.
     pub(crate) fn table_snapshot(&self) -> &TableSnapshot {
         &self.manifest
+    }
+
+    /// Begin building a scan query using this snapshot for MVCC visibility.
+    ///
+    /// This is the core scan implementation - both `DB::scan()` and `Transaction::scan()`
+    /// ultimately delegate to snapshot-based scanning.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let snapshot = db.begin_snapshot().await?;
+    /// let batches = snapshot.scan(&db)
+    ///     .filter(predicate)
+    ///     .collect()
+    ///     .await?;
+    /// ```
+    pub fn scan<'a, FS, E>(&'a self, db: &'a crate::db::DB<FS, E>) -> ScanBuilder<'a, FS, E>
+    where
+        FS: crate::manifest::ManifestFs<E>,
+        E: Executor + Timer + Clone + 'static,
+        <FS as fusio::fs::Fs>::File: fusio::durability::FileCommit,
+    {
+        ScanBuilder::from_snapshot_with_db(db, self)
     }
 }
 
@@ -453,12 +473,12 @@ where
     /// before executing the scan. The scan includes uncommitted writes from this
     /// transaction's staging buffer.
     pub fn scan(&self) -> ScanBuilder<'_, FS, E> {
-        let context = ScanContext {
-            snapshot: &self._snapshot,
-            staging: self.staged.entries(),
-            schema: &self.schema,
-        };
-        ScanBuilder::with_context(&self.handle, context)
+        ScanBuilder::with_transaction_overlay(
+            &self.handle,
+            &self._snapshot,
+            self.staged.entries(),
+            &self.schema,
+        )
     }
 
     fn project_key(&self, row: &DynRow) -> Result<KeyOwned, TransactionError> {

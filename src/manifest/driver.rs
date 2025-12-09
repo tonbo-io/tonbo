@@ -4,11 +4,12 @@ use fusio::{
     dynamic::{MaybeSend, MaybeSync},
     executor::{Executor, Timer},
 };
-#[cfg(all(test, feature = "tokio"))]
-use fusio_manifest::snapshot::ScanRange;
 use fusio_manifest::{
-    CheckpointStore, HeadStore, LeaseStore, SegmentIo, context::ManifestContext,
-    manifest::Manifest as FusioManifest, retention::DefaultRetention, snapshot::Snapshot,
+    CheckpointStore, HeadStore, LeaseStore, SegmentIo,
+    context::ManifestContext,
+    manifest::Manifest as FusioManifest,
+    retention::DefaultRetention,
+    snapshot::{ScanRange, Snapshot},
     types::Error as FusioManifestError,
 };
 use thiserror::Error;
@@ -286,6 +287,54 @@ where
         })
     }
 
+    /// Snapshot a specific historical version by its manifest timestamp.
+    ///
+    /// Unlike `snapshot_latest` which always returns the current head version,
+    /// this method loads the exact version that was committed at `manifest_ts`.
+    /// Returns `None` in `latest_version` if the version doesn't exist.
+    pub(crate) async fn snapshot_at_version(
+        &self,
+        table: TableId,
+        manifest_ts: Timestamp,
+    ) -> ManifestResult<VersionSnapshot> {
+        let session = self.inner.session_read().await?;
+        let manifest_snapshot = session.snapshot().clone();
+
+        let head_key = VersionKey::TableHead { table_id: table };
+        let head = match session.get(&head_key).await? {
+            Some(value) => {
+                <VersionCodec as ManifestCodec>::validate_key_value(&head_key, &value)?;
+                TableHead::try_from(value)?
+            }
+            None => {
+                session.end().await?;
+                return Err(ManifestError::Invariant(
+                    "Head cannot be empty for snapshot",
+                ));
+            }
+        };
+
+        // Load the specific historical version, not the latest
+        let version_key = VersionKey::TableVersion {
+            table_id: table,
+            manifest_ts,
+        };
+        let historical_version = match session.get(&version_key).await? {
+            Some(value) => {
+                <VersionCodec as ManifestCodec>::validate_key_value(&version_key, &value)?;
+                Some(VersionState::try_from(value)?)
+            }
+            None => None,
+        };
+
+        session.end().await?;
+        Ok(VersionSnapshot {
+            manifest_snapshot,
+            head,
+            latest_version: historical_version,
+        })
+    }
+
     pub(crate) async fn init_table_head(
         &self,
         table_id: TableId,
@@ -302,8 +351,11 @@ where
         Ok(())
     }
 
-    #[cfg(all(test, feature = "tokio"))]
-    pub(crate) async fn list_versions(
+    /// List committed versions of a table, ordered newest-first.
+    ///
+    /// Returns up to `limit` versions. Each version contains the full state
+    /// (SSTs, WAL references) at that commit timestamp.
+    pub async fn list_versions(
         &self,
         table: TableId,
         limit: usize,
